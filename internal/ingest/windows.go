@@ -1,0 +1,201 @@
+package ingest
+
+import (
+	"strconv"
+	"strings"
+)
+
+// Fluent Bit's winevtlog input emits records with these keys: Channel,
+// Computer, EventID, ProviderName, TimeCreated, Message and StringInserts
+// (the event's data values, in schema order).
+
+func isWindowsRecord(tag string, r map[string]any) bool {
+	return strings.HasPrefix(tag, "win") || (has(r, "EventID") && (has(r, "Channel") || has(r, "Computer")))
+}
+
+func inserts(r map[string]any) []string {
+	raw, _ := r["StringInserts"].([]any)
+	out := make([]string, len(raw))
+	for i, v := range raw {
+		out[i] = str(map[string]any{"v": v}, "v")
+	}
+	return out
+}
+
+func at(xs []string, i int) string {
+	if i < len(xs) {
+		return xs[i]
+	}
+	return ""
+}
+
+var windowsLogonTypes = map[string]string{
+	"2": "interactive", "3": "network", "4": "batch", "5": "service", "7": "unlock",
+	"8": "network cleartext", "9": "new credentials", "10": "remote interactive", "11": "cached interactive",
+}
+
+// Windows 4625 status codes that explain a failed logon.
+var windowsFailureReasons = map[string]string{
+	"0xc0000064": "unknown user",
+	"0xc000006a": "bad password",
+	"0xc0000234": "account locked out",
+	"0xc0000072": "account disabled",
+	"0xc000006f": "outside allowed hours",
+	"0xc0000070": "workstation restriction",
+	"0xc0000193": "account expired",
+	"0xc0000071": "password expired",
+	"0xc0000224": "password must change",
+}
+
+func parseWindows(r map[string]any) Event {
+	channel := str(r, "Channel")
+	eventID := str(r, "EventID")
+	computer := str(r, "Computer", "ComputerName")
+	f := map[string]any{
+		"host":           computer,
+		"dest":           computer,
+		"sourcetype":     "WinEventLog:" + channel,
+		"vendor_product": "Microsoft Windows",
+		"signature_id":   eventID,
+		"message":        str(r, "Message"),
+	}
+	if f["message"] == "" {
+		delete(f, "message")
+	}
+	ev := Event{Model: "Other", Fields: f}
+	if t, ok := parseTime(str(r, "TimeCreated", "TimeGenerated")); ok {
+		ev.Time = t
+	}
+	in := inserts(r)
+
+	switch {
+	case channel == "Security":
+		parseWindowsSecurity(eventID, in, &ev)
+	case strings.EqualFold(channel, "Microsoft-Windows-Sysmon/Operational"):
+		parseSysmon(eventID, keyValues(str(r, "Message")), &ev)
+	}
+	return ev
+}
+
+func parseWindowsSecurity(eventID string, in []string, ev *Event) {
+	f := ev.Fields
+	switch eventID {
+	case "4624", "4625":
+		ev.Model = "Authentication"
+		f["app"] = "win:local"
+		f["user"] = at(in, 5)
+		f["user_domain"] = at(in, 6)
+		if eventID == "4624" {
+			f["action"] = "success"
+			f["signature"] = "An account was successfully logged on"
+			f["logon_type"] = atoi(at(in, 8))
+			f["src"] = at(in, 18)
+			f["src_port"] = atoi(at(in, 19))
+			f["src_host"] = at(in, 11)
+			f["authentication_method"] = strings.TrimSpace(at(in, 10))
+		} else {
+			f["action"] = "failure"
+			f["signature"] = "An account failed to log on"
+			f["logon_type"] = atoi(at(in, 10))
+			f["src"] = at(in, 19)
+			f["src_port"] = atoi(at(in, 20))
+			f["src_host"] = at(in, 13)
+			f["authentication_method"] = strings.TrimSpace(at(in, 12))
+			sub := strings.ToLower(at(in, 9))
+			if reason, ok := windowsFailureReasons[sub]; ok {
+				f["reason"] = reason
+			} else if reason, ok := windowsFailureReasons[strings.ToLower(at(in, 7))]; ok {
+				f["reason"] = reason
+			}
+		}
+		if lt, ok := f["logon_type"].(int64); ok {
+			if name, ok := windowsLogonTypes[strconv.FormatInt(lt, 10)]; ok {
+				f["logon_type_name"] = name
+			}
+		}
+	case "4688":
+		ev.Model = "Endpoint"
+		f["action"] = "allowed"
+		f["signature"] = "A new process has been created"
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["process_id"] = atoi(at(in, 4))
+		f["process_path"] = at(in, 5)
+		f["process_name"] = baseName(at(in, 5))
+		f["process"] = at(in, 8)
+		if p := at(in, 13); p != "" {
+			f["parent_process_path"] = p
+			f["parent_process_name"] = baseName(p)
+		}
+		if f["process"] == "" {
+			f["process"] = at(in, 5)
+		}
+	case "4720", "4726":
+		ev.Model = "Change"
+		f["object"] = at(in, 0)
+		f["object_category"] = "user"
+		f["user"] = at(in, 4)
+		f["action"] = map[string]string{"4720": "created", "4726": "deleted"}[eventID]
+		f["signature"] = map[string]string{
+			"4720": "A user account was created",
+			"4726": "A user account was deleted",
+		}[eventID]
+	case "4728", "4732", "4756":
+		ev.Model = "Change"
+		f["action"] = "modified"
+		f["object_category"] = "group"
+		f["signature"] = "A member was added to a security-enabled group"
+		f["member"] = at(in, 0)
+		f["object"] = at(in, 2)
+		f["user"] = at(in, 6)
+	}
+}
+
+func parseSysmon(eventID string, kv map[string]string, ev *Event) {
+	f := ev.Fields
+	f["vendor_product"] = "Microsoft Sysmon"
+	switch eventID {
+	case "1":
+		ev.Model = "Endpoint"
+		f["action"] = "allowed"
+		f["signature"] = "Process Create"
+		f["user"] = kv["User"]
+		f["process"] = kv["CommandLine"]
+		f["process_path"] = kv["Image"]
+		f["process_name"] = baseName(kv["Image"])
+		f["process_id"] = atoi(kv["ProcessId"])
+		f["process_hash"] = kv["Hashes"]
+		f["parent_process"] = kv["ParentCommandLine"]
+		f["parent_process_path"] = kv["ParentImage"]
+		f["parent_process_name"] = baseName(kv["ParentImage"])
+	case "3":
+		ev.Model = "Network_Traffic"
+		f["action"] = "allowed"
+		f["signature"] = "Network connection detected"
+		f["user"] = kv["User"]
+		f["transport"] = strings.ToLower(kv["Protocol"])
+		f["src"] = kv["SourceIp"]
+		f["src_port"] = atoi(kv["SourcePort"])
+		f["dest"] = kv["DestinationIp"]
+		f["dest_host"] = kv["DestinationHostname"]
+		f["dest_port"] = atoi(kv["DestinationPort"])
+		f["process_name"] = baseName(kv["Image"])
+		f["process_path"] = kv["Image"]
+	}
+}
+
+// keyValues parses "Key: Value" lines from a rendered event message.
+func keyValues(msg string) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		k, v, ok := strings.Cut(line, ":")
+		if !ok || strings.ContainsAny(k, " \t") {
+			continue
+		}
+		if _, exists := out[k]; !exists {
+			out[k] = strings.TrimSpace(v)
+		}
+	}
+	return out
+}

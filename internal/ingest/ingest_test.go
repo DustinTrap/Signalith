@@ -1,0 +1,154 @@
+package ingest
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/store"
+)
+
+var now = time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+
+func decode(t *testing.T, s string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	if err := dec.Decode(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func expect(t *testing.T, doc map[string]any, want map[string]any) {
+	t.Helper()
+	for k, v := range want {
+		if doc[k] != v {
+			t.Errorf("%s = %#v, want %#v", k, doc[k], v)
+		}
+	}
+}
+
+func TestWindowsFailedLogon(t *testing.T) {
+	ins := make([]string, 21)
+	ins[5], ins[6], ins[7], ins[9], ins[10], ins[12], ins[13], ins[19], ins[20] =
+		"administrator", "CORP", "0xC000006D", "0xC000006A", "3", "NTLM", "KALI", "203.0.113.9", "51234"
+	b, _ := json.Marshal(map[string]any{
+		"Channel": "Security", "Computer": "DC01.corp.local", "EventID": 4625,
+		"TimeCreated": "2026-10-11 10:00:00 +0000", "StringInserts": ins, "Message": "An account failed to log on.",
+	})
+	ev := Normalize("win.security", decode(t, string(b)), now)
+	if ev.Model != "Authentication" {
+		t.Fatalf("model = %s", ev.Model)
+	}
+	expect(t, ev.Document(), map[string]any{
+		"action": "failure", "user": "administrator", "src": "203.0.113.9", "src_port": int64(51234),
+		"logon_type": int64(3), "logon_type_name": "network", "reason": "bad password",
+		"host": "DC01.corp.local", "signature_id": "4625", "sourcetype": "WinEventLog:Security",
+		"@timestamp": "2026-10-11T10:00:00Z", "datamodel": "Authentication",
+	})
+}
+
+func TestWindowsProcessCreation(t *testing.T) {
+	ins := make([]string, 15)
+	ins[1], ins[4], ins[5], ins[8], ins[13] = "bob", "0x1a2c", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "powershell -enc AAA", `C:\Windows\explorer.exe`
+	b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "WS1", "EventID": "4688", "StringInserts": ins})
+	ev := Normalize("win.security", decode(t, string(b)), now)
+	expect(t, ev.Document(), map[string]any{
+		"datamodel": "Endpoint", "process_name": "powershell.exe", "process": "powershell -enc AAA",
+		"process_id": int64(0x1a2c), "parent_process_name": "explorer.exe", "user": "bob",
+	})
+}
+
+func TestSysmonNetwork(t *testing.T) {
+	msg := "Network connection detected:\r\nRuleName: -\r\nImage: C:\\Tools\\nc.exe\r\nUser: CORP\\bob\r\nProtocol: tcp\r\nSourceIp: 10.0.0.5\r\nSourcePort: 50000\r\nDestinationIp: 198.51.100.7\r\nDestinationHostname: -\r\nDestinationPort: 4444"
+	b, _ := json.Marshal(map[string]any{"Channel": "Microsoft-Windows-Sysmon/Operational", "Computer": "WS1", "EventID": 3, "Message": msg})
+	ev := Normalize("win.sysmon", decode(t, string(b)), now)
+	doc := ev.Document()
+	expect(t, doc, map[string]any{
+		"datamodel": "Network_Traffic", "dest": "198.51.100.7", "dest_port": int64(4444), "process_name": "nc.exe", "transport": "tcp",
+	})
+	if _, ok := doc["dest_host"]; ok {
+		t.Errorf("dest_host '-' should be dropped")
+	}
+}
+
+func TestLinuxAuthLines(t *testing.T) {
+	cases := []struct {
+		line string
+		want map[string]any
+	}{
+		{"Oct 11 09:15:02 web1 sshd[811]: Failed password for invalid user oracle from 192.0.2.4 port 40122 ssh2",
+			map[string]any{"datamodel": "Authentication", "action": "failure", "user": "oracle", "src": "192.0.2.4", "reason": "unknown user", "host": "web1", "app": "sshd", "process_id": int64(811)}},
+		{"Oct 11 09:15:09 web1 sshd[812]: Accepted publickey for deploy from 192.0.2.10 port 40200 ssh2: RSA SHA256:abc",
+			map[string]any{"action": "success", "user": "deploy", "authentication_method": "publickey"}},
+		{"Oct 11 09:16:00 web1 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/cat /etc/shadow",
+			map[string]any{"datamodel": "Authentication", "action": "success", "src_user": "alice", "user": "root", "process": "/usr/bin/cat /etc/shadow"}},
+		{"Oct 11 09:16:30 web1 sudo:    alice : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/bin/bash",
+			map[string]any{"action": "failure", "reason": "bad password"}},
+		{"Oct 11 09:17:00 web1 useradd[900]: new user: name=backdoor, UID=1002, GID=1002, home=/home/backdoor, shell=/bin/bash",
+			map[string]any{"datamodel": "Change", "action": "created", "object": "backdoor"}},
+		{"Oct 11 09:18:00 web1 su[901]: pam_unix(su:session): session opened for user root(uid=0) by alice(uid=1000)",
+			map[string]any{"datamodel": "Authentication", "action": "success", "user": "root", "src_user": "alice", "app": "su"}},
+		{"Oct 11 09:19:00 web1 cron[5]: (root) CMD (run-parts /etc/cron.hourly)",
+			map[string]any{"datamodel": "Other", "app": "cron", "sourcetype": "linux:auth"}},
+	}
+	for _, c := range cases {
+		ev := Normalize("linux.auth", map[string]any{"log": c.line}, now)
+		doc := ev.Document()
+		expect(t, doc, c.want)
+		if doc["message"] != c.line {
+			t.Errorf("message not preserved for %q", c.line)
+		}
+		if !strings.HasPrefix(doc["@timestamp"].(string), "2026-10-11T") {
+			t.Errorf("timestamp = %v", doc["@timestamp"])
+		}
+	}
+}
+
+func TestJournal(t *testing.T) {
+	r := map[string]any{
+		"_HOSTNAME": "db1", "SYSLOG_IDENTIFIER": "sshd", "_PID": "77",
+		"MESSAGE":              "Failed password for root from 198.51.100.2 port 2222 ssh2",
+		"__REALTIME_TIMESTAMP": "1791763200000000",
+	}
+	doc := Normalize("linux.journal", r, now).Document()
+	expect(t, doc, map[string]any{"user": "root", "action": "failure", "host": "db1", "@timestamp": "2026-10-12T00:00:00Z"})
+}
+
+func TestUnknownRecordStaysSearchable(t *testing.T) {
+	r := decode(t, `{"date": 1791720000.5, "level": "warn", "detail": {"a": 1}}`)
+	doc := Normalize("app.custom", r, now).Document()
+	expect(t, doc, map[string]any{"datamodel": "Other", "level": "warn", "detail": `{"a":1}`, "@timestamp": "2026-10-11T12:00:00.5Z"})
+	if doc["message"] == nil {
+		t.Error("message missing")
+	}
+}
+
+type fakeBulk struct{ docs []store.IndexedDoc }
+
+func (f *fakeBulk) Bulk(_ context.Context, docs []store.IndexedDoc) ([]store.BulkItemError, error) {
+	f.docs = append(f.docs, docs...)
+	return nil, nil
+}
+
+func TestPipelineRoutesToDailyModelIndex(t *testing.T) {
+	fb := &fakeBulk{}
+	p := &Pipeline{Store: fb, Prefix: "sig", Now: func() time.Time { return now }}
+	res, err := p.Ingest(context.Background(), "linux.auth", []map[string]any{
+		{"log": "Oct 11 09:15:02 web1 sshd[811]: Failed password for bob from 192.0.2.4 port 1 ssh2"},
+		{"log": "not syslog at all"},
+	})
+	if err != nil || res.Indexed != 2 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if fb.docs[0].Index != "sig-authentication-2026.10.11" || fb.docs[1].Index != "sig-other-2026.10.11" {
+		t.Errorf("indexes = %s, %s", fb.docs[0].Index, fb.docs[1].Index)
+	}
+	if s := p.Stats(); s.Received != 2 || s.Indexed != 2 {
+		t.Errorf("stats = %+v", s)
+	}
+}

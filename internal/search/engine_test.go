@@ -67,7 +67,7 @@ func TestCompileSearch(t *testing.T) {
 		`{"wildcard":{"user":{"case_insensitive":true,"value":"adm*"}}}`,
 		`{"bool":{"must_not":[{"term":{"src":{"case_insensitive":true,"value":"10.0.0.1"}}}]}}`,
 		`{"range":{"dest_port":{"gte":1024}}}`,
-		`{"match_phrase":{"_raw":"failed password"}}`,
+		`{"match_phrase":{"message":"failed password"}}`,
 		`{"range":{"@timestamp":{"gte":"now-7d/d"}}}`,
 	} {
 		if !strings.Contains(got, want) {
@@ -159,9 +159,9 @@ func TestStatsWithoutBy(t *testing.T) {
 
 func TestEventsFlattenAndPostProcess(t *testing.T) {
 	fs := &fakeStore{responses: []string{`{"hits":{"total":{"value":3},"hits":[
-		{"_source":{"@timestamp":"2026-10-11T10:00:00Z","user":"bob","src":{"ip":"1.1.1.1"},"bytes":10,"_raw":"x"}},
-		{"_source":{"@timestamp":"2026-10-11T09:00:00Z","user":"amy","src":{"ip":"2.2.2.2"},"bytes":300,"_raw":"y"}},
-		{"_source":{"@timestamp":"2026-10-11T08:00:00Z","user":"cat","src":{"ip":"3.3.3.3"},"bytes":50,"_raw":"z"}}]}}`}}
+		{"_source":{"@timestamp":"2026-10-11T10:00:00Z","user":"bob","src":{"ip":"1.1.1.1"},"bytes":10,"message":"x"}},
+		{"_source":{"@timestamp":"2026-10-11T09:00:00Z","user":"amy","src":{"ip":"2.2.2.2"},"bytes":300,"message":"y"}},
+		{"_source":{"@timestamp":"2026-10-11T08:00:00Z","user":"cat","src":{"ip":"3.3.3.3"},"bytes":50,"message":"z"}}]}}`}}
 	e := &Engine{Store: fs}
 	res, err := e.Run(context.Background(), `* | where bytes >= 50 | sort user | table user, src.ip`)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestEventsFlattenAndPostProcess(t *testing.T) {
 
 func TestEventColumnsOrder(t *testing.T) {
 	fs := &fakeStore{responses: []string{`{"hits":{"total":{"value":1},"hits":[
-		{"_source":{"@timestamp":"t","zeta":1,"alpha":2,"_raw":"r"}}]}}`}}
+		{"_source":{"@timestamp":"t","zeta":1,"alpha":2,"message":"r"}}]}}`}}
 	res, err := (&Engine{Store: fs}).Run(context.Background(), `*`)
 	if err != nil {
 		t.Fatal(err)

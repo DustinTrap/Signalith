@@ -508,6 +508,10 @@ func eventRows(resp map[string]any) ([]Row, []string) {
 			row["_time"] = t
 			delete(row, TimeField)
 		}
+		if m, ok := row[StoredRawField]; ok {
+			row[RawField] = m
+			delete(row, StoredRawField)
+		}
 		for k := range row {
 			seen[k] = true
 		}

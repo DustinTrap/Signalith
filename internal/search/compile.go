@@ -15,8 +15,12 @@ import (
 // TimeField is the event timestamp field in every Signalith index.
 const TimeField = "@timestamp"
 
-// RawField holds the original event text.
+// RawField is the name users see for the original event text. It is stored
+// as StoredRawField because OpenSearch reserves leading-underscore names.
 const RawField = "_raw"
+
+// StoredRawField is where the original event text lives in OpenSearch.
+const StoredRawField = "message"
 
 // compileExpr turns a filter expression into OpenSearch query DSL.
 func compileExpr(e query.Expr) (map[string]any, error) {
@@ -100,6 +104,9 @@ func equalsQuery(field, value string) map[string]any {
 	if field == "_time" {
 		field = TimeField
 	}
+	if field == RawField {
+		field = StoredRawField
+	}
 	if value == "*" {
 		return map[string]any{"exists": map[string]any{"field": field}}
 	}
@@ -117,12 +124,12 @@ var queryStringReserved = regexp.MustCompile(`[+\-=&|><!(){}\[\]^"~:\\/]`)
 
 func textQuery(v string) map[string]any {
 	if strings.ContainsAny(v, " \t") {
-		return map[string]any{"match_phrase": map[string]any{RawField: v}}
+		return map[string]any{"match_phrase": map[string]any{StoredRawField: v}}
 	}
 	escaped := queryStringReserved.ReplaceAllString(v, `\$0`)
 	return map[string]any{"query_string": map[string]any{
 		"query":                  escaped,
-		"default_field":          RawField,
+		"default_field":          StoredRawField,
 		"analyze_wildcard":       true,
 		"allow_leading_wildcard": true,
 	}}
