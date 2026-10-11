@@ -1,0 +1,16 @@
+# Settings for the Docker quick start. Secrets come from environment
+# variables in docker-compose.yml.
+server:
+  listen: 0.0.0.0:8080
+  public_url: http://localhost:8080
+opensearch:
+  url: http://opensearch:9200
+  index_prefix: signalith
+  replicas: 0
+search:
+  default_earliest: -24h
+  max_events: 10000
+retention:
+  days: 90
+auth:
+  admin_user: admin

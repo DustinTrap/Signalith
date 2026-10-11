@@ -1,0 +1,616 @@
+package search
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/store"
+)
+
+// Options tune query execution.
+type Options struct {
+	IndexPrefix     string // default "signalith"
+	DefaultEarliest string // used when a query has no earliest=; "" means all time
+	DefaultEvents   int    // events returned when no head is given (default 100)
+	MaxEvents       int    // events fetched for in-memory post-processing (default 10000)
+	MaxBuckets      int    // stats rows fetched before truncating (default 50000)
+}
+
+// Engine runs queries.
+type Engine struct {
+	Store store.Searcher
+	Opt   Options
+}
+
+// Row is one result row.
+type Row map[string]any
+
+// Result is a query result.
+type Result struct {
+	Kind      string   `json:"kind"` // events, table, timechart
+	Columns   []string `json:"columns"`
+	Rows      []Row    `json:"rows"`
+	Matched   int64    `json:"matched"` // events matching the search
+	Truncated bool     `json:"truncated,omitempty"`
+	TookMS    int64    `json:"took_ms"`
+}
+
+// Plan is the OpenSearch request a query compiles to, for "show the
+// OpenSearch query" in the UI and for tests.
+type Plan struct {
+	Index string         `json:"index"`
+	Body  map[string]any `json:"body"`
+	Mode  string         `json:"mode"` // events, stats, timechart, top
+
+	transform query.Command
+	post      []query.Command
+}
+
+func (e *Engine) opts() Options {
+	o := e.Opt
+	if o.IndexPrefix == "" {
+		o.IndexPrefix = "signalith"
+	}
+	if o.DefaultEvents <= 0 {
+		o.DefaultEvents = 100
+	}
+	if o.MaxEvents <= 0 {
+		o.MaxEvents = 10000
+	}
+	if o.MaxBuckets <= 0 {
+		o.MaxBuckets = 50000
+	}
+	return o
+}
+
+// IndexPattern returns the index pattern for a query.
+func (e *Engine) IndexPattern(q *query.Query) string {
+	o := e.opts()
+	if q.Index != "" {
+		return q.Index
+	}
+	if q.Datamodel != "" {
+		return o.IndexPrefix + "-" + strings.ToLower(q.Datamodel) + "-*"
+	}
+	return o.IndexPrefix + "-*"
+}
+
+// Compile builds the OpenSearch request for a query without running it.
+func (e *Engine) Compile(q *query.Query) (*Plan, error) {
+	o := e.opts()
+	cmds := q.Commands
+
+	// where commands before any transforming command filter raw events, so
+	// they run inside OpenSearch.
+	filters := []query.Expr{}
+	if q.Search != nil {
+		filters = append(filters, q.Search)
+	}
+	for len(cmds) > 0 {
+		w, ok := cmds[0].(*query.Where)
+		if !ok {
+			break
+		}
+		filters = append(filters, w.Expr)
+		cmds = cmds[1:]
+	}
+	earliest := q.Earliest
+	if earliest == "" {
+		earliest = o.DefaultEarliest
+	}
+	var fs []any
+	for _, f := range filters {
+		c, err := compileExpr(f)
+		if err != nil {
+			return nil, err
+		}
+		fs = append(fs, c)
+	}
+	timeRange := map[string]any{}
+	if earliest != "" && earliest != "0" {
+		timeRange["gte"] = toDateMath(earliest)
+	}
+	if q.Latest != "" {
+		timeRange["lte"] = toDateMath(q.Latest)
+	}
+	if len(timeRange) > 0 {
+		fs = append(fs, map[string]any{"range": map[string]any{TimeField: timeRange}})
+	}
+	var dsl map[string]any
+	if len(fs) == 0 {
+		dsl = map[string]any{"match_all": map[string]any{}}
+	} else {
+		dsl = boolQuery("filter", fs)
+	}
+
+	p := &Plan{Index: e.IndexPattern(q)}
+	body := map[string]any{"query": dsl, "track_total_hits": true}
+	p.Body = body
+
+	if len(cmds) > 0 {
+		switch c := cmds[0].(type) {
+		case *query.Stats:
+			p.Mode, p.transform, p.post = "stats", c, cmds[1:]
+			body["size"] = 0
+			if len(c.By) == 0 {
+				aggs, err := metricAggs(c.Aggs)
+				if err != nil {
+					return nil, err
+				}
+				if len(aggs) > 0 {
+					body["aggs"] = aggs
+				}
+			} else {
+				comp, err := compositeAgg(c.By, c.Aggs, o.MaxBuckets)
+				if err != nil {
+					return nil, err
+				}
+				body["aggs"] = map[string]any{"groups": comp}
+			}
+			return p, nil
+		case *query.Top:
+			p.Mode, p.transform, p.post = "top", c, cmds[1:]
+			body["size"] = 0
+			comp, err := compositeAgg(append(append([]string{}, c.By...), c.Fields...), []query.Agg{{Func: "count"}}, o.MaxBuckets)
+			if err != nil {
+				return nil, err
+			}
+			body["aggs"] = map[string]any{"groups": comp}
+			return p, nil
+		case *query.Timechart:
+			p.Mode, p.transform, p.post = "timechart", c, cmds[1:]
+			body["size"] = 0
+			span := c.Span
+			if span == "" {
+				span = autoSpan(earliest)
+			}
+			interval, err := spanInterval(span)
+			if err != nil {
+				return nil, err
+			}
+			hist := map[string]any{"field": TimeField, "min_doc_count": 0}
+			for k, v := range interval {
+				hist[k] = v
+			}
+			sub, err := metricAggs(c.Aggs)
+			if err != nil {
+				return nil, err
+			}
+			ts := map[string]any{"date_histogram": hist}
+			if c.By != "" {
+				by := map[string]any{"terms": map[string]any{"field": c.By, "size": 10}}
+				if len(sub) > 0 {
+					by["aggs"] = sub
+				}
+				ts["aggs"] = map[string]any{"by": by}
+			} else if len(sub) > 0 {
+				ts["aggs"] = sub
+			}
+			body["aggs"] = map[string]any{"time": ts}
+			return p, nil
+		}
+	}
+
+	p.Mode, p.post = "events", cmds
+	size := o.DefaultEvents
+	if needsAllEvents(cmds) {
+		size = o.MaxEvents
+	} else if n, ok := leadingHead(cmds); ok {
+		size = min(n, o.MaxEvents)
+	}
+	body["size"] = size
+	body["sort"] = []any{map[string]any{TimeField: map[string]any{"order": "desc", "unmapped_type": "date"}}}
+	return p, nil
+}
+
+// needsAllEvents reports whether later commands look at the whole event set
+// (sorting, filtering or aggregating), not just the newest few.
+func needsAllEvents(cmds []query.Command) bool {
+	for _, c := range cmds {
+		switch c.(type) {
+		case *query.Head:
+			return false
+		case *query.Sort, *query.Where, *query.Stats, *query.Top:
+			return true
+		}
+	}
+	return false
+}
+
+func leadingHead(cmds []query.Command) (int, bool) {
+	for _, c := range cmds {
+		switch c := c.(type) {
+		case *query.Head:
+			return c.N, true
+		case *query.Table, *query.Rename:
+			continue
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
+func metricAggs(aggs []query.Agg) (map[string]any, error) {
+	out := map[string]any{}
+	for i, a := range aggs {
+		var m map[string]any
+		switch a.Func {
+		case "count":
+			if a.Field == "" {
+				continue // doc_count
+			}
+			m = map[string]any{"value_count": map[string]any{"field": a.Field}}
+		case "dc":
+			m = map[string]any{"cardinality": map[string]any{"field": a.Field}}
+		case "sum", "avg", "min", "max":
+			m = map[string]any{a.Func: map[string]any{"field": a.Field}}
+		default:
+			return nil, fmt.Errorf("unsupported function %q", a.Func)
+		}
+		out[fmt.Sprintf("m%d", i)] = m
+	}
+	return out, nil
+}
+
+func compositeAgg(by []string, aggs []query.Agg, maxBuckets int) (map[string]any, error) {
+	var sources []any
+	for i, f := range by {
+		sources = append(sources, map[string]any{fmt.Sprintf("k%d", i): map[string]any{"terms": map[string]any{"field": f}}})
+	}
+	size := min(maxBuckets, 10000)
+	comp := map[string]any{"composite": map[string]any{"size": size, "sources": sources}}
+	sub, err := metricAggs(aggs)
+	if err != nil {
+		return nil, err
+	}
+	if len(sub) > 0 {
+		comp["aggs"] = sub
+	}
+	return comp, nil
+}
+
+// Run parses and executes a query.
+func (e *Engine) Run(ctx context.Context, src string) (*Result, error) {
+	q, err := query.Parse(src)
+	if err != nil {
+		return nil, err
+	}
+	return e.Execute(ctx, q)
+}
+
+// Execute runs a parsed query.
+func (e *Engine) Execute(ctx context.Context, q *query.Query) (*Result, error) {
+	start := time.Now()
+	p, err := e.Compile(q)
+	if err != nil {
+		return nil, err
+	}
+	res, err := e.fetch(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range p.post {
+		if err := applyCommand(res, c); err != nil {
+			return nil, err
+		}
+	}
+	res.TookMS = time.Since(start).Milliseconds()
+	return res, nil
+}
+
+func (e *Engine) fetch(ctx context.Context, p *Plan) (*Result, error) {
+	o := e.opts()
+	resp, err := e.Store.Search(ctx, p.Index, p.Body)
+	if err != nil {
+		return nil, err
+	}
+	res := &Result{Matched: totalHits(resp)}
+	switch p.Mode {
+	case "events":
+		res.Kind = "events"
+		res.Rows, res.Columns = eventRows(resp)
+		return res, nil
+	case "stats":
+		st := p.transform.(*query.Stats)
+		res.Kind = "table"
+		res.Columns = append(append([]string{}, st.By...), aggColumns(st.Aggs)...)
+		if len(st.By) == 0 {
+			aggs, _ := resp["aggregations"].(map[string]any)
+			row := Row{}
+			for i, a := range st.Aggs {
+				if a.Func == "count" && a.Field == "" {
+					row[a.Column()] = res.Matched
+				} else {
+					row[a.Column()] = metricValue(aggs, fmt.Sprintf("m%d", i))
+				}
+			}
+			res.Rows = []Row{row}
+			return res, nil
+		}
+		buckets, truncated, err := e.allBuckets(ctx, p, resp, o.MaxBuckets)
+		if err != nil {
+			return nil, err
+		}
+		res.Truncated = truncated
+		for _, b := range buckets {
+			row := bucketKeys(b, st.By)
+			for i, a := range st.Aggs {
+				if a.Func == "count" && a.Field == "" {
+					row[a.Column()] = toNumber(b["doc_count"])
+				} else {
+					row[a.Column()] = metricValue(b, fmt.Sprintf("m%d", i))
+				}
+			}
+			res.Rows = append(res.Rows, row)
+		}
+		return res, nil
+	case "top":
+		top := p.transform.(*query.Top)
+		buckets, truncated, err := e.allBuckets(ctx, p, resp, o.MaxBuckets)
+		if err != nil {
+			return nil, err
+		}
+		res.Truncated = truncated
+		keys := append(append([]string{}, top.By...), top.Fields...)
+		var rows []Row
+		for _, b := range buckets {
+			row := bucketKeys(b, keys)
+			row["count"] = toNumber(b["doc_count"])
+			rows = append(rows, row)
+		}
+		res.Kind = "table"
+		res.Rows, res.Columns = topRows(rows, top)
+		return res, nil
+	case "timechart":
+		res.Kind = "timechart"
+		tc := p.transform.(*query.Timechart)
+		res.Rows, res.Columns = timechartRows(resp, tc)
+		return res, nil
+	}
+	return nil, fmt.Errorf("unknown plan mode %q", p.Mode)
+}
+
+// allBuckets pages through a composite aggregation.
+func (e *Engine) allBuckets(ctx context.Context, p *Plan, resp map[string]any, max int) ([]map[string]any, bool, error) {
+	var out []map[string]any
+	for {
+		aggs, _ := resp["aggregations"].(map[string]any)
+		groups, _ := aggs["groups"].(map[string]any)
+		bs, _ := groups["buckets"].([]any)
+		for _, b := range bs {
+			if m, ok := b.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		if len(out) >= max {
+			return out[:max], true, nil
+		}
+		after, ok := groups["after_key"]
+		if !ok || len(bs) == 0 {
+			return out, false, nil
+		}
+		// Ask for the next page.
+		next := cloneMap(p.Body)
+		nextAggs := cloneMap(next["aggs"].(map[string]any))
+		g := cloneMap(nextAggs["groups"].(map[string]any))
+		comp := cloneMap(g["composite"].(map[string]any))
+		comp["after"] = after
+		g["composite"] = comp
+		nextAggs["groups"] = g
+		next["aggs"] = nextAggs
+		next["track_total_hits"] = false
+		var err error
+		resp, err = e.Store.Search(ctx, p.Index, next)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func aggColumns(aggs []query.Agg) []string {
+	cols := make([]string, len(aggs))
+	for i, a := range aggs {
+		cols[i] = a.Column()
+	}
+	return cols
+}
+
+func bucketKeys(b map[string]any, fields []string) Row {
+	row := Row{}
+	key, _ := b["key"].(map[string]any)
+	for i, f := range fields {
+		row[f] = normalize(key[fmt.Sprintf("k%d", i)])
+	}
+	return row
+}
+
+func totalHits(resp map[string]any) int64 {
+	hits, _ := resp["hits"].(map[string]any)
+	switch t := hits["total"].(type) {
+	case map[string]any:
+		n, _ := toNumber(t["value"]).(int64)
+		return n
+	default:
+		n, _ := toNumber(t).(int64)
+		return n
+	}
+}
+
+func metricValue(aggs map[string]any, name string) any {
+	m, _ := aggs[name].(map[string]any)
+	if m == nil {
+		return nil
+	}
+	return toNumber(m["value"])
+}
+
+// toNumber converts decoded JSON numbers to int64 when whole, else float64.
+func toNumber(v any) any {
+	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+		if f, err := n.Float64(); err == nil {
+			if f == float64(int64(f)) && f < 1e15 && f > -1e15 {
+				return int64(f)
+			}
+			return f
+		}
+		return n.String()
+	case float64:
+		if n == float64(int64(n)) && n < 1e15 && n > -1e15 {
+			return int64(n)
+		}
+		return n
+	}
+	return v
+}
+
+func normalize(v any) any {
+	switch x := v.(type) {
+	case json.Number, float64:
+		return toNumber(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = normalize(e)
+		}
+		return out
+	}
+	return v
+}
+
+func eventRows(resp map[string]any) ([]Row, []string) {
+	hits, _ := resp["hits"].(map[string]any)
+	hs, _ := hits["hits"].([]any)
+	seen := map[string]bool{}
+	var rows []Row
+	for _, h := range hs {
+		hm, _ := h.(map[string]any)
+		src, _ := hm["_source"].(map[string]any)
+		row := Row{}
+		flatten("", src, row)
+		if t, ok := row[TimeField]; ok {
+			row["_time"] = t
+			delete(row, TimeField)
+		}
+		if m, ok := row[StoredRawField]; ok {
+			row[RawField] = m
+			delete(row, StoredRawField)
+		}
+		for k := range row {
+			seen[k] = true
+		}
+		rows = append(rows, row)
+	}
+	var cols []string
+	for k := range seen {
+		if k != "_time" && k != RawField {
+			cols = append(cols, k)
+		}
+	}
+	sort.Strings(cols)
+	if seen["_time"] {
+		cols = append([]string{"_time"}, cols...)
+	}
+	if seen[RawField] {
+		cols = append(cols, RawField)
+	}
+	return rows, cols
+}
+
+func flatten(prefix string, m map[string]any, out Row) {
+	for k, v := range m {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		if sub, ok := v.(map[string]any); ok {
+			flatten(key, sub, out)
+			continue
+		}
+		out[key] = normalize(v)
+	}
+}
+
+func timechartRows(resp map[string]any, tc *query.Timechart) ([]Row, []string) {
+	aggs, _ := resp["aggregations"].(map[string]any)
+	ts, _ := aggs["time"].(map[string]any)
+	bs, _ := ts["buckets"].([]any)
+	var rows []Row
+	cols := []string{"_time"}
+	if tc.By == "" {
+		cols = append(cols, aggColumns(tc.Aggs)...)
+		for _, b := range bs {
+			bm, _ := b.(map[string]any)
+			row := Row{"_time": bm["key_as_string"]}
+			for i, a := range tc.Aggs {
+				if a.Func == "count" && a.Field == "" {
+					row[a.Column()] = toNumber(bm["doc_count"])
+				} else {
+					row[a.Column()] = metricValue(bm, fmt.Sprintf("m%d", i))
+				}
+			}
+			rows = append(rows, row)
+		}
+		return rows, cols
+	}
+	// One column per value of the by field, ordered by overall total.
+	totals := map[string]float64{}
+	a := tc.Aggs[0]
+	for _, b := range bs {
+		bm, _ := b.(map[string]any)
+		row := Row{"_time": bm["key_as_string"]}
+		by, _ := bm["by"].(map[string]any)
+		vbs, _ := by["buckets"].([]any)
+		for _, vb := range vbs {
+			vm, _ := vb.(map[string]any)
+			name := fmt.Sprint(normalize(vm["key"]))
+			var val any
+			if a.Func == "count" && a.Field == "" {
+				val = toNumber(vm["doc_count"])
+			} else {
+				val = metricValue(vm, "m0")
+			}
+			row[name] = val
+			if f, ok := asFloat(val); ok {
+				totals[name] += f
+			} else if _, ok := totals[name]; !ok {
+				totals[name] = 0
+			}
+		}
+		rows = append(rows, row)
+	}
+	names := make([]string, 0, len(totals))
+	for n := range totals {
+		names = append(names, n)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if totals[names[i]] != totals[names[j]] {
+			return totals[names[i]] > totals[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	for _, r := range rows {
+		for _, n := range names {
+			if _, ok := r[n]; !ok && (a.Func == "count" || a.Func == "dc") {
+				r[n] = int64(0)
+			}
+		}
+	}
+	return rows, append(cols, names...)
+}
