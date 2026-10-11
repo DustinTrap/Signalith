@@ -1,0 +1,23 @@
+[Unit]
+Description=Signalith SIEM server
+Documentation=https://github.com/jrsamsanchez/Signalith
+After=network-online.target opensearch.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signalith
+Group=signalith
+ExecStart=/usr/local/bin/signalith serve -c /etc/signalith/signalith.yaml
+Restart=on-failure
+RestartSec=5
+# Secrets can live here instead of the config file:
+# EnvironmentFile=-/etc/signalith/signalith.env
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/signalith
+
+[Install]
+WantedBy=multi-user.target

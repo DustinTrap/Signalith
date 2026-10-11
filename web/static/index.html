@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signalith</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Signalith</div>
+  <nav>
+    <button class="tab active" data-page="search">Search</button>
+    <button class="tab" data-page="data">Add data</button>
+    <button class="tab" data-page="health">Health</button>
+    <button class="tab" data-page="help">Query guide</button>
+  </nav>
+</header>
+
+<main>
+  <!-- Search -->
+  <section id="page-search" class="page active">
+    <div class="search-layout">
+      <aside class="sidebar">
+        <h3>Fields</h3>
+        <input id="field-filter" type="search" placeholder="Filter fields">
+        <ul id="field-list" class="field-list"></ul>
+        <div id="field-values" class="field-values hidden"></div>
+      </aside>
+
+      <div class="workspace">
+        <div class="editor-row">
+          <div class="editor-wrap">
+            <textarea id="query" spellcheck="false" rows="4" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
+            <ul id="suggest" class="suggest hidden"></ul>
+          </div>
+          <div class="editor-controls">
+            <select id="time" title="Time range">
+              <option value="-15m">Last 15 minutes</option>
+              <option value="-1h">Last hour</option>
+              <option value="-4h">Last 4 hours</option>
+              <option value="-24h" selected>Last 24 hours</option>
+              <option value="-7d">Last 7 days</option>
+              <option value="-30d">Last 30 days</option>
+              <option value="0">All time</option>
+            </select>
+            <button id="run" class="primary" title="Ctrl+Enter">Search</button>
+            <button id="explain">Explain</button>
+          </div>
+        </div>
+        <div id="query-error" class="error hidden"></div>
+
+        <details id="builder" open>
+          <summary>Query builder <span id="builder-note" class="muted"></span></summary>
+          <div class="builder">
+            <label>Data
+              <select id="b-datamodel"><option value="">All data</option></select>
+            </label>
+            <label>Contains text
+              <input id="b-text" type="text" placeholder="optional, e.g. powershell">
+            </label>
+            <div class="b-filters">
+              <div class="b-label">Where</div>
+              <div id="b-filter-rows"></div>
+              <button id="b-add-filter" class="link">+ Add condition</button>
+            </div>
+            <label>Show
+              <select id="b-mode">
+                <option value="events">Matching events</option>
+                <option value="stats">A table of</option>
+                <option value="timechart">A chart over time of</option>
+              </select>
+            </label>
+            <span id="b-agg-group" class="b-inline hidden">
+              <select id="b-agg">
+                <option value="count">count</option>
+                <option value="dc">distinct count of</option>
+                <option value="sum">sum of</option>
+                <option value="avg">average of</option>
+                <option value="min">minimum of</option>
+                <option value="max">maximum of</option>
+              </select>
+              <input id="b-agg-field" type="text" list="field-names" placeholder="field" class="hidden">
+              <label class="inline">split by <input id="b-by" type="text" list="field-names" placeholder="e.g. src, user"></label>
+            </span>
+            <label>Sort by <input id="b-sort" type="text" placeholder="e.g. -count"></label>
+            <label>Limit <input id="b-limit" type="number" min="0" placeholder="none"></label>
+          </div>
+        </details>
+        <datalist id="field-names"></datalist>
+
+        <div id="explanation" class="explanation hidden"></div>
+
+        <div id="status" class="status muted"></div>
+        <div id="chart"></div>
+        <div id="results" class="results"></div>
+        <div id="starter" class="starter">
+          <h3>Start with a common hunt</h3>
+          <ul id="starter-list"></ul>
+        </div>
+      </div>
+    </div>
+    <div id="cell-menu" class="cell-menu hidden"></div>
+  </section>
+
+  <!-- Add data -->
+  <section id="page-data" class="page">
+    <h2>Add data</h2>
+    <p class="muted">Install Fluent Bit on each host, paste this configuration, and restart it. Events show up in Search within a minute.</p>
+    <div class="agent-options">
+      <label><input type="radio" name="os" value="linux" checked> Linux</label>
+      <label><input type="radio" name="os" value="windows"> Windows</label>
+      <span id="linux-opts">
+        <select id="linux-source">
+          <option value="file">Read /var/log/auth.log or /var/log/secure</option>
+          <option value="journal">Read the systemd journal (no auth.log)</option>
+        </select>
+      </span>
+      <label id="windows-opts" class="hidden"><input type="checkbox" id="sysmon" checked> Include Sysmon</label>
+    </div>
+    <ol id="agent-steps"></ol>
+    <div class="code-head"><span id="agent-path" class="muted"></span><button id="copy-config">Copy</button></div>
+    <pre id="agent-config" class="code"></pre>
+  </section>
+
+  <!-- Health -->
+  <section id="page-health" class="page">
+    <h2>Health</h2>
+    <div id="health" class="health"></div>
+  </section>
+
+  <!-- Help -->
+  <section id="page-help" class="page help">
+    <h2>Query guide</h2>
+    <p>A query is a search followed by commands joined with <code>|</code>. The search picks events; each command reshapes the results.</p>
+    <h3>Search</h3>
+    <table class="ref">
+      <tr><td><code>datamodel=Authentication</code></td><td>Only events of one data model (Authentication, Endpoint, Network_Traffic, Change, Other)</td></tr>
+      <tr><td><code>user=admin</code></td><td>Field equals a value (case-insensitive)</td></tr>
+      <tr><td><code>user=adm*</code></td><td>Wildcards with <code>*</code></td></tr>
+      <tr><td><code>dest_port&gt;=1024</code></td><td>Comparisons: <code>= != &lt; &lt;= &gt; &gt;=</code></td></tr>
+      <tr><td><code>src IN (10.0.0.1, 10.0.0.2)</code></td><td>Any of several values</td></tr>
+      <tr><td><code>"failed password"</code></td><td>Text anywhere in the raw event</td></tr>
+      <tr><td><code>a=1 b=2 OR c=3</code></td><td>Terms are ANDed; OR binds tighter, as in SPL; use NOT and parentheses as needed</td></tr>
+      <tr><td><code>earliest=-7d@d latest=now</code></td><td>Time range; overrides the time picker</td></tr>
+    </table>
+    <h3>Commands</h3>
+    <table class="ref">
+      <tr><td><code>| stats count, dc(user) as users by src</code></td><td>Aggregate: count, dc, sum, avg, min, max</td></tr>
+      <tr><td><code>| timechart span=1h count by action</code></td><td>Series over time</td></tr>
+      <tr><td><code>| top limit=10 process_name</code></td><td>Most common values with percentages</td></tr>
+      <tr><td><code>| where count &gt; 20</code></td><td>Filter rows; uses AND/OR like most languages</td></tr>
+      <tr><td><code>| sort -count, src</code></td><td>Sort; <code>-</code> for descending</td></tr>
+      <tr><td><code>| head 10</code></td><td>Keep the first N rows</td></tr>
+      <tr><td><code>| table _time, user, src</code></td><td>Choose columns</td></tr>
+      <tr><td><code>| rename src as source_ip</code></td><td>Rename columns</td></tr>
+    </table>
+    <h3>Tips</h3>
+    <ul>
+      <li>Click a field on the left to see its top values; click a value to filter on it.</li>
+      <li>Click any cell in the results to filter, exclude, or count by that value.</li>
+      <li>Use the builder to write a query, then edit the text; the builder follows along when it can.</li>
+      <li>Explain turns any query into plain English and shows the OpenSearch request it runs.</li>
+    </ul>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

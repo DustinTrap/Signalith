@@ -1,0 +1,5 @@
+/dist/
+/signalith
+/signalith.exe
+*.yaml.local
+/cmd/zz-devdemo/
