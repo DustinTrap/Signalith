@@ -11,6 +11,9 @@
   <div class="brand">Signalith</div>
   <nav>
     <button class="tab active" data-page="search">Search</button>
+    <button class="tab" data-page="findings">Findings <span id="open-count" class="count-badge hidden"></span></button>
+    <button class="tab" data-page="detections">Detections</button>
+    <button class="tab" data-page="coverage">ATT&amp;CK coverage</button>
     <button class="tab" data-page="data">Add data</button>
     <button class="tab" data-page="health">Health</button>
     <button class="tab" data-page="help">Query guide</button>
@@ -46,6 +49,7 @@
             </select>
             <button id="run" class="primary" title="Ctrl+Enter">Search</button>
             <button id="explain">Explain</button>
+            <button id="save-detection" title="Run this query on a schedule and raise findings">Save as detection</button>
           </div>
         </div>
         <div id="query-error" class="error hidden"></div>
@@ -101,6 +105,106 @@
       </div>
     </div>
     <div id="cell-menu" class="cell-menu hidden"></div>
+  </section>
+
+  <!-- Findings (incident review) -->
+  <section id="page-findings" class="page">
+    <div class="page-head">
+      <h2>Findings</h2>
+      <div id="f-summary" class="sev-summary"></div>
+    </div>
+    <div class="toolbar">
+      <select id="f-status" title="Status">
+        <option value="new,in_progress,pending" selected>Open</option>
+        <option value="new">New</option>
+        <option value="in_progress">In progress</option>
+        <option value="pending">Pending</option>
+        <option value="resolved,closed">Resolved or closed</option>
+        <option value="">Any status</option>
+      </select>
+      <select id="f-severity" title="Severity">
+        <option value="">Any severity</option>
+        <option value="critical">Critical</option>
+        <option value="high,critical">High and above</option>
+        <option value="medium,high,critical">Medium and above</option>
+      </select>
+      <input id="f-owner" type="search" placeholder="Owner">
+      <input id="f-text" type="search" placeholder="Search title, user, host, IP">
+      <select id="f-since" title="Created">
+        <option value="24h">Last 24 hours</option>
+        <option value="7d" selected>Last 7 days</option>
+        <option value="30d">Last 30 days</option>
+        <option value="">All time</option>
+      </select>
+      <button id="f-refresh">Refresh</button>
+    </div>
+    <div id="f-bulk" class="bulk hidden">
+      <span id="f-bulk-count"></span>
+      <select id="f-bulk-status">
+        <option value="">Set status...</option>
+        <option value="in_progress">In progress</option>
+        <option value="pending">Pending</option>
+        <option value="resolved">Resolved</option>
+        <option value="closed">Closed</option>
+      </select>
+      <select id="f-bulk-disposition">
+        <option value="">Disposition...</option>
+        <option value="true_positive">True positive</option>
+        <option value="benign_true_positive">Benign true positive</option>
+        <option value="false_positive">False positive</option>
+        <option value="undetermined">Undetermined</option>
+      </select>
+      <input id="f-bulk-owner" type="text" placeholder="Assign to">
+      <input id="f-bulk-comment" type="text" placeholder="Comment (optional)">
+      <button id="f-bulk-apply" class="primary">Apply</button>
+    </div>
+    <div class="split">
+      <div id="f-list" class="results"></div>
+      <aside id="f-detail" class="detail hidden"></aside>
+    </div>
+  </section>
+
+  <!-- Detections -->
+  <section id="page-detections" class="page">
+    <div class="page-head">
+      <h2>Detections</h2>
+      <div class="toolbar">
+        <input id="d-filter" type="search" placeholder="Filter by name, ATT&amp;CK ID or tag">
+        <select id="d-show">
+          <option value="">All</option>
+          <option value="enabled">Enabled</option>
+          <option value="disabled">Disabled</option>
+          <option value="custom">Custom or edited</option>
+          <option value="errors">Failing</option>
+        </select>
+        <button id="d-new" class="primary">New detection</button>
+        <button id="d-sigma">Import Sigma rule</button>
+      </div>
+    </div>
+    <div id="d-scheduler-note" class="notice hidden">The scheduler is off on this server (detections.scheduler: false), so detections only run when you click Run now.</div>
+    <div id="d-sigma-box" class="panel hidden">
+      <h3>Import a Sigma rule</h3>
+      <p class="muted">Paste a rule from <a href="https://github.com/SigmaHQ/sigma" target="_blank" rel="noopener">SigmaHQ</a> or your own. Signalith converts it to a query you can review and test before saving. Imported rules start disabled.</p>
+      <textarea id="d-sigma-text" rows="12" spellcheck="false" placeholder="title: ...&#10;logsource: ...&#10;detection: ..."></textarea>
+      <div class="row"><button id="d-sigma-convert" class="primary">Convert</button><button id="d-sigma-cancel">Cancel</button></div>
+      <div id="d-sigma-error" class="error hidden"></div>
+    </div>
+    <div id="d-editor" class="panel hidden"></div>
+    <div id="d-list" class="results"></div>
+  </section>
+
+  <!-- ATT&CK coverage -->
+  <section id="page-coverage" class="page">
+    <div class="page-head">
+      <h2>MITRE ATT&amp;CK coverage</h2>
+      <div class="toolbar">
+        <label><input type="checkbox" id="c-only"> Only techniques with detections</label>
+      </div>
+    </div>
+    <div id="c-summary" class="health"></div>
+    <div class="legend-row"><span class="cov-cell enabled">Enabled detection</span><span class="cov-cell available">Detection available, disabled</span><span class="cov-cell">No detection</span></div>
+    <div id="c-matrix" class="matrix"></div>
+    <p class="muted small">ATT&amp;CK® is a registered trademark of The MITRE Corporation. Matrix data © The MITRE Corporation, used under the ATT&amp;CK terms of use.</p>
   </section>
 
   <!-- Add data -->
@@ -165,5 +269,6 @@
   </section>
 </main>
 <script src="app.js"></script>
+<script src="detections.js"></script>
 </body>
 </html>

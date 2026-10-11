@@ -1,0 +1,15 @@
+id: change-account-created
+title: Account $object$ created on $dest$
+description: A new local or domain user account was created.
+query: |
+  datamodel=Change object_category=user action=created
+schedule: 5m
+lookback: 10m
+severity: low
+mitre: [T1136]
+throttle:
+  fields: [object, dest]
+  window: 24h
+enabled: true
+tags: [persistence]
+guidance: Confirm the account matches a change request. Accounts created outside business hours or by unusual users deserve a closer look.

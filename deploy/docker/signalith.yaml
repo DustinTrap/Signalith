@@ -14,3 +14,7 @@ retention:
   days: 90
 auth:
   admin_user: admin
+detections:
+  dir: /var/lib/signalith/detections
+  scheduler: true
+  max_findings_per_run: 100

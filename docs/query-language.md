@@ -32,6 +32,10 @@ datamodel=Authentication action=failure earliest=-24h
 Relative times: `-30s`, `-15m`, `-4h`, `-7d`, `-2w`, `-1mon`, `-1y`, optionally snapped
 with `@d`, `@h`, `@w`. Absolute times are ISO 8601 (`2026-10-01T00:00:00Z`).
 
+Quote values that contain spaces or symbols: `process_path="C:\Windows\System32\cmd.exe"`.
+Inside quotes, `\"` is a quote and `\\` is one backslash; any other backslash is
+kept as typed, so Windows paths work without doubling.
+
 ## Commands
 
 | Command | Example | Notes |

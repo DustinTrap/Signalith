@@ -1,0 +1,14 @@
+id: auth-ssh-root-login
+title: Direct SSH login as root on $dest$ from $src$
+description: Someone logged on over SSH as root instead of using a named account and sudo.
+query: |
+  datamodel=Authentication app=sshd action=success user=root
+schedule: 5m
+lookback: 10m
+severity: medium
+mitre: [T1078.003, T1021.004]
+throttle:
+  fields: [dest, src]
+  window: 24h
+enabled: true
+tags: [authentication, linux]

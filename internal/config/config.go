@@ -27,6 +27,7 @@ type Config struct {
 	Retention  Retention  `yaml:"retention"`
 	Auth       Auth       `yaml:"auth"`
 	Ingest     Ingest     `yaml:"ingest"`
+	Detections Detections `yaml:"detections"`
 
 	// path is where the file was loaded from.
 	path string
@@ -78,6 +79,27 @@ type Ingest struct {
 	Tokens []string `yaml:"tokens"`
 }
 
+// Detections controls scheduled detections and findings.
+type Detections struct {
+	// Dir holds custom and edited detections as YAML files. A relative
+	// path is relative to the folder this config file is in.
+	Dir string `yaml:"dir"`
+	// Scheduler runs enabled detections on their schedules. Turn it off on
+	// extra servers that share one OpenSearch so rules run once.
+	Scheduler bool `yaml:"scheduler"`
+	// MaxFindingsPerRun caps findings one run can raise.
+	MaxFindingsPerRun int `yaml:"max_findings_per_run"`
+}
+
+// DetectionsDir returns the absolute detections folder.
+func (c *Config) DetectionsDir() string {
+	d := c.Detections.Dir
+	if d == "" || filepath.IsAbs(d) || c.path == "" {
+		return d
+	}
+	return filepath.Join(filepath.Dir(c.path), d)
+}
+
 // Default returns a config with every default filled in.
 func Default() *Config {
 	return &Config{
@@ -86,6 +108,7 @@ func Default() *Config {
 		Search:     Search{DefaultEarliest: "-24h", MaxEvents: 10000},
 		Retention:  Retention{Days: 90},
 		Auth:       Auth{AdminUser: "admin"},
+		Detections: Detections{Dir: "detections", Scheduler: true, MaxFindingsPerRun: 100},
 	}
 }
 
@@ -139,6 +162,9 @@ func (c *Config) applyEnv() error {
 		}
 		c.Auth.AdminPasswordHash = h
 	}
+	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
+		c.Detections.Dir = v
+	}
 	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
 		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
 	}
@@ -190,6 +216,12 @@ func (c *Config) Validate() error {
 		p = append(p, "auth.admin_password_hash is empty; run signalith passwd, or set SIGNALITH_ADMIN_PASSWORD")
 	} else if _, err := bcrypt.Cost([]byte(c.Auth.AdminPasswordHash)); err != nil {
 		p = append(p, "auth.admin_password_hash is not a bcrypt hash; generate one with signalith passwd")
+	}
+	if c.Detections.Dir == "" {
+		p = append(p, "detections.dir is required, for example: detections")
+	}
+	if c.Detections.MaxFindingsPerRun < 1 || c.Detections.MaxFindingsPerRun > 10000 {
+		p = append(p, "detections.max_findings_per_run must be between 1 and 10000")
 	}
 	for i, t := range c.Ingest.Tokens {
 		if len(t) < 16 {
@@ -273,5 +305,6 @@ const header = `# Signalith configuration.
 # search.*           default time range and result limits
 # retention.days     days of events to keep (0 = forever)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
+# detections.dir     folder for custom detections (relative to this file)
 
 `

@@ -4,12 +4,13 @@ An open-source SIEM for Windows and Linux, modeled on Splunk Enterprise Security
 Signalith stores events in [OpenSearch](https://opensearch.org), collects them with
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
 query language that reads like SPL, a visual query builder, CIM-style data models,
-and (in later phases) detections, findings, risk scoring and investigations.
+scheduled detections with a findings queue for triage, Sigma rule import, and a
+MITRE ATT&CK coverage map. Risk scoring and investigations come in later phases.
 
 The server is a single Go binary with the web UI embedded. It runs as a Windows
 service or a systemd unit.
 
-> Status: Phase 1 (search foundation). See the [roadmap](#roadmap).
+> Status: Phase 2 (detect and triage). See the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -82,10 +83,38 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `retention.days` | `90` | Days of events to keep; `0` keeps everything |
 | `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
+| `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
+| `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
+| `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`).
+`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`).
+
+## Detections and findings
+
+A detection is a query that runs on a schedule. Each row it returns becomes a
+**finding** in the queue, like a notable event in Splunk ES. Signalith ships 19
+detections mapped to MITRE ATT&CK (brute force, password spray, encoded PowerShell,
+Office spawning shells, shadow copy deletion, credential dumping, privileged group
+changes and more); 17 are on by default.
+
+- **Findings** is the triage queue: filter by status, severity, owner or entity;
+  assign, change status and disposition, comment, and update many at once. Each
+  finding shows the result that fired, its entities, triage guidance, its full
+  history, and a **View contributing events** link that opens the exact search.
+- **Detections** lists every rule with its last run. Edit one in the form, **Test**
+  it to see which findings it would raise, or **Run now**. Editing a built-in saves
+  your version and keeps the original to revert to. Any search can become a detection
+  with **Save as detection** on the Search page.
+- **Import Sigma rule** converts a [Sigma](https://github.com/SigmaHQ/sigma) rule to a
+  Signalith query and lists anything it had to approximate. Imported rules start
+  disabled so you can test them first.
+- **ATT&CK coverage** shows the Enterprise matrix with techniques covered by enabled
+  detections, by disabled ones, and gaps.
+
+Detections are YAML files, so they can live in Git. See
+[docs/detections.md](docs/detections.md) for the format.
 
 ## Writing queries
 
@@ -126,6 +155,8 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/ingest` | Fluent Bit record parsing for Windows and Linux, index template |
 | `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Other |
 | `internal/agents` | Fluent Bit configuration generator |
+| `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
+| `internal/findings` | Findings model and its OpenSearch store |
 | `internal/config` | YAML config, validation, password hashing |
 | `internal/api` | REST API, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
@@ -143,11 +174,11 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 
 ## Roadmap
 
-1. **Search foundation** (this release): agents, parsing, data models, query language, builder, installers.
-2. **Detect and triage**: scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
+1. **Search foundation**: agents, parsing, data models, query language, builder, installers.
+2. **Detect and triage** (this release): scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
 3. **ES depth**: risk-based alerting, asset and identity enrichment, threat intel feeds, posture dashboards, plain-English to query.
 4. **Respond and scale**: investigation cases, response actions, playbooks, multi-node deployments.
 
 ## License
 
-Apache 2.0 is proposed to match OpenSearch and Fluent Bit; a LICENSE file will be added once confirmed.
+[Apache 2.0](LICENSE). See [NOTICE](NOTICE) for third-party data.

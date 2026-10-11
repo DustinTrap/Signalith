@@ -149,3 +149,21 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestBackslashesInQuotedStrings(t *testing.T) {
+	q, err := Parse(`process_path="C:\Windows\System32\cmd.exe" process="say \"hi\" \\ bye"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	and := q.Search.(*And)
+	if v := and.Children[0].(*Compare).Value; v != `C:\Windows\System32\cmd.exe` {
+		t.Errorf("path = %q", v)
+	}
+	if v := and.Children[1].(*Compare).Value; v != `say "hi" \ bye` {
+		t.Errorf("escapes = %q", v)
+	}
+	q2, err := Parse(q.String())
+	if err != nil || q2.String() != q.String() {
+		t.Errorf("round trip: %v %s", err, q2)
+	}
+}

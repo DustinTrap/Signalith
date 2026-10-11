@@ -1,0 +1,14 @@
+id: endpoint-service-created
+title: Service created with sc.exe on $dest$
+description: sc.exe created a Windows service, which attackers use for persistence and lateral movement.
+query: |
+  datamodel=Endpoint process_name=sc.exe process="* create *"
+schedule: 5m
+lookback: 10m
+severity: medium
+mitre: [T1543.003]
+throttle:
+  fields: [dest, process]
+  window: 24h
+enabled: true
+tags: [persistence, windows]

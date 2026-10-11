@@ -1,0 +1,17 @@
+id: endpoint-lolbin-download
+title: Built-in Windows tool used to download a file on $dest$
+description: certutil, bitsadmin or PowerShell download functions were used to fetch a file from the network.
+query: |
+  datamodel=Endpoint
+  (process_name=certutil.exe process IN ("*urlcache*", "*verifyctl*"))
+  OR (process_name=bitsadmin.exe process="*/transfer*")
+  OR (process_name IN (powershell.exe, pwsh.exe) process IN ("*downloadstring*", "*downloadfile*", "*invoke-webrequest*", "*iwr *", "*start-bitstransfer*"))
+schedule: 5m
+lookback: 10m
+severity: medium
+mitre: [T1105]
+throttle:
+  fields: [dest, process]
+  window: 24h
+enabled: true
+tags: [command-and-control, windows]

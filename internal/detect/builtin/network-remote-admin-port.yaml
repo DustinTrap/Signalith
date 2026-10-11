@@ -1,0 +1,17 @@
+id: network-remote-admin-port
+title: $process_name$ on $src$ connected to $dest$ on remote admin port $dest_port$
+description: A process other than the usual clients opened a connection on SMB, RDP, WinRM or SSH ports.
+query: |
+  datamodel=Network_Traffic dest_port IN (22, 445, 3389, 5985, 5986)
+  NOT process_name IN (mstsc.exe, ssh.exe, putty.exe, svchost.exe, system, lsass.exe, explorer.exe)
+  | stats count by src, dest, dest_port, process_name
+schedule: 15m
+lookback: 30m
+severity: low
+mitre: [T1021]
+throttle:
+  fields: [src, dest, dest_port, process_name]
+  window: 24h
+enabled: false
+tags: [lateral-movement]
+guidance: Disabled by default because it needs tuning; add your admin tools to the NOT list before enabling.
