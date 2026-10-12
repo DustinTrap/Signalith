@@ -505,78 +505,229 @@
   </section>
 
   <!-- Risk -->
-  <section id="page-risk" class="page" data-legacy>
+  <section id="page-risk" class="page">
     <div class="page-head">
-      <h2>Risk</h2>
-      <div class="toolbar">
-        <select id="r-type">
-          <option value="">Users and systems</option>
-          <option value="user">Users</option>
-          <option value="system">Systems</option>
-          <option value="other">Other</option>
-        </select>
-        <select id="r-since">
-          <option value="24h" selected>Last 24 hours</option>
-          <option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option>
-        </select>
-        <button id="r-refresh">Refresh</button>
+      <div>
+        <h2 class="page-head__title">Risk</h2>
+        <p class="page-head__desc">Detections add risk to users and systems, weighted by priority; 100 in 24 hours raises a finding.</p>
       </div>
     </div>
-    <p class="muted">Risk adds up from detections, weighted by asset and identity priority.</p>
+    <div class="toolbar" role="search">
+      <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="r-find" class="input" type="search" placeholder="Find a user or system" aria-label="Find a user or system" autocomplete="off" spellcheck="false"></div>
+      <select id="r-type" class="select" aria-label="Type">
+        <option value="">Users and systems</option>
+        <option value="user">Users</option>
+        <option value="system">Systems</option>
+        <option value="other">Other</option>
+      </select>
+      <div id="r-since" class="seg" role="group" aria-label="Time range">
+        <button type="button" data-since="24h" aria-pressed="true">24h</button>
+        <button type="button" data-since="7d" aria-pressed="false">7d</button>
+        <button type="button" data-since="30d" aria-pressed="false">30d</button>
+      </div>
+      <span class="spacer"></span>
+      <button id="r-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
+    </div>
     <div class="split">
-      <div id="r-list" class="results"></div>
-      <aside id="r-detail" class="detail hidden"></aside>
+      <div class="card">
+        <div id="r-list" class="table-wrap"></div>
+        <div id="r-foot" class="table-foot hidden"></div>
+      </div>
+      <aside id="r-detail" class="card inspector hidden" aria-label="Risk details"></aside>
     </div>
   </section>
 
   <!-- Assets and identities -->
-  <section id="page-assets" class="page" data-legacy>
-    <h2>Assets &amp; identities</h2>
-    <p class="muted">Tell Signalith which hosts and accounts matter. Priority raises urgency and risk.</p>
-    <div class="lists">
-      <div class="panel" data-kind="assets">
-        <div class="detail-head"><h3>Assets <span class="muted l-count"></span></h3><a class="button-link" href="api/lookups/assets.csv">Download CSV</a></div>
-        <p class="muted small">CSV columns: <code>host, ip, cidr, owner, priority, category, bunit, location</code>. Separate several values with <code>|</code>.</p>
-        <pre class="code small">host,ip,cidr,owner,priority,category,bunit,location
-DC01.corp.local|DC01,10.0.0.10,,it-ops,critical,domain_controller|pci,IT,HQ
-,,10.20.0.0/16,,low,workstation,Corp,</pre>
-        <div class="row"><input type="file" accept=".csv,text/csv" class="l-file"><button class="primary l-upload">Upload and replace</button></div>
-        <div class="l-msg"></div>
-        <div class="l-table results"></div>
-      </div>
-      <div class="panel" data-kind="identities">
-        <div class="detail-head"><h3>Identities <span class="muted l-count"></span></h3><a class="button-link" href="api/lookups/identities.csv">Download CSV</a></div>
-        <p class="muted small">CSV columns: <code>identity, name, email, manager, priority, category, bunit, watchlist</code>. List every username form, like <code>bob|CORP\bob</code>.</p>
-        <pre class="code small">identity,name,email,manager,priority,category,bunit,watchlist
-bob|CORP\bob,Bob Smith,bob@corp.com,alice,high,admin,IT,true
-svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
-        <div class="row"><input type="file" accept=".csv,text/csv" class="l-file"><button class="primary l-upload">Upload and replace</button></div>
-        <div class="l-msg"></div>
-        <div class="l-table results"></div>
+  <section id="page-assets" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Assets &amp; identities</h2>
+        <p class="page-head__desc">Tell Signalith which hosts and accounts matter; priority raises urgency and risk.</p>
       </div>
     </div>
+    <div class="tabs" role="tablist" aria-label="Lists">
+      <button class="tab" type="button" role="tab" id="l-tab-assets" data-kind="assets" aria-selected="true" aria-controls="l-panel">Assets <span class="count l-count hidden" data-kind="assets"></span></button>
+      <button class="tab" type="button" role="tab" id="l-tab-identities" data-kind="identities" aria-selected="false" aria-controls="l-panel" tabindex="-1">Identities <span class="count l-count hidden" data-kind="identities"></span></button>
+    </div>
+    <div class="toolbar" id="l-toolbar" role="search">
+      <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="l-find" class="input" type="search" placeholder="Find a host, IP or owner" aria-label="Find in this list" autocomplete="off" spellcheck="false"></div>
+      <span class="spacer"></span>
+      <a id="l-download" class="btn btn--ghost" href="api/lookups/assets.csv" download aria-label="Download CSV" title="Download the list as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span class="hide-sm">Download CSV</span></a>
+      <button id="l-upload-open" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload CSV</button>
+    </div>
+    <div class="card" id="l-panel" role="tabpanel" aria-labelledby="l-tab-assets">
+      <div id="l-table" class="table-wrap"></div>
+      <div id="l-foot" class="table-foot hidden"></div>
+    </div>
+    <dialog id="l-dialog" class="modal" aria-labelledby="l-dialog-title" aria-describedby="l-dialog-desc">
+      <form id="l-form" method="dialog" novalidate>
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="l-dialog-title">Replace the asset list</h3>
+            <p class="modal__desc" id="l-dialog-desc">The file replaces the whole list. If any line has a problem, nothing changes.</p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="l-msg"></div>
+          <div class="field">
+            <label class="label" for="l-file">CSV file</label>
+            <input id="l-file" class="file" type="file" accept=".csv,text/csv">
+          </div>
+          <div class="field">
+            <span class="label">Columns</span>
+            <p class="hint l-columns" id="l-columns"></p>
+            <pre class="code-block" id="l-example" aria-label="Example file"></pre>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="l-upload">Upload and replace</button>
+        </div>
+      </form>
+    </dialog>
   </section>
 
   <!-- Threat intel -->
-  <section id="page-intel" class="page" data-legacy>
+  <section id="page-intel" class="page">
     <div class="page-head">
-      <h2>Threat intel</h2>
-      <div class="toolbar">
-        <div id="ti-summary" class="sev-summary"></div>
-        <button id="ti-hunt" title="Search the last 24 hours for events that match any indicator">Find matching events</button>
-        <button id="ti-refresh">Refresh</button>
+      <div>
+        <h2 class="page-head__title">Threat intel</h2>
+        <p class="page-head__desc">Known-bad IPs, domains, URLs, hashes and email addresses, from feeds and your own lists.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="ti-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
+        <button id="ti-add-open" class="btn btn--secondary" type="button" aria-label="Add indicators"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="hide-sm">Add indicators</span></button>
+        <button id="ti-hunt" class="btn btn--primary" type="button" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg>Find matching events</button>
       </div>
     </div>
-    <p class="muted">Known-bad IPs, domains, URLs, hashes and email addresses, from feeds and your own lists.</p>
 
-    <div class="panel">
-      <h3>Feeds</h3>
-      <div id="ti-feeds"></div>
-      <details id="ti-examples">
-        <summary>Example feed settings</summary>
-        <p class="muted small">Paste into signalith.yaml, run <code>signalith validate</code>, and restart. Check each provider's terms of use.</p>
-        <pre class="code small">intel:
+    <div id="ti-error" class="card hidden"></div>
+
+    <div id="ti-main">
+      <div class="card ti-feeds">
+        <div class="card__head">
+          <div>
+            <h3 class="card__title">Feeds</h3>
+            <p class="card__sub" id="ti-feeds-sub"></p>
+          </div>
+          <div class="card__actions"><button id="ti-examples-open" class="btn btn--ghost btn--sm hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>Example settings</button></div>
+        </div>
+        <div id="ti-feeds" class="ti-feeds__body"></div>
+      </div>
+
+      <div class="ti-ind">
+        <div class="ti-ind__head">
+          <h3 class="card__title">Indicators</h3>
+          <div id="ti-type" class="pills" role="group" aria-label="Filter by type"></div>
+        </div>
+        <div class="toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="ti-q" class="input" type="search" placeholder="Find a value, description or tag" aria-label="Find indicators" autocomplete="off" spellcheck="false"></div>
+          <select id="ti-source" class="select" aria-label="Source"><option value="">Any source</option></select>
+        </div>
+        <div class="split">
+          <div class="card">
+            <div id="ti-list" class="table-wrap"></div>
+            <div class="table-foot" id="ti-foot">
+              <span id="ti-count"></span>
+              <span class="spacer"></span>
+              <button id="ti-prev" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Previous page" title="Previous page" disabled><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
+              <button id="ti-next" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Next page" title="Next page" disabled><svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+            </div>
+          </div>
+          <aside id="ti-detail" class="card inspector hidden" aria-label="Indicator details"></aside>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="ti-add-dialog" class="modal" aria-labelledby="ti-add-title">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="ti-add-title">Add indicators</h3>
+          <p class="modal__desc">Searches and the threat detection use them right away.</p>
+        </div>
+        <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="tabs ti-add-tabs" role="tablist" aria-label="How to add">
+        <button class="tab" type="button" role="tab" id="ti-tab-one" aria-controls="ti-add" aria-selected="true">One indicator</button>
+        <button class="tab" type="button" role="tab" id="ti-tab-upload" aria-controls="ti-upload-panel" aria-selected="false" tabindex="-1">Upload a list</button>
+      </div>
+      <form id="ti-add" role="tabpanel" aria-labelledby="ti-tab-one" autocomplete="off" novalidate>
+        <div class="modal__body">
+          <div id="ti-add-msg"></div>
+          <div class="field">
+            <label class="label" for="ti-value">Value</label>
+            <input id="ti-value" class="input mono" type="text" required spellcheck="false" placeholder="203.0.113.9, evil.example, a hash or URL">
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label" for="ti-add-type">Type</label>
+              <select id="ti-add-type" class="select select--block">
+                <option value="auto">Detect automatically</option>
+                <option value="ip">IP address or network</option>
+                <option value="domain">Domain</option>
+                <option value="url">URL</option>
+                <option value="hash">File hash</option>
+                <option value="email">Email address</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label" for="ti-weight">Weight</label>
+              <input id="ti-weight" class="input" type="text" inputmode="decimal" placeholder="1 (2 doubles the risk)">
+            </div>
+          </div>
+          <div class="field">
+            <label class="label" for="ti-desc">Description</label>
+            <input id="ti-desc" class="input" type="text" placeholder="Why it is bad, or a ticket number">
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label" for="ti-expires">Expires</label>
+              <input id="ti-expires" class="input" type="text" placeholder="never, 30d or 2026-12-31">
+            </div>
+            <div class="field">
+              <label class="label" for="ti-tags">Tags</label>
+              <input id="ti-tags" class="input" type="text" placeholder="phishing, incident-42">
+            </div>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="ti-add-submit">Add indicator</button>
+        </div>
+      </form>
+      <div id="ti-upload-panel" role="tabpanel" aria-labelledby="ti-tab-upload" hidden>
+        <div class="modal__body">
+          <div id="ti-upload-msg"></div>
+          <div class="field">
+            <label class="label" for="ti-file">CSV or text file</label>
+            <input id="ti-file" class="file" type="file" accept=".csv,.txt,text/csv,text/plain">
+          </div>
+          <div class="field">
+            <span class="label">Format</span>
+            <p class="hint ti-format">A CSV with <code>value, type, description, weight, expires, tags</code> (only value is required), or one value per line.</p>
+            <pre class="code-block" aria-label="Example file">value,description,weight,expires,tags
+203.0.113.9,Scanner seen in incident 42,2,30d,scanner|ssh
+login-bank.example,Phishing site,,2026-12-31,phishing</pre>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="button" id="ti-upload">Upload and add</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="ti-examples" class="modal ti-examples" aria-labelledby="ti-examples-title" aria-describedby="ti-examples-desc">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="ti-examples-title">Example feed settings</h3>
+          <p class="modal__desc" id="ti-examples-desc">Paste into signalith.yaml, run <code>signalith validate</code> and restart. Check each provider's terms of use.</p>
+        </div>
+        <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal__body">
+        <pre class="code-block" id="ti-example-yaml">intel:
   feeds:
     # Botnet command-and-control servers (abuse.ch Feodo Tracker)
     - name: feodo-tracker
@@ -603,66 +754,26 @@ svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
       url: https://misp.example.com/feeds/signalith.json
       format: stix
       headers: {Authorization: "${MISP_API_KEY}"}</pre>
-      </details>
-    </div>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" id="ti-example-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy</button>
+        <button class="btn btn--secondary" type="button" data-close>Close</button>
+      </div>
+    </dialog>
 
-    <div class="lists">
-      <form id="ti-add" class="panel" autocomplete="off">
-        <h3>Add an indicator</h3>
-        <div class="form-grid">
-          <label>Value <input id="ti-value" type="text" required placeholder="203.0.113.9, evil.example, a hash or URL"></label>
-          <label>Type
-            <select id="ti-add-type">
-              <option value="auto">Detect automatically</option>
-              <option value="ip">IP address or network</option>
-              <option value="domain">Domain</option>
-              <option value="url">URL</option>
-              <option value="hash">File hash</option>
-              <option value="email">Email address</option>
-            </select>
-          </label>
-          <label>Description <input id="ti-desc" type="text" placeholder="Why it is bad, or a ticket number"></label>
-          <label>Weight <input id="ti-weight" type="text" inputmode="decimal" placeholder="1 (2 doubles the risk)"></label>
-          <label>Expires <input id="ti-expires" type="text" placeholder="never, 30d or 2026-12-31"></label>
-          <label>Tags <input id="ti-tags" type="text" placeholder="phishing, incident-42"></label>
+    <dialog id="ti-confirm" class="modal" aria-labelledby="ti-confirm-title" aria-describedby="ti-confirm-desc">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="ti-confirm-title">Delete this indicator?</h3>
+          <p class="modal__desc" id="ti-confirm-desc"></p>
         </div>
-        <div class="row"><button class="primary" type="submit">Add</button></div>
-        <div id="ti-add-msg"></div>
-      </form>
-      <div class="panel">
-        <h3>Upload a list</h3>
-        <p class="muted small">CSV with <code>value, type, description, weight, expires, tags</code> (only value is required), or one value per line.</p>
-        <pre class="code small">value,description,weight,expires,tags
-203.0.113.9,Scanner seen in incident 42,2,30d,scanner|ssh
-login-bank.example,Phishing site,,2026-12-31,phishing</pre>
-        <div class="row"><input id="ti-file" type="file" accept=".csv,.txt,text/csv,text/plain"><button id="ti-upload" class="primary">Upload and add</button></div>
-        <div id="ti-upload-msg"></div>
       </div>
-    </div>
-
-    <div class="panel">
-      <div class="detail-head">
-        <h3>Indicators</h3>
-        <span id="ti-count" class="muted small"></span>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+        <button class="btn btn--danger" type="button" id="ti-confirm-delete">Delete</button>
       </div>
-      <div class="toolbar">
-        <input id="ti-q" type="search" placeholder="Find a value, description or tag">
-        <select id="ti-type">
-          <option value="">Any type</option>
-          <option value="ip">IP addresses and networks</option>
-          <option value="domain">Domains</option>
-          <option value="url">URLs</option>
-          <option value="hash">File hashes</option>
-          <option value="email">Email addresses</option>
-        </select>
-        <select id="ti-source"><option value="">Any source</option></select>
-        <button id="ti-prev">Previous</button>
-        <button id="ti-next">Next</button>
-      </div>
-      <div id="ti-list" class="results"></div>
-    </div>
+    </dialog>
   </section>
-
   <!-- Detections -->
   <section id="page-detections" class="page">
     <div class="page-head">
