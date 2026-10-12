@@ -23,3 +23,10 @@ lookups:
 dashboards:
   dir: /var/lib/signalith/dashboards
   stale_after: 2h
+# Syslog from firewalls, switches and servers without an agent. The
+# container cannot open ports below 1024, so it listens on 5514 and
+# docker-compose.yml publishes it as port 514 on the host.
+syslog:
+  udp: 0.0.0.0:5514
+  tcp: 0.0.0.0:5514
+  allow: []
