@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,9 +30,19 @@ import (
 
 type fakeOS struct {
 	bulk []store.IndexedDoc
+
+	mu      sync.Mutex
+	indices []string // every index pattern searched or mapped
+}
+
+func (f *fakeOS) searched(index string) {
+	f.mu.Lock()
+	f.indices = append(f.indices, index)
+	f.mu.Unlock()
 }
 
 func (f *fakeOS) Search(_ context.Context, index string, body map[string]any) (map[string]any, error) {
+	f.searched(index)
 	var out map[string]any
 	dec := json.NewDecoder(strings.NewReader(`{"hits":{"total":{"value":2}},"aggregations":{"groups":{"buckets":[
 		{"key":{"k0":"10.0.0.9"},"doc_count":25},{"key":{"k0":"10.0.0.7"},"doc_count":3}]}}}`))
@@ -44,7 +55,8 @@ func (f *fakeOS) Bulk(_ context.Context, docs []store.IndexedDoc) ([]store.BulkI
 	return nil, nil
 }
 func (f *fakeOS) Health(context.Context) (string, error) { return "green", nil }
-func (f *fakeOS) Mapping(context.Context, string) (map[string]string, error) {
+func (f *fakeOS) Mapping(_ context.Context, pattern string) (map[string]string, error) {
+	f.searched(pattern)
 	return map[string]string{"user": "keyword", "custom_score": "long"}, nil
 }
 
@@ -228,15 +240,6 @@ func TestIngestNeedsToken(t *testing.T) {
 	}
 	if len(fos.bulk) != 1 || fos.bulk[0].Doc["user"] != "bob" {
 		t.Errorf("bulk = %v", fos.bulk)
-	}
-}
-
-func TestDecodeRecordsFormats(t *testing.T) {
-	for _, body := range []string{`[{"a":1},{"a":2}]`, "{\"a\":1}\n{\"a\":2}\n"} {
-		recs, err := decodeRecords([]byte(body))
-		if err != nil || len(recs) != 2 {
-			t.Errorf("%q -> %v %v", body, recs, err)
-		}
 	}
 }
 

@@ -324,6 +324,8 @@ func TestDescribeErrors(t *testing.T) {
 		"https://u:p@x.example/a/b?key=abc#f": "https://x.example/a/b?…",
 		"https://x.example/feed.txt":          "https://x.example/feed.txt",
 		"http://x.example/?token=1":           "http://x.example/?…",
+		// Does not parse (a space in the password): still no password.
+		"https://u:pa ss@x.example/a?key=1": "https://***@x.example?…",
 	} {
 		if got := RedactURL(in); got != want {
 			t.Errorf("RedactURL(%q) = %q, want %q", in, got, want)

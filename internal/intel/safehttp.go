@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/redact"
 )
 
 // Feed downloads may only reach the internet and the local network. The
@@ -470,10 +472,12 @@ func scrub(msg string, fd Feed) string {
 func RedactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
+		// Unparsable text may still hold a password before the host, as
+		// in "https://user:pa ss@host/": keep only the scheme and host.
 		if i := strings.IndexAny(raw, "?#"); i >= 0 {
-			raw = raw[:i] + "?…"
+			return redact.URL(raw[:i]) + "?…"
 		}
-		return raw
+		return redact.URL(raw)
 	}
 	u.User = nil
 	if u.RawQuery != "" || u.ForceQuery {

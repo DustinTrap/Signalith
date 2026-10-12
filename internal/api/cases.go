@@ -12,6 +12,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/users"
@@ -158,7 +159,9 @@ func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
 	if title == "" && len(req.Findings) > 0 && s.Findings != nil {
 		// Name the case after its first finding when no title is given.
 		if f, err := s.Findings.Get(r.Context(), req.Findings[0]); err == nil {
-			title = f.Title
+			// Findings raised before titles were made safe may still
+			// hold hidden characters.
+			title = detect.ShowHidden(f.Title)
 		}
 	}
 	if title == "" {
@@ -185,6 +188,10 @@ func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
 	}
 	s.caseMu.Lock()
 	err := s.Cases.Create(r.Context(), c)
+	for try := 0; errors.Is(err, cases.ErrExists) && try < 3; try++ {
+		c.ID = cases.NewID(now) // practically never needed
+		err = s.Cases.Create(r.Context(), c)
+	}
 	s.caseMu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
@@ -462,7 +469,7 @@ func (s *Server) handleAddCaseEntry(w http.ResponseWriter, r *http.Request) {
 		res, err := s.Engine.Execute(ctx, q)
 		cancel()
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			writeSearchError(w, err)
 			return
 		}
 		e.Query, e.Earliest, e.Latest = qs, req.Earliest, req.Latest

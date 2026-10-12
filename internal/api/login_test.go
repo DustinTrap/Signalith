@@ -103,9 +103,9 @@ func TestSignInFlow(t *testing.T) {
 	if me["user"] != "admin" || me["auth"] != "session" {
 		t.Errorf("me = %v", me)
 	}
-	// The app page is always revalidated, so a cached copy is not shown
-	// after signing out.
-	if resp := send(t, "GET", ts.URL+"/", "", nil, c); resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-cache" {
+	// The app page is never stored, so a copy is not shown after signing
+	// out.
+	if resp := send(t, "GET", ts.URL+"/", "", nil, c); resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" {
 		t.Errorf("app page = %d, Cache-Control %q", resp.StatusCode, resp.Header.Get("Cache-Control"))
 	}
 	if resp := send(t, "GET", ts.URL+"/login", "", nil, c); resp.StatusCode != 303 {

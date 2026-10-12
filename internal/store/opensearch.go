@@ -6,13 +6,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/redact"
 )
 
 // Searcher runs a search request body against an index pattern.
@@ -22,18 +30,44 @@ type Searcher interface {
 
 // Config holds connection settings.
 type Config struct {
-	URL           string
-	Username      string
-	Password      string
+	// URL is the OpenSearch address. A user name and password in it are
+	// used as Username and Password (when those are empty) and are never
+	// shown in errors.
+	URL      string
+	Username string
+	Password string
+	// CAFile is a PEM file of certificate authorities to trust, in
+	// addition to the system's, for an OpenSearch with a private CA.
+	CAFile string
+	// CertFile and KeyFile are a client certificate and its key to present
+	// to OpenSearch. They are read again when they change on disk, so a
+	// renewed certificate needs no restart.
+	CertFile, KeyFile string
+	// TLSSkipVerify turns certificate checks off. Anyone on the network
+	// path can then read and change the traffic; for lab clusters only.
 	TLSSkipVerify bool
-	Timeout       time.Duration
+	// Proxy is the proxy URL for OpenSearch traffic. Empty connects
+	// directly: the HTTP_PROXY and HTTPS_PROXY environment variables are
+	// deliberately ignored, because a proxy would see every event and the
+	// OpenSearch password.
+	Proxy   string
+	Timeout time.Duration
 }
 
 // Client is an OpenSearch REST client.
 type Client struct {
 	base string
-	cfg  Config
-	http *http.Client
+	// shown is base as errors show it, with any secrets hidden.
+	shown string
+	cfg   Config
+	http  *http.Client
+	// setupErr is why the TLS or proxy settings could not be used; every
+	// request then fails with it. config.Validate reports the same
+	// problems before the server starts.
+	setupErr error
+	// proxyHint is added to connection errors when the environment names
+	// a proxy that OpenSearch traffic does not use.
+	proxyHint string
 }
 
 // New returns a client for one OpenSearch endpoint.
@@ -41,15 +75,182 @@ func New(cfg Config) *Client {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
 	}
+	if stripped, user, pw, ok := redact.Strip(cfg.URL); ok {
+		cfg.URL = stripped
+		if cfg.Username == "" {
+			cfg.Username, cfg.Password = user, pw
+		}
+	}
+	base := strings.TrimRight(cfg.URL, "/")
+	tr, err := Transport(cfg)
+	c := &Client{
+		base:     base,
+		shown:    redact.URL(base),
+		cfg:      cfg,
+		setupErr: err,
+		http: &http.Client{Timeout: cfg.Timeout, Transport: tr,
+			// A redirect is never part of the OpenSearch API, and following
+			// one could send the credentials somewhere else.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+	}
+	c.proxyHint = proxyHint(cfg, base)
+	return c
+}
+
+// Transport returns the HTTP transport for cfg: TLS 1.2 or newer, the
+// system's certificate authorities plus cfg.CAFile, the client
+// certificate if set, and no proxy unless cfg.Proxy is set. On an error
+// it still returns a usable transport without the broken setting.
+func Transport(cfg Config) (*http.Transport, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	tr.TLSClientConfig = tlsCfg
+	var errs []error
+	if cfg.Proxy != "" {
+		if u, err := url.Parse(cfg.Proxy); err != nil || u.Host == "" {
+			errs = append(errs, fmt.Errorf("opensearch proxy %q is not a URL such as http://proxy:3128", redact.URL(cfg.Proxy)))
+		} else {
+			tr.Proxy = http.ProxyURL(u)
+		}
+	}
 	if cfg.TLSSkipVerify {
-		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in for self-signed lab clusters
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // opt-in for lab clusters; warned about at startup
 	}
-	return &Client{
-		base: strings.TrimRight(cfg.URL, "/"),
-		cfg:  cfg,
-		http: &http.Client{Timeout: cfg.Timeout, Transport: tr},
+	if cfg.CAFile != "" {
+		pool, err := LoadCAFile(cfg.CAFile)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			tlsCfg.RootCAs = pool
+		}
 	}
+	if cfg.CertFile != "" || cfg.KeyFile != "" {
+		kp := &keyPair{cert: cfg.CertFile, key: cfg.KeyFile}
+		if _, err := kp.get(nil); err != nil {
+			errs = append(errs, err)
+		} else {
+			tlsCfg.GetClientCertificate = kp.get
+		}
+	}
+	return tr, errors.Join(errs...)
+}
+
+// proxyHint explains, for connection errors, that a proxy named in the
+// environment is not used for OpenSearch: after an upgrade, an OpenSearch
+// that was only reachable through HTTPS_PROXY otherwise fails with a bare
+// dial or DNS error. It is empty when cfg.Proxy is set, OpenSearch is on
+// this machine, or NO_PROXY covers its host.
+func proxyHint(cfg Config, base string) string {
+	if cfg.Proxy != "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	if a, err := netip.ParseAddr(host); err == nil && a.Unmap().IsLoopback() {
+		return ""
+	}
+	names := []string{"HTTP_PROXY", "http_proxy"}
+	if u.Scheme == "https" {
+		names = []string{"HTTPS_PROXY", "https_proxy"}
+	}
+	for _, name := range names {
+		if os.Getenv(name) == "" {
+			continue
+		}
+		if noProxy(host) {
+			return ""
+		}
+		return fmt.Sprintf(" (%s is set, but Signalith never sends OpenSearch traffic through proxies named in the environment; "+
+			"if OpenSearch can only be reached through that proxy, set opensearch.proxy or SIGNALITH_OPENSEARCH_PROXY)", name)
+	}
+	return ""
+}
+
+// noProxy reports whether NO_PROXY names host (exactly, as a parent
+// domain, as a CIDR holding it, or with "*").
+func noProxy(host string) bool {
+	list := os.Getenv("NO_PROXY")
+	if list == "" {
+		list = os.Getenv("no_proxy")
+	}
+	a, aErr := netip.ParseAddr(host)
+	for _, e := range strings.Split(list, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "*" {
+			return true
+		}
+		if p, err := netip.ParsePrefix(e); err == nil {
+			if aErr == nil && p.Contains(a.Unmap()) {
+				return true
+			}
+			continue
+		}
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			e = h
+		}
+		e = strings.TrimPrefix(strings.TrimPrefix(e, "*"), ".")
+		if e != "" && (host == e || strings.HasSuffix(host, "."+e)) {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadCAFile returns the system's certificate authorities plus those in
+// the PEM file at path.
+func LoadCAFile(path string) (*x509.CertPool, error) {
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("opensearch CA file: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("opensearch CA file %s holds no PEM certificates (it should contain -----BEGIN CERTIFICATE-----)", path)
+	}
+	return pool, nil
+}
+
+// keyPair loads a client certificate, again whenever its files change.
+type keyPair struct {
+	cert, key string
+	mu        sync.Mutex
+	loaded    *tls.Certificate
+	stamp     string
+}
+
+func (k *keyPair) get(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	stamp := ""
+	for _, p := range []string{k.cert, k.key} {
+		if st, err := os.Stat(p); err == nil {
+			stamp += st.ModTime().String() + fmt.Sprint(st.Size())
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.loaded != nil && stamp == k.stamp {
+		return k.loaded, nil
+	}
+	c, err := tls.LoadX509KeyPair(k.cert, k.key)
+	if err != nil {
+		if k.loaded != nil {
+			// Halfway through replacing the files: keep the old pair.
+			return k.loaded, nil
+		}
+		return nil, fmt.Errorf("opensearch client certificate %s and key %s: %w", k.cert, k.key, err)
+	}
+	k.loaded, k.stamp = &c, stamp
+	return k.loaded, nil
 }
 
 // Error is a non-2xx response from OpenSearch.
@@ -97,9 +298,17 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, out any)
 		}
 		rd = bytes.NewReader(buf)
 	}
+	if c.setupErr != nil {
+		return c.setupErr
+	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
-		return err
+		// The parse error would repeat the whole URL.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fmt.Errorf("opensearch request to %s: %w", c.shown, err)
 	}
 	if rd != nil {
 		req.Header.Set("Content-Type", contentType)
@@ -109,12 +318,21 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, out any)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("opensearch unreachable at %s: %w", c.base, err)
+		// Go hides the password in the URL it repeats, but not the rest.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = redact.URL(ue.URL)
+		}
+		return fmt.Errorf("opensearch unreachable at %s: %w%s", c.shown, err, c.proxyHint)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode/100 == 3 {
+		return fmt.Errorf("opensearch at %s answered with a redirect (%d) to %q; Signalith does not follow redirects, so set opensearch.url to the address OpenSearch is really at",
+			c.shown, resp.StatusCode, redact.URL(resp.Header.Get("Location")))
 	}
 	if resp.StatusCode/100 != 2 {
 		return &Error{Status: resp.StatusCode, Body: string(data)}
@@ -148,6 +366,10 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 type BulkItemError struct {
 	Index  string
 	Reason string
+	// Pos is the document's position in the request, from 0, and Type the
+	// OpenSearch error type, such as mapper_parsing_exception.
+	Pos  int    `json:"-"`
+	Type string `json:"-"`
 }
 
 // Bulk indexes documents. docs maps each document to its target index.
@@ -181,10 +403,10 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 	}
 	var errs []BulkItemError
 	if out.Errors {
-		for _, item := range out.Items {
+		for i, item := range out.Items {
 			for _, r := range item {
 				if r.Error != nil {
-					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason})
+					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason, Pos: i, Type: r.Error.Type})
 				}
 			}
 		}

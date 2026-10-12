@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInitSaveLoadRoundTrip(t *testing.T) {
@@ -454,5 +455,32 @@ func TestRetentionSettings(t *testing.T) {
 	os.WriteFile(path, []byte("retention:\n  policies:\n    endpoint: {keep: 30}\n"), 0o600)
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "keep") {
 		t.Errorf("unknown policy key: %v", err)
+	}
+}
+
+func TestMaxEventAge(t *testing.T) {
+	day := 24 * time.Hour
+	// Unset: a week, or the retention period when that is shorter.
+	for days, want := range map[int]time.Duration{0: 7 * day, 90: 7 * day, 7: 7 * day, 3: 3 * day, 1: day} {
+		if got := Default().MaxEventAge(days); got != want {
+			t.Errorf("retention %d days: %v, want %v", days, got, want)
+		}
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "age.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	os.WriteFile(path, []byte("ingest:\n  max_event_age: 30d\n"), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxEventAge(1) != 30*day {
+		t.Errorf("set: %v", c.MaxEventAge(1))
+	}
+	for _, bad := range []string{"soon", "10m", "4000d"} {
+		os.WriteFile(path, []byte("ingest:\n  max_event_age: "+bad+"\n"), 0o600)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "ingest.max_event_age") {
+			t.Errorf("%s: %v", bad, err)
+		}
 	}
 }

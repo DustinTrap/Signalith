@@ -10,6 +10,8 @@ import (
 	"testing"
 	"testing/iotest"
 	"unicode/utf8"
+
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
 
 var fuzzSeeds = []string{
@@ -46,7 +48,7 @@ func FuzzParse(f *testing.F) {
 		}
 		ev := m.Event(sender, now, 0)
 		// The event time, and so the daily index, stays in the window.
-		if ev.Model == "" || ev.Time.Before(now.Add(-DefaultMaxAge)) || ev.Time.After(now.Add(maxAhead)) {
+		if ev.Model == "" || ev.Time.Before(now.Add(-DefaultMaxAge)) || ev.Time.After(now.Add(ingest.MaxEventAhead)) {
 			t.Fatalf("model %q time %v", ev.Model, ev.Time)
 		}
 		d := ev.Document()

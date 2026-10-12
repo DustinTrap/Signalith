@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 )
 
@@ -116,5 +117,47 @@ func TestCasesAPI(t *testing.T) {
 	}
 	if code, _ := do(t, ts, "GET", "/api/cases/CASE-nope", "", true); code != 404 {
 		t.Errorf("unknown case = %d", code)
+	}
+}
+
+// takenOnce answers the first create as if its ID were taken.
+type takenOnce struct {
+	*cases.Memory
+	tried []string
+}
+
+func (s *takenOnce) Create(ctx context.Context, c *cases.Case) error {
+	s.tried = append(s.tried, c.ID)
+	if len(s.tried) == 1 {
+		return cases.ErrExists
+	}
+	return s.Memory.Create(ctx, c)
+}
+
+func TestCaseIDCollisionGetsANewID(t *testing.T) {
+	st := &takenOnce{Memory: cases.NewMemory()}
+	ts, _ := newTestServerWith(t, func(s *Server) { s.Cases = st })
+	code, out := do(t, ts, "POST", "/api/cases", `{"title":"Phishing wave"}`, true)
+	if code != 201 || len(st.tried) != 2 || st.tried[0] == st.tried[1] || out["case"].(map[string]any)["id"] != st.tried[1] {
+		t.Fatalf("create = %d %v, tried %v", code, out, st.tried)
+	}
+}
+
+// TestCaseFromFindingShowsHiddenCharacters: a new case is named after its
+// first finding; a finding stored before titles were made safe may still
+// hold U+202E, which must not reach the case title (xss-bidi-spoof).
+func TestCaseFromFindingShowsHiddenCharacters(t *testing.T) {
+	var fs *findings.Memory
+	ts, _ := newTestServerWith(t, func(s *Server) { fs = s.Findings.(*findings.Memory) })
+	now := time.Now().UTC()
+	rlo := string(rune(0x202e))
+	f := &findings.Finding{ID: "f1", Title: "Failed logons for bob" + rlo + "gnp.exe", Severity: "high", Status: findings.StatusNew, Created: now, Updated: now}
+	if err := fs.Create(context.Background(), f); err != nil {
+		t.Fatal(err)
+	}
+	code, out := do(t, ts, "POST", "/api/cases", `{"findings":["f1"]}`, true)
+	c, _ := out["case"].(map[string]any)
+	if code != 201 || c["title"] != "Failed logons for bob⟨U+202E⟩gnp.exe" {
+		t.Errorf("%d %v", code, out)
 	}
 }

@@ -15,14 +15,11 @@ import (
 const maxExtraFields = 64
 
 // DefaultMaxAge is how old a message's own timestamp may be before the
-// receive time is used instead. Events go to one index per day, so without
-// a bound a sender could create an index for every day it names and use up
-// the cluster's shard limit, which stops all ingestion.
-const DefaultMaxAge = 7 * 24 * time.Hour
-
-// maxAhead is how far in the future a message's timestamp may be (clock
-// skew and time zone mistakes) before the receive time is used instead.
-const maxAhead = 24 * time.Hour
+// receive time is used instead: the same window as every other event (see
+// ingest.TimeUsable). Events go to one index per day, so without a bound a
+// sender could create an index for every day it names and use up the
+// cluster's shard limit, which stops all ingestion.
+const DefaultMaxAge = ingest.DefaultMaxEventAge
 
 var facilityNames = [24]string{
 	"kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news",
@@ -36,8 +33,8 @@ var severityNames = [8]string{"emergency", "alert", "critical", "error", "warnin
 // sender is the address the message came from and received is when it
 // arrived; they fill dvc, host when the message names none, and the time
 // when the message has no usable timestamp. A message time older than
-// maxAge (zero: DefaultMaxAge) or more than a day ahead is not used for the
-// event time; it is kept in device_time instead.
+// maxAge (zero: DefaultMaxAge) or more than ingest.MaxEventAhead ahead is
+// not used for the event time; it is kept in device_time instead.
 func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Duration) ingest.Event {
 	if maxAge <= 0 {
 		maxAge = DefaultMaxAge
@@ -124,7 +121,7 @@ func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Durat
 	if plausible(t, received, maxAge) {
 		ev.Time = t.UTC()
 	} else if !t.IsZero() {
-		f["device_time"] = t.UTC().Format(time.RFC3339Nano)
+		ev.DeviceTime = t.UTC()
 	}
 	return ev
 }
@@ -141,10 +138,10 @@ func ciscoProduct(facility string) string {
 
 // plausible reports whether a message time can be the event time: set, no
 // older than maxAge (a clock never set, a replayed or forged message) and
-// at most a day ahead. Keeping event times in this window bounds the daily
-// indices syslog can write to.
+// at most ingest.MaxEventAhead ahead. Keeping event times in this window
+// bounds the daily indices syslog can write to.
 func plausible(t, received time.Time, maxAge time.Duration) bool {
-	return !t.IsZero() && !t.Before(received.Add(-maxAge)) && !t.After(received.Add(maxAhead))
+	return ingest.TimeUsable(t, received, maxAge)
 }
 
 // maxHostLen is the longest host name kept, the DNS limit.

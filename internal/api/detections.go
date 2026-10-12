@@ -200,7 +200,7 @@ func (s *Server) handleTestDetection(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Scheduler.Preview(ctx, &d)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	titles := make([]string, 0, min(len(res.Rows), 20))
@@ -223,7 +223,7 @@ func (s *Server) handleRunDetection(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Scheduler.Run(ctx, d)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

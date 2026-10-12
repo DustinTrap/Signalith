@@ -59,14 +59,26 @@ type doc struct {
 	EntityValues []string `json:"entity_values,omitempty"`
 }
 
-func (s *OpenSearch) put(ctx context.Context, c *Case) error {
+// put writes a case; op is "_doc" to create or replace it, or "_create"
+// to create it only if its ID is new.
+func (s *OpenSearch) put(ctx context.Context, c *Case, op string) error {
 	return s.Client.Do(ctx, http.MethodPut,
-		"/"+url.PathEscape(s.Index)+"/_doc/"+url.PathEscape(c.ID)+"?refresh=wait_for",
+		"/"+url.PathEscape(s.Index)+"/"+op+"/"+url.PathEscape(c.ID)+"?refresh=wait_for",
 		doc{Case: c, EntityValues: c.EntityValues()}, nil)
 }
 
-func (s *OpenSearch) Create(ctx context.Context, c *Case) error { return s.put(ctx, c) }
-func (s *OpenSearch) Save(ctx context.Context, c *Case) error   { return s.put(ctx, c) }
+// Create never replaces an existing case: OpenSearch answers 409 when the
+// ID is taken.
+func (s *OpenSearch) Create(ctx context.Context, c *Case) error {
+	err := s.put(ctx, c, "_create")
+	var oe *store.Error
+	if errors.As(err, &oe) && oe.Status == http.StatusConflict {
+		return ErrExists
+	}
+	return err
+}
+
+func (s *OpenSearch) Save(ctx context.Context, c *Case) error { return s.put(ctx, c, "_doc") }
 
 func (s *OpenSearch) Get(ctx context.Context, id string) (*Case, error) {
 	var out struct {

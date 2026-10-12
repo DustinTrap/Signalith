@@ -5,6 +5,8 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +23,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
@@ -61,16 +65,129 @@ type Server struct {
 	PublicURL string `yaml:"public_url"`
 	TLSCert   string `yaml:"tls_cert,omitempty"`
 	TLSKey    string `yaml:"tls_key,omitempty"`
+	// MaxConnections caps open connections to the UI, API and ingest;
+	// 0 means 10000. One client (an IPv4 address, or an IPv6 /64 network)
+	// may hold a tenth of them; connections from this machine, such as a
+	// local reverse proxy, and from SharedAddresses are not limited that
+	// way.
+	MaxConnections int `yaml:"max_connections,omitempty"`
+	// SharedAddresses lists IP addresses or CIDRs that stand for many
+	// clients, such as a reverse proxy, load balancer or NAT gateway on
+	// another machine. They are not limited to one client's share of
+	// connections, requests and ingest memory, only by the totals.
+	SharedAddresses []string `yaml:"shared_addresses,omitempty"`
+}
+
+// SharedList returns server.shared_addresses as prefixes; single addresses
+// become /32 or /128. Invalid entries are skipped (Validate reports them).
+func (s Server) SharedList() []netip.Prefix {
+	var out []netip.Prefix
+	for _, a := range s.SharedAddresses {
+		if p, err := parseAllow(a); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // OpenSearch is the event store connection.
 type OpenSearch struct {
-	URL           string `yaml:"url"`
-	Username      string `yaml:"username,omitempty"`
-	Password      string `yaml:"password,omitempty"`
-	TLSSkipVerify bool   `yaml:"tls_skip_verify,omitempty"`
-	IndexPrefix   string `yaml:"index_prefix"`
-	Replicas      int    `yaml:"replicas"`
+	// URL is http(s)://host:port. A user name and password written into it
+	// are moved to Username and Password when the file is loaded, so they
+	// are never shown or logged with the URL.
+	URL      string `yaml:"url"`
+	Username string `yaml:"username,omitempty"`
+	Password string `yaml:"password,omitempty"`
+	// CAFile is a PEM file with the certificate authority that signed
+	// OpenSearch's certificate, for an https url with a private CA (the
+	// usual case). The system's trusted authorities are trusted too.
+	CAFile string `yaml:"ca_file,omitempty"`
+	// CertFile and KeyFile are a client certificate and key Signalith
+	// presents to OpenSearch, for certificate sign-in.
+	CertFile string `yaml:"cert_file,omitempty"`
+	KeyFile  string `yaml:"key_file,omitempty"`
+	// TLSSkipVerify turns off OpenSearch certificate checks, so anyone on
+	// the network path could read and change events. For a lab only; use
+	// CAFile instead.
+	TLSSkipVerify bool `yaml:"tls_skip_verify,omitempty"`
+	// Proxy is a proxy for OpenSearch traffic, such as
+	// http://proxy:3128 (SIGNALITH_OPENSEARCH_PROXY overrides it). Empty
+	// connects directly: HTTP_PROXY and HTTPS_PROXY are not used for
+	// OpenSearch, since a proxy would see every event and the OpenSearch
+	// password.
+	Proxy string `yaml:"proxy,omitempty"`
+	// AllowInsecureHTTP lets the username and password go to OpenSearch
+	// over plain http on another machine, where anyone on the network
+	// could read them. Off, that is refused; use https instead.
+	AllowInsecureHTTP bool   `yaml:"allow_insecure_http,omitempty"`
+	IndexPrefix       string `yaml:"index_prefix"`
+	Replicas          int    `yaml:"replicas"`
+}
+
+// problems checks the connection settings. resolve makes file paths
+// relative to the config file.
+func (o *OpenSearch) problems(resolve func(string) string) []string {
+	var p []string
+	u, err := url.Parse(o.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return []string{fmt.Sprintf("opensearch.url %q must be http(s)://host:port", redact.URL(o.URL))}
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		// Only the scheme and host are repeated: the rest may hold a key.
+		p = append(p, fmt.Sprintf("opensearch.url %s://%s must not have a query string (?...) or fragment (#...); "+
+			"put credentials in opensearch.username and password instead", u.Scheme, u.Host))
+	}
+	if u.Scheme == "http" && (o.Username != "" || o.Password != "") && !isLoopback(u.Hostname()) && !o.AllowInsecureHTTP {
+		p = append(p, fmt.Sprintf("opensearch.url is plain http to %s, so the OpenSearch username and password would cross the network unencrypted. "+
+			"Use https:// (with opensearch.ca_file set to OpenSearch's CA certificate if it is not publicly trusted), "+
+			"or, to accept the risk, set opensearch.allow_insecure_http: true (signalith init: -opensearch-allow-insecure-http)", u.Host))
+	}
+	if u.Scheme == "http" && (o.CAFile != "" || o.CertFile != "") {
+		p = append(p, "opensearch.ca_file, cert_file and key_file only apply to an https:// opensearch.url")
+	}
+	if o.CAFile != "" {
+		if pem, err := os.ReadFile(resolve(o.CAFile)); err != nil {
+			p = append(p, fmt.Sprintf("opensearch.ca_file: %v", err))
+		} else if !x509.NewCertPool().AppendCertsFromPEM(pem) {
+			p = append(p, fmt.Sprintf("opensearch.ca_file %s holds no PEM certificates (it should contain -----BEGIN CERTIFICATE-----)", o.CAFile))
+		}
+	}
+	switch {
+	case (o.CertFile == "") != (o.KeyFile == ""):
+		p = append(p, "opensearch.cert_file and opensearch.key_file must be set together")
+	case o.CertFile != "":
+		if _, err := tls.LoadX509KeyPair(resolve(o.CertFile), resolve(o.KeyFile)); err != nil {
+			p = append(p, fmt.Sprintf("opensearch.cert_file and key_file: %v", err))
+		}
+	}
+	if o.Proxy != "" {
+		if pu, err := url.Parse(o.Proxy); err != nil || !slices.Contains([]string{"http", "https", "socks5"}, pu.Scheme) || pu.Host == "" {
+			p = append(p, fmt.Sprintf("opensearch.proxy %q must be http://host:port, https://host:port or socks5://host:port", redact.URL(o.Proxy)))
+		}
+	}
+	return p
+}
+
+// moveURLCredentials takes a user name and password out of the URL and
+// into Username and Password, unless those are set already.
+func (o *OpenSearch) moveURLCredentials() {
+	stripped, user, pw, ok := redact.Strip(o.URL)
+	if !ok {
+		return
+	}
+	o.URL = stripped
+	if o.Username == "" && o.Password == "" {
+		o.Username, o.Password = user, pw
+	}
+}
+
+// isLoopback reports whether host is this machine.
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }
 
 // Search tunes the query engine.
@@ -201,6 +318,29 @@ type Ingest struct {
 	// Tokens agents present in the Authorization header. Rotate by adding a
 	// new token, updating agents, then removing the old one.
 	Tokens []string `yaml:"tokens"`
+	// MaxEventAge is how old an event's own time (from an agent or syslog)
+	// may be and still be its event time, such as 7d. Older events, and
+	// ones more than an hour ahead, are filed under the time they arrived,
+	// with their own time kept in device_time. Empty means 7 days, or the
+	// shortest retention period when that is shorter. Raise it to load old
+	// logs.
+	MaxEventAge string `yaml:"max_event_age,omitempty"`
+}
+
+// MaxEventAge returns ingest.max_event_age as a duration: the setting, or
+// a week (keepDays, the shortest retention period, when that is shorter,
+// since older events would land in indices about to be deleted). Each day
+// in this window can get its own daily indices, so it bounds how many a
+// sender can create.
+func (c *Config) MaxEventAge(keepDays int) time.Duration {
+	if d, err := detect.ParseDuration(c.Ingest.MaxEventAge); err == nil && d > 0 {
+		return d
+	}
+	week := 7 * 24 * time.Hour
+	if d := time.Duration(keepDays) * 24 * time.Hour; d > 0 && d < week {
+		return d
+	}
+	return week
 }
 
 // Syslog receives syslog from systems that cannot run an agent: firewalls,
@@ -497,6 +637,9 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_PASSWORD"); v != "" {
 		c.OpenSearch.Password = v
 	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_OPENSEARCH_PROXY")); v != "" {
+		c.OpenSearch.Proxy = v
+	}
 	if v := os.Getenv("SIGNALITH_LISTEN"); v != "" {
 		c.Server.Listen = v
 	}
@@ -573,6 +716,14 @@ func (c *Config) Validate() error {
 	} else if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 		p = append(p, fmt.Sprintf("server.listen port %q must be 1-65535", port))
 	}
+	if c.Server.MaxConnections < 0 {
+		p = append(p, "server.max_connections cannot be negative (0 uses the default, 10000)")
+	}
+	for i, a := range c.Server.SharedAddresses {
+		if _, err := parseAllow(a); err != nil {
+			p = append(p, fmt.Sprintf("server.shared_addresses[%d] %q must be an IP address or a CIDR such as 10.0.0.0/24", i, a))
+		}
+	}
 	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
 		p = append(p, "server.tls_cert and server.tls_key must be set together")
 	}
@@ -581,9 +732,8 @@ func (c *Config) Validate() error {
 	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	}
-	if u, err := url.Parse(c.OpenSearch.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		p = append(p, fmt.Sprintf("opensearch.url %q must be http(s)://host:port", c.OpenSearch.URL))
-	}
+	c.OpenSearch.moveURLCredentials()
+	p = append(p, c.OpenSearch.problems(c.resolve)...)
 	if c.OpenSearch.IndexPrefix == "" || strings.ToLower(c.OpenSearch.IndexPrefix) != c.OpenSearch.IndexPrefix || strings.ContainsAny(c.OpenSearch.IndexPrefix, `*?"<>|, /\#`) {
 		p = append(p, "opensearch.index_prefix must be lowercase with no spaces or wildcards")
 	}
@@ -659,7 +809,7 @@ func (c *Config) Validate() error {
 	}
 	if c.Assistant.URL != "" {
 		if u, err := url.Parse(c.Assistant.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			p = append(p, fmt.Sprintf("assistant.url %q must be http(s)://host[:port][/path]", c.Assistant.URL))
+			p = append(p, fmt.Sprintf("assistant.url %q must be http(s)://host[:port][/path]", redact.URL(c.Assistant.URL)))
 		}
 	}
 	p = append(p, c.Intel.problems()...)
@@ -671,11 +821,41 @@ func (c *Config) Validate() error {
 			p = append(p, fmt.Sprintf("ingest.tokens[%d] is shorter than 16 characters", i))
 		}
 	}
+	if c.Ingest.MaxEventAge != "" {
+		if d, err := detect.ParseDuration(c.Ingest.MaxEventAge); err != nil || d < time.Hour || d > 3650*24*time.Hour {
+			p = append(p, fmt.Sprintf("ingest.max_event_age %q must be a duration from 1h to 3650d, for example 7d or 30d (empty: 7 days)", c.Ingest.MaxEventAge))
+		}
+	}
 	p = append(p, c.Syslog.problems(c.Server)...)
 	if len(p) > 0 {
 		return &ValidationError{Problems: p}
 	}
 	return nil
+}
+
+// Warnings lists settings that work but put data at risk. validate prints
+// them, and the server logs them at startup and shows them on the Health
+// page.
+func (c *Config) Warnings() []string {
+	var w []string
+	o := c.OpenSearch
+	if o.TLSSkipVerify {
+		w = append(w, "opensearch.tls_skip_verify is on, so Signalith does not check OpenSearch's certificate: anyone on the network path "+
+			"could read and change events and capture the OpenSearch password. Set opensearch.ca_file to OpenSearch's CA certificate and turn tls_skip_verify off.")
+	}
+	if u, err := url.Parse(o.URL); err == nil && u.Scheme == "http" && o.AllowInsecureHTTP && (o.Username != "" || o.Password != "") && !isLoopback(u.Hostname()) {
+		w = append(w, "opensearch.allow_insecure_http is on, so the OpenSearch username and password cross the network to "+u.Host+" unencrypted. Use an https:// opensearch.url.")
+	}
+	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
+		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
+	}
+	return w
+}
+
+// OpenSearchTLSFiles returns opensearch.ca_file, cert_file and key_file,
+// with relative paths made relative to the folder this config file is in.
+func (c *Config) OpenSearchTLSFiles() (ca, cert, key string) {
+	return c.resolve(c.OpenSearch.CAFile), c.resolve(c.OpenSearch.CertFile), c.resolve(c.OpenSearch.KeyFile)
 }
 
 func defaultPublicURL(s Server) string {
@@ -766,17 +946,24 @@ const header = `# Signalith configuration.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
+# server.max_connections  open connections allowed at once (default 10000); one
+#                    client may hold a tenth of them
+# server.shared_addresses  IPs or CIDRs of a proxy, load balancer or NAT that many
+#                    clients reach Signalith through; not limited as one client
 # auth.admin_user    the built-in admin, a break-glass account; add other users on the Users page
 # auth.session_timeout  sign the web UI out after this long idle (default 12h)
 # auth.users_file    where Users page accounts are kept (default users.json in lookups.dir)
 # auth.ldap          optional LDAP / Active Directory sign-in; usually set up on the Users
 #                    page instead (see docs/users.md)
-# opensearch.*       where events are stored
+# opensearch.*       where events are stored; for https with a private CA set
+#                    ca_file (cert_file and key_file for certificate sign-in)
 # search.*           default time range and result limits
 # retention.days     days of events to keep (0 = forever) until a default is saved on the
 #                    Data retention page; per-category policies, the disk guard and
 #                    archiving are set there too (or here: see docs/retention.md)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
+# ingest.max_event_age  events older than this (default 7d) are filed under the time
+#                    they arrived, with their own time in device_time
 # syslog.udp, .tcp   receive syslog from devices without an agent, e.g. 0.0.0.0:514
 #                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)
 # syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses server.tls_cert and tls_key

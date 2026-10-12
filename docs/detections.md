@@ -50,6 +50,10 @@ Rules of thumb:
   A little overlap is fine; throttling keeps overlapping runs from raising duplicates.
 - Without `throttle.fields`, the whole result row is the throttle key.
 - Use `stats ... by` to raise one finding per entity instead of one per event.
+- Up to four detections run at once. A run is stopped when it takes longer than its
+  schedule (at least 1 minute, at most 5); the Detections page then shows **Timed out**,
+  and the next run starts on schedule. Narrow the query or shorten `lookback` so it
+  finishes in time.
 
 ## Risk
 

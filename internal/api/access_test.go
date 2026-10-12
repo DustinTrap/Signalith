@@ -164,3 +164,28 @@ func TestUnclassifiedRoutesAreAdminOnly(t *testing.T) {
 		t.Errorf("admin on unclassified route = %d", code)
 	}
 }
+
+// TestHealthDetailsAreForAdmins: everyone sees whether things work, but
+// file paths, addresses and setup advice only reach admins.
+func TestHealthDetailsAreForAdmins(t *testing.T) {
+	ts, _ := newRoleServer(t)
+	code, body := doAs(t, ts, "vera", "role-password", "GET", "/api/health", "")
+	if code != 200 {
+		t.Fatalf("viewer health = %d", code)
+	}
+	for _, k := range []string{"config_file", "config_has_syslog", "runtime", "warnings"} {
+		if _, ok := body[k]; ok {
+			t.Errorf("viewer sees %s", k)
+		}
+	}
+	if os, _ := body["opensearch"].(map[string]any); os["status"] == nil || os["url"] != nil || os["error"] != nil {
+		t.Errorf("viewer opensearch = %v", body["opensearch"])
+	}
+	if _, ok := body["ingest"]; !ok {
+		t.Error("viewer health has no ingest stats")
+	}
+	_, body = do(t, ts, "GET", "/api/health", "", true)
+	if os, _ := body["opensearch"].(map[string]any); os["url"] == nil || body["runtime"] == nil {
+		t.Errorf("admin health = %v", body)
+	}
+}

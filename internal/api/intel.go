@@ -194,6 +194,7 @@ func (s *Server) handleIntelUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.intelOK(w) {
 		return
 	}
+	allowSlowUpload(w)
 	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

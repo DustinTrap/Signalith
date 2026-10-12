@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
 
@@ -87,7 +88,8 @@ type Config struct {
 	MaxMessageSize int
 	MaxConnections int
 	// MaxConnectionsPerSender limits the TCP and TLS connections from one
-	// address; zero uses a tenth of MaxConnections, at least 16.
+	// sender (an IPv4 address, or an IPv6 /64 network); zero uses a tenth
+	// of MaxConnections, at least 16.
 	MaxConnectionsPerSender int
 	IdleTimeout             time.Duration
 	MessageTimeout          time.Duration
@@ -471,8 +473,7 @@ func (r *Receiver) accept(ctx context.Context, ln net.Listener, proto string) {
 			c.Close()
 			continue
 		}
-		cs := &connState{from: from}
-		cs.active.Store(time.Now().UnixNano())
+		cs := newConnState(from)
 		switch r.track(c, cs) {
 		case trackOK:
 			r.readers.Add(1)
@@ -500,10 +501,19 @@ func remoteAddr(c net.Conn) netip.Addr {
 // connState is what the receiver knows about one TCP or TLS connection.
 type connState struct {
 	from netip.Addr
+	// sender is what the per-sender connection limit counts it under: the
+	// address, or for IPv6 its /64 network (see clientaddr.Key).
+	sender netip.Addr
 	// active is when the connection last sent something, and msgStart
 	// when the message being read began (zero between messages), both
 	// in unix nanoseconds.
 	active, msgStart atomic.Int64
+}
+
+func newConnState(from netip.Addr) *connState {
+	cs := &connState{from: from, sender: clientaddr.Key(from)}
+	cs.active.Store(time.Now().UnixNano())
+	return cs
 }
 
 type trackResult int
@@ -526,14 +536,14 @@ func (r *Receiver) track(c net.Conn, cs *connState) trackResult {
 	if r.closing {
 		return trackStopping
 	}
-	if r.perSender[cs.from] >= r.cfg.MaxConnectionsPerSender && !r.evictLocked(cs.from, true) {
+	if r.perSender[cs.sender] >= r.cfg.MaxConnectionsPerSender && !r.evictLocked(cs.sender, true) {
 		return trackSenderFull
 	}
 	if len(r.conns) >= r.cfg.MaxConnections && !r.evictLocked(netip.Addr{}, false) {
 		return trackFull
 	}
 	r.conns[c] = cs
-	r.perSender[cs.from]++
+	r.perSender[cs.sender]++
 	return trackOK
 }
 
@@ -543,7 +553,7 @@ func (r *Receiver) evictLocked(sender netip.Addr, sameSender bool) bool {
 	var victim net.Conn
 	var quietSince int64
 	for c, cs := range r.conns {
-		if sameSender && cs.from != sender {
+		if sameSender && cs.sender != sender {
 			continue
 		}
 		if a := cs.active.Load(); victim == nil || a < quietSince {
@@ -566,10 +576,10 @@ func (r *Receiver) forgetLocked(c net.Conn) {
 		return
 	}
 	delete(r.conns, c)
-	if r.perSender[cs.from] <= 1 {
-		delete(r.perSender, cs.from)
+	if r.perSender[cs.sender] <= 1 {
+		delete(r.perSender, cs.sender)
 	} else {
-		r.perSender[cs.from]--
+		r.perSender[cs.sender]--
 	}
 }
 
@@ -798,9 +808,10 @@ func (r *Receiver) send(batch []ingest.Event) {
 		r.warn("write", "could not write syslog events to OpenSearch; they were dropped", "events", len(batch), "err", err)
 		return
 	}
-	if len(res.Errors) > 0 {
-		r.writeFailed.Add(int64(len(res.Errors)))
-		r.warn("rejected", "OpenSearch rejected some syslog events", "rejected", len(res.Errors), "first", res.Errors[0].Reason)
+	// Errors lists only the first few; Rejected counts them all.
+	if res.Rejected > 0 && len(res.Errors) > 0 {
+		r.writeFailed.Add(int64(res.Rejected))
+		r.warn("rejected", "OpenSearch rejected some syslog events", "rejected", res.Rejected, "first", res.Errors[0].Reason)
 	}
 }
 
@@ -931,7 +942,7 @@ type nameBudget struct {
 type indexNames struct {
 	day     string
 	names   map[string]struct{}
-	senders map[netip.Addr]int // names each sender added
+	senders map[netip.Addr]int // names each sender (clientaddr.Key) added
 }
 
 func newNameBudget(perIndex, perSender int) nameBudget {
@@ -941,6 +952,7 @@ func newNameBudget(perIndex, perSender int) nameBudget {
 func (b *nameBudget) limit(ev ingest.Event, from netip.Addr, now time.Time, maxAge time.Duration) {
 	day := ev.Time.UTC().Format("2006.01.02")
 	key := ev.Model + "/" + day
+	sender := clientaddr.Key(from)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	ix := b.indices[key]
@@ -954,12 +966,12 @@ func (b *nameBudget) limit(ev ingest.Event, from netip.Addr, now time.Time, maxA
 		if _, ok := ix.names[k]; ok {
 			continue
 		}
-		if len(ix.names) >= b.perIndex || ix.senders[from] >= b.perSender {
+		if len(ix.names) >= b.perIndex || ix.senders[sender] >= b.perSender {
 			delete(ev.Fields, k)
 			continue
 		}
 		ix.names[k] = struct{}{}
-		ix.senders[from]++
+		ix.senders[sender]++
 	}
 }
 

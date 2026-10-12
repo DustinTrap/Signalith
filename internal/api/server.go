@@ -2,20 +2,22 @@
 package api
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"os"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/agents"
@@ -23,6 +25,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
@@ -31,6 +34,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
@@ -139,7 +143,7 @@ func (s *Server) Handler() http.Handler {
 	s.routes = api.routes
 	s.routeLogin(mux)
 	mux.Handle("/", s.requireUser(api.mux))
-	return securityHeaders(s.guardAPI(mux))
+	return limitBodies(s.securityHeaders(s.guardAPI(mux)))
 }
 
 // guardAPI makes sure no /api/ route escapes sign-in: a route registered
@@ -155,27 +159,6 @@ func (s *Server) guardAPI(mux *http.ServeMux) http.Handler {
 			}
 		}
 		mux.ServeHTTP(w, r)
-	})
-}
-
-// revalidate makes browsers check with the server before reusing a cached
-// copy of a signed-in page, so after signing out the app sends them to the
-// sign-in page instead of showing a stale copy.
-func revalidate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
-		next.ServeHTTP(w, r)
 	})
 }
 
@@ -195,6 +178,22 @@ func writeError(w http.ResponseWriter, status int, err error) {
 		body["pos"] = qe.Pos
 	}
 	writeJSON(w, status, body)
+}
+
+// writeSearchError answers a failed search: 400 for a query that cannot
+// run as written, 503 (retry shortly) when too many searches are running,
+// and 502 when OpenSearch failed.
+func writeSearchError(w http.ResponseWriter, err error) {
+	var qe *search.QueryError
+	switch {
+	case errors.As(err, &qe):
+		writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, search.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, err)
+	default:
+		writeError(w, http.StatusBadGateway, err)
+	}
 }
 
 func readJSON(r *http.Request, v any) error {
@@ -219,31 +218,168 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	// The whole batch is read before a pipeline slot is taken, so a
+	// sender that sends slowly holds only its connection and the bytes it
+	// has sent, never a slot other agents are waiting for.
+	body, release, err := s.readBatch(w, r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		s.batchReadFailed(w, r, err)
 		return
 	}
-	records, err := decodeRecords(body)
+	defer release()
+	slot, err := s.Pipeline.Admit(r.Context(), ingestQueueWait)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		// 503 makes Fluent Bit retry later instead of dropping data.
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	defer slot()
 	tag := r.Header.Get("X-Signalith-Tag")
 	if tag == "" {
 		tag = r.URL.Query().Get("tag")
 	}
-	res, err := s.Pipeline.Ingest(r.Context(), tag, records)
+	res, err := s.Pipeline.IngestBody(r.Context(), tag, body)
 	if err != nil {
-		s.Log.Error("ingest failed", "err", err, "records", len(records))
-		// 503 makes Fluent Bit retry later instead of dropping data.
-		writeError(w, http.StatusServiceUnavailable, err)
+		var bad *ingest.BodyError
+		if errors.As(err, &bad) {
+			writeError(w, bad.Status, bad)
+			return
+		}
+		s.Log.Error("ingest failed", "err", err, "bytes", len(body))
+		// 503 makes Fluent Bit retry later instead of dropping data. The
+		// details, such as where OpenSearch is, stay in the server log.
+		writeError(w, http.StatusServiceUnavailable, errors.New("events could not be stored right now; try again later"))
 		return
 	}
 	if len(res.Errors) > 0 {
-		s.Log.Warn("some events were rejected", "rejected", len(res.Errors), "first", res.Errors[0].Reason)
+		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "first", res.Errors[0].Reason)
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// Agent batches. The sender has proved who it is, so its batch may arrive
+// more slowly than other request bodies, over a slow link: it has
+// ingestReadTimeout, and while it keeps arriving (ingestProgressBytes at
+// least every ingestProgressWindow) up to ingestMaxReadTime in all. A
+// sender that stalls part way is cut off at the deadline. ingestQueueWait
+// is how long a batch that has arrived waits for a free pipeline slot
+// before the sender is told to retry. They are variables so tests can
+// shorten them.
+var (
+	ingestReadTimeout    = 2 * time.Minute
+	ingestMaxReadTime    = 10 * time.Minute
+	ingestProgressWindow = 30 * time.Second
+	ingestProgressBytes  = int64(16 << 10)
+	ingestQueueWait      = 15 * time.Second
+)
+
+// ingestReplyTimeout is how long, once a batch has arrived, Signalith has
+// to write it and reply: the server's usual write time, counted from then
+// rather than from the request headers.
+const ingestReplyTimeout = 10 * time.Minute
+
+// readBatch reads an agent's request body within the ingest deadlines
+// and the ingest memory budget (see ingest.Pipeline.ReadBody). Call release
+// once the batch has been written.
+func (s *Server) readBatch(w http.ResponseWriter, r *http.Request) (body []byte, release func(), err error) {
+	rc := http.NewResponseController(w)
+	in := &batchBody{ReadCloser: r.Body, rc: rc, start: time.Now()}
+	in.deadline = in.start.Add(ingestReadTimeout)
+	_ = rc.SetReadDeadline(in.deadline)
+	sender := netip.Addr{}
+	if from := clientaddr.Parse(r.RemoteAddr); !clientaddr.Shared(from, s.Config.Server.SharedList()) {
+		sender = clientaddr.Key(from)
+	}
+	body, release, err = s.Pipeline.ReadBody(http.MaxBytesReader(w, in, ingest.MaxBodyBytes), sender, r.ContentLength)
+	if err != nil {
+		return nil, nil, &batchError{err: err, received: in.n, took: time.Since(in.start)}
+	}
+	_ = rc.SetWriteDeadline(time.Now().Add(ingestReplyTimeout))
+	return body, release, nil
+}
+
+// batchError is why an agent's batch could not be read, with how much of
+// it had arrived.
+type batchError struct {
+	err      error
+	received int64
+	took     time.Duration
+}
+
+func (e *batchError) Error() string { return e.err.Error() }
+func (e *batchError) Unwrap() error { return e.err }
+
+// batchReadFailed answers a batch that could not be read: 413 when it is
+// too large, 408 when it did not arrive in time, and 503 (retry shortly)
+// when too many batches are arriving at once.
+func (s *Server) batchReadFailed(w http.ResponseWriter, r *http.Request, err error) {
+	var tooBig *http.MaxBytesError
+	var bad *ingest.BodyError
+	var be *batchError
+	errors.As(err, &be)
+	switch {
+	case errors.As(err, &tooBig):
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20))
+	case errors.As(err, &bad):
+		writeError(w, bad.Status, bad)
+	case errors.Is(err, ingest.ErrBusy), errors.Is(err, ingest.ErrSenderBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, errors.Unwrap(err))
+	case errors.Is(err, os.ErrDeadlineExceeded) && be != nil:
+		took := be.took.Round(time.Second)
+		s.warnSlowBatch("an agent batch took too long to arrive and was refused; the agent will send it again (logged at most once a minute)",
+			"client", r.RemoteAddr, "received_bytes", be.received, "took", took.String())
+		writeError(w, http.StatusRequestTimeout, fmt.Errorf("the batch took too long to arrive (%d KB in %s). A batch must arrive within %s, "+
+			"or within %s while at least %d KB arrives every %s. Send smaller batches (for example a lower Flush in Fluent Bit's [SERVICE] section) or check the network",
+			be.received>>10, took, ingestReadTimeout, ingestMaxReadTime, ingestProgressBytes>>10, ingestProgressWindow))
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("the request body could not be read: %w", errors.Unwrap(err)))
+	}
+}
+
+var lastSlowBatchWarning atomic.Int64
+
+// warnSlowBatch logs at most once a minute.
+func (s *Server) warnSlowBatch(msg string, args ...any) {
+	now := time.Now().UnixNano()
+	prev := lastSlowBatchWarning.Load()
+	if s.Log == nil || (prev != 0 && now-prev < int64(time.Minute)) || !lastSlowBatchWarning.CompareAndSwap(prev, now) {
+		return
+	}
+	s.Log.Warn(msg, args...)
+}
+
+// batchBody gives an agent's batch more time while it keeps arriving:
+// each ingestProgressBytes received moves the read deadline to at least
+// ingestProgressWindow from then, but never past ingestMaxReadTime after
+// the batch began.
+type batchBody struct {
+	io.ReadCloser
+	rc              *http.ResponseController
+	start, deadline time.Time
+	n, sinceMove    int64
+}
+
+func (b *batchBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.n += int64(n)
+	b.sinceMove += int64(n)
+	// Not once the body has ended: the deadline is lifted then (see
+	// deadlineBody), and one set again would cancel the request when it
+	// passed.
+	if err == nil && b.sinceMove >= ingestProgressBytes {
+		b.sinceMove = 0
+		next := time.Now().Add(ingestProgressWindow)
+		if last := b.start.Add(ingestMaxReadTime); next.After(last) {
+			next = last
+		}
+		if next.After(b.deadline) {
+			b.deadline = next
+			_ = b.rc.SetReadDeadline(next)
+		}
+	}
+	return n, err
 }
 
 func (s *Server) validToken(r *http.Request) bool {
@@ -257,49 +393,6 @@ func (s *Server) validToken(r *http.Request) bool {
 		}
 	}
 	return false
-}
-
-// decodeRecords accepts a JSON array, a single object, or NDJSON.
-func decodeRecords(body []byte) ([]map[string]any, error) {
-	body = bytes.TrimSpace(body)
-	if len(body) == 0 {
-		return nil, nil
-	}
-	dec := func(b []byte, v any) error {
-		d := json.NewDecoder(bytes.NewReader(b))
-		d.UseNumber()
-		return d.Decode(v)
-	}
-	switch body[0] {
-	case '[':
-		var arr []map[string]any
-		if err := dec(body, &arr); err != nil {
-			return nil, errors.New("invalid JSON array: " + err.Error())
-		}
-		return arr, nil
-	case '{':
-		var out []map[string]any
-		sc := bufio.NewScanner(bytes.NewReader(body))
-		sc.Buffer(make([]byte, 1<<20), 16<<20)
-		for sc.Scan() {
-			line := bytes.TrimSpace(sc.Bytes())
-			if len(line) == 0 {
-				continue
-			}
-			var m map[string]any
-			if err := dec(line, &m); err != nil {
-				// Maybe one pretty-printed object.
-				var single map[string]any
-				if err2 := dec(body, &single); err2 == nil {
-					return []map[string]any{single}, nil
-				}
-				return nil, errors.New("invalid JSON lines: " + err.Error())
-			}
-			out = append(out, m)
-		}
-		return out, sc.Err()
-	}
-	return nil, errors.New("body must be a JSON array or JSON lines")
 }
 
 // ---- search ----
@@ -342,7 +435,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -403,6 +496,11 @@ type fieldInfo struct {
 
 func (s *Server) handleFields(w http.ResponseWriter, r *http.Request) {
 	dm := r.URL.Query().Get("datamodel")
+	pattern, err := s.Engine.IndexPattern(&query.Query{Datamodel: dm})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	out := map[string]*fieldInfo{}
 	var order []string
 	for _, f := range datamodel.FieldsFor(dm) {
@@ -410,7 +508,6 @@ func (s *Server) handleFields(w http.ResponseWriter, r *http.Request) {
 		order = append(order, f.Name)
 	}
 	if s.Backend != nil {
-		pattern := s.Engine.IndexPattern(&query.Query{Datamodel: dm})
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		if mapping, err := s.Backend.Mapping(ctx, pattern); err == nil {
@@ -465,7 +562,7 @@ func (s *Server) handleFieldValues(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res.Rows)
@@ -515,16 +612,35 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.Config.Path(),
-		// For the steps that turn syslog on: edit the section or add one.
-		"config_has_syslog": s.Config.HasSection("syslog"), "runtime": s.runtimeInfo()}
-	if status, err := s.Backend.Health(ctx); err != nil {
-		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": s.Config.OpenSearch.URL}
-	} else {
-		out["opensearch"] = map[string]any{"status": status, "url": s.Config.OpenSearch.URL}
+	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats()}
+	status, err := s.Backend.Health(ctx)
+	if err != nil {
+		status = "unreachable"
 	}
+	// Everyone signed in sees whether things work. Where they run (file
+	// paths, addresses, the OpenSearch URL and its errors) and the setup
+	// advice is for admins, who are the ones able to change it.
+	if p := principalOf(r); p == nil || !p.Role.AtLeast(users.Admin) {
+		out["opensearch"] = map[string]any{"status": status}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out["config_file"] = s.Config.Path()
+	// For the steps that turn syslog on: edit the section or add one.
+	out["config_has_syslog"] = s.Config.HasSection("syslog")
+	out["runtime"] = s.runtimeInfo()
+	osURL := redact.URL(s.Config.OpenSearch.URL)
+	if err != nil {
+		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
+	} else {
+		out["opensearch"] = map[string]any{"status": status, "url": osURL}
+	}
+	warnings := s.Config.Warnings()
 	if len(s.Config.Ingest.Tokens) == 0 {
-		out["warnings"] = []string{"No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens."}
+		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, out)
 }
