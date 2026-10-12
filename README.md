@@ -6,14 +6,14 @@ Signalith stores events in [OpenSearch](https://opensearch.org), collects them w
 query language that reads like SPL, plain-English questions that become queries, a
 visual query builder, CIM-style data models, scheduled detections with a findings
 queue for triage, Sigma rule import, a MITRE ATT&CK coverage map, risk-based
-alerting with asset and identity context, and a security posture dashboard plus
-dashboards you build from queries.
-Threat intel and investigations come in later phases.
+alerting with asset and identity context, threat intel feeds matched against your
+events, and a security posture dashboard plus dashboards you build from queries.
+Investigation cases and response actions come in a later phase.
 
 The server is a single Go binary with the web UI embedded. It runs as a Windows
 service or a systemd unit.
 
-> Status: Phase 3 (risk and context), in progress. See the [roadmap](#roadmap).
+> Status: Phase 3 (ES depth) is complete; Phase 4 is next. See the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -90,6 +90,13 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
+| `intel.feeds` | none | Threat intel feeds to download; see [Threat intel](#threat-intel). Nothing is fetched unless listed |
+| `intel.feeds[].name`, `.url` | required | Feed name (shown as the indicator source) and its http(s) address |
+| `intel.feeds[].format` | `lines` | `lines` (one per line, `#` comments), `csv` (with `column:`, a header name or number) or `stix` (STIX 2.1 bundle) |
+| `intel.feeds[].type` | `auto` | `auto` detects each value, or `ip`, `cidr`, `domain`, `url`, `hash`, `md5`, `sha1`, `sha256`, `email` |
+| `intel.feeds[].interval`, `.max_age` | `1h`, `7d` | How often to download; how long indicators last when downloads keep failing |
+| `intel.feeds[].weight` | `1` | Multiplies the risk a match adds (0 to 10) |
+| `intel.feeds[].headers`, `.tags`, `.description`, `.enabled` | none, `true` | Request headers (values may use `${ENV_VAR}` for API keys), labels, and on/off |
 | `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
 | `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
@@ -171,6 +178,53 @@ Context changes three things:
 Risk events are stored under the Risk data model (`datamodel=Risk`) in
 `<prefix>-risk-YYYY.MM.DD` indices, which ordinary searches leave out.
 
+## Threat intel
+
+Like the ES threat intelligence framework, Signalith matches events against
+**indicators**: IP addresses and IPv4 networks, domains, URLs, MD5/SHA-1/SHA-256
+file hashes and email addresses.
+
+- **Feeds** listed under `intel.feeds` in signalith.yaml are downloaded on their
+  interval by the server running the detection scheduler. Nothing is fetched until
+  you add one. Proxy settings come from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
+  An indicator that disappears from a feed is removed at the next download; if a
+  feed keeps failing, its indicators expire after `max_age`. Disabling or removing a
+  feed removes its indicators.
+- **Manual indicators**: add one on the **Threat intel** page or upload a CSV
+  (`value,type,description,weight,expires,tags`) or plain list. Every bad line is
+  reported and nothing is saved until the file is clean.
+- **Matching**: the built-in **Threat intel match** detection (`threat-activity`)
+  runs every 5 minutes, raises one finding per indicator and system a day, and adds
+  60 risk times the indicator's weight to the system and user involved. In Search,
+  `| threatmatch` keeps only matching events and `| intel` adds
+  `<field>_intel_source`, `_intel_type`, `_intel_weight` and `_intel_description`
+  columns to any result.
+
+Copy-paste examples (free public feeds; check each provider's terms, and some ask for
+a free key, which you send with `headers`):
+
+```yaml
+intel:
+  feeds:
+    - name: feodo-tracker          # botnet C2 servers, abuse.ch
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+      weight: 1.5
+    - name: urlhaus                # malware download URLs, abuse.ch
+      url: https://urlhaus.abuse.ch/downloads/csv_recent/
+      format: csv
+      column: url
+      type: url
+    - name: malwarebazaar          # malware SHA-256 hashes, abuse.ch
+      url: https://bazaar.abuse.ch/export/txt/sha256/recent/
+      type: sha256
+    - name: et-compromised         # compromised hosts, Proofpoint Emerging Threats
+      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+      type: ip
+      interval: 12h
+```
+
+See [docs/threat-intel.md](docs/threat-intel.md) for formats, STIX, matching details
+and the API.
 ## Dashboards
 
 The **Dashboards** tab opens on the built-in **Security posture** dashboard, like the
@@ -278,6 +332,7 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/findings` | Findings model and its OpenSearch store |
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
 | `internal/risk` | Risk event store |
+| `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX) and downloads |
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
@@ -300,7 +355,7 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 
 1. **Search foundation**: agents, parsing, data models, query language, builder, installers.
 2. **Detect and triage**: scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
-3. **ES depth** (in progress): risk-based alerting, asset and identity context, plain-English to query, and posture dashboards (security posture summary and custom dashboards) are in; threat intel feeds are next.
+3. **ES depth**: risk-based alerting, asset and identity context, threat intel feeds, posture dashboards, and plain-English to query.
 4. **Respond and scale**: investigation cases, response actions, playbooks, multi-node deployments.
 
 ## License

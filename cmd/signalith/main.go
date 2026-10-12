@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/retention"
@@ -183,6 +185,15 @@ func cmdValidate(args []string) error {
 		return err
 	}
 	fmt.Printf("%d assets and %d identities loaded from %s.\n", len(lists.Assets()), len(lists.Identities()), c.LookupsDir())
+	if feeds := intelFeeds(c); len(feeds) > 0 {
+		on := 0
+		for _, f := range feeds {
+			if f.Enabled {
+				on++
+			}
+		}
+		fmt.Printf("%d threat intel feeds configured, %d enabled.\n", len(feeds), on)
+	}
 	if boards, err := dashboards.NewStore(c.DashboardsDir()); err != nil {
 		fmt.Printf("Warning: dashboards folder %s: %v\n", c.DashboardsDir(), err)
 	} else if list, problems, err := boards.List(); err == nil {
@@ -294,6 +305,15 @@ func cmdQuery(args []string) error {
 	if lists, err := assets.NewStore(c.LookupsDir()); err == nil {
 		eng.Assets = lists
 	}
+	if strings.Contains(src, "intel") || strings.Contains(src, "threatmatch") {
+		eng.Intel = intel.NewStore(intel.NewOpenSearch(newStore(c), c.OpenSearch.IndexPrefix))
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		err := eng.Intel.Load(ctx)
+		cancel()
+		if err != nil && !*explain {
+			return fmt.Errorf("could not read threat intel indicators: %w", err)
+		}
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if *explain {
@@ -396,6 +416,11 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	log.Info("asset and identity lists loaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()), "dir", c.LookupsDir())
 	eng.Assets = lists
 	go reloadLookups(ctx, lists, log)
+	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
+	indicators := intel.NewStore(ibackend)
+	eng.Intel = indicators
+	feeds := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
+		StatusFile: filepath.Join(c.LookupsDir(), "intel_feeds.json")}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -428,6 +453,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Scheduler:  sched,
 		Findings:   fstore,
 		Assets:     lists,
+		Intel:      indicators,
+		Feeds:      feeds,
 		Dashboards: boards,
 		Assistant:  newAssistant(c),
 		UI:         web.FS(),
@@ -437,6 +464,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	go func() {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
+		}
+		if err := ibackend.EnsureIndex(ctx); err != nil {
+			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
+		} else {
+			go indicators.Watch(ctx, time.Minute, log)
+			if c.Detections.Scheduler && len(feeds.List) > 0 {
+				log.Info("threat intel feeds will download on their schedules", "feeds", len(feeds.List))
+				go feeds.Start(ctx)
+			}
 		}
 		if err := fstore.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the findings index; detections will not run", "index", fstore.Index, "err", err)
@@ -476,7 +512,22 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 }
 
-// ensureTemplate installs the index template, retrying until OpenSearch is up.
+// intelFeeds converts the configured feeds; the config is already
+// validated, so durations parse.
+func intelFeeds(c *config.Config) []intel.Feed {
+	var out []intel.Feed
+	for _, f := range c.Intel.Feeds {
+		iv, _ := config.ParseFeedDuration(f.Interval)
+		age, _ := config.ParseFeedDuration(f.MaxAge)
+		out = append(out, intel.Feed{
+			Name: f.Name, URL: f.URL, Format: f.Format, Type: f.Type, Column: f.Column,
+			Interval: iv, MaxAge: age, Weight: f.Weight, Description: f.Description, Tags: f.Tags,
+			Headers: f.Headers, Enabled: f.IsEnabled(),
+		})
+	}
+	return out
+}
+
 // reloadLookups picks up edits to the CSV files made outside the UI.
 func reloadLookups(ctx context.Context, lists *assets.Store, log *slog.Logger) {
 	t := time.NewTicker(time.Minute)
@@ -495,6 +546,7 @@ func reloadLookups(ctx context.Context, lists *assets.Store, log *slog.Logger) {
 	}
 }
 
+// ensureTemplate installs the index template, retrying until OpenSearch is up.
 // It reports false if ctx ended first.
 func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log *slog.Logger) bool {
 	tmpl := ingest.IndexTemplate(c.OpenSearch.IndexPrefix, c.OpenSearch.Replicas)

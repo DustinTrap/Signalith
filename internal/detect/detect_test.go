@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/findings"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
 )
@@ -22,7 +23,7 @@ func TestBuiltinsCompile(t *testing.T) {
 	if len(ds) < 15 {
 		t.Fatalf("only %d built-in detections", len(ds))
 	}
-	eng := &search.Engine{}
+	eng := &search.Engine{Intel: intel.NewStore(intel.NewMemory())}
 	for _, d := range ds {
 		q, err := query.Parse(d.Query)
 		if err != nil {
@@ -32,7 +33,7 @@ func TestBuiltinsCompile(t *testing.T) {
 		if _, err := eng.Compile(q); err != nil {
 			t.Errorf("%s: compile: %v", d.ID, err)
 		}
-		if len(d.MITRE) == 0 && !slices.Contains(d.Tags, "risk-incident") {
+		if len(d.MITRE) == 0 && !slices.Contains(d.Tags, "risk-incident") && !slices.Contains(d.Tags, "threat-intel") {
 			t.Errorf("%s has no ATT&CK mapping", d.ID)
 		}
 		// A transforming query only returns the columns it names, so

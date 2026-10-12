@@ -1,0 +1,21 @@
+id: threat-activity
+title: Threat intel match on $threat_match_field$ $threat_match_value$ ($threat_source$)
+description: An event involved an IP address, network, domain, URL, file hash or email address from your threat intel feeds or manual indicators. Does nothing until intel is configured.
+query: |
+  * | threatmatch
+  | head 1000
+schedule: 5m
+lookback: 10m
+severity: high
+throttle:
+  fields: [threat_indicator, threat_target]
+  window: 24h
+risk:
+  score: 60
+  weight_field: threat_weight
+  objects:
+    - {field: threat_target, type: system}
+    - {field: user, type: user}
+enabled: true
+tags: [threat-intel]
+guidance: Check threat_source and threat_description to see why the indicator is listed and how old it is (Threat intel page). Feeds of scanners and botnet servers are often right about the address but the event may be harmless, such as a blocked connection. Open the events to see what the system did before and after the match.

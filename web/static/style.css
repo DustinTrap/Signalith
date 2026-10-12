@@ -208,6 +208,17 @@ table.kv td { padding: 3px 0; word-break: break-all; font-family: var(--mono); f
 @media (max-width: 600px) { .ask-row { flex-wrap: wrap; } .ask-row input[type=search] { flex-basis: 100%; } }
 .ask-row label { display: flex; gap: 4px; align-items: center; white-space: nowrap; font-size: 14px; }
 
+/* threat intel */
+td.mono-cell { font-family: var(--mono); font-size: 12.5px; word-break: break-all; max-width: 420px; }
+.ti-url { word-break: break-all; max-width: 360px; }
+button.link.danger-link { color: var(--danger); }
+#page-intel .panel h3 { margin: 0 0 8px; }
+#page-intel .panel .results { margin-top: 8px; max-height: 560px; }
+#page-intel details { margin-top: 10px; }
+#page-intel details summary { cursor: pointer; color: var(--accent); }
+#page-intel .status-badge.ok { border-color: #2e7d32; } #page-intel .status-badge.bad { border-color: var(--danger); }
+#ti-q { flex: 1 1 200px; }
+#page-intel .lists > * { min-width: 0; }
 /* dashboards */
 .db-select { font-size: 16px; font-weight: 600; max-width: 100%; }
 .db-desc { margin: 2px 0 10px; }

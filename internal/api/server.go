@@ -27,6 +27,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
 )
@@ -50,6 +51,10 @@ type Server struct {
 	Findings   findings.Store
 	// Assets holds the asset and identity lists; nil disables them.
 	Assets *assets.Store
+	// Intel holds threat intel indicators and Feeds downloads them; nil
+	// Intel disables the threat intel endpoints.
+	Intel *intel.Store
+	Feeds *intel.Feeds
 	// Dashboards holds custom dashboards; nil disables them (the built-in
 	// posture dashboard still works).
 	Dashboards *dashboards.Store
@@ -81,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeDetections(api)
 	s.routeRisk(api)
 	s.routeAsk(api)
+	s.routeIntel(api)
 	s.routeDashboards(api)
 	if s.UI != nil {
 		api.Handle("GET /", http.FileServerFS(s.UI))

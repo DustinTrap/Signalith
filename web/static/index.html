@@ -17,6 +17,7 @@
     <button class="tab" data-page="detections">Detections</button>
     <button class="tab" data-page="coverage">ATT&amp;CK coverage</button>
     <button class="tab" data-page="assets">Assets &amp; identities</button>
+    <button class="tab" data-page="intel">Threat intel</button>
     <button class="tab" data-page="data">Add data</button>
     <button class="tab" data-page="health">Health</button>
     <button class="tab" data-page="help">Query guide</button>
@@ -264,6 +265,111 @@ svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
     </div>
   </section>
 
+  <!-- Threat intel -->
+  <section id="page-intel" class="page">
+    <div class="page-head">
+      <h2>Threat intel</h2>
+      <div class="toolbar">
+        <div id="ti-summary" class="sev-summary"></div>
+        <button id="ti-hunt" title="Search the last 24 hours for events that match any indicator">Find matching events</button>
+        <button id="ti-refresh">Refresh</button>
+      </div>
+    </div>
+    <p class="muted">Indicators are known-bad IP addresses and networks, domains, URLs, file hashes and email addresses. Signalith downloads them from the feeds in signalith.yaml and you can add your own. The <b>Threat intel match</b> detection checks new events every 5 minutes and adds risk scaled by each indicator's weight. In Search, <code>| threatmatch</code> keeps only matching events and <code>| intel</code> adds intel columns to any result.</p>
+
+    <div class="panel">
+      <h3>Feeds</h3>
+      <div id="ti-feeds"></div>
+      <details id="ti-examples">
+        <summary>Example feed settings</summary>
+        <p class="muted small">Paste into signalith.yaml, run <code>signalith validate</code>, and restart. Feeds download right away, then on their interval. Check each provider's terms of use.</p>
+        <pre class="code small">intel:
+  feeds:
+    # Botnet command-and-control servers (abuse.ch Feodo Tracker)
+    - name: feodo-tracker
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+      tags: [botnet, c2]
+      weight: 1.5
+    # Malware download URLs from the last 30 days (abuse.ch URLhaus)
+    - name: urlhaus
+      url: https://urlhaus.abuse.ch/downloads/csv_recent/
+      format: csv
+      column: url
+      type: url
+    # Malware file hashes (abuse.ch MalwareBazaar, last 48 hours)
+    - name: malwarebazaar
+      url: https://bazaar.abuse.ch/export/txt/sha256/recent/
+      type: sha256
+    # Compromised hosts (Proofpoint Emerging Threats)
+    - name: et-compromised
+      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
+      type: ip
+      interval: 12h
+    # A STIX 2.1 bundle from your own platform, with an API key
+    - name: our-misp
+      url: https://misp.example.com/feeds/signalith.json
+      format: stix
+      headers: {Authorization: "${MISP_API_KEY}"}</pre>
+      </details>
+    </div>
+
+    <div class="lists">
+      <form id="ti-add" class="panel" autocomplete="off">
+        <h3>Add an indicator</h3>
+        <div class="form-grid">
+          <label>Value <input id="ti-value" type="text" required placeholder="203.0.113.9, evil.example, a hash or URL"></label>
+          <label>Type
+            <select id="ti-add-type">
+              <option value="auto">Detect automatically</option>
+              <option value="ip">IP address or network</option>
+              <option value="domain">Domain</option>
+              <option value="url">URL</option>
+              <option value="hash">File hash</option>
+              <option value="email">Email address</option>
+            </select>
+          </label>
+          <label>Description <input id="ti-desc" type="text" placeholder="Why it is bad, or a ticket number"></label>
+          <label>Weight <input id="ti-weight" type="text" inputmode="decimal" placeholder="1 (2 doubles the risk)"></label>
+          <label>Expires <input id="ti-expires" type="text" placeholder="never, 30d or 2026-12-31"></label>
+          <label>Tags <input id="ti-tags" type="text" placeholder="phishing, incident-42"></label>
+        </div>
+        <div class="row"><button class="primary" type="submit">Add</button></div>
+        <div id="ti-add-msg"></div>
+      </form>
+      <div class="panel">
+        <h3>Upload a list</h3>
+        <p class="muted small">CSV with the columns <code>value, type, description, weight, expires, tags</code> (only value is required; separate tags with <code>|</code>), or a plain list with one value per line. Defanged values like <code>evil[.]example</code> are fine. Nothing is saved unless every line is valid.</p>
+        <pre class="code small">value,description,weight,expires,tags
+203.0.113.9,Scanner seen in incident 42,2,30d,scanner|ssh
+login-bank.example,Phishing site,,2026-12-31,phishing</pre>
+        <div class="row"><input id="ti-file" type="file" accept=".csv,.txt,text/csv,text/plain"><button id="ti-upload" class="primary">Upload and add</button></div>
+        <div id="ti-upload-msg"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="detail-head">
+        <h3>Indicators</h3>
+        <span id="ti-count" class="muted small"></span>
+      </div>
+      <div class="toolbar">
+        <input id="ti-q" type="search" placeholder="Find a value, description or tag">
+        <select id="ti-type">
+          <option value="">Any type</option>
+          <option value="ip">IP addresses and networks</option>
+          <option value="domain">Domains</option>
+          <option value="url">URLs</option>
+          <option value="hash">File hashes</option>
+          <option value="email">Email addresses</option>
+        </select>
+        <select id="ti-source"><option value="">Any source</option></select>
+        <button id="ti-prev">Previous</button>
+        <button id="ti-next">Next</button>
+      </div>
+      <div id="ti-list" class="results"></div>
+    </div>
+  </section>
+
   <!-- Detections -->
   <section id="page-detections" class="page">
     <div class="page-head">
@@ -359,6 +465,8 @@ svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
       <tr><td><code>| table _time, user, src</code></td><td>Choose columns</td></tr>
       <tr><td><code>| rename src as source_ip</code></td><td>Rename columns</td></tr>
       <tr><td><code>| enrich</code></td><td>Add owner, priority and category from the asset and identity lists, as <code>dest_owner</code>, <code>user_priority</code> and so on</td></tr>
+      <tr><td><code>| threatmatch</code></td><td>Keep only events whose IP, domain, URL, hash or email fields match threat intel, with <code>threat_match_value</code>, <code>threat_source</code> and <code>threat_weight</code> columns. Name fields to check only those: <code>| threatmatch src, dest</code>. Put it right after the search</td></tr>
+      <tr><td><code>| intel src, dest</code></td><td>Check any result against threat intel: adds <code>src_intel_source</code>, <code>src_intel_type</code>, <code>src_intel_weight</code> and <code>src_intel_description</code> where a value is a known indicator</td></tr>
     </table>
     <h3>Tips</h3>
     <ul>
@@ -372,6 +480,7 @@ svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
 <script src="app.js"></script>
 <script src="detections.js"></script>
 <script src="risk.js"></script>
+<script src="intel.js"></script>
 <script src="dashboards.js"></script>
 </body>
 </html>

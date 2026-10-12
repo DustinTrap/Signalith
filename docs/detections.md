@@ -61,6 +61,7 @@ result row:
 | `score` | Base risk, 1 to 1000. Multiplied by the object's priority from the asset and identity lists (critical ×2, high ×1.5, medium ×1, low ×0.5; a watchlisted user at least ×1.5) |
 | `objects` | Result fields that hold a risk object, each with `type` `user`, `system` or `other`. Empty or missing values are skipped |
 | `only` | `true` records risk without raising a finding. Throttling still applies, per risk object row |
+| `weight_field` | A result column with a number from 0 to 10 that multiplies `score`, such as `threat_weight` from `threatmatch` |
 
 Each object gets one risk event in the Risk data model with `risk_object`,
 `risk_object_type`, `risk_score`, `risk_base_score`, `risk_priority`,
@@ -73,6 +74,11 @@ Ten built-in detections are risk-only. Two **risk incident** detections (tagged
 - `risk-threshold-exceeded`: total risk of 100 or more for one object in 24 hours.
 - `risk-multiple-tactics`: three or more ATT&CK tactics from three or more
   detections on one object in 7 days.
+
+The **threat intel match** detection (`threat-activity`, tagged `threat-intel`)
+runs `* | threatmatch` every 5 minutes over the last 10, raises one finding per
+indicator and target system per day, and adds 60 risk times the indicator's weight
+to `threat_target` and `user`. See [threat-intel.md](threat-intel.md).
 
 Write your own the same way, for example
 `datamodel=Risk risk_object_type=user | stats sum(risk_score) as risk_score by risk_object | where risk_score >= 200`.

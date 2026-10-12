@@ -209,6 +209,8 @@ Query language (SPL-like, but only what is listed here exists):
   table f1, f2
   rename f as g
   enrich [fields]   adds asset and identity context columns
+  intel [fields]    adds threat intel columns (<field>_intel_source, _intel_type, _intel_weight) for values that are known indicators
+  threatmatch [fields]   keeps only events whose IP, domain, URL, hash or email fields match threat intel; must come right after the search
 - Quote values with spaces or symbols. Windows paths need no doubled backslashes inside quotes.
 
 Data models and their fields (every event also has: `)

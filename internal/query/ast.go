@@ -169,15 +169,25 @@ type Rename struct{ Pairs [][2]string }
 // With no fields it enriches the usual entity fields.
 type Enrich struct{ Fields []string }
 
-func (*Stats) Name() string     { return "stats" }
-func (*Timechart) Name() string { return "timechart" }
-func (*Top) Name() string       { return "top" }
-func (*Where) Name() string     { return "where" }
-func (*Sort) Name() string      { return "sort" }
-func (*Head) Name() string      { return "head" }
-func (*Table) Name() string     { return "table" }
-func (*Rename) Name() string    { return "rename" }
-func (*Enrich) Name() string    { return "enrich" }
+// Intel adds threat intel columns (<field>_intel_source and so on) for
+// values that match an indicator: intel, or intel src, dest.
+type Intel struct{ Fields []string }
+
+// ThreatMatch keeps only events whose fields match threat intel. The
+// matching runs inside OpenSearch, so it must come right after the search.
+type ThreatMatch struct{ Fields []string }
+
+func (*Stats) Name() string       { return "stats" }
+func (*Timechart) Name() string   { return "timechart" }
+func (*Top) Name() string         { return "top" }
+func (*Where) Name() string       { return "where" }
+func (*Sort) Name() string        { return "sort" }
+func (*Head) Name() string        { return "head" }
+func (*Table) Name() string       { return "table" }
+func (*Rename) Name() string      { return "rename" }
+func (*Enrich) Name() string      { return "enrich" }
+func (*Intel) Name() string       { return "intel" }
+func (*ThreatMatch) Name() string { return "threatmatch" }
 
 // String renders the query back to canonical text.
 func (q *Query) String() string {
@@ -263,6 +273,16 @@ func CommandString(c Command) string {
 			return "enrich"
 		}
 		return "enrich " + strings.Join(c.Fields, ", ")
+	case *Intel:
+		if len(c.Fields) == 0 {
+			return "intel"
+		}
+		return "intel " + strings.Join(c.Fields, ", ")
+	case *ThreatMatch:
+		if len(c.Fields) == 0 {
+			return "threatmatch"
+		}
+		return "threatmatch " + strings.Join(c.Fields, ", ")
 	}
 	return c.Name()
 }
