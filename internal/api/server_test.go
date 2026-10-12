@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/cases"
@@ -21,6 +24,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/syslog"
 )
 
 type fakeOS struct {
@@ -120,6 +124,42 @@ func TestAuthRequired(t *testing.T) {
 	}
 	if code, body := do(t, ts, "GET", "/api/health", "", true); code != 200 || body["opensearch"].(map[string]any)["status"] != "green" {
 		t.Errorf("health = %d %v", code, body)
+	} else if sl, _ := body["syslog"].(map[string]any); sl == nil || sl["enabled"] != false {
+		t.Errorf("syslog off: %v", body["syslog"])
+	}
+}
+
+func TestHealthShowsSyslog(t *testing.T) {
+	var rcv *syslog.Receiver
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		rcv = syslog.New(syslog.Config{UDP: "127.0.0.1:0"}, s.Pipeline, s.Log)
+		ctx, cancel := context.WithCancel(context.Background())
+		if err := rcv.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cancel(); rcv.Wait() })
+		s.Syslog = rcv
+	})
+	addr := rcv.Stats().Listeners[0].Address
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprint(c, "<13>Oct 12 13:00:00 fw1 app: hello")
+	c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for rcv.Stats().Received == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, body := do(t, ts, "GET", "/api/health", "", true)
+	sl, _ := body["syslog"].(map[string]any)
+	if sl == nil || sl["enabled"] != true || sl["received"] != float64(1) {
+		t.Fatalf("syslog = %v", body["syslog"])
+	}
+	listeners, _ := sl["listeners"].([]any)
+	senders, _ := sl["senders"].([]any)
+	if len(listeners) != 1 || listeners[0].(map[string]any)["address"] != addr || len(senders) != 1 || senders[0].(map[string]any)["host"] != "fw1" {
+		t.Errorf("listeners %v senders %v", listeners, senders)
 	}
 }
 

@@ -21,26 +21,33 @@ func parseSyslogLine(line, sourcetype string, now time.Time) Event {
 	}
 	var ts time.Time
 	if m[1] != "" {
-		// RFC 3164 has no year; assume the current one, or last year for
-		// timestamps that would land in the future.
-		if t, err := time.ParseInLocation("Jan _2 15:04:05 2006", strings.Join(strings.Fields(m[1]), " ")+" "+strconv.Itoa(now.Year()), time.Local); err == nil {
-			if t.After(now.Add(24 * time.Hour)) {
-				t = t.AddDate(-1, 0, 0)
-			}
-			ts = t.UTC()
+		if t, err := time.ParseInLocation("Jan _2 15:04:05", strings.Join(strings.Fields(m[1]), " "), time.Local); err == nil {
+			ts = GuessYear(t, now)
 		}
 	} else if t, ok := parseTime(m[2]); ok {
 		ts = t
 	}
-	ev := parseProgram(m[3], m[4], m[5], m[6], sourcetype)
+	ev := ParseProgram(m[3], m[4], m[5], m[6], sourcetype)
 	ev.Fields["message"] = line
 	ev.Time = ts
 	return ev
 }
 
+// GuessYear gives a timestamp that has no year, as in RFC 3164 syslog
+// ("Oct 11 09:15:02"), the current year, or last year when that would put
+// it more than a day in the future. The clock time and location of t are
+// kept; the result is in UTC.
+func GuessYear(t, now time.Time) time.Time {
+	y := time.Date(now.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), t.Location())
+	if y.After(now.Add(24 * time.Hour)) {
+		y = y.AddDate(-1, 0, 0)
+	}
+	return y.UTC()
+}
+
 func parseJournal(r map[string]any) Event {
 	program := str(r, "SYSLOG_IDENTIFIER", "_COMM")
-	ev := parseProgram(str(r, "_HOSTNAME"), program, str(r, "_PID"), str(r, "MESSAGE"), "linux:journal")
+	ev := ParseProgram(str(r, "_HOSTNAME"), program, str(r, "_PID"), str(r, "MESSAGE"), "linux:journal")
 	if us, err := strconv.ParseInt(str(r, "__REALTIME_TIMESTAMP", "_SOURCE_REALTIME_TIMESTAMP"), 10, 64); err == nil {
 		ev.Time = time.UnixMicro(us).UTC()
 	}
@@ -60,7 +67,12 @@ var (
 	groupAdd      = regexp.MustCompile(`^add '([^']+)' to (?:shadow )?group '([^']+)'`)
 )
 
-func parseProgram(host, program, pid, msg, sourcetype string) Event {
+// ParseProgram maps one syslog program's message onto a data model: sshd
+// (including OpenSSH 9.8+ sshd-session), sudo and su logons become Authentication events; useradd, userdel,
+// usermod and gpasswd become Change events; anything else is Other. Agent
+// logs and the syslog receiver both use it, so the built-in detections fire
+// whichever way Linux auth logs arrive.
+func ParseProgram(host, program, pid, msg, sourcetype string) Event {
 	f := map[string]any{
 		"host":       host,
 		"dest":       host,
@@ -70,7 +82,10 @@ func parseProgram(host, program, pid, msg, sourcetype string) Event {
 	}
 	ev := Event{Model: "Other", Fields: f}
 	switch program {
-	case "sshd":
+	case "sshd", "sshd-session", "sshd-auth":
+		// OpenSSH 9.8 and later log logons from sshd-session (and 10.0
+		// from sshd-auth); they are still sshd to detections and searches.
+		f["app"] = "sshd"
 		if m := sshdAuth.FindStringSubmatch(msg); m != nil {
 			ev.Model = "Authentication"
 			f["action"] = map[string]string{"Accepted": "success", "Failed": "failure"}[m[1]]
