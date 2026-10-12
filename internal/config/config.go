@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -49,7 +50,8 @@ type Server struct {
 	// 0.0.0.0:8080 to accept agents from other machines.
 	Listen string `yaml:"listen"`
 	// PublicURL is the address agents and browsers use to reach this
-	// server. It goes into the agent configs Signalith generates.
+	// server: scheme, host and optional port, no path. It goes into the
+	// agent configs Signalith generates. SIGNALITH_PUBLIC_URL overrides it.
 	PublicURL string `yaml:"public_url"`
 	TLSCert   string `yaml:"tls_cert,omitempty"`
 	TLSKey    string `yaml:"tls_key,omitempty"`
@@ -464,6 +466,12 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_LISTEN"); v != "" {
 		c.Server.Listen = v
 	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_PUBLIC_URL")); v != "" {
+		if _, err := agents.ParseServerURL(v); err != nil {
+			return fmt.Errorf("SIGNALITH_PUBLIC_URL %q: %v", v, err)
+		}
+		c.Server.PublicURL = v
+	}
 	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
 		h, err := HashPassword(v)
 		if err != nil {
@@ -524,8 +532,8 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.PublicURL == "" {
 		c.Server.PublicURL = defaultPublicURL(c.Server)
-	} else if u, err := url.Parse(c.Server.PublicURL); err != nil || u.Host == "" {
-		p = append(p, fmt.Sprintf("server.public_url %q must be a full URL such as https://siem.example.com:8080", c.Server.PublicURL))
+	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
+		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	}
 	if u, err := url.Parse(c.OpenSearch.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		p = append(p, fmt.Sprintf("opensearch.url %q must be http(s)://host:port", c.OpenSearch.URL))
@@ -608,16 +616,18 @@ func defaultPublicURL(s Server) string {
 	if err != nil {
 		return ""
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "localhost"
-		}
-	}
 	scheme := "http"
 	if s.TLSCert != "" {
 		scheme = "https"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+		// The machine's name, if it can go into an agent config as is.
+		if h, err := os.Hostname(); err == nil {
+			if _, err := agents.ParseServerURL(scheme + "://" + net.JoinHostPort(h, port)); err == nil {
+				host = h
+			}
+		}
 	}
 	return scheme + "://" + net.JoinHostPort(host, port)
 }
@@ -691,7 +701,7 @@ const header = `# Signalith configuration.
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
-# server.public_url  URL agents use to reach this server
+# server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
 # auth.session_timeout  sign the web UI out after this long idle (default 12h)
 # opensearch.*       where events are stored
 # search.*           default time range and result limits

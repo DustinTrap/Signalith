@@ -62,6 +62,7 @@ async function api(path, body, method) {
     const err = new Error(data.error || resp.statusText);
     err.pos = data.pos;
     err.problems = data.problems;
+    err.field = data.field;
     throw err;
   }
   return data;
@@ -1794,15 +1795,49 @@ function renderGuide() {
 // steps and the config file. A step written as "Do this: command" shows the
 // command in a copyable well, and the step that saves the config file
 // carries the file itself.
+//
+// "Agents send to" is the address written into the config. It starts as
+// the server's public_url; when that is localhost but this browser reached
+// Signalith by another name, the browser's address is the better guess. An
+// address typed here is remembered in this browser.
 const agentFileEl = $('agent-file');
+const agentServerEl = $('agent-server');
+const agentServerKey = 'signalith.agentServer';
 let agentSetupSeq = 0;
 let agentSetupConfig = '';
 let agentSetupErrEl = null;
+let agentServerGuess = ''; // known once the server has answered without server=
+let agentServerSent = null;
+let agentServerTimer = 0;
+let agentSetupPending = null; // the latest load, which Copy and Download may wait for
+try { agentServerEl.value = localStorage.getItem(agentServerKey) || ''; } catch (_) { /* storage may be blocked */ }
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', loadAgentConfig));
 $('linux-source').addEventListener('change', loadAgentConfig);
 $('sysmon').addEventListener('change', loadAgentConfig);
+agentServerEl.addEventListener('input', () => {
+  clearTimeout(agentServerTimer);
+  agentServerTimer = setTimeout(agentServerChanged, 400);
+});
+agentServerEl.addEventListener('change', () => {
+  if (!agentServerEl.value.trim()) agentServerEl.value = agentServerGuess; // cleared: back to the default
+  agentServerChanged();
+});
 
-async function loadAgentConfig() {
+function agentServerChanged() {
+  clearTimeout(agentServerTimer);
+  if (agentServerValue() !== agentServerSent) loadAgentConfig();
+}
+
+// agentServerValue is the address to ask for: what is typed, else the guess.
+const agentServerValue = () => agentServerEl.value.trim() || agentServerGuess;
+const agentLoopbackHost = (h) => /^(localhost|.+\.localhost|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\])$/i.test(h);
+
+function loadAgentConfig() {
+  agentSetupPending = agentSetupLoad();
+  return agentSetupPending;
+}
+
+async function agentSetupLoad() {
   const os = document.querySelector('input[name=os]:checked').value;
   $('linux-opts').classList.toggle('hidden', os !== 'linux');
   $('windows-opts').classList.toggle('hidden', os !== 'windows');
@@ -1812,18 +1847,83 @@ async function loadAgentConfig() {
   steps.setAttribute('aria-busy', 'true');
   if (!agentSetupConfig) agentSetupSkeleton();
   const q = new URLSearchParams({ os, source: $('linux-source').value, sysmon: $('sysmon').checked });
+  const server = agentServerValue();
+  agentServerSent = server;
+  if (server) q.set('server', server);
   try {
     const a = await api('api/agents/config?' + q);
-    if (seq === agentSetupSeq) agentSetupRender(a);
+    if (seq !== agentSetupSeq) return;
+    if (!server && agentServerFirst(a)) return loadAgentConfig();
+    agentServerError('');
+    try {
+      if (server && server !== agentServerGuess) localStorage.setItem(agentServerKey, server);
+      else localStorage.removeItem(agentServerKey);
+    } catch (_) { /* storage may be blocked */ }
+    agentSetupRender(a);
   } catch (e) {
-    if (seq === agentSetupSeq) agentSetupError(e);
+    if (seq !== agentSetupSeq) return;
+    if (e.field === 'server') agentServerError(e.message);
+    else agentSetupError(e);
   } finally {
     if (seq === agentSetupSeq) steps.removeAttribute('aria-busy');
   }
 }
 
+// agentServerFirst takes the server's own address as the guess and fills
+// the empty field with it. It returns true when the browser's address is
+// the better guess, so the config must be built again.
+function agentServerFirst(a) {
+  const own = a.server_url || '';
+  agentServerGuess = a.server_loopback && !agentLoopbackHost(location.hostname) ? location.origin : own;
+  agentServerEl.placeholder = agentServerGuess;
+  if (!agentServerEl.value.trim()) agentServerEl.value = agentServerGuess;
+  return agentServerGuess !== own;
+}
+
+function agentServerError(msg) {
+  const err = $('agent-server-error');
+  if (msg) {
+    agentServerEl.setAttribute('aria-invalid', 'true');
+    err.replaceChildren(icon('circle-alert'), msg.charAt(0).toUpperCase() + msg.slice(1) + (/[.?!]$/.test(msg) ? '' : '.'));
+    // nothing built yet: drop the loading rows rather than leave them spinning
+    if (!agentSetupConfig) $('agent-steps').replaceChildren();
+  } else {
+    agentServerEl.removeAttribute('aria-invalid');
+    err.replaceChildren();
+  }
+  err.classList.toggle('hidden', !msg);
+}
+
+// agentServerWarn says when the config sends to localhost, which only
+// works on this computer, and how to find the address to use instead.
+function agentServerWarn(a) {
+  const w = $('agent-server-warn');
+  w.classList.toggle('hidden', !a.server_loopback);
+  if (!a.server_loopback) {
+    delete w.dataset.url;
+    return w.replaceChildren();
+  }
+  if (w.dataset.url === a.server_url) return; // unchanged: don't announce it again
+  w.dataset.url = a.server_url;
+  let host = 'localhost';
+  let example = 'http://192.168.1.20:8080';
+  let port = '8080';
+  try {
+    const u = new URL(a.server_url);
+    host = u.hostname;
+    port = u.port || (u.protocol === 'https:' ? '443' : '80');
+    example = u.protocol + '//192.168.1.20' + (u.port ? ':' + u.port : '');
+  } catch (_) { /* keep the defaults */ }
+  w.replaceChildren(icon('triangle-alert'), el('div', {},
+    el('b', {}, 'Other machines can’t reach ' + host + '.'),
+    el('p', {}, 'Enter this computer’s network address, such as ', el('code', {}, example),
+      ' (find it with ', el('code', {}, 'ipconfig'), ' on Windows or ', el('code', {}, 'ip addr'),
+      ' on Linux), and allow port ' + port + ' through the firewall.')));
+}
+
 function agentSetupRender(a) {
   if (agentSetupErrEl) agentSetupErrEl.remove();
+  agentServerWarn(a);
   agentSetupConfig = a.config || '';
   $('agent-steps').classList.remove('hidden');
   const path = a.config_path || '';
@@ -1919,7 +2019,7 @@ function agentSetupError(e) {
     el('div', { class: 'empty__title' }, 'Couldn’t build the agent setup'),
     el('p', { class: 'empty__text' }, e.message || 'The Signalith server did not respond.'),
     el('div', { class: 'empty__actions' }, el('button', { class: 'btn btn--secondary btn--sm', type: 'button', onclick: loadAgentConfig }, icon('refresh-cw'), 'Try again')));
-  $('agent-body').prepend(agentSetupErrEl);
+  $('agent-steps').before(agentSetupErrEl);
 }
 
 // agentSetupCopy copies text. navigator.clipboard needs HTTPS or localhost,
@@ -1951,8 +2051,33 @@ async function agentSetupCopy(text, btn) {
     btn.classList.remove('is-copied');
   }, 1800);
 }
-$('copy-config').addEventListener('click', () => agentSetupCopy(agentSetupConfig, $('copy-config')));
-$('agent-download').addEventListener('click', () => {
+
+// agentSetupFresh waits for a config still on its way (the address was
+// just typed, or the OS changed), so Copy and Download never hand out one
+// for an older address. It is false when the address in the field is
+// wrong; the field then takes focus so its error is read out.
+async function agentSetupFresh() {
+  clearTimeout(agentServerTimer);
+  if (agentServerValue() !== agentServerSent) loadAgentConfig();
+  for (let p; p !== agentSetupPending;) {
+    p = agentSetupPending;
+    await p;
+  }
+  if (agentServerEl.getAttribute('aria-invalid') === 'true') {
+    agentServerEl.focus();
+    return false;
+  }
+  return !!agentSetupConfig;
+}
+const agentSetupStale = () => agentServerValue() !== agentServerSent || $('agent-steps').hasAttribute('aria-busy') ||
+  agentServerEl.getAttribute('aria-invalid') === 'true';
+
+$('copy-config').addEventListener('click', async () => {
+  if (agentSetupStale() && !(await agentSetupFresh())) return;
+  agentSetupCopy(agentSetupConfig, $('copy-config'));
+});
+$('agent-download').addEventListener('click', async () => {
+  if (agentSetupStale() && !(await agentSetupFresh())) return;
   if (!agentSetupConfig) return;
   const url = URL.createObjectURL(new Blob([agentSetupConfig], { type: 'text/plain' }));
   const a = el('a', { href: url, download: 'fluent-bit.conf', class: 'hidden' });

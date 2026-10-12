@@ -1,6 +1,6 @@
 # Signalith
 
-An open-source SIEM for Windows and Linux, modeled on Splunk Enterprise Security.
+An open-source SIEM for Windows and Linux, inspired by Splunk Enterprise Security.
 Signalith stores events in [OpenSearch](https://opensearch.org), collects them with
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
 query language that reads like SPL, plain-English questions that become queries, a
@@ -27,7 +27,9 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 Open http://localhost:8080 and sign in as `admin` with the password set in
 `deploy/docker/docker-compose.yml` (change it first).
 To update, run `git pull` and then the same command. It rebuilds Signalith from the
-new code each time.
+new code each time. After a reboot both containers start again by themselves once
+Docker is running; in Docker Desktop turn on Settings > General > "Start Docker
+Desktop when you sign in".
 
 ### Linux
 
@@ -57,6 +59,11 @@ new code each time.
 Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
 Fluent Bit, paste the generated configuration, restart it. The configuration already
 contains the server address and ingest token.
+
+Agents on other machines must send to an address they can reach, such as
+`http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
+(or set `server.public_url` or `SIGNALITH_PUBLIC_URL`), and allow the port, 8080 by default,
+through this computer's firewall.
 
 Supported sources in Phase 1:
 
@@ -130,7 +137,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
-| `server.public_url` | from `listen` | URL agents use; goes into generated agent configs |
+| `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials |
@@ -161,9 +168,9 @@ Unknown keys are rejected, so typos do not silently do nothing.
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
-`SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off`
-turns the listener off).
+`SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
+`SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
+`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
 
 ## Detections and findings
 
@@ -440,3 +447,11 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 ## License
 
 [Apache 2.0](LICENSE). See [NOTICE](NOTICE) for third-party data.
+
+## Trademarks
+
+Signalith is an independent open-source project. It is not affiliated with,
+endorsed by or sponsored by Splunk or Cisco, and contains no Splunk code.
+Splunk, Splunk Enterprise Security and SPL are trademarks of Splunk LLC; they are
+named here only to describe what Signalith works like. OpenSearch, Fluent Bit,
+Sigma and MITRE ATT&CK are trademarks of their respective owners.

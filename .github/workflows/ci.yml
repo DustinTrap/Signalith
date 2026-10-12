@@ -29,6 +29,8 @@ jobs:
           DISABLE_SECURITY_PLUGIN: "true"
           DISABLE_INSTALL_DEMO_CONFIG: "true"
           OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+          # Same as the Docker quick start, so the tests cover that setting.
+          node.store.allow_mmap: "false"
         ports:
           - 9200:9200
         options: >-
