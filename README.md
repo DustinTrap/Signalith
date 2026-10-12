@@ -102,13 +102,17 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
-| `intel.feeds` | none | Threat intel feeds to download; see [Threat intel](#threat-intel). Nothing is fetched unless listed |
+| `intel.feeds` | none | Threat intel feeds kept in this file (read-only on the page); most people add feeds on the **Threat intel** page instead. See [Threat intel](#threat-intel). Nothing is fetched until a feed is added |
 | `intel.feeds[].name`, `.url` | required | Feed name (shown as the indicator source) and its http(s) address |
-| `intel.feeds[].format` | `lines` | `lines` (one per line, `#` comments), `csv` (with `column:`, a header name or number) or `stix` (STIX 2.1 bundle) |
+| `intel.feeds[].kind`, `.collection` | `url` | `taxii` reads a TAXII 2.1 collection: `url` is the API root and `collection` the collection ID |
+| `intel.feeds[].format` | `lines` | `lines` (one per line, `#` comments), `csv` (with `column:`, a header name or number), `stix` (STIX 2.1 bundle) or `auto` to detect |
 | `intel.feeds[].type` | `auto` | `auto` detects each value, or `ip`, `cidr`, `domain`, `url`, `hash`, `md5`, `sha1`, `sha256`, `email` |
 | `intel.feeds[].interval`, `.max_age` | `1h`, `7d` | How often to download; how long indicators last when downloads keep failing |
 | `intel.feeds[].weight` | `1` | Multiplies the risk a match adds (0 to 10) |
-| `intel.feeds[].headers`, `.tags`, `.description`, `.enabled` | none, `true` | Request headers (values may use `${ENV_VAR}` for API keys), labels, and on/off |
+| `intel.feeds[].headers`, `.username`, `.password` | none | Request headers and HTTP basic sign-in for feeds that need a key; values may use `${ENV_VAR}` |
+| `intel.feeds[].tags`, `.description`, `.enabled` | none, `true` | Labels added to every indicator, and on/off |
+| `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys (file mode 0600) |
+| `intel.allow_loopback_feeds` | `false` | Allow feed downloads from this machine (`127.0.0.1`, `::1`), for a feed server on the same host |
 | `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
 | `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
@@ -117,7 +121,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
 `SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
-`SIGNALITH_ASSISTANT_API_KEY`).
+`SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`).
 
 ## Detections and findings
 
@@ -215,12 +219,20 @@ Like the ES threat intelligence framework, Signalith matches events against
 **indicators**: IP addresses and IPv4 networks, domains, URLs, MD5/SHA-1/SHA-256
 file hashes and email addresses.
 
-- **Feeds** listed under `intel.feeds` in signalith.yaml are downloaded on their
-  interval by the server running the detection scheduler. Nothing is fetched until
-  you add one. Proxy settings come from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
-  An indicator that disappears from a feed is removed at the next download; if a
-  feed keeps failing, its indicators expire after `max_age`. Disabling or removing a
-  feed removes its indicators.
+- **Feeds** are added on the **Threat intel** page with **Add feed**: pick free
+  feeds from the built-in catalog (abuse.ch, Spamhaus, Emerging Threats and more),
+  paste the address of any list, CSV or STIX file, or connect a TAXII 2.1 server
+  such as MISP or OpenCTI and pick a collection. **Test** downloads the feed and
+  shows what it holds (format, indicator types, samples) before you save, and a new
+  feed downloads at once. Feeds can also be listed under `intel.feeds` in
+  signalith.yaml; those show on the page as read-only. Nothing is fetched until you
+  add one.
+- **Downloads** run on the server with the detection scheduler, every feed on its
+  own interval. The server needs outbound HTTPS to each feed; proxy settings come
+  from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`. An indicator that disappears from
+  a feed is removed at the next download; if a feed keeps failing, its indicators
+  expire after `max_age`. Turning a feed off removes its indicators; deleting one
+  removes them, or keeps them until they age out if you choose.
 - **Manual indicators**: add one on the **Threat intel** page or upload a CSV
   (`value,type,description,weight,expires,tags`) or plain list. Every bad line is
   reported and nothing is saved until the file is clean.
@@ -231,8 +243,10 @@ file hashes and email addresses.
   `<field>_intel_source`, `_intel_type`, `_intel_weight` and `_intel_description`
   columns to any result.
 
-Copy-paste examples (free public feeds; check each provider's terms, and some ask for
-a free key, which you send with `headers`):
+Feeds added on the page are saved in `lookups/intel_feeds.yaml` (set
+`intel.feeds_file` to move it). To keep feeds in signalith.yaml instead, for example
+when it is managed by configuration tools (check each provider's terms; values may
+use `${ENV_VAR}` so keys stay out of the file):
 
 ```yaml
 intel:
@@ -241,21 +255,19 @@ intel:
       url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
       weight: 1.5
     - name: urlhaus                # malware download URLs, abuse.ch
-      url: https://urlhaus.abuse.ch/downloads/csv_recent/
-      format: csv
-      column: url
+      url: https://urlhaus.abuse.ch/downloads/text_recent/
       type: url
-    - name: malwarebazaar          # malware SHA-256 hashes, abuse.ch
-      url: https://bazaar.abuse.ch/export/txt/sha256/recent/
-      type: sha256
-    - name: et-compromised         # compromised hosts, Proofpoint Emerging Threats
-      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
-      type: ip
-      interval: 12h
+    - name: our-cti                # a collection on your own TAXII 2.1 server
+      kind: taxii
+      url: https://cti.example.com/taxii2/api1/
+      collection: 91a7b528-80eb-42ed-a74d-c6fbd5a26116
+      username: signalith
+      password: ${CTI_PASSWORD}
 ```
 
-See [docs/threat-intel.md](docs/threat-intel.md) for formats, STIX, matching details
-and the API.
+See [docs/threat-intel.md](docs/threat-intel.md) for the catalog, formats, TAXII,
+download safety rules, matching details and the API.
+
 ## Dashboards
 
 The **Dashboards** tab opens on the built-in **Security posture** dashboard, like the
@@ -363,7 +375,7 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/findings` | Findings model and its OpenSearch store |
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
 | `internal/risk` | Risk event store |
-| `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX) and downloads |
+| `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX, format detection), the feed catalog, TAXII 2.1, guarded downloads and feeds managed on the page |
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |

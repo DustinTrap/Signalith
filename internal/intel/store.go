@@ -521,3 +521,14 @@ func (m *Memory) Version(context.Context) (string, error) {
 	defer m.mu.Unlock()
 	return fmt.Sprint(m.gen), nil
 }
+
+// DeleteSource deletes every indicator from one source.
+func (s *Store) DeleteSource(ctx context.Context, source string) (int, error) {
+	var gone []string
+	for _, ind := range s.snapshot() {
+		if ind.Source == source {
+			gone = append(gone, ind.ID)
+		}
+	}
+	return len(gone), s.Delete(ctx, gone)
+}

@@ -45,18 +45,18 @@ func TestNormalize(t *testing.T) {
 }
 
 func TestParseLines(t *testing.T) {
-	feed := "# Feodo Tracker\n# last updated today\n\n203.0.113.9\n198.51.100.0/24 ; SBL123\n203.0.113.9\n0.0.0.0 evil.example.com\nnot-an-ip!\n10.1.2.3 # trailing comment\n"
+	feed := "# Feodo Tracker\n# last updated today\n\n203.0.113.9\n198.51.100.0/24 ; SBL123\n203.0.113.9\n0.0.0.0 evil.example.com\nnot-an-ip!\n192.0.2.3 # trailing comment\n10.1.2.3\n"
 	res, err := Parse([]byte(feed), ParseOptions{Format: FormatLines, Type: "auto"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := values(res.Indicators)
-	if got != "ip:203.0.113.9 cidr:198.51.100.0/24 domain:evil.example.com ip:10.1.2.3" || res.Skipped != 1 || res.Example != "not-an-ip!" {
-		t.Errorf("got %s skipped %d %q", got, res.Skipped, res.Example)
+	if got != "ip:203.0.113.9 cidr:198.51.100.0/24 domain:evil.example.com ip:192.0.2.3" || res.Skipped != 1 || res.Example != "not-an-ip!" || res.Reserved != 1 {
+		t.Errorf("got %s skipped %d %q reserved %d", got, res.Skipped, res.Example, res.Reserved)
 	}
 	// A type limits what counts as valid.
 	res, _ = Parse([]byte(feed), ParseOptions{Format: FormatLines, Type: "ip"})
-	if values(res.Indicators) != "ip:203.0.113.9 cidr:198.51.100.0/24 ip:10.1.2.3" || res.Skipped != 2 {
+	if values(res.Indicators) != "ip:203.0.113.9 cidr:198.51.100.0/24 ip:192.0.2.3" || res.Skipped != 2 {
 		t.Errorf("ip only: %s skipped %d", values(res.Indicators), res.Skipped)
 	}
 }
@@ -301,7 +301,7 @@ func TestFeedRefresh(t *testing.T) {
 	s := NewStore(NewMemory())
 	s.Now = clock
 	statusFile := filepath.Join(t.TempDir(), "intel_feeds.json")
-	f := &Feeds{Store: s, Now: clock, StatusFile: statusFile, List: []Feed{
+	f := &Feeds{Store: s, Now: clock, StatusFile: statusFile, AllowLoopback: true, List: []Feed{
 		{Name: "blocklist", URL: srv.URL, Format: FormatLines, Type: "auto", Interval: time.Hour, MaxAge: 7 * 24 * time.Hour,
 			Weight: 1.5, Description: "Test list", Tags: []string{"botnet"}, Headers: map[string]string{"Authorization": "Bearer ${SIGNALITH_TEST_FEED_KEY}"}, Enabled: true},
 		{Name: "off", URL: srv.URL, Enabled: false, Interval: time.Hour},
@@ -345,8 +345,14 @@ func TestFeedRefresh(t *testing.T) {
 	mu.Lock()
 	status, body = 200, "<html>maintenance</html>\n"
 	mu.Unlock()
-	if _, err := f.Refresh(ctx, "blocklist"); err == nil || !strings.Contains(err.Error(), "none of the 1 values") || s.CountSource("blocklist") != 2 {
-		t.Errorf("junk = %v, %d left", err, s.CountSource("blocklist"))
+	if _, err := f.Refresh(ctx, "blocklist"); err == nil || !strings.Contains(err.Error(), "web page, not a feed") || s.CountSource("blocklist") != 2 {
+		t.Errorf("web page = %v, %d left", err, s.CountSource("blocklist"))
+	}
+	mu.Lock()
+	body = "maintenance\n"
+	mu.Unlock()
+	if _, err := f.Refresh(ctx, "blocklist"); err == nil || !strings.Contains(err.Error(), "None of the 1 values") || !strings.Contains(err.Error(), "previous indicators are kept") {
+		t.Errorf("junk = %v", err)
 	}
 	// Indicators that disappear from the feed are removed.
 	mu.Lock()
@@ -365,7 +371,7 @@ func TestFeedRefresh(t *testing.T) {
 	if _, err := os.Stat(statusFile); err != nil {
 		t.Fatal(err)
 	}
-	f2 := &Feeds{Store: s, Now: clock, StatusFile: statusFile, List: f.List}
+	f2 := &Feeds{Store: s, Now: clock, StatusFile: statusFile, AllowLoopback: true, List: f.List}
 	if st := f2.Status(); st[0].Status.LastSuccess.IsZero() || st[0].Status.Count != 2 {
 		t.Errorf("reloaded status = %+v", st[0].Status)
 	}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,9 +20,11 @@ const (
 	FormatLines = "lines" // one indicator per line, # comments
 	FormatCSV   = "csv"   // one column of a CSV file
 	FormatSTIX  = "stix"  // a STIX 2.1 bundle of indicator objects
+	// FormatAuto detects one of the others from the content; see Sniff.
+	FormatAuto = "auto"
 )
 
-// Formats lists the feed formats.
+// Formats lists the feed formats a download can be read as.
 var Formats = []string{FormatLines, FormatCSV, FormatSTIX}
 
 // ParseOptions say how to read a feed.
@@ -40,6 +43,12 @@ type ParseResult struct {
 	Skipped int
 	// Example is the first skipped value, to help fix a feed's settings.
 	Example string
+	// Reserved counts private, reserved and overly broad IP addresses and
+	// networks, which are skipped so a feed never matches your own network.
+	Reserved int
+	// Format and Column are what the feed was read as, after detection.
+	Format string
+	Column string
 }
 
 // maxIndicators caps one feed, so a wrong URL cannot fill memory.
@@ -61,6 +70,10 @@ func (r *ParseResult) add(o ParseOptions, value, desc string, expires time.Time,
 		}
 		return
 	}
+	if (typ == TypeIP || typ == TypeCIDR) && reservedNet(val) {
+		r.Reserved++
+		return
+	}
 	if seen[typ+"\x00"+val] {
 		return
 	}
@@ -71,15 +84,63 @@ func (r *ParseResult) add(o ParseOptions, value, desc string, expires time.Time,
 // Parse reads a downloaded feed.
 func Parse(data []byte, o ParseOptions) (*ParseResult, error) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	if o.Format == FormatAuto {
+		o.Format, o.Column = Sniff(data, o.Type, o.Column)
+	}
+	var res *ParseResult
+	var err error
 	switch o.Format {
 	case "", FormatLines:
-		return parseLines(data, o)
+		o.Format = FormatLines
+		res, err = parseLines(data, o)
 	case FormatCSV:
-		return parseCSV(data, o)
+		res, err = parseCSV(data, o)
 	case FormatSTIX:
-		return parseSTIX(data, o)
+		res, err = parseSTIX(data, o)
+	default:
+		return nil, fmt.Errorf("format %q must be one of %s", o.Format, strings.Join(specFormats, ", "))
 	}
-	return nil, fmt.Errorf("format %q must be one of %s", o.Format, strings.Join(Formats, ", "))
+	if res != nil {
+		res.Format, res.Column = o.Format, o.Column
+	}
+	return res, err
+}
+
+// reserved are networks no threat feed should list: private, loopback,
+// link-local, multicast and other special ranges. A feed that lists them
+// (FireHOL level 1 includes the bogon ranges, for blocking at a firewall)
+// would otherwise match every internal address.
+var reserved = func() []netip.Prefix {
+	var out []netip.Prefix
+	for _, s := range []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+		"172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
+		"::/127", "fc00::/7", "fe80::/10", "ff00::/8"} {
+		out = append(out, netip.MustParsePrefix(s))
+	}
+	return out
+}()
+
+// reservedNet reports whether a normalized IP address or network is
+// reserved, or too broad to be an indicator (shorter than /8, or /16 for
+// IPv6).
+func reservedNet(v string) bool {
+	p, err := netip.ParsePrefix(v)
+	if err != nil {
+		a, err := netip.ParseAddr(v)
+		if err != nil {
+			return false
+		}
+		p = netip.PrefixFrom(a, a.BitLen())
+	}
+	if (p.Addr().Is4() && p.Bits() < 8) || (p.Addr().Is6() && p.Bits() < 16) {
+		return true
+	}
+	for _, r := range reserved {
+		if r.Overlaps(p) {
+			return true
+		}
+	}
+	return false
 }
 
 func isComment(line string) bool {
@@ -87,8 +148,10 @@ func isComment(line string) bool {
 }
 
 // parseLines takes the first word of each line, so lists like Spamhaus
-// DROP ("1.2.3.0/24 ; SBL123") and hosts files ("0.0.0.0 evil.com") work:
-// in a hosts file the second word is the indicator.
+// DROP ("1.2.3.0/24 ; SBL123"), "value,comment" lists and hosts files
+// ("0.0.0.0 evil.com") work: in a hosts file the second word is the
+// indicator. A URL is cut only at white space, since URLs may contain ;
+// and commas.
 func parseLines(data []byte, o ParseOptions) (*ParseResult, error) {
 	res := &ParseResult{}
 	seen := map[string]bool{}
@@ -99,17 +162,31 @@ func parseLines(data []byte, o ParseOptions) (*ParseResult, error) {
 		if isComment(line) {
 			continue
 		}
-		fields := strings.FieldsFunc(line, func(r rune) bool { return r == ' ' || r == '\t' || r == ';' || r == ',' })
-		if len(fields) == 0 {
-			continue
+		v := firstWord(line)
+		if v == "0.0.0.0" || v == "127.0.0.1" {
+			if rest := strings.TrimSpace(strings.TrimLeft(line[len(v):], ";, \t")); rest != "" && !isComment(rest) {
+				v = firstWord(rest)
+			}
 		}
-		v := fields[0]
-		if (v == "0.0.0.0" || v == "127.0.0.1") && len(fields) > 1 {
-			v = fields[1]
+		if v == "" {
+			continue
 		}
 		res.add(o, v, "", time.Time{}, nil, seen)
 	}
 	return res, sc.Err()
+}
+
+// firstWord returns a line's first value: up to white space, and, unless
+// it is a URL, up to a ; or a comma.
+func firstWord(line string) string {
+	v, _, _ := strings.Cut(line, " ")
+	v, _, _ = strings.Cut(v, "\t")
+	if !strings.Contains(v, "://") {
+		if i := strings.IndexAny(v, ";,"); i >= 0 {
+			v = v[:i]
+		}
+	}
+	return v
 }
 
 // parseCSV reads one column. A named column is found in the first row,
@@ -260,6 +337,16 @@ func stixType(object, path string) string {
 // comparison in an indicator's pattern becomes an indicator; patterns of
 // other languages and revoked or expired indicators are skipped.
 func parseSTIX(data []byte, o ParseOptions) (*ParseResult, error) {
+	objs, err := decodeSTIX(data)
+	if err != nil {
+		return nil, err
+	}
+	return stixIndicators(objs, o), nil
+}
+
+// decodeSTIX reads the objects of a bundle, envelope, array or single
+// indicator.
+func decodeSTIX(data []byte) ([]stixObject, error) {
 	var objs []stixObject
 	trimmed := bytes.TrimSpace(data)
 	switch {
@@ -285,6 +372,11 @@ func parseSTIX(data []byte, o ParseOptions) (*ParseResult, error) {
 			return nil, errors.New(`not a STIX bundle: expected {"type": "bundle", "objects": [...]}`)
 		}
 	}
+	return objs, nil
+}
+
+// stixIndicators turns indicator objects into indicators.
+func stixIndicators(objs []stixObject, o ParseOptions) *ParseResult {
 	res := &ParseResult{}
 	seen := map[string]bool{}
 	for _, obj := range objs {
@@ -326,5 +418,5 @@ func parseSTIX(data []byte, o ParseOptions) (*ParseResult, error) {
 			res.add(sub, value, desc, exp, tags, seen)
 		}
 	}
-	return res, nil
+	return res
 }

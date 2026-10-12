@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,20 +15,41 @@ import (
 	"time"
 )
 
-// Feed is one threat intel feed from the config file.
+// Feed is one threat intel feed, from signalith.yaml or added on the
+// Threat intel page.
 type Feed struct {
-	Name        string            `json:"name"`
-	URL         string            `json:"url"`
-	Format      string            `json:"format"`
-	Type        string            `json:"type"`
-	Column      string            `json:"column,omitempty"`
-	Interval    time.Duration     `json:"-"`
-	MaxAge      time.Duration     `json:"-"`
-	Weight      float64           `json:"weight"`
-	Description string            `json:"description,omitempty"`
-	Tags        []string          `json:"tags,omitempty"`
-	Headers     map[string]string `json:"-"` // may hold API keys; never shown
-	Enabled     bool              `json:"enabled"`
+	Name        string
+	Kind        string // KindURL or KindTAXII; "" is KindURL
+	URL         string // the file, or the TAXII API root
+	Collection  string // TAXII collection ID
+	Format      string
+	Type        string
+	Column      string
+	Interval    time.Duration
+	MaxAge      time.Duration
+	Weight      float64
+	Description string
+	Tags        []string
+	Headers     map[string]string // may hold API keys; never shown
+	Username    string
+	Password    string // never shown
+	Enabled     bool
+	// Source is SourceConfig or SourceUI; "" counts as SourceConfig.
+	Source  string
+	Catalog string
+	// Problem says why a feed from the feeds file cannot run, such as a
+	// name that signalith.yaml now uses too.
+	Problem string
+}
+
+// expand fills ${ENV_VAR} references in a secret. Only feeds from
+// signalith.yaml may read the environment: a feed added on the Threat
+// intel page could otherwise send the server's own secrets to any URL.
+func (fd Feed) expand(v string) string {
+	if fd.Source == SourceUI {
+		return v
+	}
+	return ExpandEnv(v)
 }
 
 // FeedStatus is what the UI shows about a feed's downloads.
@@ -43,27 +63,67 @@ type FeedStatus struct {
 	Removed     int       `json:"removed"`           // no longer listed, so removed
 	Skipped     int       `json:"skipped,omitempty"` // lines that were not valid indicators
 	Example     string    `json:"skipped_example,omitempty"`
+	Reserved    int       `json:"reserved,omitempty"` // private or reserved networks skipped
+	Note        string    `json:"note,omitempty"`     // such as a TAXII collection read only in part
 	LastError   string    `json:"last_error,omitempty"`
 	Running     bool      `json:"running,omitempty"`
 }
 
-// FeedView is a feed and its status, for the API.
-type FeedView struct {
-	Feed
-	Interval   string     `json:"interval"`
-	MaxAge     string     `json:"max_age"`
-	HasHeaders bool       `json:"has_headers,omitempty"`
-	Indicators int        `json:"indicators"` // stored now
-	Status     FeedStatus `json:"status"`
+// HeaderView names a request header without its value.
+type HeaderView struct {
+	Name string `json:"name"`
+	Set  bool   `json:"set"`
 }
 
-// Feeds downloads the configured feeds on their schedules.
+// SecretView says whether a secret is stored, never what it is.
+type SecretView struct {
+	Set bool `json:"set"`
+}
+
+// FeedView is a feed and its status, for the API. Secret values are
+// never included.
+type FeedView struct {
+	Name        string       `json:"name"`
+	Source      string       `json:"source"` // config or ui
+	Kind        string       `json:"kind"`
+	URL         string       `json:"url"`
+	Collection  string       `json:"collection,omitempty"`
+	Format      string       `json:"format"`
+	Type        string       `json:"type"`
+	Column      string       `json:"column,omitempty"`
+	Interval    string       `json:"interval"`
+	MaxAge      string       `json:"max_age"`
+	Weight      float64      `json:"weight"`
+	Description string       `json:"description,omitempty"`
+	Tags        []string     `json:"tags,omitempty"`
+	Enabled     bool         `json:"enabled"`
+	Catalog     string       `json:"catalog,omitempty"`
+	Headers     []HeaderView `json:"headers"`
+	Username    string       `json:"username,omitempty"`
+	Password    SecretView   `json:"password"`
+	HasHeaders  bool         `json:"has_headers,omitempty"`
+	Problem     string       `json:"problem,omitempty"`
+	Indicators  int          `json:"indicators"` // stored now
+	Status      FeedStatus   `json:"status"`
+}
+
+// Feeds downloads the feeds on their schedules, and keeps the feeds added
+// on the Threat intel page. It is safe for concurrent use.
 type Feeds struct {
 	Store *Store
-	List  []Feed
-	// HTTP downloads feeds; nil uses a client that honors the
-	// HTTPS_PROXY, HTTP_PROXY and NO_PROXY environment variables.
+	// List is the feeds from signalith.yaml, which the page shows but
+	// cannot change. Set it before use and do not change it afterwards.
+	List []Feed
+	// File keeps the feeds added on the Threat intel page; "" keeps them
+	// in memory only.
+	File string
+	// HTTP downloads feeds; nil uses a client that honors HTTPS_PROXY,
+	// HTTP_PROXY and NO_PROXY and refuses blocked addresses (see CheckAddr).
 	HTTP *http.Client
+	// AllowLoopback lets feeds download from this machine.
+	AllowLoopback bool
+	// MaxBytes caps one download; 0 is MaxDownload.
+	MaxBytes int64
 	// StatusFile keeps feed status across restarts; "" keeps it in memory.
 	StatusFile string
 	Log        *slog.Logger
@@ -71,17 +131,40 @@ type Feeds struct {
 	// Tick is how often due feeds are checked (default 30s).
 	Tick time.Duration
 
-	mu     sync.Mutex
-	status map[string]*FeedStatus
-	loaded bool
+	mu       sync.Mutex
+	status   map[string]*FeedStatus
+	loaded   bool
+	ui       []FeedSpec // feeds added on the page, in the order added
+	kept     []KeptFeed
+	fileRead bool
+	fileErr  error
+	// gen changes whenever a feed's settings do, so a download that was
+	// running meanwhile throws its result away.
+	gen    map[string]int
+	runCtx context.Context // set while Start runs
+	// storeMu orders storing a download against removing a feed's
+	// indicators, so a deleted feed's last download cannot bring them back.
+	storeMu    sync.Mutex
+	clientOnce sync.Once
+	httpc      *http.Client
 }
 
 // MaxDownload caps a feed download.
 const MaxDownload = 256 << 20
 
+// TestMaxDownload caps the download of a feed test; a larger feed is
+// previewed from its first part.
+const TestMaxDownload = 32 << 20
+
 // RetryAfterFailure is how soon a failed download is retried, unless the
 // feed's interval is shorter.
 const RetryAfterFailure = 15 * time.Minute
+
+// Time limits for a scheduled download and for a test.
+const (
+	RunTimeout  = 5 * time.Minute
+	TestTimeout = time.Minute
+)
 
 func (f *Feeds) now() time.Time {
 	if f.Now != nil {
@@ -101,18 +184,27 @@ func (f *Feeds) client() *http.Client {
 	if f.HTTP != nil {
 		return f.HTTP
 	}
-	// The default transport reads proxy settings from the environment.
-	return &http.Client{Timeout: 5 * time.Minute}
+	f.clientOnce.Do(func() { f.httpc = newFeedClient(f.AllowLoopback) })
+	return f.httpc
 }
 
-// Get returns a configured feed by name.
-func (f *Feeds) Get(name string) (Feed, bool) {
-	for _, fd := range f.List {
-		if fd.Name == name {
-			return fd, true
-		}
+func (f *Feeds) maxBytes() int64 {
+	if f.MaxBytes > 0 {
+		return f.MaxBytes
 	}
-	return Feed{}, false
+	return MaxDownload
+}
+
+// Load reads the feeds file and the status file. It reports a feeds file
+// that cannot be read; until that is fixed, feeds cannot be added or
+// changed on the page, so a bad file is never overwritten. Feeds load
+// themselves on first use, so calling Load is optional.
+func (f *Feeds) Load() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loadStatus()
+	f.loadFile()
+	return f.fileErr
 }
 
 func (f *Feeds) loadStatus() {
@@ -161,6 +253,7 @@ func (f *Feeds) saveStatus() {
 	}
 }
 
+// stateFor returns a feed's status; the caller holds f.mu.
 func (f *Feeds) stateFor(name string) *FeedStatus {
 	f.loadStatus()
 	st, ok := f.status[name]
@@ -171,19 +264,118 @@ func (f *Feeds) stateFor(name string) *FeedStatus {
 	return st
 }
 
-// Status returns every configured feed with its status.
+// all returns every feed: those from signalith.yaml, then those added on
+// the page. The caller holds f.mu.
+func (f *Feeds) all() []Feed {
+	f.loadFile()
+	out := make([]Feed, 0, len(f.List)+len(f.ui))
+	inConfig := map[string]bool{}
+	for _, fd := range f.List {
+		if fd.Source == "" {
+			fd.Source = SourceConfig
+		}
+		if fd.Kind == "" {
+			fd.Kind = KindURL
+		}
+		inConfig[fd.Name] = true
+		out = append(out, fd)
+	}
+	seen := map[string]bool{}
+	for _, s := range f.ui {
+		s.Defaults()
+		var probs []string
+		switch {
+		case inConfig[s.Name]:
+			probs = append(probs, "A feed in signalith.yaml has the same name, so this one is not used; delete it and add it again with another name")
+		case seen[s.Name]:
+			probs = append(probs, "Another feed has the same name")
+		}
+		seen[s.Name] = true
+		for _, p := range s.Problems(false) {
+			probs = append(probs, p.Msg)
+		}
+		fd := s.Feed(SourceUI)
+		fd.Problem = strings.Join(probs, "; ")
+		out = append(out, fd)
+	}
+	return out
+}
+
+// get finds a feed by name; the caller holds f.mu. A feed from
+// signalith.yaml wins over one added on the page with the same name.
+func (f *Feeds) get(name string) (Feed, bool) {
+	for _, fd := range f.all() {
+		if fd.Name == name {
+			return fd, true
+		}
+	}
+	return Feed{}, false
+}
+
+// Get returns a feed by name.
+func (f *Feeds) Get(name string) (Feed, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.get(name)
+}
+
+// Len returns how many feeds there are.
+func (f *Feeds) Len() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.all())
+}
+
+// Status returns every feed with its status.
 func (f *Feeds) Status() []FeedView {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]FeedView, 0, len(f.List))
-	for _, fd := range f.List {
-		v := FeedView{Feed: fd, Interval: fmtDuration(fd.Interval), MaxAge: fmtDuration(fd.MaxAge), HasHeaders: len(fd.Headers) > 0, Status: *f.stateFor(fd.Name)}
+	list := f.all()
+	out := make([]FeedView, 0, len(list))
+	for _, fd := range list {
+		out = append(out, f.view(fd))
+	}
+	return out
+}
+
+// View returns one feed with its status.
+func (f *Feeds) View(name string) (FeedView, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fd, ok := f.get(name)
+	if !ok {
+		return FeedView{}, false
+	}
+	return f.view(fd), true
+}
+
+// view describes a feed without its secrets; the caller holds f.mu.
+func (f *Feeds) view(fd Feed) FeedView {
+	kind := fd.Kind
+	if kind == "" {
+		kind = KindURL
+	}
+	v := FeedView{
+		Name: fd.Name, Source: fd.Source, Kind: kind, URL: fd.URL, Collection: fd.Collection,
+		Format: fd.Format, Type: fd.Type, Column: fd.Column, Interval: fmtDuration(fd.Interval), MaxAge: fmtDuration(fd.MaxAge),
+		Weight: fd.Weight, Description: fd.Description, Tags: fd.Tags, Enabled: fd.Enabled, Catalog: fd.Catalog,
+		Headers: []HeaderView{}, Username: fd.Username, Password: SecretView{Set: fd.Password != ""},
+		HasHeaders: len(fd.Headers) > 0, Problem: fd.Problem,
+	}
+	if v.Source == "" {
+		v.Source = SourceConfig
+	}
+	for k, val := range fd.Headers {
+		v.Headers = append(v.Headers, HeaderView{Name: k, Set: val != ""})
+	}
+	sort.Slice(v.Headers, func(i, j int) bool { return v.Headers[i].Name < v.Headers[j].Name })
+	if fd.Problem == "" {
+		v.Status = *f.stateFor(fd.Name)
 		if f.Store != nil {
 			v.Indicators = f.Store.CountSource(fd.Name)
 		}
-		out = append(out, v)
 	}
-	return out
+	return v
 }
 
 func fmtDuration(d time.Duration) string {
@@ -200,7 +392,8 @@ func fmtDuration(d time.Duration) string {
 
 // Start downloads due feeds, removes indicators of feeds that are no
 // longer configured, and purges expired indicators, until ctx ends.
-// Run it on one server only (the one with the detection scheduler).
+// Feeds added or changed on the page meanwhile download at once. Run it
+// on one server only (the one with the detection scheduler).
 func (f *Feeds) Start(ctx context.Context) {
 	// Feeds replace what they stored before, so the current indicators
 	// must be known first.
@@ -216,16 +409,38 @@ func (f *Feeds) Start(ctx context.Context) {
 		case <-time.After(30 * time.Second):
 		}
 	}
+	f.mu.Lock()
+	f.runCtx = ctx
 	var keep []string
-	for _, fd := range f.List {
+	for _, fd := range f.all() {
 		if fd.Enabled {
 			keep = append(keep, fd.Name)
 		}
 	}
-	if n, err := f.Store.RemoveSources(ctx, keep); err != nil {
-		f.log().Warn("could not remove indicators of removed or disabled feeds", "err", err)
-	} else if n > 0 {
-		f.log().Info("removed indicators of feeds that are no longer configured or are disabled", "indicators", n)
+	now := f.now()
+	for _, k := range f.kept {
+		if k.Until.After(now) {
+			keep = append(keep, k.Name)
+		}
+	}
+	// Without the feeds file, its feeds' indicators cannot be told apart
+	// from those of deleted feeds, so nothing is removed.
+	fileOK := f.fileErr == nil
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.runCtx = nil
+		f.mu.Unlock()
+	}()
+	if fileOK {
+		f.storeMu.Lock()
+		n, err := f.Store.RemoveSources(ctx, keep)
+		f.storeMu.Unlock()
+		if err != nil {
+			f.log().Warn("could not remove indicators of removed or disabled feeds", "err", err)
+		} else if n > 0 {
+			f.log().Info("removed indicators of feeds that are no longer configured or are disabled", "indicators", n)
+		}
 	}
 	tick := f.Tick
 	if tick <= 0 {
@@ -257,9 +472,12 @@ func (f *Feeds) RunDue(ctx context.Context) {
 	now := f.now()
 	var due []string
 	f.mu.Lock()
-	for _, fd := range f.List {
+	for _, fd := range f.all() {
+		if !fd.Enabled || fd.Problem != "" {
+			continue
+		}
 		st := f.stateFor(fd.Name)
-		if !fd.Enabled || st.Running {
+		if st.Running {
 			continue
 		}
 		if st.NextRun.IsZero() && !st.LastAttempt.IsZero() {
@@ -275,10 +493,32 @@ func (f *Feeds) RunDue(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if _, err := f.Refresh(ctx, name); err != nil {
-			f.log().Warn("threat intel feed download failed", "feed", name, "err", err)
-		}
+		f.refreshAndLog(ctx, name)
 	}
+}
+
+func (f *Feeds) refreshAndLog(ctx context.Context, name string) {
+	_, err := f.Refresh(ctx, name)
+	if err != nil && !errors.Is(err, ErrFeedRunning) && !errors.Is(err, ErrFeedChanged) && !errors.Is(err, ErrUnknownFeed) {
+		f.log().Warn("threat intel feed download failed", "feed", name, "err", err)
+	}
+}
+
+// kick downloads a feed that was just added or changed, when this server
+// runs the schedule. The caller holds f.mu.
+func (f *Feeds) kick(name string) {
+	if f.runCtx == nil {
+		return
+	}
+	ctx := f.runCtx
+	go f.refreshAndLog(ctx, name)
+}
+
+// Running reports whether this server downloads feeds on their schedules.
+func (f *Feeds) Running() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.runCtx != nil
 }
 
 // ErrUnknownFeed is returned for a feed name that is not configured.
@@ -287,27 +527,46 @@ var ErrUnknownFeed = errors.New("no feed with that name is configured")
 // ErrFeedRunning is returned when a feed is already downloading.
 var ErrFeedRunning = errors.New("this feed is already downloading")
 
+// ErrFeedChanged is returned when a feed's settings changed while it
+// downloaded; the result is thrown away and the feed downloads again.
+var ErrFeedChanged = errors.New("the feed's settings changed while it downloaded, so it will download again shortly")
+
 // Refresh downloads one feed now and replaces its indicators.
 func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
-	fd, ok := f.Get(name)
+	f.mu.Lock()
+	fd, ok := f.get(name)
 	if !ok {
+		f.mu.Unlock()
 		return FeedStatus{}, ErrUnknownFeed
 	}
-	start := f.now()
-	f.mu.Lock()
+	if fd.Problem != "" {
+		f.mu.Unlock()
+		return FeedStatus{}, errors.New(fd.Problem)
+	}
 	st := f.stateFor(name)
 	if st.Running {
 		f.mu.Unlock()
 		return *st, ErrFeedRunning
 	}
 	st.Running = true
+	gen := f.gen[name]
 	f.mu.Unlock()
 
-	res, added, removed, err := f.download(ctx, fd, start)
+	start := f.now()
+	got, added, removed, err := f.download(ctx, fd, start, gen)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if _, still := f.get(name); !still {
+		delete(f.status, name) // deleted while it downloaded
+		return FeedStatus{}, ErrUnknownFeed
+	}
+	st = f.stateFor(name)
 	st.Running = false
+	if errors.Is(err, ErrFeedChanged) || f.gen[name] != gen {
+		st.NextRun = time.Time{} // download again with the new settings
+		return *st, ErrFeedChanged
+	}
 	st.LastAttempt = start
 	st.DurationMS = f.now().Sub(start).Milliseconds()
 	if err != nil {
@@ -316,57 +575,29 @@ func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
 		f.saveStatus()
 		return *st, err
 	}
+	res := got.Result
 	st.LastError = ""
 	st.LastSuccess = start
 	st.NextRun = start.Add(fd.Interval)
 	st.Count, st.Added, st.Removed = len(res.Indicators), added, removed
-	st.Skipped, st.Example = res.Skipped, res.Example
+	st.Skipped, st.Example, st.Reserved, st.Note = res.Skipped, res.Example, res.Reserved, got.Note
 	f.saveStatus()
 	f.log().Info("threat intel feed downloaded", "feed", name, "indicators", st.Count, "added", added, "removed", removed, "skipped", res.Skipped)
 	return *st, nil
 }
 
-func (f *Feeds) download(ctx context.Context, fd Feed, now time.Time) (*ParseResult, int, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+// download fetches a feed and stores its indicators, unless the feed
+// changed (gen) meanwhile. Errors are in plain words without secrets.
+func (f *Feeds) download(ctx context.Context, fd Feed, now time.Time, gen int) (*fetched, int, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, RunTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fd.URL, nil)
+	got, err := f.fetch(ctx, fd, now, fetchLimits{MaxBytes: f.maxBytes(), Refuse: f.maxBytes(), Timeout: RunTimeout})
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, errors.New(describe(err, fd, RunTimeout))
 	}
-	req.Header.Set("User-Agent", "Signalith threat intel")
-	for k, v := range fd.Headers {
-		req.Header.Set(k, ExpandEnv(v))
-	}
-	resp, err := f.client().Do(req)
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("download failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		msg := strings.TrimSpace(string(body))
-		if msg != "" {
-			msg = ": " + msg
-		}
-		return nil, 0, 0, fmt.Errorf("download failed: %s%s", resp.Status, msg)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxDownload+1))
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("download failed: %w", err)
-	}
-	if len(data) > MaxDownload {
-		return nil, 0, 0, fmt.Errorf("the feed is larger than %d MB", MaxDownload>>20)
-	}
-	res, err := Parse(data, ParseOptions{Format: fd.Format, Type: fd.Type, Column: fd.Column, Now: now})
-	if err != nil {
-		return nil, 0, 0, err
-	}
+	res := got.Result
 	if len(res.Indicators) == 0 {
-		msg := "the download had no indicators, so the previous ones are kept"
-		if res.Skipped > 0 {
-			msg = fmt.Sprintf("none of the %d values were valid indicators (first: %q); check the feed's format, type and column", res.Skipped, res.Example)
-		}
-		return nil, 0, 0, errors.New(msg)
+		return nil, 0, 0, errors.New(emptyMessage(got) + " The previous indicators are kept.")
 	}
 	expires := now.Add(fd.MaxAge)
 	for i := range res.Indicators {
@@ -381,11 +612,19 @@ func (f *Feeds) download(ctx context.Context, fd Feed, now time.Time) (*ParseRes
 			ind.Expires = expires
 		}
 	}
+	f.storeMu.Lock()
+	defer f.storeMu.Unlock()
+	f.mu.Lock()
+	changed := f.gen[fd.Name] != gen
+	f.mu.Unlock()
+	if changed {
+		return nil, 0, 0, ErrFeedChanged
+	}
 	added, removed, err := f.Store.ReplaceSource(ctx, fd.Name, res.Indicators)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("could not store indicators: %w", err)
 	}
-	return res, added, removed, nil
+	return got, added, removed, nil
 }
 
 func mergeTags(a, b []string) []string {
@@ -405,6 +644,9 @@ func mergeTags(a, b []string) []string {
 	return out
 }
 
+// lookupEnv reads an environment variable.
+var lookupEnv = os.Getenv
+
 // ExpandEnv replaces ${NAME} with the environment variable NAME, so API
 // keys for feeds can stay out of the config file. Other $ signs are kept.
 func ExpandEnv(v string) string {
@@ -421,7 +663,7 @@ func ExpandEnv(v string) string {
 			return b.String()
 		}
 		b.WriteString(v[:i])
-		b.WriteString(os.Getenv(v[i+2 : i+j]))
+		b.WriteString(lookupEnv(v[i+2 : i+j]))
 		v = v[i+j+1:]
 	}
 }
