@@ -543,7 +543,7 @@ page itself.
 `DELETE /api/dashboards/{id}`, `POST /api/dashboards/{id}/panels`,
 `POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`.
 
-**Admin:** `GET /api/agents/config`, `POST /api/detections`,
+**Admin:** `GET /api/agents/config`, `POST /api/tls/names`, `POST /api/detections`,
 `POST /api/detections/test`, `POST /api/detections/sigma`,
 `PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
@@ -554,7 +554,8 @@ page itself.
 
 A route added without a role is admin-only, and a test fails until it gets one. That
 includes routes registered outside the role table, straight on the server's outer
-router: any `/api/` route there other than the three public ones is admin-only.
+router: any `/api/` route there other than the public ones (sign-in, sign-out, agent
+ingest and the CA certificate, `GET /api/tls/ca.pem`) is admin-only.
 
 A refused request:
 

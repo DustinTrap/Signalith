@@ -112,7 +112,7 @@ func TestGenerateUsesServerAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Host             192.168.1.20\n", "Port             8443\n", "tls              On\n"} {
+	for _, want := range []string{"Host                 192.168.1.20\n", "Port                 8443\n", "tls                  On\n"} {
 		if !strings.Contains(a.Config, want) {
 			t.Errorf("config missing %q:\n%s", want, a.Config)
 		}
@@ -125,7 +125,7 @@ func TestGenerateUsesServerAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(a.Config, "Host             2001:db8::20\n") || !strings.Contains(a.Config, "tls              On\n") {
+	if !strings.Contains(a.Config, "Host                 2001:db8::20\n") || !strings.Contains(a.Config, "tls                  On\n") {
 		t.Errorf("IPv6 address:\n%s", a.Config)
 	}
 
@@ -133,7 +133,7 @@ func TestGenerateUsesServerAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(a.Config, "Port             80\n") || a.ServerURL != "http://localhost" || !a.ServerLoopback {
+	if !strings.Contains(a.Config, "Port                 80\n") || a.ServerURL != "http://localhost" || !a.ServerLoopback {
 		t.Errorf("server_url = %q, loopback = %v:\n%s", a.ServerURL, a.ServerLoopback, a.Config)
 	}
 }
@@ -164,8 +164,9 @@ func TestGenerateTrustsTheServerCA(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"tls              On\n", "tls.verify       On\n",
-		"tls.ca_file      /etc/fluent-bit/signalith-ca.pem\n", "tls.vhost        siem.corp.local\n",
+		"tls                  On\n", "tls.verify           On\n",
+		"tls.ca_file          /etc/fluent-bit/signalith-ca.pem\n", "tls.vhost            siem.corp.local\n",
+		"tls.verify_hostname  On\n",
 	} {
 		if !strings.Contains(a.Config, want) {
 			t.Errorf("config missing %q:\n%s", want, a.Config)
@@ -188,18 +189,37 @@ func TestGenerateTrustsTheServerCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(a.Config, `tls.ca_file      C:\Program Files\fluent-bit\conf\signalith-ca.pem`) {
+	if !strings.Contains(a.Config, `tls.ca_file          C:\Program Files\fluent-bit\conf\signalith-ca.pem`) {
 		t.Errorf("windows config:\n%s", a.Config)
 	}
-	// An IP address is no name to ask for.
-	if strings.Contains(a.Config, "tls.vhost") {
+	// An IP address is no name to ask for or check.
+	if strings.Contains(a.Config, "tls.vhost") || strings.Contains(a.Config, "verify_hostname") {
 		t.Errorf("vhost for an IP address:\n%s", a.Config)
 	}
-	if a.CAStep != 3 || a.ConfigStep != 4 || !strings.Contains(a.Steps[a.CAStep-1], a.CAPath) || !strings.Contains(a.Steps[a.ConfigStep-1], a.ConfigPath) {
+	// A browser saves both files to Downloads; a step copies them into
+	// place.
+	if a.CAStep != 3 || a.ConfigStep != 4 || !strings.Contains(a.Steps[a.CAStep-1], "as signalith-ca.pem.") || !strings.Contains(a.Steps[a.ConfigStep-1], "as fluent-bit.conf.") {
 		t.Errorf("steps %d %d: %q", a.CAStep, a.ConfigStep, a.Steps)
 	}
-	if want := `icacls "C:\Program Files\fluent-bit\conf\fluent-bit.conf" /inheritance:r /grant:r SYSTEM:F Administrators:F`; !strings.Contains(a.Steps[4], want) {
-		t.Errorf("icacls step: %q", a.Steps[4])
+	// Then only SYSTEM and Administrators may read the config and the
+	// buffer, named by SID so it works in every language.
+	for _, want := range []string{
+		`cd "$env:USERPROFILE\Downloads"`,
+		`Copy-Item signalith-ca.pem, fluent-bit.conf 'C:\Program Files\fluent-bit\conf\' -Force`,
+		`icacls 'C:\Program Files\fluent-bit\conf\fluent-bit.conf' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F'`,
+		`icacls 'C:\ProgramData\fluent-bit' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'`,
+	} {
+		if !strings.Contains(a.Steps[4], want) {
+			t.Errorf("install step lacks %s: %q", want, a.Steps[4])
+		}
+	}
+	if !strings.Contains(a.Config, `storage.path         C:\ProgramData\fluent-bit\signalith-buffer`) {
+		t.Errorf("the buffer is not in the folder the steps lock down:\n%s", a.Config)
+	}
+	// Without a CA file, only the config is copied.
+	a, _ = Generate(Options{OS: "windows", ServerURL: "https://siem.example.com", Token: "tok-0123456789abcdef"})
+	if !strings.Contains(a.Steps[a.ConfigStep], "Copy-Item fluent-bit.conf 'C:") || strings.Contains(a.Steps[a.ConfigStep], "signalith-ca.pem") {
+		t.Errorf("windows without a CA: %q", a.Steps)
 	}
 }
 
@@ -209,21 +229,27 @@ func TestGenerateWithoutCA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(a.Config, "ca_file") || a.CAStep != 0 || a.ConfigStep != 2 || !strings.Contains(a.Config, "tls.vhost        siem.example.com\n") {
+	if strings.Contains(a.Config, "ca_file") || a.CAStep != 0 || a.ConfigStep != 2 || !strings.Contains(a.Config, "tls.vhost            siem.example.com\n") {
 		t.Errorf("public CA: steps %d %d\n%s", a.CAStep, a.ConfigStep, a.Config)
+	}
+	// Any public CA vouches for many sites, so the agent must also check
+	// the certificate is for this server's name, or anyone with a
+	// certificate for any domain could take its token and events.
+	if !strings.Contains(a.Config, "tls.verify_hostname  On\n") {
+		t.Errorf("public CA without a host name check:\n%s", a.Config)
 	}
 	if !strings.Contains(a.Steps[2], "sudo install -m 600 -o root -g root fluent-bit.conf /etc/fluent-bit/fluent-bit.conf") {
 		t.Errorf("install step: %q", a.Steps[2])
 	}
 	// Plain http (HTTPS is off, behind a proxy): no TLS settings at all.
 	a, _ = Generate(Options{OS: "linux", ServerURL: "http://siem:8080", Token: "tok-0123456789abcdef", CA: testCA})
-	if !strings.Contains(a.Config, "tls              Off\n") || strings.Contains(a.Config, "ca_file") || strings.Contains(a.Config, "vhost") || a.CA != "" {
+	if !strings.Contains(a.Config, "tls                  Off\n") || strings.Contains(a.Config, "ca_file") || strings.Contains(a.Config, "vhost") || a.CA != "" {
 		t.Errorf("http:\n%s", a.Config)
 	}
 	// A private CA Signalith does not have: the agent still reads a CA
 	// file, and the step says where to get it.
 	a, _ = Generate(Options{OS: "linux", ServerURL: "https://siem.corp:8080", Token: "tok-0123456789abcdef", CAUnknown: true})
-	if !strings.Contains(a.Config, "tls.ca_file") || a.CA != "" || !strings.Contains(a.Steps[a.CAStep-1], "does not include it") {
+	if !strings.Contains(a.Config, "tls.ca_file") || a.CA != "" || !strings.Contains(a.Steps[a.CAStep-1], "doesn't include it") {
 		t.Errorf("unknown CA: %q\n%s", a.Steps, a.Config)
 	}
 }

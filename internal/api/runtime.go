@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Runtime describes where the server runs, so the UI can give setup steps
@@ -38,7 +39,7 @@ func (s *Server) runtimeInfo() Runtime {
 	r := Runtime{OS: runtime.GOOS, LowPorts: true, Addresses: []string{}}
 	r.Exe, _ = os.Executable()
 	if runtime.GOOS == "linux" {
-		r.Container = exists("/.dockerenv") || exists("/run/.containerenv")
+		r.Container = detectContainer()
 		r.Systemd = os.Getenv("INVOCATION_ID") != ""
 		r.LowPorts = linuxLowPorts(os.ReadFile)
 	}
@@ -47,6 +48,20 @@ func (s *Server) runtimeInfo() Runtime {
 	}
 	return r
 }
+
+// inContainer reports whether the server runs in Docker or Podman.
+func (s *Server) inContainer() bool {
+	if s.Runtime != nil {
+		return s.Runtime.Container
+	}
+	return detectContainer()
+}
+
+// detectContainer looks for the files Docker and Podman put in every
+// container, once.
+var detectContainer = sync.OnceValue(func() bool {
+	return runtime.GOOS == "linux" && (exists("/.dockerenv") || exists("/run/.containerenv"))
+})
 
 func exists(path string) bool {
 	_, err := os.Stat(path)

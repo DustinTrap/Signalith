@@ -28,7 +28,9 @@ if (-not (Test-Path $config)) {
   & $exe init -c $config -listen $Listen -opensearch $OpenSearchUrl "-syslog-udp=$SyslogUdp" "-syslog-tcp=$SyslogTcp" "-syslog-tls=$SyslogTls"
 }
 # Only Administrators and SYSTEM may read the config (it holds the ingest token).
-icacls $ConfigDir /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
+# They are named by SID (S-1-5-32-544 and S-1-5-18), since the names differ
+# in other languages of Windows.
+icacls $ConfigDir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
 
 & $exe validate -c $config
 & $exe service install -c $config

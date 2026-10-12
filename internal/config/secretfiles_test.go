@@ -45,9 +45,10 @@ func TestSecretFiles(t *testing.T) {
 		t.Errorf("bind password %q %v", s.BindPassword, err)
 	}
 
-	// Both forms of the ingest token add a token each.
+	// Both forms of the ingest token add a token each, the file's first:
+	// it is the one new agents get, and the variable keeps an older one.
 	t.Setenv("SIGNALITH_INGEST_TOKEN", "token-from-the-environment")
-	if c, err := Load(path); err != nil || !slices.Equal(c.Ingest.Tokens, []string{"token-from-the-environment", "token-from-a-file-0123456789"}) {
+	if c, err := Load(path); err != nil || !slices.Equal(c.Ingest.Tokens, []string{"token-from-a-file-0123456789", "token-from-the-environment"}) {
 		t.Errorf("tokens %q %v", c.Ingest.Tokens, err)
 	}
 	// For the others, setting both is a mistake.
@@ -170,9 +171,8 @@ func TestPublicURLFromEnvironmentUpgrades(t *testing.T) {
 	if c.Server.PublicURL != "https://192.168.1.20:8080" {
 		t.Errorf("public url %s", c.Server.PublicURL)
 	}
-	// In the file it is still a mistake to fix.
-	t.Setenv("SIGNALITH_PUBLIC_URL", "")
-	if _, err := loadYAML(t, "server:\n  public_url: http://localhost:8080\n  tls:\n    mode: auto\n"); err == nil {
-		t.Error("http:// public_url with HTTPS on was accepted")
+	// It still works, and the warning says where to change it.
+	if w := strings.Join(c.Warnings(), "\n"); !strings.Contains(w, "Change SIGNALITH_PUBLIC_URL to https://192.168.1.20:8080") {
+		t.Errorf("warnings:\n%s", w)
 	}
 }

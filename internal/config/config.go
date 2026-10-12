@@ -60,6 +60,9 @@ type Config struct {
 	// publicURLFromEnv is set when SIGNALITH_PUBLIC_URL set
 	// server.public_url.
 	publicURLFromEnv bool
+	// httpPublicURL is the http:// public_url Validate read as https://,
+	// for Warnings.
+	httpPublicURL string
 	// sections are the top-level keys in that file.
 	sections map[string]bool
 }
@@ -196,6 +199,21 @@ func (s Server) TrustedProxyList() []netip.Prefix {
 		}
 	}
 	return out
+}
+
+// LegacyProxy reports whether X-Forwarded-Proto from a is believed only
+// because the config was written before HTTPS was the default and lists
+// no server.trusted_proxies. Such a config may sit behind a reverse proxy
+// set up the way older versions described (send X-Forwarded-Proto, keep
+// public_url http://), so the header is believed from this machine and
+// private networks, where that proxy would be; the Health page then asks
+// for server.trusted_proxies.
+func (s Server) LegacyProxy(a netip.Addr) bool {
+	if !s.legacyHTTP() || len(s.TrustedProxies) > 0 {
+		return false
+	}
+	a = a.Unmap().WithZone("")
+	return a.IsLoopback() || a.IsPrivate()
 }
 
 // TrustsProxy reports whether a is in server.trusted_proxies.
@@ -976,6 +994,10 @@ func (c *Config) applyEnv() error {
 	if v, err := envSecret("SIGNALITH_INGEST_TOKEN"); err != nil {
 		return err
 	} else {
+		// The file's token comes first, so it is the one the Add data
+		// page gives new agents: the variable is how an older token is
+		// kept for agents that still use it.
+		slices.Reverse(v)
 		c.Ingest.Tokens = append(c.Ingest.Tokens, v...)
 	}
 	// "off" turns a syslog listener off, since an empty variable is
@@ -1026,15 +1048,17 @@ func (c *Config) Validate() error {
 	} else if u, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	} else if u.Scheme == "http" && c.Server.HTTPS() {
-		if c.Server.legacyHTTP() || c.publicURLFromEnv {
-			// Written when Signalith served plain HTTP (in the file, or
-			// in SIGNALITH_PUBLIC_URL as older Docker examples show it);
-			// the same port serves HTTPS now.
-			c.Server.PublicURL = "https://" + u.Host
-		} else {
-			p = append(p, fmt.Sprintf("server.public_url %s is plain http, but Signalith serves HTTPS on its port (server.tls.mode: %s), "+
-				"so agents set up with it could not send. Change it to https://%s", c.Server.PublicURL, c.Server.TLSMode(), u.Host))
+		// Most likely written when Signalith served plain HTTP (in the
+		// file, or in SIGNALITH_PUBLIC_URL as older Docker examples show
+		// it). The same port serves HTTPS now, so that is the address;
+		// Warnings asks for the setting to be changed. With no port it
+		// was port 80, which https:// alone would not mean.
+		host := u.Host
+		if u.Port() == "" {
+			host = net.JoinHostPort(u.Hostname(), "80")
 		}
+		c.httpPublicURL = c.Server.PublicURL
+		c.Server.PublicURL = "https://" + host
 	}
 	c.OpenSearch.moveURLCredentials()
 	p = append(p, c.OpenSearch.problems(c.resolve)...)
@@ -1155,14 +1179,26 @@ func (c *Config) Warnings() []string {
 	}
 	if c.publicAdminPassword && c.adminHashFile == "" {
 		w = append(w, "The built-in admin's password is "+publicAdminPassword+", the example in an older docker-compose.yml, which anyone can look up. "+
-			"Remove SIGNALITH_ADMIN_PASSWORD (the Docker quick start now makes a password: docker compose exec signalith signalith initial-password), "+
-			"or set a new one with signalith passwd.")
+			"Remove SIGNALITH_ADMIN_PASSWORD (the Docker quick start now makes a password; from the Signalith folder: "+
+			"docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password), or set a new one with signalith passwd.")
 	}
 	for _, t := range c.Ingest.Tokens {
-		if slices.Contains(publicIngestTokens, t) {
+		if IsPublicIngestToken(t) {
+			fix := "Give each agent a new configuration from the Add data page, which has this server's own token, then remove " + t
+			if len(c.Ingest.Tokens) == 1 {
+				fix = "Add a token of your own under ingest.tokens (signalith init makes one), give each agent a new configuration from the Add data page, then remove " + t
+			}
 			w = append(w, "ingest.tokens includes "+t+", the example token in an older docker-compose.yml, which anyone can look up and use to send events. "+
-				"Give each agent a new configuration from the Add data page (it has this server's own token), then remove "+t+" (SIGNALITH_INGEST_TOKEN).")
+				fix+" (in ingest.tokens or SIGNALITH_INGEST_TOKEN).")
 		}
+	}
+	if c.httpPublicURL != "" {
+		where, fix := "server.public_url is "+c.httpPublicURL, "Change public_url to "+c.Server.PublicURL+" in signalith.yaml"
+		if c.publicURLFromEnv {
+			where, fix = "SIGNALITH_PUBLIC_URL is "+c.httpPublicURL, "Change SIGNALITH_PUBLIC_URL to "+c.Server.PublicURL+" (in docker-compose.yml, or wherever it is set)"
+		}
+		w = append(w, where+", but Signalith serves HTTPS on that port now, so agents are set up with "+c.Server.PublicURL+". "+
+			fix+". If a reverse proxy in front adds HTTPS, use the proxy's https:// address instead.")
 	}
 	if host, _, err := net.SplitHostPort(c.Server.Listen); err == nil && !c.Server.HTTPS() && !isLoopback(host) && len(c.Server.TrustedProxies) == 0 {
 		w = append(w, "HTTPS is off (server.tls.mode: off) and server.listen accepts connections from other machines, so passwords, sessions, "+
@@ -1177,6 +1213,11 @@ func (c *Config) Warnings() []string {
 const publicAdminPassword = "change-me-please"
 
 var publicIngestTokens = []string{"change-this-ingest-token"}
+
+// IsPublicIngestToken reports whether t is the example ingest token from an
+// older docker-compose.yml, which anyone can look up. The Add data page
+// never hands it to new agents.
+func IsPublicIngestToken(t string) bool { return slices.Contains(publicIngestTokens, t) }
 
 // OpenSearchTLSFiles returns opensearch.ca_file, cert_file and key_file,
 // with relative paths made relative to the folder this config file is in.

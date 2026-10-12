@@ -53,6 +53,19 @@ func TestHTTPSDefaults(t *testing.T) {
 	if err != nil || c.Server.PlaintextIngest() || strings.Join(c.Server.TLSNames(), ",") != "siem.example.com,192.0.2.10" {
 		t.Errorf("tls section: %v %v %v", err, c.Server.PlaintextIngest(), c.Server.TLSNames())
 	}
+	// An http public_url with HTTPS on, such as an old config after
+	// following the upgrade steps (a tls section added) or one with no
+	// port: the same host and port over HTTPS, and a warning to fix it.
+	for text, want := range map[string]string{
+		"server:\n  public_url: http://siem:18775\n  tls:\n    mode: auto\n    plaintext_ingest: deny\n": "https://siem:18775",
+		"server:\n  listen: 0.0.0.0:80\n  public_url: http://siem.corp\n":                                "https://siem.corp:80",
+		"server:\n  public_url: http://[2001:db8::5]\n":                                                  "https://[2001:db8::5]:80",
+	} {
+		c, err := loadYAML(t, text)
+		if err != nil || c.Server.PublicURL != want || !strings.Contains(strings.Join(c.Warnings(), "\n"), "Change public_url to "+want+" in signalith.yaml") {
+			t.Errorf("%q: %v, public_url %s, warnings %v", text, err, c.Server.PublicURL, c.Warnings())
+		}
+	}
 	// An old config with an https public_url and no certificate had a
 	// reverse proxy adding HTTPS: it stays plain behind it.
 	c, err = loadYAML(t, "server:\n  listen: 127.0.0.1:8080\n  public_url: https://siem.example.com\n")
@@ -92,8 +105,6 @@ func TestHTTPSValidation(t *testing.T) {
 		"server:\n  tls:\n    plaintext_ingest: maybe\n":                                      `plaintext_ingest "maybe" must be allow or deny`,
 		"server:\n  tls:\n    names: [\"bad name\", \"ok.example.com\"]\n":                    `server.tls.names[0] "bad name"`,
 		"server:\n  trusted_proxies: [10.0.0.0/33]\n":                                         `server.trusted_proxies[0] "10.0.0.0/33"`,
-		// HTTPS on, so an http public_url could not work for agents.
-		"server:\n  public_url: http://siem:8080\n  tls:\n    mode: auto\n": "Change it to https://siem:8080",
 	} {
 		if _, err := loadYAML(t, text); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: error %v, want %q", text, err, want)
@@ -144,18 +155,26 @@ func TestTrustedProxies(t *testing.T) {
 }
 
 func TestStateDir(t *testing.T) {
+	// t.TempDir is absolute on every system; "/var/..." is not on Windows,
+	// where an absolute path needs a drive letter.
+	root := t.TempDir()
 	c := Default()
-	c.path = filepath.Join("/etc", "signalith", "signalith.yaml")
-	c.Lookups.Dir = filepath.Join("/var", "lib", "signalith", "lookups")
+	c.path = filepath.Join(root, "etc", "signalith.yaml")
+	c.Lookups.Dir = filepath.Join(root, "var", "lookups")
 	t.Setenv("SIGNALITH_STATE_DIR", "")
-	if got := c.StateDir(); got != filepath.Join("/var", "lib", "signalith") {
+	if got := c.StateDir(); got != filepath.Join(root, "var") {
 		t.Errorf("StateDir = %s", got)
 	}
-	if got := c.TLSDir(); got != filepath.Join("/var", "lib", "signalith", "tls") {
+	if got := c.TLSDir(); got != filepath.Join(root, "var", "tls") {
 		t.Errorf("TLSDir = %s", got)
 	}
-	t.Setenv("SIGNALITH_STATE_DIR", filepath.Join("/srv", "state"))
-	if got := c.TLSDir(); got != filepath.Join("/srv", "state", "tls") {
+	// A relative lookups.dir is relative to the config file.
+	c.Lookups.Dir = "lookups"
+	if got := c.StateDir(); got != filepath.Join(root, "etc") {
+		t.Errorf("StateDir with a relative lookups.dir = %s", got)
+	}
+	t.Setenv("SIGNALITH_STATE_DIR", filepath.Join(root, "state"))
+	if got := c.TLSDir(); got != filepath.Join(root, "state", "tls") {
 		t.Errorf("TLSDir with SIGNALITH_STATE_DIR = %s", got)
 	}
 }

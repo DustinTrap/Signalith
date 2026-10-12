@@ -258,10 +258,10 @@ func TestTLSWithCertificateManager(t *testing.T) {
 	}
 	first := send()
 	waitFor(t, "the event", func() bool { return bulk.count() == 1 })
-	if err := m.EnsureName("syslog.example.com"); err != nil {
+	if err := m.EnsureName("syslog.corp.lan"); err != nil {
 		t.Fatal(err)
 	}
-	if second := send(); second.SerialNumber.Cmp(first.SerialNumber) == 0 || second.VerifyHostname("syslog.example.com") != nil {
+	if second := send(); second.SerialNumber.Cmp(first.SerialNumber) == 0 || second.VerifyHostname("syslog.corp.lan") != nil {
 		t.Error("the new certificate is not served")
 	}
 	waitFor(t, "the second event", func() bool { return bulk.count() == 2 })

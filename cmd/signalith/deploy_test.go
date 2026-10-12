@@ -1,15 +1,24 @@
 package main
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/ospki"
+	"github.com/jrsamsanchez/signalith/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,6 +45,7 @@ type composeService struct {
 	Healthcheck map[string]any    `yaml:"healthcheck"`
 	Build       map[string]string `yaml:"build"`
 	PullPolicy  string            `yaml:"pull_policy"`
+	Hostname    string            `yaml:"hostname"`
 }
 
 type dep struct {
@@ -183,6 +193,11 @@ func TestDockerCompose(t *testing.T) {
 			t.Errorf("signalith does not publish %s", p)
 		}
 	}
+	// A fixed host name for the certificate and its CA, not the
+	// container's ID.
+	if s.Hostname != "signalith" {
+		t.Errorf("signalith hostname %q", s.Hostname)
+	}
 }
 
 // TestDockerConfigLoads loads the Docker quick start's signalith.yaml the
@@ -245,6 +260,75 @@ func TestDockerConfigLoads(t *testing.T) {
 	if w := c.Warnings(); len(w) != 0 {
 		t.Errorf("warnings: %v", w)
 	}
+	dockerUpgrade(t, c)
+}
+
+// dockerUpgrade checks what agents from the older Docker quick start meet
+// after the upgrade, with the quick start's own config. They sent the
+// example token change-this-ingest-token over plain HTTP, which the new
+// docker-compose.yml no longer sets: they keep sending while
+// plaintext_ingest is allow, as shipped, and new agents get the server's
+// own token, even if the old one is put back in the environment.
+func dockerUpgrade(t *testing.T, c *config.Config) {
+	t.Helper()
+	srv := &api.Server{
+		Config:   c,
+		Pipeline: &ingest.Pipeline{Store: nopBulk{}},
+		Log:      slog.New(slog.DiscardHandler),
+		Runtime:  &api.Runtime{OS: "linux", Container: true, Addresses: []string{}},
+	}
+	plain := httptest.NewServer(srv.PlainHandler(srv.Handler()))
+	defer plain.Close()
+	secure := httptest.NewTLSServer(srv.Handler())
+	defer secure.Close()
+	post := func(cl *http.Client, url, token string) int {
+		req, _ := http.NewRequest("POST", url+"/api/ingest", strings.NewReader(`[{"Computer":"WIN-01","EventID":4624,"Channel":"Security"}]`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post(plain.Client(), plain.URL, "change-this-ingest-token"); code != http.StatusOK {
+		t.Errorf("an old agent over plain HTTP: %d", code)
+	}
+	if got := srv.Pipeline.PlaintextSenders(time.Time{}); len(got) != 1 || !slices.Equal(got[0].Hosts, []string{"WIN-01"}) {
+		t.Errorf("plain-text senders %+v", got)
+	}
+	// Over HTTPS the old token is refused, with a status Fluent Bit
+	// retries; the server's own token works.
+	if code := post(secure.Client(), secure.URL, "change-this-ingest-token"); code != http.StatusServiceUnavailable {
+		t.Errorf("the old token over HTTPS: %d", code)
+	}
+	if code := post(secure.Client(), secure.URL, c.Ingest.Tokens[0]); code != http.StatusOK {
+		t.Errorf("the new token over HTTPS: %d", code)
+	}
+	// Put back in the environment, the old token is not handed to new
+	// agents.
+	c.Ingest.Tokens = append(c.Ingest.Tokens, "change-this-ingest-token")
+	slices.Reverse(c.Ingest.Tokens)
+	h, _ := config.HashPassword("an admin password")
+	c.Auth.AdminPasswordHash = h
+	req, _ := http.NewRequest("GET", secure.URL+"/api/agents/config?os=windows", nil)
+	req.SetBasicAuth("admin", "an admin password")
+	resp, err := secure.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || strings.Contains(string(b), "change-this-ingest-token") || !strings.Contains(string(b), c.Ingest.Tokens[1]) {
+		t.Errorf("agent config: %d %s", resp.StatusCode, b)
+	}
+}
+
+// nopBulk stores nothing and says every event was stored.
+type nopBulk struct{}
+
+func (nopBulk) Bulk(context.Context, []store.IndexedDoc) ([]store.BulkItemError, error) {
+	return nil, nil
 }
 
 func anyStrings(v any) []string {

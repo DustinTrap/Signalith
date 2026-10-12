@@ -1976,6 +1976,7 @@ let agentServerGuess = ''; // known once the server has answered without server=
 let agentServerSent = null;
 let agentServerTimer = 0;
 let agentSetupPending = null; // the latest load, which Copy and Download may wait for
+let agentNameAdd = ''; // the address Signalith's certificate doesn't cover yet (from the latest setup)
 try {
   // An address saved while this server spoke plain HTTP: agents now send
   // over HTTPS, on the same port.
@@ -1989,10 +1990,28 @@ agentServerEl.addEventListener('input', () => {
   clearTimeout(agentServerTimer);
   agentServerTimer = setTimeout(agentServerChanged, 400);
 });
-agentServerEl.addEventListener('change', () => {
+agentServerEl.addEventListener('change', async () => {
   if (!agentServerEl.value.trim()) agentServerEl.value = agentServerGuess; // cleared: back to the default
-  agentServerChanged();
+  if (await agentSetupFresh()) agentEnsureName();
 });
+
+// agentEnsureName adds the address agents send to to Signalith's HTTPS
+// certificate, once it is entered (the field is left, or Copy or Download
+// is used), never while it is being typed. It is false when the name
+// can't be added; the field then says why.
+async function agentEnsureName() {
+  const name = agentNameAdd;
+  if (!name) return true;
+  try {
+    await api('api/tls/names', { name });
+    if (agentNameAdd === name) agentNameAdd = '';
+    return true;
+  } catch (e) {
+    agentServerError(e.message);
+    agentServerEl.focus();
+    return false;
+  }
+}
 
 function agentServerChanged() {
   clearTimeout(agentServerTimer);
@@ -2094,6 +2113,7 @@ function agentServerWarn(a) {
 
 function agentSetupRender(a) {
   if (agentSetupErrEl) agentSetupErrEl.remove();
+  agentNameAdd = a.add_name || '';
   agentServerWarn(a);
   agentSetupConfig = a.config || '';
   $('agent-steps').classList.remove('hidden');
@@ -2150,8 +2170,8 @@ function agentSetupInline(text, names = []) {
 }
 
 // caFile shows the CA certificate agents and devices check this server
-// with: its file name, Download and Copy, the certificate and its SHA-256
-// fingerprint, which matches the one Signalith logs when it starts.
+// with: its file name, Download and Copy, its SHA-256 fingerprint (the one
+// Signalith logs when it starts) and, folded away, the certificate.
 function caFile(pem, fingerprint) {
   const name = 'signalith-ca.pem';
   const btn = (ic, label) => el('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, icon(ic), el('span', {}, label));
@@ -2168,8 +2188,9 @@ function caFile(pem, fingerprint) {
   copy.addEventListener('click', () => agentSetupCopy(pem, copy));
   return el('div', { class: 'agent-file agent-ca' },
     el('div', { class: 'agent-file__bar' }, icon('shield-check'), el('span', { class: 'agent-file__name mono' }, name), el('span', { class: 'spacer' }), dl, copy),
-    el('pre', { class: 'agent-ca__pem', tabindex: '0', 'aria-label': 'CA certificate' }, pem.trim()),
-    fingerprint ? el('p', { class: 'agent-ca__fp' }, el('span', {}, 'SHA-256 fingerprint'), el('code', {}, fingerprint)) : null);
+    fingerprint ? el('p', { class: 'agent-ca__fp' }, el('span', {}, 'SHA-256 fingerprint'), el('code', {}, fingerprint)) : null,
+    el('details', { class: 'agent-ca__more' }, el('summary', {}, icon('chevron-right', 'icon--sm chev'), 'Show certificate'),
+      el('pre', { class: 'agent-ca__pem', tabindex: '0', 'aria-label': 'CA certificate' }, pem.trim())));
 }
 
 function agentSetupCommand(cmd, label = 'Copy command') {
@@ -2269,11 +2290,12 @@ const agentSetupStale = () => agentServerValue() !== agentServerSent || $('agent
 
 $('copy-config').addEventListener('click', async () => {
   if (agentSetupStale() && !(await agentSetupFresh())) return;
+  if (!(await agentEnsureName())) return;
   agentSetupCopy(agentSetupConfig, $('copy-config'));
 });
 $('agent-download').addEventListener('click', async () => {
   if (agentSetupStale() && !(await agentSetupFresh())) return;
-  if (!agentSetupConfig) return;
+  if (!agentSetupConfig || !(await agentEnsureName())) return;
   const url = URL.createObjectURL(new Blob([agentSetupConfig], { type: 'text/plain' }));
   const a = el('a', { href: url, download: 'fluent-bit.conf', class: 'hidden' });
   document.body.append(a);
@@ -2295,6 +2317,8 @@ const syslogVendorKey = 'signalith.syslogVendor';
 const syslogHostKey = 'signalith.syslogHost';
 const syslogState = {
   h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', vendor: 'rsyslog', hostTimer: 0, tabsObserver: null, ca: null,
+  // why the certificate can't include a host devices send to: { host, msg }
+  nameError: null,
   // since the panel opened: when, the counts then, new senders announced, and what the live box says
   opened: 0, base: null, announced: new Set(), liveKey: '',
 };
@@ -2330,6 +2354,8 @@ async function syslogOpen() {
   const h = syslogHostEl.value.trim();
   st.host = syslogHostProblem(h) ? st.host || syslogDefaultHost() : h.replace(/^\[|\]$/g, '');
   await syslogPoll();
+  // The address shown was entered before, or is the one agents use.
+  syslogEnsureName();
 }
 
 // syslogGuessHost asks for the agent setup once when no address is known
@@ -2403,7 +2429,33 @@ syslogHostEl.addEventListener('input', () => {
 syslogHostEl.addEventListener('change', () => {
   if (!syslogHostEl.value.trim()) syslogHostEl.value = syslogDefaultHost();
   syslogHostChanged();
+  syslogEnsureName();
 });
+
+// syslogCovers says whether Signalith's certificate names host.
+function syslogCovers(host) {
+  const names = ((syslogState.h && syslogState.h.tls && syslogState.h.tls.names) || []).map((n) => n.toLowerCase());
+  const h = host.toLowerCase();
+  return names.some((n) => n === h || (n.startsWith('*.') && h.endsWith(n.slice(1)) && !h.slice(0, h.length - n.length + 1).includes('.')));
+}
+
+// syslogEnsureName adds the host devices send to to Signalith's own
+// certificate once it is entered, so devices sending over TLS can check
+// it. When it can't be, the setups say why.
+async function syslogEnsureName() {
+  const st = syslogState;
+  const host = st.host;
+  const tls = st.h && ((st.h.syslog && st.h.syslog.listeners) || []).some((l) => l.protocol === 'tls');
+  if (!tls || !st.ca || !st.ca.own || !host || syslogHostProblem(host) || syslogCovers(host)) return;
+  try {
+    const r = await api('api/tls/names', { name: host });
+    if (st.h.tls) st.h.tls.names = r.names || [];
+    if (st.nameError && st.nameError.host === host) st.nameError = null;
+  } catch (e) {
+    st.nameError = { host, msg: e.message };
+  }
+  syslogRender();
+}
 
 // syslogUseAddress is a button that puts one of this computer's addresses
 // in "Devices send to". Used from the keyboard, focus returns to the field,
@@ -2412,6 +2464,7 @@ function syslogUseAddress(ip) {
   return el('button', { class: 'link-btn mono sl-ip', type: 'button', title: 'Use ' + ip, onclick: (e) => {
     syslogHostEl.value = ip;
     syslogHostChanged();
+    syslogEnsureName();
     if (e.detail === 0) syslogHostEl.focus();
   } }, ip);
 }
@@ -2498,7 +2551,8 @@ function syslogRender() {
   if (!st.h) return;
   const sl = st.h.syslog || {};
   $('syslog-body').removeAttribute('aria-busy');
-  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file, st.h.config_has_syslog, st.h.runtime, st.ca && st.ca.fp]);
+  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file, st.h.config_has_syslog, st.h.runtime, st.ca && st.ca.fp,
+    st.h.tls && st.h.tls.names, st.nameError]);
   if (shape !== st.shape) {
     st.shape = shape;
     st.liveKey = '';
@@ -2838,15 +2892,24 @@ function syslogVendors(d, ips) {
   // read the logs.
   const tls = d.tls && d.ca;
   // A note when Signalith's certificate does not name the host devices
-  // send to, so the device would refuse to connect.
-  const names = ((syslogState.h && syslogState.h.tls && syslogState.h.tls.names) || []).map((n) => n.toLowerCase());
-  const host = d.host.toLowerCase();
-  const covered = names.some((n) => n === host || (n.startsWith('*.') && host.endsWith(n.slice(1)) && !host.slice(0, host.length - n.length + 1).includes('.')));
-  const notCovered = (who) => (covered ? null : el('p', { class: 'hint', 'data-tone': 'warning' }, icon('triangle-alert'), el('span', {},
-    `Signalith’s certificate doesn’t cover ${d.host}, so ${who} won’t connect. Add it under `, slCode('server.tls.names'),
-    ' in signalith.yaml and restart Signalith', ...(names.length ? [', or send to a name it covers: ', names.slice(0, 4).join(', ')] : []), '.')));
+  // send to, so the device would refuse to connect. Its own certificate
+  // takes the name when it is entered (syslogEnsureName); one from
+  // server.tls_cert has to be sent to by a name it covers. Names only
+  // this computer can use are left out, and addresses come first.
+  const nameError = syslogState.nameError && syslogState.nameError.host === d.host ? syslogState.nameError.msg : '';
+  const usable = ((syslogState.h && syslogState.h.tls && syslogState.h.tls.names) || [])
+    .filter((n) => !agentLoopbackHost(n.includes(':') ? '[' + n + ']' : n))
+    .sort((a, b) => syslogIsIP(b) - syslogIsIP(a)).slice(0, 4);
+  const notCovered = (who) => {
+    if (syslogCovers(d.host)) return null;
+    if (d.ca.own && !nameError) return null; // being added
+    const text = nameError ? [nameError.charAt(0).toUpperCase() + nameError.slice(1) + (/[.?!]$/.test(nameError) ? '' : '.')]
+      : [`Signalith’s certificate doesn’t cover ${d.host}, so ${who} won’t connect. `,
+        ...(usable.length ? ['Send to a name it covers, such as ', usable.join(', '), ', or get a certificate that includes it.'] : ['Get a certificate that includes it.'])];
+    return el('p', { class: 'hint', 'data-tone': 'warning' }, icon('triangle-alert'), el('span', {}, ...text));
+  };
   const saveCA = (dir) => [
-    slText('Save the CA certificate below as ', slCode('signalith-ca.pem'), ' on each server. It checks it is sending to this server with it.'),
+    slText('Save Signalith’s CA certificate as ', slCode('signalith-ca.pem'), ' on each server. The server uses it to check it’s talking to Signalith.'),
     caFile(d.ca.pem, d.ca.fp),
     slText('From the folder you saved it in, run:'),
     `sudo install -m 644 signalith-ca.pem ${dir}/signalith-ca.pem\n`,

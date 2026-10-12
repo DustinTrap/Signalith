@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,8 +87,9 @@ type Pipeline struct {
 	warnMu  sync.Mutex
 	warned  map[string]time.Time
 
-	// plaintext lists the agents that sent over plain HTTP.
-	plaintext plaintextSenders
+	// plaintext lists the agents that sent over plain HTTP, and refused
+	// the ones whose batches were turned away.
+	plaintext, refused senderLog
 
 	// recvUsed is the receive budget in use, and recvBy each sender's
 	// part of it (see ReadBody).
@@ -162,6 +164,26 @@ type Result struct {
 	// Retimed and FieldsDropped are as in Stats, for this call.
 	Retimed       int `json:"retimed,omitempty"`
 	FieldsDropped int `json:"fields_dropped,omitempty"`
+	// Hosts are the first few host names in the events, to tell agents
+	// apart in Health page warnings (see NotePlaintext).
+	Hosts []string `json:"-"`
+}
+
+// maxResultHosts caps Result.Hosts, and maxHostName the length of a name
+// kept there: they come from the sender.
+const (
+	maxResultHosts = 4
+	maxHostName    = 64
+)
+
+// noteHost adds an event's host name to r.Hosts, when it looks like one.
+func (r *Result) noteHost(ev *Event) {
+	h, _ := ev.Fields["host"].(string)
+	if h == "" || len(h) > maxHostName || len(r.Hosts) >= maxResultHosts || slices.Contains(r.Hosts, h) ||
+		strings.ContainsFunc(h, func(c rune) bool { return c <= ' ' || c == 0x7f }) {
+		return
+	}
+	r.Hosts = append(r.Hosts, h)
 }
 
 func (r *Result) add(o *Result) {

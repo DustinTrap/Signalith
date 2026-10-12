@@ -2,7 +2,9 @@ package api
 
 import (
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -24,7 +26,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
-		if s.overHTTPS(r) {
+		if s.overHTTPS(r) && hstsHost(r.Host) {
 			// Browsers then use only HTTPS for this site for a year. Sent
 			// only over HTTPS, directly or through a trusted proxy;
 			// browsers ignore it over plain HTTP or with a certificate
@@ -43,6 +45,24 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// hstsHost reports whether browsers should be told to use only HTTPS for
+// host (a Host header). Not for localhost or an IP address: HSTS covers
+// every port of a host, so after https://localhost:8080 the browser would
+// force HTTPS on every other local tool and dev server for a year, and
+// browsers ignore it for IP addresses anyway.
+func hstsHost(hostport string) bool {
+	h := hostport
+	if hh, _, err := net.SplitHostPort(hostport); err == nil {
+		h = hh
+	}
+	h = strings.ToLower(strings.TrimSuffix(strings.Trim(h, "[]"), "."))
+	if h == "" || h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return false
+	}
+	_, err := netip.ParseAddr(h)
+	return err != nil
 }
 
 // revalidate makes browsers check with the server before reusing a cached

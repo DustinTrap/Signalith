@@ -82,6 +82,9 @@ type Manager struct {
 	ca    *x509.Certificate // the CA agents should trust; nil when none is known
 	caKey crypto.Signer     // auto mode only
 	added []string          // names from EnsureName, oldest first
+	// outside are names the certificate should cover but the CA may not
+	// sign (see allowed), as of the last wantNames.
+	outside []string
 	// files mode: what the files looked like when last loaded, and
 	// whether the certificate chains to a CA this system trusts.
 	stamp    string
@@ -109,10 +112,11 @@ func New(o Options) (*Manager, error) {
 	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create %s for the HTTPS certificate: %w. Set SIGNALITH_STATE_DIR to a folder Signalith can write, or use your own certificate (server.tls.mode: files)", o.Dir, err)
 	}
+	// The names first: a new CA is made for them.
+	m.added = m.readNames()
 	if err := m.loadCA(); err != nil {
 		return nil, err
 	}
-	m.added = m.readNames()
 	if err := m.loadOrIssue(); err != nil {
 		return nil, err
 	}
@@ -230,28 +234,54 @@ func (m *Manager) Covers(host string) bool {
 	return leaf != nil && leaf.VerifyHostname(strings.Trim(host, "[]")) == nil
 }
 
-// EnsureName makes sure the certificate covers host, the address agents
-// are being set up to send to. In auto mode it issues a new certificate
-// that adds it, and keeps it in future ones; in files mode it can only
-// say the certificate does not cover it.
-func (m *Manager) EnsureName(host string) error {
+// CanCover says whether the certificate covers host or EnsureName can
+// make it do so, without changing anything: nil, or an error that says
+// why not and what to use instead.
+func (m *Manager) CanCover(host string) error {
+	_, err := m.canCover(host)
+	return err
+}
+
+// canCover is CanCover, and also returns host as it goes into the
+// certificate, or "" when nothing needs to change.
+func (m *Manager) canCover(host string) (string, error) {
 	if m == nil {
-		return nil
+		return "", nil
 	}
 	name, ok := normalizeName(host)
 	if !ok {
-		return fmt.Errorf("%q is not a host name or IP address", host)
+		return "", fmt.Errorf("%q is not a host name or IP address", host)
 	}
 	if m.Covers(name) {
-		return nil
+		return "", nil
 	}
 	if a, err := netip.ParseAddr(name); err == nil && a.IsUnspecified() {
-		return nil // 0.0.0.0 is no one's address
+		return "", nil // 0.0.0.0 is no one's address
 	}
 	if !m.LocalCA() {
-		leaf := m.Leaf()
-		return fmt.Errorf("the certificate in server.tls_cert is not valid for %s (it covers %s). Use one of those names, or get a certificate that includes %s",
-			name, strings.Join(certNames(leaf), ", "), name)
+		return "", fmt.Errorf("the certificate in server.tls_cert is not valid for %s (it covers %s). Use one of those, or get a certificate that includes %s",
+			name, shortList(certNames(m.Leaf()), 6), name)
+	}
+	m.mu.Lock()
+	allowed := m.allowed(name)
+	m.mu.Unlock()
+	if !allowed {
+		return "", fmt.Errorf("Signalith's certificate can't include %s: its own certificate authority only signs this server's names and private network addresses, "+
+			"so trusting it can't expose other websites. Use this computer's IP address or a name the certificate covers (%s), "+
+			"or see \"Names the certificate can cover\" in docs/https.md", name, shortList(certNames(m.Leaf()), 4))
+	}
+	return name, nil
+}
+
+// EnsureName makes sure the certificate covers host, the address agents
+// are being set up to send to. In auto mode it issues a new certificate
+// that adds it, and keeps it in future ones, when the CA may sign it (see
+// allowed); in files mode it can only say the certificate does not cover
+// it.
+func (m *Manager) EnsureName(host string) error {
+	name, err := m.canCover(host)
+	if err != nil || name == "" {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -345,6 +375,11 @@ func (m *Manager) loadCA() error {
 	return nil
 }
 
+// makeCA makes the CA. Its name constraints let it sign only the names
+// and addresses this server has now (wantNames) and ones that only mean
+// something on a private network (see constraints): computers trust it
+// for every site, so this keeps a stolen ca.key from vouching for anyone
+// else's.
 func (m *Manager) makeCA() error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -355,15 +390,19 @@ func (m *Manager) makeCA() error {
 		host = "signalith"
 	}
 	now := m.now()
+	dns, ips := constraints(m.wantNames())
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial(),
-		Subject:               pkix.Name{CommonName: "Signalith Local CA (" + host + ")", Organization: []string{"Signalith"}},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.AddDate(CAYears, 0, 0),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		MaxPathLenZero:        true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		SerialNumber:                serial(),
+		Subject:                     pkix.Name{CommonName: "Signalith Local CA (" + host + ")", Organization: []string{"Signalith"}},
+		NotBefore:                   now.Add(-time.Hour),
+		NotAfter:                    now.AddDate(CAYears, 0, 0),
+		IsCA:                        true,
+		BasicConstraintsValid:       true,
+		MaxPathLenZero:              true,
+		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         dns,
+		PermittedIPRanges:           ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
@@ -397,9 +436,10 @@ func writeCAKey(path string, key crypto.Signer) error {
 	return writeKey(path, key)
 }
 
-// wantNames lists the names the auto certificate must cover.
+// wantNames lists the names the auto certificate must cover: the ones
+// the CA may sign. The others are kept in m.outside, for Outside.
 func (m *Manager) wantNames() []string {
-	var out []string
+	var out, outside []string
 	seen := map[string]bool{}
 	// The first name (the public_url host when there is one) is also the
 	// certificate's common name.
@@ -407,11 +447,90 @@ func (m *Manager) wantNames() []string {
 		for _, n := range list {
 			if n, ok := normalizeName(n); ok && !seen[n] {
 				seen[n] = true
-				out = append(out, n)
+				if m.allowed(n) {
+					out = append(out, n)
+				} else {
+					outside = append(outside, n)
+				}
 			}
 		}
 	}
+	m.outside = outside
 	return out
+}
+
+// Outside lists the names the auto certificate should cover (public_url's
+// host, server.tls.names, this machine's names) but leaves out, because
+// Signalith's own CA may not sign them: it was made before they were
+// known. docs/https.md says how to get them in.
+func (m *Manager) Outside() []string {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.outside)
+}
+
+// Names Signalith's own CA may sign besides the ones it was made for:
+// names that only mean something on a private network (see RFC 6762,
+// appendix G, and RFC 8375), and private, shared (CGNAT), loopback and
+// link-local addresses.
+var (
+	privateDomains = []string{"localhost", "local", "localdomain", "internal", "intranet", "lan", "home", "home.arpa", "corp", "private"}
+	privateRanges  = []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"),
+		netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("fc00::/7"), netip.MustParsePrefix("fe80::/10"),
+	}
+)
+
+// constraints returns the name constraints for a new CA: privateDomains
+// and privateRanges, plus each of names outside them. A DNS name there
+// also allows the names under it.
+func constraints(names []string) (dns []string, ips []*net.IPNet) {
+	dns = slices.Clone(privateDomains)
+	ranges := slices.Clone(privateRanges)
+	for _, n := range names {
+		if a, err := netip.ParseAddr(n); err == nil {
+			if !slices.ContainsFunc(ranges, func(p netip.Prefix) bool { return p.Contains(a) }) {
+				ranges = append(ranges, netip.PrefixFrom(a, a.BitLen()))
+			}
+		} else if !domainAllowed(dns, n) {
+			dns = append(dns, n)
+		}
+	}
+	for _, p := range ranges {
+		ips = append(ips, &net.IPNet{IP: p.Addr().AsSlice(), Mask: net.CIDRMask(p.Bits(), p.Addr().BitLen())})
+	}
+	return dns, ips
+}
+
+// allowed reports whether the CA's name constraints let it sign name. A
+// CA without them (made by an earlier version) may sign anything.
+func (m *Manager) allowed(name string) bool {
+	if m.ca == nil {
+		return true
+	}
+	if a, err := netip.ParseAddr(name); err == nil {
+		if len(m.ca.PermittedIPRanges) == 0 {
+			return true
+		}
+		return slices.ContainsFunc(m.ca.PermittedIPRanges, func(r *net.IPNet) bool { return r.Contains(a.AsSlice()) })
+	}
+	return len(m.ca.PermittedDNSDomains) == 0 || domainAllowed(m.ca.PermittedDNSDomains, name)
+}
+
+// domainAllowed reports whether name is one of domains or under one, the
+// way certificate name constraints match DNS names.
+func domainAllowed(domains []string, name string) bool {
+	for _, d := range domains {
+		d = strings.ToLower(strings.TrimPrefix(d, "."))
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadOrIssue uses the saved certificate when it is from the CA, covers
@@ -635,6 +754,29 @@ func certNames(c *x509.Certificate) []string {
 		out = append(out, ip.String())
 	}
 	return out
+}
+
+// shortList lists up to max of names for a message: addresses other
+// machines can use first, then names, without the loopback ones.
+func shortList(names []string, max int) string {
+	var ips, hosts []string
+	for _, n := range names {
+		if a, err := netip.ParseAddr(n); err == nil {
+			if !a.IsLoopback() {
+				ips = append(ips, n)
+			}
+		} else if n != "localhost" && !strings.HasSuffix(n, ".localhost") {
+			hosts = append(hosts, n)
+		}
+	}
+	list := append(ips, hosts...)
+	switch {
+	case len(list) == 0:
+		return "only this computer's own names, such as localhost"
+	case len(list) > max:
+		return strings.Join(list[:max], ", ") + " and others"
+	}
+	return strings.Join(list, ", ")
 }
 
 // selfSigned reports whether c signed itself: a root CA, or a server

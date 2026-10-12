@@ -110,6 +110,10 @@ type Server struct {
 	dirSlotsOnce sync.Once
 	dirSlots     chan struct{}  // limits directory connections at once
 	background   sync.WaitGroup // directory checks still running
+
+	// legacyProxies are reverse proxies believed only because the config
+	// predates HTTPS by default (see viaTrustedProxy).
+	legacyProxies legacyProxySeen
 }
 
 // Handler returns the HTTP handler. Every API route is registered with
@@ -133,6 +137,9 @@ func (s *Server) Handler() http.Handler {
 	api.viewer("GET /api/language", s.handleLanguage)
 	// Agent configs carry the ingest token.
 	api.admin("GET /api/agents/config", s.handleAgentConfig)
+	// Adds the address agents or syslog devices send to to the HTTPS
+	// certificate.
+	api.admin("POST /api/tls/names", s.handleTLSName)
 	s.routeDetections(api)
 	s.routeRisk(api)
 	s.routeAsk(api)
@@ -218,12 +225,21 @@ func decodeJSON(b []byte, v any) error {
 // ---- ingest ----
 
 func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
-	if !s.validToken(r) {
-		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
+	from := clientaddr.Parse(r.RemoteAddr)
+	if !s.validToken(r) && !s.retiredTokenAccepted(w, r) {
 		return
 	}
+	var res *ingest.Result
 	if plaintextIngest(r) {
-		s.Pipeline.NotePlaintext(clientaddr.Parse(r.RemoteAddr))
+		// Noted once the batch is in, with the host names in its events:
+		// they tell apart agents that share an address.
+		defer func() {
+			var hosts []string
+			if res != nil {
+				hosts = res.Hosts
+			}
+			s.Pipeline.NotePlaintext(from, hosts)
+		}()
 	}
 	// The whole batch is read before a pipeline slot is taken, so a
 	// sender that sends slowly holds only its connection and the bytes it
@@ -246,7 +262,7 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if tag == "" {
 		tag = r.URL.Query().Get("tag")
 	}
-	res, err := s.Pipeline.IngestBody(r.Context(), tag, body)
+	res, err = s.Pipeline.IngestBody(r.Context(), tag, body)
 	if err != nil {
 		var bad *ingest.BodyError
 		if errors.As(err, &bad) {
@@ -390,7 +406,7 @@ func (b *batchBody) Read(p []byte) (int, error) {
 }
 
 func (s *Server) validToken(r *http.Request) bool {
-	tok := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	tok := bearerToken(r)
 	if tok == "" {
 		return false
 	}
@@ -399,6 +415,37 @@ func (s *Server) validToken(r *http.Request) bool {
 			return true
 		}
 	}
+	return false
+}
+
+func bearerToken(r *http.Request) string {
+	return strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+}
+
+// retiredTokenAccepted decides on a batch whose token is not one of this
+// server's, and answers it when it is refused.
+//
+// The Docker quick start used to give every agent the same example token,
+// change-this-ingest-token, over plain HTTP. In a container (where that
+// quick start runs), agents still sending it over plain HTTP are accepted
+// while server.tls.plaintext_ingest is allow, as other agents set up for
+// http:// are, and the Health page lists them to update. Over HTTPS it is
+// refused with 503, which Fluent Bit keeps and sends again. Any other
+// token is refused with 401. Refused agents are noted for the Health page.
+func (s *Server) retiredTokenAccepted(w http.ResponseWriter, r *http.Request) bool {
+	from := clientaddr.Parse(r.RemoteAddr)
+	if config.IsPublicIngestToken(bearerToken(r)) && s.inContainer() {
+		if plaintextIngest(r) {
+			return true
+		}
+		s.Pipeline.NoteRefused(from, ingest.RefusedOldToken)
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusServiceUnavailable, errors.New("this agent sends the example ingest token from an older docker-compose.yml, "+
+			"which this server no longer accepts; the agent keeps its events and sends them again. Get a new configuration for it from the Add data page"))
+		return false
+	}
+	s.Pipeline.NoteRefused(from, ingest.RefusedToken)
+	writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 	return false
 }
 
@@ -619,16 +666,20 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if !s.Config.Server.HTTPS() {
 		certs = nil
 	}
+	// Building the config changes nothing: the page adds the address to
+	// the certificate (POST api/tls/names) once it is entered, not while
+	// it is being typed. Here it only checks that it can.
+	addName := ""
 	if u.Scheme == "https" && certs != nil {
-		if err := certs.EnsureName(u.Hostname()); err != nil {
+		if err := certs.CanCover(u.Hostname()); err != nil {
 			fieldError(err)
 			return
 		}
+		if !certs.Covers(u.Hostname()) {
+			addName = u.Hostname()
+		}
 	}
-	token := ""
-	if len(s.Config.Ingest.Tokens) > 0 {
-		token = s.Config.Ingest.Tokens[0]
-	}
+	token := s.agentToken()
 	opts := agents.Options{
 		OS:          v.Get("os"),
 		ServerURL:   server,
@@ -648,7 +699,51 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if a.CA != "" {
 		a.CAFingerprint = certs.Fingerprint()
 	}
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, http.StatusOK, agentConfig{Agent: a, AddName: addName})
+}
+
+// agentConfig is the answer to GET api/agents/config. AddName is the
+// address the certificate does not cover yet, for the page to add.
+type agentConfig struct {
+	*agents.Agent
+	AddName string `json:"add_name,omitempty"`
+}
+
+// agentToken is the ingest token new agents get: the first that is not
+// the example token from an older docker-compose.yml, which anyone can
+// look up (kept only for agents that still use it).
+func (s *Server) agentToken() string {
+	for _, t := range s.Config.Ingest.Tokens {
+		if !config.IsPublicIngestToken(t) {
+			return t
+		}
+	}
+	if len(s.Config.Ingest.Tokens) > 0 {
+		return s.Config.Ingest.Tokens[0]
+	}
+	return ""
+}
+
+// handleTLSName adds the address agents or syslog devices are being set up
+// to send to to the HTTPS certificate (see tlsauto.Manager.EnsureName),
+// and answers with the names it covers then.
+func (s *Server) handleTLSName(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if s.TLS == nil {
+		writeError(w, http.StatusConflict, errors.New("Signalith has no certificate of its own here (server.tls.mode is off), so there is nothing to add the name to"))
+		return
+	}
+	if err := s.TLS.EnsureName(req.Name); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "name"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"names": s.TLS.Names()})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -682,9 +777,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if len(s.Config.Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
 	}
-	if senders := s.Pipeline.PlaintextSenders(time.Now().Add(-plaintextWindow)); len(senders) > 0 {
+	since := time.Now().Add(-plaintextWindow)
+	docker := s.inContainer()
+	if senders := s.Pipeline.PlaintextSenders(since); len(senders) > 0 {
 		out["plaintext_senders"] = senders
-		warnings = append(warnings, plaintextWarning(senders))
+		warnings = append(warnings, plaintextWarning(senders, docker))
+	}
+	if refused := s.Pipeline.RefusedSenders(since); len(refused) > 0 {
+		out["refused_senders"] = refused
+		warnings = append(warnings, refusedWarnings(refused, docker)...)
+	}
+	if proxies := s.legacyProxies.since(since); len(proxies) > 0 {
+		warnings = append(warnings, legacyProxyWarning(proxies))
+	}
+	if outside := s.TLS.Outside(); len(outside) > 0 {
+		warnings = append(warnings, "Signalith's HTTPS certificate leaves out "+joinAnd(outside)+": Signalith's own certificate authority only signs "+
+			"the names and private network addresses it was made with, so that trusting it can't expose other websites. "+
+			"See \"Names the certificate can cover\" in docs/https.md.")
 	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
@@ -714,26 +823,114 @@ func (s *Server) tlsInfo() map[string]any {
 const plaintextWindow = 24 * time.Hour
 
 // plaintextWarning names the agents still sending over plain HTTP and
-// says how to move them to HTTPS.
-func plaintextWarning(senders []ingest.PlaintextSender) string {
+// says how to move them to HTTPS. docker adds that Docker's port
+// forwarding may hide the agents' own addresses.
+func plaintextWarning(senders []ingest.Sender, docker bool) string {
+	n, list := agentList(senders)
+	where := "signalith.yaml"
+	if docker {
+		where = "signalith.yaml (deploy/docker/signalith.yaml in the Docker quick start)"
+	}
+	var msg string
+	if n == 1 {
+		msg = "An agent still sends events over plain HTTP, which anyone on the network can read: " + list + ". " +
+			"On the Add data page, get a new configuration for it, which uses HTTPS, and put it on that agent. " +
+			"Then set server.tls.plaintext_ingest: deny in " + where + "."
+	} else {
+		msg = fmt.Sprintf("%d agents still send events over plain HTTP, which anyone on the network can read: %s. "+
+			"On the Add data page, get a new configuration, which uses HTTPS, and put it on each of them. "+
+			"Once all are updated, set server.tls.plaintext_ingest: deny in %s.", n, list, where)
+	}
+	return msg + dockerNote(senders, docker)
+}
+
+// refusedWarnings says which agents' batches were turned away and why,
+// one warning for each reason.
+func refusedWarnings(refused []ingest.Sender, docker bool) []string {
+	by := map[string][]ingest.Sender{}
+	for _, x := range refused {
+		by[x.Reason] = append(by[x.Reason], x)
+	}
+	var out []string
+	for _, reason := range []string{ingest.RefusedPlaintext, ingest.RefusedOldToken, ingest.RefusedToken} {
+		list := by[reason]
+		if len(list) == 0 {
+			continue
+		}
+		n, names := agentList(list)
+		agent := "An agent was"
+		if n > 1 {
+			agent = fmt.Sprintf("%d agents were", n)
+		}
+		var msg string
+		switch reason {
+		case ingest.RefusedPlaintext:
+			msg = agent + " turned away for sending over plain HTTP (server.tls.plaintext_ingest is deny): " + names + ". " +
+				"They keep their events and send them again. On the Add data page, get a new configuration, which uses HTTPS, and put it on each."
+		case ingest.RefusedOldToken:
+			msg = agent + " turned away for sending the example ingest token from an older docker-compose.yml: " + names + ". " +
+				"They keep their events and send them again. On the Add data page, get a new configuration and put it on each."
+		default:
+			msg = agent + " turned away for a wrong or missing ingest token: " + names + ". " +
+				"Fluent Bit drops what is refused this way. On the Add data page, get a new configuration and put it on each."
+		}
+		out = append(out, msg+dockerNote(list, docker))
+	}
+	return out
+}
+
+// agentList counts the agents in senders and names them, at most five
+// addresses: an address with host names from several machines counts
+// as that many agents.
+func agentList(senders []ingest.Sender) (int, string) {
+	n := 0
 	var names []string
 	for i, x := range senders {
+		n += max(1, len(x.Hosts))
 		if i == 5 {
 			names = append(names, fmt.Sprintf("%d more", len(senders)-5))
-			break
+			continue
 		}
-		names = append(names, x.Address)
+		if i > 5 {
+			continue
+		}
+		name := x.Address
+		if len(x.Hosts) > 0 {
+			name += " (" + strings.Join(x.Hosts, ", ") + ")"
+		}
+		names = append(names, name)
 	}
-	list := names[0]
-	if len(names) > 1 {
-		list = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	return n, joinAnd(names)
+}
+
+// dockerNote explains, in Docker, why agents may share one address.
+func dockerNote(senders []ingest.Sender, docker bool) string {
+	if !docker {
+		return ""
 	}
-	if len(senders) == 1 {
-		return "An agent still sends events over plain HTTP, which anyone on the network can read: " + list + ". " +
-			"On the Add data page, get a new configuration for it, which uses HTTPS, and put it on that agent. " +
-			"Then set server.tls.plaintext_ingest: deny in signalith.yaml."
+	for _, x := range senders {
+		if len(x.Hosts) > 0 {
+			return " Docker's port forwarding can make every agent seem to come from one address; the names in brackets come from their events."
+		}
 	}
-	return fmt.Sprintf("%d agents still send events over plain HTTP, which anyone on the network can read: %s. "+
-		"On the Add data page, get a new configuration, which uses HTTPS, and put it on each of them. "+
-		"Once all are updated, set server.tls.plaintext_ingest: deny in signalith.yaml.", len(senders), list)
+	return " Docker's port forwarding can make every agent seem to come from one address; each agent's own log (fluent-bit) shows the refusal."
+}
+
+// legacyProxyWarning names the reverse proxies believed only because the
+// config predates HTTPS by default, and says how to keep them working.
+func legacyProxyWarning(proxies []string) string {
+	return "A reverse proxy at " + joinAnd(proxies) + " sends requests to Signalith over plain HTTP, saying the browser used HTTPS (X-Forwarded-Proto). " +
+		"Signalith believes it for now only because signalith.yaml was written before HTTPS was the default. Add server.trusted_proxies: [" +
+		strings.Join(proxies, ", ") + "] to signalith.yaml and restart Signalith."
+}
+
+// joinAnd joins a list as "a, b and c".
+func joinAnd(list []string) string {
+	switch len(list) {
+	case 0:
+		return ""
+	case 1:
+		return list[0]
+	}
+	return strings.Join(list[:len(list)-1], ", ") + " and " + list[len(list)-1]
 }

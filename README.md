@@ -81,18 +81,21 @@ same):
    The old one no longer works. People you added on the **Users** page keep theirs.
 4. Open **https**://localhost:8080 (old `http://` bookmarks are redirected) and sign in as
    `admin`. Trust the certificate as described in [docs/https.md](docs/https.md).
-5. Update the agents. The old ingest token was public, so it is refused; agents set up
-   from **Add data** keep their events on disk and keep retrying until you update them.
-   On each machine, install the configuration from the **Add data** page again; it also
-   moves the agent to HTTPS. Syslog devices need no change. If agents must keep sending
-   for a while, add
-   `- SIGNALITH_INGEST_TOKEN=change-this-ingest-token` (or the token you had set) under
-   `environment:` of the `signalith` service in `docker-compose.yml` and run step 2 again;
-   the **Health** page warns while it is accepted. Remove it once every agent is updated.
+5. Update the agents. Agents you set up before keep sending for now: over plain `http://`
+   the old example token is still accepted, and the **Health** page lists each agent that
+   still uses it (behind Docker Desktop they share one address, so it names them by the
+   computer names in their events). On each of them, install the configuration from the
+   **Add data** page again; it has this server's own token and moves the agent to HTTPS.
+   Syslog devices need no change. If you had set a token of your own in
+   `SIGNALITH_INGEST_TOKEN`, add that line back under `environment:` of the `signalith`
+   service in `docker-compose.yml` and run step 2 again; new agents still get the new
+   token.
 6. If you had changed other things, such as ports or `SIGNALITH_PUBLIC_URL`, make the same
    changes in the new files (`SIGNALITH_PUBLIC_URL` now starts with `https://`).
 7. Once the **Health** page lists no agent still sending over plain `http://`, set
-   `plaintext_ingest: deny` in `deploy/docker/signalith.yaml` and run step 2 again.
+   `plaintext_ingest: deny` in `deploy/docker/signalith.yaml` and run step 2 again. That
+   also ends the old token. An agent you missed is turned away until it gets a new
+   configuration; it keeps its events and sends them then, and Health names it.
 
 ### Linux
 
@@ -378,7 +381,7 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PASSWORD_FILE`,
 `SIGNALITH_ADMIN_PASSWORD_FILE`, `SIGNALITH_INGEST_TOKEN_FILE`, `SIGNALITH_LDAP_BIND_PASSWORD_FILE` or
 `SIGNALITH_ASSISTANT_API_KEY_FILE` to the file's path. Setting both forms of one is an error, except for the
-ingest token, where both tokens are accepted. When the admin password comes from
+ingest token, where both tokens are accepted (agents set up on Add data get the file's). When the admin password comes from
 `SIGNALITH_ADMIN_PASSWORD_FILE`, `signalith passwd` keeps the new one in `admin-password-hash` in
 the state folder, where it replaces the file's password. `SIGNALITH_STATE_DIR` is the folder
 where Signalith keeps files it makes for itself, such as its HTTPS certificate (in `tls`); it

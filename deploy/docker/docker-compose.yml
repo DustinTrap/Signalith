@@ -89,6 +89,10 @@ services:
     # Rebuild from the checked-out code on every `up`, so after `git pull` the
     # same command runs the new version instead of the last image built.
     pull_policy: build
+    # A fixed name, which goes into Signalith's own HTTPS certificate and the
+    # name of its certificate authority ("Signalith Local CA (signalith)").
+    # Without it the name would be the container's random ID, new each time.
+    hostname: signalith
     # After a reboot this can start before OpenSearch is ready; it waits for it.
     restart: unless-stopped
     depends_on:

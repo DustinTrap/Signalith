@@ -5,23 +5,82 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/clientaddr"
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
 
 // viaTrustedProxy reports whether a request came through a reverse proxy
 // listed in server.trusted_proxies that says the browser used HTTPS.
 // X-Forwarded-Proto from anyone else is ignored, since any client can
-// send it.
+// send it; except that a config from before HTTPS was the default, with
+// no trusted_proxies, believes it from this machine and private networks
+// (see config.Server.LegacyProxy), so a proxy set up the old way keeps
+// working. The Health page then names the proxy to list.
 func (s *Server) viaTrustedProxy(r *http.Request) bool {
 	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
 	if !strings.EqualFold(strings.TrimSpace(proto), "https") {
 		return false
 	}
 	from := clientaddr.Parse(r.RemoteAddr)
-	return from.IsValid() && s.Config.Server.TrustsProxy(from)
+	if !from.IsValid() {
+		return false
+	}
+	if s.Config.Server.TrustsProxy(from) {
+		return true
+	}
+	if s.Config.Server.LegacyProxy(from) {
+		s.legacyProxies.note(from)
+		return true
+	}
+	return false
+}
+
+// maxLegacyProxies caps the proxies legacyProxySeen remembers.
+const maxLegacyProxies = 16
+
+// legacyProxySeen remembers the reverse proxies believed only because the
+// config predates HTTPS by default, for the Health page.
+type legacyProxySeen struct {
+	mu sync.Mutex
+	m  map[netip.Addr]time.Time
+}
+
+func (l *legacyProxySeen) note(a netip.Addr) {
+	a = a.Unmap().WithZone("")
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.m == nil {
+		l.m = map[netip.Addr]time.Time{}
+	}
+	if _, ok := l.m[a]; !ok && len(l.m) >= maxLegacyProxies {
+		return
+	}
+	l.m[a] = time.Now()
+}
+
+// since lists the proxies seen since t, in address order.
+func (l *legacyProxySeen) since(t time.Time) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []netip.Addr
+	for a, seen := range l.m {
+		if !seen.Before(t) {
+			out = append(out, a)
+		}
+	}
+	slices.SortFunc(out, func(a, b netip.Addr) int { return a.Compare(b) })
+	names := make([]string, len(out))
+	for i, a := range out {
+		names[i] = a.String()
+	}
+	return names
 }
 
 // overHTTPS reports whether the browser reached Signalith over HTTPS:
@@ -47,11 +106,15 @@ func plaintextIngest(r *http.Request) bool {
 //   - Sign-in, and any request carrying a password (HTTP Basic) or a
 //     session for the API, is refused with a message to use https://.
 //   - Agents may still send events when server.tls.plaintext_ingest is
-//     allow; each one is noted so the Health page can name it. Otherwise
-//     they are told to get a new config from the Add data page.
+//     allow; each one is noted so the Health page can name it. Only the
+//     ingest handler sees those requests, never the rest of the API.
+//     Otherwise the batch is refused with 503, which Fluent Bit keeps and
+//     sends again (it drops a batch refused with 4xx), and the Health
+//     page names the agent to update from the Add data page.
 //   - A trusted reverse proxy that says the browser used HTTPS is served
 //     as usual.
 func (s *Server) PlainHandler(secure http.Handler) http.Handler {
+	ingestOnly := limitBodies(s.securityHeaders(http.HandlerFunc(s.handleIngest)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.viaTrustedProxy(r) {
 			secure.ServeHTTP(w, r)
@@ -59,13 +122,17 @@ func (s *Server) PlainHandler(secure http.Handler) http.Handler {
 		}
 		target := s.httpsURL(r)
 		route := r.Method + " " + r.URL.Path
-		if route == "POST /api/ingest" {
+		// The escaped path, so /api%2Fingest, which the API's router would
+		// not take for ingest, is not taken for it here either.
+		if r.Method+" "+r.URL.EscapedPath() == "POST /api/ingest" {
 			if s.Config.Server.PlaintextIngest() {
-				secure.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), plaintextKey{}, true)))
+				ingestOnly.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), plaintextKey{}, true)))
 				return
 			}
-			plainRefusal(w, r, http.StatusUpgradeRequired, "This server only accepts events over HTTPS. Get a new configuration for this agent "+
-				"from the Add data page (it sends to "+s.httpsBase(r)+"), or, until every agent has one, set server.tls.plaintext_ingest: allow.")
+			s.Pipeline.NoteRefused(clientaddr.Parse(r.RemoteAddr), ingest.RefusedPlaintext)
+			w.Header().Set("Retry-After", "60")
+			plainRefusal(w, r, http.StatusServiceUnavailable, "This server only accepts events over HTTPS, so this batch was refused; the agent keeps it and sends it again. "+
+				"Get a new configuration for this agent from the Add data page (it sends to "+s.httpsBase(r)+"), or, until every agent has one, set server.tls.plaintext_ingest: allow.")
 			return
 		}
 		_, _, basic := r.BasicAuth()
@@ -109,6 +176,11 @@ func plainRefusal(w http.ResponseWriter, r *http.Request, status int, msg string
 // usable host and port.
 func (s *Server) httpsBase(r *http.Request) string {
 	if host := r.Host; validHostHeader(host) {
+		if _, _, err := net.SplitHostPort(host); err != nil {
+			// No port: the client used port 80, which serves HTTPS now,
+			// and https:// alone would mean 443.
+			host = net.JoinHostPort(host, "80")
+		}
 		return "https://" + host
 	}
 	if u, err := url.Parse(s.Config.Server.PublicURL); err == nil && u.Host != "" {

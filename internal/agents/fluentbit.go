@@ -208,7 +208,7 @@ func Generate(o Options) (*Agent, error) {
 			}))
 		}
 		// Only root may read the config: it holds the ingest token.
-		a.Steps = []string{"Install Fluent Bit: curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh"}
+		a.Steps = []string{"Install Fluent Bit (3.1 or later): curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh"}
 		if useCA {
 			a.CAPath = LinuxCAPath
 			a.Steps = append(a.Steps, caStep(a, "signalith-ca.pem"))
@@ -247,17 +247,29 @@ func Generate(o Options) (*Agent, error) {
 		if o.Sysmon {
 			a.Steps = append(a.Steps, "Install Sysmon with a config such as SwiftOnSecurity's sysmon-config, so process and network events are recorded")
 		}
-		a.Steps = append(a.Steps, "Install Fluent Bit for Windows (64-bit installer) from https://docs.fluentbit.io/manual/installation/windows")
+		a.Steps = append(a.Steps, "Install Fluent Bit for Windows, 3.1 or later (64-bit installer), from https://docs.fluentbit.io/manual/installation/windows")
+		files := "fluent-bit.conf"
 		if useCA {
 			a.CAPath = WindowsCAPath
-			a.Steps = append(a.Steps, caStep(a, a.CAPath))
+			a.Steps = append(a.Steps, caStep(a, "signalith-ca.pem"))
+			files = "signalith-ca.pem, fluent-bit.conf"
 		}
-		a.Steps = append(a.Steps, "Save the configuration below as "+a.ConfigPath)
+		a.Steps = append(a.Steps, "Save the configuration below as fluent-bit.conf.")
 		a.ConfigStep = len(a.Steps)
-		// Only SYSTEM and Administrators may read the config: it holds
-		// the ingest token, and Program Files lets every user read.
+		// A browser cannot save into Program Files, so the files are
+		// copied there. Only SYSTEM and Administrators may then read the
+		// config, which holds the ingest token (Program Files lets every
+		// user read), and the buffer, which holds Security log events
+		// (ProgramData does too). The accounts are given by their SIDs,
+		// whose names differ in other languages.
 		a.Steps = append(a.Steps,
-			`In an elevated PowerShell, let only SYSTEM and Administrators read the configuration, since it holds the ingest token: icacls "`+a.ConfigPath+`" /inheritance:r /grant:r SYSTEM:F Administrators:F`,
+			"In an elevated PowerShell, put them in place from your Downloads folder, and let only SYSTEM and Administrators read the configuration and the agent's buffer, "+
+				"since they hold the ingest token and Security log events: "+
+				`cd "$env:USERPROFILE\Downloads"`+"\n"+
+				"Copy-Item "+files+` 'C:\Program Files\fluent-bit\conf\' -Force`+"\n"+
+				`icacls '`+a.ConfigPath+`' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F'`+"\n"+
+				`New-Item -ItemType Directory -Force 'C:\ProgramData\fluent-bit' | Out-Null`+"\n"+
+				`icacls 'C:\ProgramData\fluent-bit' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'`,
 			`Register and start the service in an elevated PowerShell: New-Service fluent-bit -BinaryPathName '"C:\Program Files\fluent-bit\bin\fluent-bit.exe" -c "C:\Program Files\fluent-bit\conf\fluent-bit.conf"' -StartupType Automatic; Start-Service fluent-bit`,
 			"Events appear in Search within a minute; check the Health page if they do not.")
 	default:
@@ -275,10 +287,13 @@ func Generate(o Options) (*Agent, error) {
 	if a.CAPath != "" {
 		out = append(out, [2]string{"tls.ca_file", a.CAPath})
 	}
-	// The name the agent asks the server for. An IP address is not a
-	// valid name for that (SNI), so it is left out then.
+	// The name the agent asks the server for, and checks the server's
+	// certificate is for: tls.verify alone only checks who issued it, so
+	// with a public or company CA any certificate it issued would do.
+	// An IP address is not a valid name for SNI, and Fluent Bit cannot
+	// check one against a certificate, so both are left out then.
 	if tls == "On" && net.ParseIP(host) == nil {
-		out = append(out, [2]string{"tls.vhost", host})
+		out = append(out, [2]string{"tls.vhost", host}, [2]string{"tls.verify_hostname", "On"})
 	}
 	out = append(out, [2]string{"Retry_Limit", "False"})
 	b.WriteString(section("OUTPUT", out))
@@ -292,16 +307,16 @@ func caStep(a *Agent, name string) string {
 	a.CAStep = len(a.Steps) + 1
 	if a.CA == "" {
 		return "Save the certificate of the CA that issued Signalith's certificate as " + name +
-			". The agent checks the server with it. Signalith's certificate file (server.tls_cert) does not include it, so get it from whoever issued the certificate."
+			". The agent uses it to check it's talking to this server. Signalith's certificate file (server.tls_cert) doesn't include it, so get it from whoever issued the certificate."
 	}
-	return "Save Signalith's CA certificate below as " + name + ". The agent checks it is sending to this server with it."
+	return "Save Signalith's CA certificate as " + name + ". The agent uses it to check it's talking to this server."
 }
 
 func section(name string, kv [][2]string) string {
 	var b strings.Builder
 	b.WriteString("\n[" + name + "]\n")
 	for _, p := range kv {
-		fmt.Fprintf(&b, "    %-16s %s\n", p[0], p[1])
+		fmt.Fprintf(&b, "    %-20s %s\n", p[0], p[1])
 	}
 	return b.String()
 }

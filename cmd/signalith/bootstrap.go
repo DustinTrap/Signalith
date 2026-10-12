@@ -74,7 +74,8 @@ func bootstrapDocker(out io.Writer, osDir, sigDir string, osUID, sigUID int, now
 			return err
 		}
 		if existed {
-			fmt.Fprintf(out, "OpenSearch certificates: made new ones, since %v. If OpenSearch and Signalith are running, restart them to use them: docker compose restart opensearch signalith\n", err)
+			fmt.Fprintf(out, "OpenSearch certificates: made new ones, since %v. If OpenSearch and Signalith are running, restart them to use them, from the Signalith folder: "+
+				"docker compose -f deploy/docker/docker-compose.yml restart opensearch signalith\n", err)
 		} else {
 			fmt.Fprintf(out, "OpenSearch certificates: made, valid until %s.\n", set.CA.Cert.NotAfter.Format(time.DateOnly))
 		}
@@ -127,7 +128,7 @@ func bootstrapDocker(out io.Writer, osDir, sigDir string, osUID, sigUID int, now
 	if err := set(sigDir, sigUID, 0o700); err != nil {
 		return err
 	}
-	fmt.Fprintln(out, "Ready. Show the first admin password with: docker compose exec signalith signalith initial-password")
+	fmt.Fprintln(out, "Ready. Show the first admin password, from the Signalith folder, with: docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password")
 	return nil
 }
 
@@ -195,7 +196,8 @@ func printInitialPassword(out io.Writer, path string) error {
 	}
 	if fi, err := os.Stat(config.AdminHashFileIn(config.StateDirFor(path))); err == nil {
 		return fmt.Errorf("the first admin password no longer works: it was changed with signalith passwd on %s. "+
-			"To set a new one, run signalith passwd (with the Docker quick start: docker compose exec signalith signalith passwd)",
+			"To set a new one, run signalith passwd and restart Signalith. With the Docker quick start, from the Signalith folder: "+
+			"docker compose -f deploy/docker/docker-compose.yml exec signalith signalith passwd, then docker compose -f deploy/docker/docker-compose.yml restart signalith",
 			fi.ModTime().Format("2006-01-02 15:04"))
 	}
 	b, err := os.ReadFile(file)

@@ -268,7 +268,7 @@ func TestAgentConfig(t *testing.T) {
 	ts, _ := newTestServer(t)
 	_, body := do(t, ts, "GET", "/api/agents/config?os=windows&sysmon=true", "", true)
 	cfg := body["config"].(string)
-	for _, want := range []string{"winevtlog", "Microsoft-Windows-Sysmon/Operational", "Bearer tok-0123456789abcdef", "Port             8080", "Header_Tag"} {
+	for _, want := range []string{"winevtlog", "Microsoft-Windows-Sysmon/Operational", "Bearer tok-0123456789abcdef", "Port                 8080", "Header_Tag"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("windows config missing %q:\n%s", want, cfg)
 		}
@@ -287,7 +287,7 @@ func TestAgentConfigServerAddress(t *testing.T) {
 	q := url.Values{"os": {"linux"}, "server": {"https://192.168.1.20:9000"}}
 	code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
 	cfg, _ := body["config"].(string)
-	if code != http.StatusOK || !strings.Contains(cfg, "Host             192.168.1.20\n") || !strings.Contains(cfg, "Port             9000\n") {
+	if code != http.StatusOK || !strings.Contains(cfg, "Host                 192.168.1.20\n") || !strings.Contains(cfg, "Port                 9000\n") {
 		t.Fatalf("override: %d %v", code, body)
 	}
 	if body["server_url"] != "https://192.168.1.20:9000" || body["server_loopback"] != false {

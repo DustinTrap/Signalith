@@ -392,7 +392,7 @@ func cmdPasswd(args []string) error {
 			return err
 		}
 		fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
-		fmt.Println("Restart the server to apply it (with the Docker quick start: docker compose restart signalith).")
+		fmt.Println("Restart the server to apply it. With the Docker quick start, from the Signalith folder: docker compose -f deploy/docker/docker-compose.yml restart signalith")
 		return nil
 	}
 	// Only the hash changes in the file; settings from the environment
@@ -862,6 +862,10 @@ func newCertificates(c *config.Config, log *slog.Logger) (*tlsauto.Manager, erro
 		return nil, err
 	}
 	leaf, names := m.Leaf(), m.Names()
+	if out := m.Outside(); len(out) > 0 {
+		log.Warn("the HTTPS certificate leaves out names that Signalith's own certificate authority may not sign; "+
+			"see \"Names the certificate can cover\" in docs/https.md", "names", strings.Join(out, ","))
+	}
 	if m.LocalCA() {
 		log.Info("HTTPS certificate from Signalith's own certificate authority; browsers warn until this CA is trusted (see docs/https.md)",
 			"ca_file", m.CAPath(), "ca_sha256", m.Fingerprint(), "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly))

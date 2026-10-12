@@ -272,7 +272,7 @@ func TestInitialPassword(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(printed, filepath.Join(state, "admin-password-hash")) || !strings.Contains(printed, "docker compose restart signalith") {
+	if !strings.Contains(printed, filepath.Join(state, "admin-password-hash")) || !strings.Contains(printed, "docker compose -f deploy/docker/docker-compose.yml restart signalith") {
 		t.Errorf("passwd said:\n%s", printed)
 	}
 	if b, _ := os.ReadFile(path); strings.Contains(string(b), "admin_password_hash") {
@@ -287,7 +287,7 @@ func TestInitialPassword(t *testing.T) {
 		t.Error("the first password still works, or the new one does not")
 	}
 	out.Reset()
-	if err := printInitialPassword(&out, path); err == nil || !strings.Contains(err.Error(), "no longer works") || out.Len() != 0 {
+	if err := printInitialPassword(&out, path); err == nil || !strings.Contains(err.Error(), "no longer works") || !strings.Contains(err.Error(), "docker-compose.yml restart signalith") || out.Len() != 0 {
 		t.Errorf("initial-password after the change: %q %v", out.String(), err)
 	}
 	// A second change goes to the same place.

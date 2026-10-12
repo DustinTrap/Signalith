@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
@@ -77,6 +81,12 @@ func TestPlainHTTPGoesToHTTPS(t *testing.T) {
 	if loc := resp.Header.Get("Location"); loc != "https://127.0.0.1:8080/" {
 		t.Errorf("bad Host: Location %q", loc)
 	}
+	// No port in Host: the browser used port 80, which serves HTTPS now;
+	// https:// alone would send it to 443.
+	resp, _ = plainSend(t, "GET", ts.URL+"/search?q=1", "", map[string]string{"Host": "siem.corp"})
+	if loc := resp.Header.Get("Location"); loc != "https://siem.corp:80/search?q=1" {
+		t.Errorf("Host without a port: Location %q", loc)
+	}
 
 	// Passwords and sessions are never taken over plain HTTP.
 	resp, body := plainSend(t, "POST", ts.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, host)
@@ -108,6 +118,36 @@ func TestPlainHTTPGoesToHTTPS(t *testing.T) {
 	}
 }
 
+// TestPlainIngestReachesOnlyIngest checks that a plain-HTTP request let
+// through as agent ingest can only ever be ingest: an escaped path that
+// the API's router would not take for ingest is refused like any other,
+// so a password sent with it is never checked in clear text.
+func TestPlainIngestReachesOnlyIngest(t *testing.T) {
+	ts, s := newPlainSide(t, nil)
+	if !s.Config.Server.PlaintextIngest() {
+		t.Fatal("plain-text ingest is off for an old config")
+	}
+	for _, pw := range []string{"wrong-password", "s3cret-pass"} {
+		req, _ := http.NewRequest("POST", ts.URL+"/api%2Fingest", strings.NewReader("[]"))
+		req.URL.RawPath, req.URL.Path = "/api%2Fingest", "/api/ingest"
+		req.SetBasicAuth("admin", pw)
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(b), "only accepts passwords over HTTPS") {
+			t.Errorf("/api%%2Fingest with %s: %d %s", pw, resp.StatusCode, b)
+		}
+	}
+	// Ingest itself never looks at a password: the agent's token decides.
+	basic := map[string]string{"Authorization": "Basic YWRtaW46czNjcmV0LXBhc3M="}
+	if resp, _ := plainSend(t, "POST", ts.URL+"/api/ingest", "[]", basic); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("ingest with Basic: %d", resp.StatusCode)
+	}
+}
+
 func TestPlainIngest(t *testing.T) {
 	batch := `[{"date":1760000000,"log":"Accepted password for bob from 192.0.2.4 port 22 ssh2"}]`
 	bearer := map[string]string{"Authorization": "Bearer tok-0123456789abcdef"}
@@ -125,28 +165,162 @@ func TestPlainIngest(t *testing.T) {
 	if len(senders) != 1 || senders[0].Address != "127.0.0.1" || senders[0].Requests != 1 {
 		t.Errorf("senders = %+v", senders)
 	}
-	// A wrong token is refused and not listed as an agent.
+	// A wrong token is refused and not listed as sending, but as refused.
 	resp, _ = plainSend(t, "POST", ts.URL+"/api/ingest", batch, map[string]string{"Authorization": "Bearer wrong-token-0123456"})
 	if resp.StatusCode != http.StatusUnauthorized || s.Pipeline.PlaintextSenders(time.Time{})[0].Requests != 1 {
 		t.Errorf("wrong token: %d", resp.StatusCode)
 	}
+	if r := s.Pipeline.RefusedSenders(time.Time{}); len(r) != 1 || r[0].Reason != ingest.RefusedToken {
+		t.Errorf("refused = %+v", r)
+	}
 	// The Health page names the agent and says how to move it.
 	code, h := do(t, mustServe(t, s), "GET", "/api/health", "", true)
 	warn, _ := json.Marshal(h["warnings"])
-	if code != 200 || !strings.Contains(string(warn), "127.0.0.1") || !strings.Contains(string(warn), "plaintext_ingest: deny") || h["plaintext_senders"] == nil {
+	if code != 200 || !strings.Contains(string(warn), "over plain HTTP, which anyone on the network can read: 127.0.0.1.") || !strings.Contains(string(warn), "plaintext_ingest: deny") || h["plaintext_senders"] == nil ||
+		!strings.Contains(string(warn), "wrong or missing ingest token: 127.0.0.1") {
 		t.Errorf("health: %d %v", code, h)
 	}
 
-	// Denied: the agent is told what to do, and nothing is stored.
+	// Denied: nothing is stored, and the agent is told to try again
+	// later (503), so Fluent Bit keeps the batch instead of dropping it
+	// as it does for a 4xx; the Health page names it.
 	ts, s = newPlainSide(t, func(s *Server) {
 		s.Config.Server.TLS = &config.ServerTLS{Mode: "auto", PlaintextIngest: "deny"}
 	})
 	resp, body = plainSend(t, "POST", ts.URL+"/api/ingest", batch, bearer)
-	if resp.StatusCode != http.StatusUpgradeRequired || !strings.Contains(body, "Add data") {
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") == "" || !strings.Contains(body, "Add data") || !strings.Contains(body, "sends it again") {
 		t.Errorf("plain ingest denied: %d %s", resp.StatusCode, body)
 	}
 	if len(s.Pipeline.PlaintextSenders(time.Time{})) != 0 || s.Pipeline.Stats().Received != 0 {
 		t.Error("a denied batch was counted")
+	}
+	_, h = do(t, mustServe(t, s), "GET", "/api/health", "", true)
+	if warn, _ := json.Marshal(h["warnings"]); !strings.Contains(string(warn), "turned away for sending over plain HTTP (server.tls.plaintext_ingest is deny): 127.0.0.1") {
+		t.Errorf("health after a refusal: %s", warn)
+	}
+}
+
+// TestOldDockerToken checks agents set up by the older Docker quick
+// start, which all sent the example token change-this-ingest-token over
+// plain HTTP. In a container they keep sending over plain HTTP while it is
+// allowed, and are listed to update. Over HTTPS the token is refused with
+// 503, which Fluent Bit keeps and sends again. Anywhere else it is just a
+// wrong token.
+func TestOldDockerToken(t *testing.T) {
+	batch := `[{"Computer":"WIN-01","EventID":4624,"Channel":"Security"}]`
+	old := map[string]string{"Authorization": "Bearer change-this-ingest-token"}
+	docker := func(s *Server) { s.Runtime = &Runtime{OS: "linux", Container: true, Addresses: []string{}} }
+	ts, s := newPlainSide(t, docker)
+	if resp, body := plainSend(t, "POST", ts.URL+"/api/ingest", batch, old); resp.StatusCode != http.StatusOK {
+		t.Fatalf("old agent over plain HTTP: %d %s", resp.StatusCode, body)
+	}
+	if p := s.Pipeline.PlaintextSenders(time.Time{}); len(p) != 1 || !slices.Equal(p[0].Hosts, []string{"WIN-01"}) {
+		t.Errorf("plain senders %+v", p)
+	}
+	_, h := do(t, mustServe(t, s), "GET", "/api/health", "", true)
+	if warn, _ := json.Marshal(h["warnings"]); !strings.Contains(string(warn), "127.0.0.1 (WIN-01)") || !strings.Contains(string(warn), "Docker's port forwarding") {
+		t.Errorf("health: %s", warn)
+	}
+	// Over HTTPS: refused, but kept by the agent.
+	tls := httptest.NewTLSServer(s.Handler())
+	defer tls.Close()
+	req, _ := http.NewRequest("POST", tls.URL+"/api/ingest", strings.NewReader(batch))
+	req.Header.Set("Authorization", old["Authorization"])
+	resp, err := tls.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("old token over HTTPS: %d", resp.StatusCode)
+	}
+	if r := s.Pipeline.RefusedSenders(time.Time{}); len(r) != 1 || r[0].Reason != ingest.RefusedOldToken {
+		t.Errorf("refused %+v", r)
+	}
+	// Plain-text ingest denied: refused like every plain-HTTP agent.
+	ts, _ = newPlainSide(t, func(s *Server) {
+		docker(s)
+		s.Config.Server.TLS = &config.ServerTLS{Mode: "auto", PlaintextIngest: "deny"}
+	})
+	if resp, _ := plainSend(t, "POST", ts.URL+"/api/ingest", batch, old); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("old token with deny: %d", resp.StatusCode)
+	}
+	// Not in a container: that token was never this server's.
+	ts, s = newPlainSide(t, func(s *Server) { s.Runtime = &Runtime{OS: "linux", Addresses: []string{}} })
+	if resp, _ := plainSend(t, "POST", ts.URL+"/api/ingest", batch, old); resp.StatusCode != http.StatusUnauthorized || s.Pipeline.Stats().Received != 0 {
+		t.Errorf("old token outside a container: %d", resp.StatusCode)
+	}
+}
+
+// TestAgentsGetTheServersOwnToken checks that new agent configs never
+// carry the public example token while the server has a token of its own,
+// whichever order they are listed in.
+func TestAgentsGetTheServersOwnToken(t *testing.T) {
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Config.Ingest.Tokens = []string{"change-this-ingest-token", "own-token-0123456789abcdef"}
+	})
+	_, body := do(t, ts, "GET", "/api/agents/config?os=linux", "", true)
+	cfg, _ := body["config"].(string)
+	if !strings.Contains(cfg, "Bearer own-token-0123456789abcdef") || strings.Contains(cfg, "change-this") {
+		t.Errorf("config:\n%s", cfg)
+	}
+}
+
+// TestLegacyConfigBehindProxy checks a config from before HTTPS was the
+// default, behind a reverse proxy set up the way older versions said: it
+// sends X-Forwarded-Proto: https and public_url was left http://. The
+// proxy keeps working (no redirect loop, sign-in works), and the Health
+// page asks for server.trusted_proxies.
+func TestLegacyConfigBehindProxy(t *testing.T) {
+	ts, s := newPlainSide(t, nil)
+	proxy := map[string]string{"Host": "siem.example.com", "X-Forwarded-Proto": "https"}
+	if resp, _ := plainSend(t, "GET", ts.URL+"/", "", proxy); resp.StatusCode == http.StatusPermanentRedirect {
+		t.Errorf("page behind the proxy redirected to %s", resp.Header.Get("Location"))
+	}
+	resp, body := plainSend(t, "POST", ts.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, proxy)
+	if resp.StatusCode != http.StatusOK || len(resp.Cookies()) == 0 || resp.Cookies()[0].Name != secureSessionCookie {
+		t.Errorf("sign-in behind the proxy: %d %s %v", resp.StatusCode, body, resp.Cookies())
+	}
+	_, h := do(t, mustServe(t, s), "GET", "/api/health", "", true)
+	if warn, _ := json.Marshal(h["warnings"]); !strings.Contains(string(warn), "server.trusted_proxies: [127.0.0.1]") {
+		t.Errorf("health: %s", warn)
+	}
+	// Without the header it is a browser on plain HTTP: redirected.
+	if resp, _ := plainSend(t, "GET", ts.URL+"/", "", map[string]string{"Host": "siem.example.com:8080"}); resp.StatusCode != http.StatusPermanentRedirect {
+		t.Errorf("plain page: %d", resp.StatusCode)
+	}
+	// A config written for HTTPS believes only server.trusted_proxies.
+	ts, _ = newPlainSide(t, func(s *Server) { s.Config.Server.TLS = &config.ServerTLS{Mode: "auto"} })
+	if resp, _ := plainSend(t, "POST", ts.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, proxy); resp.StatusCode != http.StatusForbidden {
+		t.Errorf("new config, unlisted proxy: %d", resp.StatusCode)
+	}
+}
+
+// TestLoginPageOffersTheCA checks that the sign-in page links the CA
+// certificate only when there is one to download, so it never asks for
+// one that is not there.
+func TestLoginPageOffersTheCA(t *testing.T) {
+	page := func(s *httptest.Server) string {
+		resp, err := http.Get(s.URL + "/login")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.UI = fstest.MapFS{"login.html": {Data: []byte(`<p id="ca-help" hidden><a href="api/tls/ca.pem">Download</a></p>`)}}
+		s.TLS = newCertManager(t)
+	})
+	if p := page(ts); !strings.Contains(p, `id="ca-help">`) {
+		t.Errorf("with a CA: %s", p)
+	}
+	ts, _ = newTestServerWith(t, func(s *Server) {
+		s.UI = fstest.MapFS{"login.html": {Data: []byte(`<p id="ca-help" hidden><a href="api/tls/ca.pem">Download</a></p>`)}}
+	})
+	if p := page(ts); !strings.Contains(p, `id="ca-help" hidden`) {
+		t.Errorf("without a CA: %s", p)
 	}
 }
 
@@ -159,7 +333,7 @@ func mustServe(t *testing.T, s *Server) *httptest.Server {
 
 func TestTrustedProxyIsServed(t *testing.T) {
 	ts, _ := newPlainSide(t, func(s *Server) { s.Config.Server.TrustedProxies = []string{"127.0.0.1"} })
-	hdr := map[string]string{"X-Forwarded-Proto": "https", "Authorization": "Basic YWRtaW46czNjcmV0LXBhc3M="}
+	hdr := map[string]string{"X-Forwarded-Proto": "https", "Authorization": "Basic YWRtaW46czNjcmV0LXBhc3M=", "Host": "siem.example.com"}
 	resp, body := plainSend(t, "GET", ts.URL+"/api/health", "", hdr)
 	if resp.StatusCode != 200 || resp.Header.Get("Strict-Transport-Security") == "" {
 		t.Errorf("trusted proxy: %d %s", resp.StatusCode, body)
@@ -257,18 +431,48 @@ func TestCACertificateIsPublic(t *testing.T) {
 }
 
 func TestAgentConfigTrustsTheCA(t *testing.T) {
-	m := newCertManager(t)
-	ts, _ := newTestServerWith(t, func(s *Server) { s.TLS = m })
-	q := url.Values{"os": {"linux"}, "server": {"https://192.168.1.77:8080"}}
-	code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
-	cfg, _ := body["config"].(string)
-	if code != 200 || !strings.Contains(cfg, "tls.ca_file      /etc/fluent-bit/signalith-ca.pem") || body["ca"] != string(m.CAPEM()) ||
-		body["ca_fingerprint"] != m.Fingerprint() || body["ca_step"] != float64(2) || body["config_step"] != float64(3) {
-		t.Fatalf("agent config: %d %v", code, body)
+	dir := t.TempDir()
+	m, err := tlsauto.New(tlsauto.Options{Dir: dir, Names: []string{"siem.example.com"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The certificate now covers the address agents use.
-	if !m.Covers("192.168.1.77") {
-		t.Error("the agent address was not added to the certificate")
+	ts, _ := newTestServerWith(t, func(s *Server) { s.TLS = m })
+	// Building the setup, as the page does while an address is typed,
+	// changes nothing; it says which name is still to be added.
+	for _, typed := range []string{"https://192.168.1.7", "https://192.168.1.77:8080"} {
+		q := url.Values{"os": {"linux"}, "server": {typed}}
+		code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
+		cfg, _ := body["config"].(string)
+		if code != 200 || !strings.Contains(cfg, "tls.ca_file          /etc/fluent-bit/signalith-ca.pem") || body["ca"] != string(m.CAPEM()) ||
+			body["ca_fingerprint"] != m.Fingerprint() || body["ca_step"] != float64(2) || body["config_step"] != float64(3) ||
+			body["add_name"] != strings.TrimPrefix(strings.Split(typed, ":8080")[0], "https://") {
+			t.Fatalf("agent config: %d %v", code, body)
+		}
+	}
+	if m.Covers("192.168.1.7") || m.Covers("192.168.1.77") {
+		t.Error("building a setup changed the certificate")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "names.txt")); err == nil {
+		t.Error("building a setup saved a name")
+	}
+	// Once entered, the page adds it.
+	code, body := do(t, ts, "POST", "/api/tls/names", `{"name":"192.168.1.77"}`, true)
+	if code != 200 || !m.Covers("192.168.1.77") || m.Covers("192.168.1.7") {
+		t.Errorf("add name: %d %v", code, body)
+	}
+	q := url.Values{"os": {"linux"}, "server": {"https://192.168.1.77:8080"}}
+	if _, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true); body["add_name"] != nil {
+		t.Errorf("covered name still to add: %v", body["add_name"])
+	}
+	// Another website's name is refused, saying why and what to use.
+	q = url.Values{"os": {"linux"}, "server": {"https://www.bank.example"}}
+	code, body = do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
+	if msg, _ := body["error"].(string); code != 400 || body["field"] != "server" || !strings.Contains(msg, "can't include www.bank.example") {
+		t.Errorf("outside name: %d %v", code, body)
+	}
+	code, body = do(t, ts, "POST", "/api/tls/names", `{"name":"www.bank.example"}`, true)
+	if code != 400 || body["field"] != "name" {
+		t.Errorf("add outside name: %d %v", code, body)
 	}
 }
 
@@ -293,16 +497,23 @@ func TestHealthShowsTLS(t *testing.T) {
 }
 
 func TestPlaintextWarning(t *testing.T) {
-	one := plaintextWarning([]ingest.PlaintextSender{{Address: "192.0.2.4"}})
-	if !strings.HasPrefix(one, "An agent still sends") || !strings.Contains(one, ": 192.0.2.4.") || !strings.Contains(one, "plaintext_ingest: deny") {
+	one := plaintextWarning([]ingest.Sender{{Address: "192.0.2.4"}}, false)
+	if !strings.HasPrefix(one, "An agent still sends") || !strings.Contains(one, ": 192.0.2.4.") || !strings.Contains(one, "plaintext_ingest: deny in signalith.yaml.") {
 		t.Errorf("one: %s", one)
 	}
-	var many []ingest.PlaintextSender
+	var many []ingest.Sender
 	for _, a := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3", "192.0.2.4", "192.0.2.5", "192.0.2.6", "192.0.2.7"} {
-		many = append(many, ingest.PlaintextSender{Address: a})
+		many = append(many, ingest.Sender{Address: a})
 	}
-	if got := plaintextWarning(many); !strings.HasPrefix(got, "7 agents still send") ||
-		!strings.Contains(got, "192.0.2.1, 192.0.2.2, 192.0.2.3, 192.0.2.4, 192.0.2.5 and 2 more.") {
+	if got := plaintextWarning(many, false); !strings.HasPrefix(got, "7 agents still send") ||
+		!strings.Contains(got, "192.0.2.1, 192.0.2.2, 192.0.2.3, 192.0.2.4, 192.0.2.5 and 2 more.") || strings.Contains(got, "Docker") {
 		t.Errorf("many: %s", got)
+	}
+	// Behind Docker Desktop every agent has the gateway's address: the
+	// host names in their events count and name them.
+	got := plaintextWarning([]ingest.Sender{{Address: "192.168.65.1", Hosts: []string{"WIN-01", "web-02", "web-03"}}}, true)
+	if !strings.HasPrefix(got, "3 agents still send") || !strings.Contains(got, "192.168.65.1 (WIN-01, web-02, web-03)") ||
+		!strings.Contains(got, "deploy/docker/signalith.yaml") || !strings.Contains(got, "names in brackets come from their events") {
+		t.Errorf("docker: %s", got)
 	}
 }

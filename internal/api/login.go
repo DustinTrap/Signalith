@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"net"
@@ -207,6 +208,11 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.NotFound(w, r)
 		return
+	}
+	if s.TLS.CAPEM() != nil {
+		// The link to the CA certificate, hidden unless there is one to
+		// download (Signalith's own, or a private CA's).
+		page = bytes.Replace(page, []byte(`id="ca-help" hidden`), []byte(`id="ca-help"`), 1)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

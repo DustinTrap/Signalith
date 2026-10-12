@@ -176,9 +176,18 @@ func TestRestartReusesCAAndCertificate(t *testing.T) {
 		t.Error("a restart made a new CA or certificate")
 	}
 	// A new name in the config: a new certificate from the same CA.
-	m3 := newAuto(t, dir, c, "siem.example.com", "alias.example.com")
-	if m3.Fingerprint() != m1.Fingerprint() || m3.Leaf().SerialNumber.Cmp(m1.Leaf().SerialNumber) == 0 || !m3.Covers("alias.example.com") {
+	m3 := newAuto(t, dir, c, "siem.example.com", "siem.corp.lan")
+	if m3.Fingerprint() != m1.Fingerprint() || m3.Leaf().SerialNumber.Cmp(m1.Leaf().SerialNumber) == 0 || !m3.Covers("siem.corp.lan") {
 		t.Error("new name not added with the same CA")
+	}
+	// One the CA may not sign is left out, and said so; the rest still
+	// verify.
+	m4 := newAuto(t, dir, c, "siem.example.com", "alias.example.com", "203.0.113.9")
+	if m4.Covers("alias.example.com") || m4.Covers("203.0.113.9") || !slices.Equal(m4.Outside(), []string{"alias.example.com", "203.0.113.9"}) {
+		t.Errorf("outside names: %v, certificate %v", m4.Outside(), certNames(m4.Leaf()))
+	}
+	if _, err := m4.Leaf().Verify(x509.VerifyOptions{Roots: caPool(t, m4), DNSName: "siem.example.com", CurrentTime: c.t}); err != nil {
+		t.Error(err)
 	}
 	// A key that does not belong to the CA is refused.
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -260,7 +269,7 @@ func TestEnsureName(t *testing.T) {
 	}
 	// Only the latest names are kept.
 	for i := 0; i < maxAddedNames+5; i++ {
-		if err := m2.EnsureName("host" + string(rune('a'+i%26)) + string(rune('a'+i/26)) + ".example.com"); err != nil {
+		if err := m2.EnsureName("host" + string(rune('a'+i%26)) + string(rune('a'+i/26)) + ".lan"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -270,6 +279,69 @@ func TestEnsureName(t *testing.T) {
 	// A machine name is not lost by trimming.
 	if !m2.Covers("10.1.2.3") {
 		t.Error("machine address dropped")
+	}
+}
+
+// TestCANameConstraints checks that Signalith's CA can only vouch for
+// this server: names it was made with, private names and private
+// addresses. A certificate it signed for another website fails to
+// verify, so a stolen ca.key cannot be used against other sites.
+func TestCANameConstraints(t *testing.T) {
+	fakeMachine(t)
+	dir := t.TempDir()
+	c := &clock{time.Now()}
+	m := newAuto(t, dir, c, "siem.example.com", "198.51.100.7")
+	ca := m.ca
+	if !slices.Contains(ca.PermittedDNSDomains, "siem.example.com") || !slices.Contains(ca.PermittedDNSDomains, "ws-test") ||
+		!slices.Contains(ca.PermittedDNSDomains, "home.arpa") || !ca.PermittedDNSDomainsCritical {
+		t.Errorf("DNS constraints %v", ca.PermittedDNSDomains)
+	}
+	// A certificate signed with the CA's key for any name, the way a
+	// stolen key would be used.
+	forge := func(name string) *x509.Certificate {
+		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		tmpl := &x509.Certificate{SerialNumber: serial(), NotBefore: c.t.Add(-time.Hour), NotAfter: c.t.Add(time.Hour),
+			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+		if ip := net.ParseIP(name); ip != nil {
+			tmpl.IPAddresses = []net.IP{ip}
+		} else {
+			tmpl.DNSNames = []string{name}
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, m.ca, key.Public(), m.caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leaf, _ := x509.ParseCertificate(der)
+		return leaf
+	}
+	pool := caPool(t, m)
+	for name, ok := range map[string]bool{
+		"siem.example.com": true, "api.siem.example.com": true, "ws-test": true, "siem.corp.local": true, "nas.home.arpa": true,
+		"192.168.1.20": true, "10.9.8.7": true, "100.101.102.103": true, "fd00::5": true, "198.51.100.7": true, "127.0.0.1": true,
+		"www.bank.example": false, "example.com": false, "login.microsoftonline.com": false, "8.8.8.8": false, "198.51.100.8": false, "2001:db8::1": false,
+	} {
+		_, err := forge(name).Verify(x509.VerifyOptions{Roots: pool, DNSName: name, CurrentTime: c.t})
+		if (err == nil) != ok {
+			t.Errorf("%s: verify error %v, want allowed %v", name, err, ok)
+		}
+		if got := m.CanCover(name) == nil; got != ok {
+			t.Errorf("CanCover(%s) = %v, want %v", name, got, ok)
+		}
+	}
+	// EnsureName refuses another site's name, saying what to use, and
+	// keeps nothing.
+	err := m.EnsureName("www.bank.example")
+	if err == nil || !strings.Contains(err.Error(), "can't include www.bank.example") || !strings.Contains(err.Error(), "(198.51.100.7, 10.1.2.3, siem.example.com, ws-test)") ||
+		strings.Contains(err.Error(), "127.0.0.1") || !strings.Contains(err.Error(), "docs/https.md") {
+		t.Errorf("EnsureName: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, namesFile)); strings.Contains(string(b), "bank") {
+		t.Errorf("names.txt: %s", b)
+	}
+	// CanCover changes nothing.
+	before := m.Leaf()
+	if err := m.CanCover("192.168.7.7"); err != nil || m.Leaf() != before || m.Covers("192.168.7.7") {
+		t.Errorf("CanCover changed the certificate: %v", err)
 	}
 }
 
