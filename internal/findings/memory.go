@@ -73,6 +73,9 @@ func Matches(f *Finding, flt Filter) bool {
 	if !flt.Since.IsZero() && f.Created.Before(flt.Since) {
 		return false
 	}
+	if !flt.UpdatedSince.IsZero() && f.Updated.Before(flt.UpdatedSince) {
+		return false
+	}
 	if flt.Text != "" {
 		b, _ := json.Marshal(f)
 		if !strings.Contains(strings.ToLower(string(b)), strings.ToLower(flt.Text)) {

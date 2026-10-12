@@ -346,6 +346,7 @@ function renderResult(res) {
   parts.push(`${res.took_ms} ms`);
   if (res.truncated) parts.push('results were truncated');
   $('status').textContent = parts.join(' · ');
+  releaseCharts($('chart'));
   $('chart').replaceChildren();
   if (res.kind === 'timechart') renderChart(res);
   let cols = res.columns || [];
@@ -412,46 +413,159 @@ function showCellMenu(ev, col, value, kind) {
 function hideCellMenu() { $('cell-menu').classList.add('hidden'); }
 document.addEventListener('click', hideCellMenu);
 
-// ---------- chart ----------
-const palette = ['#1f6feb', '#2da44e', '#d97706', '#cf222e', '#8250df', '#0891b2', '#bf3989', '#57606a'];
-function renderChart(res) {
-  const rows = res.rows || [];
-  const series = (res.columns || []).filter((c) => c !== '_time').slice(0, 8);
-  if (!rows.length || !series.length) return;
-  const W = 1000, H = 220, L = 50, R = 10, T = 12, B = 26;
-  const max = Math.max(1, ...rows.flatMap((r) => series.map((s) => Number(r[s]) || 0)));
-  const x = (i) => L + (rows.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (rows.length - 1));
-  const y = (v) => T + (H - T - B) * (1 - v / max);
-  const ns = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(ns, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('preserveAspectRatio', 'none');
-  const mk = (tag, attrs, text) => {
-    const n = document.createElementNS(ns, tag);
-    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
-    if (text !== undefined) n.textContent = text;
-    svg.append(n);
-    return n;
-  };
-  for (let i = 0; i <= 4; i++) {
-    const v = max * i / 4;
-    mk('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: 'currentColor', 'stroke-opacity': '0.12' });
-    mk('text', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'currentColor', 'fill-opacity': '0.6' }, Math.round(v).toLocaleString());
+// ---------- charts ----------
+// Charts are plain SVG drawn at the container's pixel width, so text stays
+// crisp at any size; they redraw when the container is resized. Colors
+// come from CSS variables so they follow the light or dark theme.
+const SERIES = 8;
+const seriesColor = (i) => `var(--series-${(i % SERIES) + 1})`;
+const SVGNS = 'http://www.w3.org/2000/svg';
+
+function svgEl(parent, tag, attrs, text) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
+  if (text !== undefined) n.textContent = text;
+  if (parent) parent.append(n);
+  return n;
+}
+
+// fmtCompact shortens big numbers: 12.3k, 4.5M.
+function fmtCompact(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return fmtValue(v);
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(a >= 1e10 ? 0 : 1) + 'B';
+  if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
+  if (a >= 1e4) return (n / 1e3).toFixed(a >= 1e5 ? 0 : 1) + 'k';
+  return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+// niceMax rounds a maximum up to 1, 2 or 5 times a power of ten.
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (v <= m * p) return m * p;
+  return 10 * p;
+}
+
+const chartObserver = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+  for (const e of entries) {
+    const box = e.target;
+    const w = Math.round(e.contentRect.width);
+    if (box._draw && w && w !== box._drawnWidth) box._draw();
   }
-  const step = Math.max(1, Math.ceil(rows.length / 8));
-  rows.forEach((r, i) => {
-    if (i % step) return;
-    const d = new Date(r._time);
-    mk('text', { x: x(i), y: H - 8, 'text-anchor': 'middle', 'font-size': 11, fill: 'currentColor', 'fill-opacity': '0.6' },
-      isNaN(d) ? r._time : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
-  });
-  series.forEach((s, si) => {
-    const pts = rows.map((r, i) => `${x(i)},${y(Number(r[s]) || 0)}`).join(' ');
-    mk('polyline', { points: pts, fill: 'none', stroke: palette[si % palette.length], 'stroke-width': 2, 'vector-effect': 'non-scaling-stroke' });
-  });
+}) : null;
+
+// releaseCharts stops watching the charts inside a box that is about to be
+// replaced.
+function releaseCharts(box) {
+  if (chartObserver) box.querySelectorAll('.chart-holder').forEach((h) => chartObserver.unobserve(h));
+}
+
+// keepDrawn draws now and again whenever the box changes width.
+function keepDrawn(box, draw) {
+  box._draw = () => { box._drawnWidth = Math.round(box.clientWidth); draw(box._drawnWidth || 600); };
+  box._draw();
+  if (chartObserver) chartObserver.observe(box);
+}
+
+// drawTimeChart draws a timechart result as lines (or filled areas) in box.
+// opts: area, height, colorFor(name, index), emptyText.
+function drawTimeChart(box, res, opts = {}) {
+  releaseCharts(box);
+  const rows = res.rows || [];
+  const series = (res.columns || []).filter((c) => c !== '_time').slice(0, SERIES);
+  if (!rows.length || !series.length) {
+    box.replaceChildren(el('div', { class: 'muted chart-empty' }, opts.emptyText || 'No data in this time range.'));
+    return;
+  }
+  const colorFor = opts.colorFor || ((_, i) => seriesColor(i));
+  const times = rows.map((r) => new Date(r._time));
+  const spanMs = times.length > 1 ? times[times.length - 1] - times[0] : 0;
+  const fmtX = (d) => (isNaN(d) ? '' : spanMs >= 2 * 86400e3
+    ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }));
+  const fmtTip = (d) => (isNaN(d) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+  const values = rows.flatMap((r) => series.map((s) => Number(r[s]) || 0));
+  // Whole-number data (counts) gets whole-number ticks.
+  const whole = values.every(Number.isInteger);
+  const max = whole ? Math.max(4, Math.ceil(niceMax(Math.max(0, ...values)) / 4) * 4) : niceMax(Math.max(0, ...values));
   const legend = el('div', { class: 'legend' }, ...series.map((s, si) => el('span', {},
-    el('span', { class: 'swatch', style: `background:${palette[si % palette.length]}` }), s)));
-  $('chart').replaceChildren(svg, legend);
+    el('span', { class: 'swatch', style: `background:${colorFor(s, si)}` }), s)));
+  const holder = el('div', { class: 'chart-holder' });
+  box.replaceChildren(holder, series.length > 1 || opts.legend ? legend : '');
+  keepDrawn(holder, (W) => {
+    const H = opts.height || 220;
+    const T = 10, B = 22, R = 10;
+    const L = Math.max(28, fmtCompact(max).length * 7 + 10);
+    const pw = Math.max(10, W - L - R), ph = H - T - B;
+    const x = (i) => L + (rows.length === 1 ? pw / 2 : i * pw / (rows.length - 1));
+    const y = (v) => T + ph * (1 - v / max);
+    const svg = svgEl(null, 'svg', { class: 'chart-svg', width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': (opts.label || 'Chart') + ': ' + series.join(', ') });
+    for (let i = 0; i <= 4; i++) {
+      const v = max * i / 4;
+      svgEl(svg, 'line', { x1: L, x2: W - R, y1: y(v), y2: y(v), class: 'grid-line' });
+      svgEl(svg, 'text', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end', class: 'axis' }, fmtCompact(v));
+    }
+    const labels = Math.max(2, Math.floor(pw / 80));
+    const step = Math.max(1, Math.ceil(rows.length / labels));
+    for (let i = 0; i < rows.length; i += step) {
+      const anchor = i === 0 && rows.length > 1 ? 'start' : x(i) > W - R - 30 ? 'end' : 'middle';
+      svgEl(svg, 'text', { x: x(i), y: H - 6, 'text-anchor': anchor, class: 'axis' }, fmtX(times[i]));
+    }
+    series.forEach((s, si) => {
+      const pts = rows.map((r, i) => [x(i), y(Number(r[s]) || 0)]);
+      const color = colorFor(s, si);
+      if (opts.area) {
+        const d = `M${pts[0][0]},${y(0)} ` + pts.map((p) => `L${p[0]},${p[1]}`).join(' ') + ` L${pts[pts.length - 1][0]},${y(0)} Z`;
+        svgEl(svg, 'path', { d, style: `fill:${color}`, 'fill-opacity': series.length > 1 ? 0.12 : 0.2 });
+      }
+      svgEl(svg, 'polyline', { points: pts.map((p) => p.join(',')).join(' '), fill: 'none', style: `stroke:${color}`, 'stroke-width': 2, 'stroke-linejoin': 'round' });
+      if (rows.length === 1) svgEl(svg, 'circle', { cx: pts[0][0], cy: pts[0][1], r: 3, style: `fill:${color}` });
+    });
+    // Hover a column to see every value at that time.
+    const colW = rows.length > 1 ? pw / (rows.length - 1) : pw;
+    rows.forEach((r, i) => {
+      const hit = svgEl(svg, 'rect', { x: x(i) - colW / 2, y: T, width: colW, height: ph, class: 'hit' });
+      svgEl(hit, 'title', {}, fmtTip(times[i]) + '\n' + series.map((s) => `${s}: ${fmtValue(r[s] ?? 0)}`).join('\n'));
+    });
+    holder.replaceChildren(svg);
+  });
+}
+
+// drawBarChart draws labeled horizontal bars, largest first as given.
+// items: [{label, value, note, color, onclick}].
+function drawBarChart(box, items, opts = {}) {
+  releaseCharts(box);
+  if (!items.length) {
+    box.replaceChildren(el('div', { class: 'muted chart-empty' }, opts.emptyText || 'Nothing in this time range.'));
+    return;
+  }
+  const holder = el('div', { class: 'chart-holder' });
+  box.replaceChildren(holder);
+  const max = Math.max(...items.map((it) => Number(it.value) || 0), 0) || 1;
+  keepDrawn(holder, (W) => {
+    const rowH = 34, H = items.length * rowH;
+    const svg = svgEl(null, 'svg', { class: 'chart-svg bars', width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': opts.label || 'Bar chart' });
+    const fit = (t, px) => { const n = Math.max(4, Math.floor(px / 7)); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
+    items.forEach((it, i) => {
+      const top = i * rowH;
+      const g = svgEl(svg, 'g', { class: it.onclick ? 'bar-row clickable' : 'bar-row' });
+      const valText = it.note || fmtCompact(it.value);
+      const valW = valText.length * 7 + 6;
+      svgEl(g, 'text', { x: 0, y: top + 13, class: 'bar-text' }, fit(String(it.label), W - valW - 8));
+      svgEl(g, 'text', { x: W, y: top + 13, 'text-anchor': 'end', class: 'bar-value' }, valText);
+      svgEl(g, 'rect', { x: 0, y: top + 18, width: W, height: 8, rx: 3, class: 'bar-track' });
+      svgEl(g, 'rect', { x: 0, y: top + 18, width: Math.max(2, W * (Number(it.value) || 0) / max), height: 8, rx: 3, style: `fill:${it.color || opts.color || seriesColor(0)}` });
+      svgEl(g, 'title', {}, `${it.label}: ${fmtValue(it.value)}${it.note ? ' (' + it.note + ')' : ''}`);
+      if (it.onclick) g.addEventListener('click', it.onclick);
+    });
+    holder.replaceChildren(svg);
+  });
+}
+
+function renderChart(res) {
+  drawTimeChart($('chart'), res, { legend: true, label: 'Search results over time' });
 }
 
 // ---------- explain ----------
@@ -486,6 +600,8 @@ $('starter-list').replaceChildren(...starters.map(([title, q]) => el('li', {},
 
 // ---------- ask in plain English ----------
 let askInfo = { ai_available: false, examples: [] };
+// lastAsk lets "Add to dashboard" title a panel with the question asked.
+let lastAsk = null;
 
 async function ask(question, mode) {
   question = question.trim();
@@ -502,6 +618,7 @@ async function ask(question, mode) {
     return;
   }
   setQuery(res.query);
+  lastAsk = { question, query: res.query };
   const steps = (res.steps || []).filter((s) => s.meaning);
   const head = res.source === 'ai'
     ? el('div', {}, el('b', {}, 'Query written by ' + (res.ai_model || 'the AI model')), el('span', { class: 'muted' }, '. Check it before relying on the results.'))
