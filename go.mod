@@ -1,6 +1,6 @@
 module github.com/jrsamsanchez/signalith
 
-go 1.24.0
+go 1.26.9
 
 require (
 	github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667

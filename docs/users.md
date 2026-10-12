@@ -17,7 +17,7 @@ Each role can do everything the roles above it can.
 | --- | --- | --- |
 | **Viewer** | Managers, auditors, other teams | Run searches and see dashboards, findings, investigations, detections, risk and intel. Cannot change anything. |
 | **Analyst** | SOC analysts | Also triage findings, work investigations, build dashboards, use **Ask** and add or remove intel indicators by hand. |
-| **Admin** | Whoever runs Signalith | Also create and change detections, refresh feeds and upload intel, edit asset and identity lists, see the agent setup (it holds the ingest token), manage users and set up directory sign-in. |
+| **Admin** | Whoever runs Signalith | Also create and change detections, add and change threat intel feeds and upload intel, edit asset and identity lists, see the agent setup (it holds the ingest token), manage users and set up directory sign-in. |
 
 By area:
 
@@ -38,7 +38,7 @@ By area:
 | Asset and identity lists: edit | No | No | Yes |
 | Threat intel: view and look up | Yes | Yes | Yes |
 | Threat intel: add or remove indicators by hand | No | Yes | Yes |
-| Threat intel: refresh feeds, upload files | No | No | Yes |
+| Threat intel: add, change, test and refresh feeds, upload files | No | No | Yes |
 | Add data (agent setup and ingest token) | No | No | Yes |
 | Users and directory sign-in | No | No | Yes |
 | Change your own password (local users) | Yes | Yes | Yes |
@@ -523,8 +523,8 @@ page itself.
 `GET /api/coverage`, `GET /api/findings`, `GET /api/findings/summary`,
 `GET /api/findings/{id}`, `GET /api/cases`, `GET /api/cases/summary`,
 `GET /api/cases/{id}`, `GET /api/lookups/context`, `GET /api/lookups/{kind}`,
-`GET /api/risk`, `GET /api/risk/object`, `GET /api/intel`,
-`GET /api/intel/indicators`, `GET /api/intel/lookup`, `GET /api/posture`,
+`GET /api/risk`, `GET /api/risk/object`, `GET /api/intel`, `GET /api/intel/feeds`,
+`GET /api/intel/catalog`, `GET /api/intel/indicators`, `GET /api/intel/lookup`, `GET /api/posture`,
 `GET /api/dashboards`, `GET /api/dashboards/{id}`, `GET /api/dashboards/{id}/yaml`,
 `POST /api/dashboards/{id}/run`, `POST /api/panels/run`, and the web UI.
 
@@ -540,7 +540,9 @@ page itself.
 `POST /api/detections/test`, `POST /api/detections/sigma`,
 `PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
-`POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/upload`, and every
+`POST /api/intel/feeds`, `PUT /api/intel/feeds/{name}`, `DELETE /api/intel/feeds/{name}`,
+`POST /api/intel/feeds/test`, `POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/catalog`,
+`POST /api/intel/taxii/collections`, `POST /api/intel/upload`, and every
 `/api/users` and `/api/auth/directory` route below.
 
 A route added without a role is admin-only, and a test fails until it gets one. That

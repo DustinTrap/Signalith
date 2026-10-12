@@ -94,6 +94,11 @@ func TestLinuxAuthLines(t *testing.T) {
 			map[string]any{"datamodel": "Authentication", "action": "failure", "user": "oracle", "src": "192.0.2.4", "reason": "unknown user", "host": "web1", "app": "sshd", "process_id": int64(811)}},
 		{"Oct 11 09:15:09 web1 sshd[812]: Accepted publickey for deploy from 192.0.2.10 port 40200 ssh2: RSA SHA256:abc",
 			map[string]any{"action": "success", "user": "deploy", "authentication_method": "publickey"}},
+		// OpenSSH 9.8 and later (Debian 13, Ubuntu 24.10, Fedora 41, RHEL 10).
+		{"Oct 11 09:15:20 web1 sshd-session[1234]: Accepted password for root from 192.0.2.11 port 50000 ssh2",
+			map[string]any{"datamodel": "Authentication", "action": "success", "user": "root", "src": "192.0.2.11", "app": "sshd", "process_id": int64(1234)}},
+		{"Oct 11 09:15:21 web1 sshd-auth[1235]: Failed password for bob from 192.0.2.11 port 50001 ssh2",
+			map[string]any{"datamodel": "Authentication", "action": "failure", "user": "bob", "app": "sshd"}},
 		{"Oct 11 09:16:00 web1 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/cat /etc/shadow",
 			map[string]any{"datamodel": "Authentication", "action": "success", "src_user": "alice", "user": "root", "process": "/usr/bin/cat /etc/shadow"}},
 		{"Oct 11 09:16:30 web1 sudo:    alice : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/bin/bash",
@@ -159,5 +164,38 @@ func TestPipelineRoutesToDailyModelIndex(t *testing.T) {
 	}
 	if s := p.Stats(); s.Received != 2 || s.Indexed != 2 {
 		t.Errorf("stats = %+v", s)
+	}
+}
+
+func TestIngestEvents(t *testing.T) {
+	fb := &fakeBulk{}
+	p := &Pipeline{Store: fb, Prefix: "sig", Now: func() time.Time { return now }}
+	auth := ParseProgram("web1", "sshd", "7", "Failed password for root from 192.0.2.4 port 22 ssh2", "syslog")
+	auth.Time = time.Date(2026, 10, 10, 23, 0, 0, 0, time.UTC)
+	res, err := p.IngestEvents(context.Background(), []Event{auth, {Fields: map[string]any{"message": "no time, no model"}}})
+	if err != nil || res.Indexed != 2 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if fb.docs[0].Index != "sig-authentication-2026.10.10" || fb.docs[1].Index != "sig-other-2026.10.11" {
+		t.Errorf("indexes = %s, %s", fb.docs[0].Index, fb.docs[1].Index)
+	}
+	expect(t, fb.docs[1].Doc, map[string]any{"datamodel": "Other", "@timestamp": "2026-10-11T12:00:00Z"})
+	if s := p.Stats(); s.Received != 2 || s.Indexed != 2 {
+		t.Errorf("stats = %+v", s)
+	}
+}
+
+func TestGuessYear(t *testing.T) {
+	cases := []struct{ stamp, now, want string }{
+		{"Oct 11 09:15:02", "2026-10-11T12:00:00Z", "2026-10-11T09:15:02Z"},
+		{"Oct 12 11:00:00", "2026-10-11T12:00:00Z", "2026-10-12T11:00:00Z"}, // within a day ahead: clock skew
+		{"Dec 31 23:59:59", "2027-01-01T00:00:30Z", "2026-12-31T23:59:59Z"},
+	}
+	for _, c := range cases {
+		st, _ := time.Parse("Jan _2 15:04:05", c.stamp)
+		n, _ := time.Parse(time.RFC3339, c.now)
+		if got := GuessYear(st, n).Format(time.RFC3339); got != c.want {
+			t.Errorf("%s at %s = %s, want %s", c.stamp, c.now, got, c.want)
+		}
 	}
 }

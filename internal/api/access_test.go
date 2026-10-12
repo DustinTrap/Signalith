@@ -79,6 +79,8 @@ func TestEveryRouteHasARole(t *testing.T) {
 		"PATCH /api/findings/{id}":   users.Analyst,
 		"POST /api/intel/indicators": users.Analyst,
 		"POST /api/intel/upload":     users.Admin,
+		"POST /api/intel/feeds/test": users.Admin,
+		"GET /api/intel/feeds":       users.Viewer,
 		"POST /api/search":           users.Viewer,
 		"GET /api/me":                users.Viewer,
 	} {

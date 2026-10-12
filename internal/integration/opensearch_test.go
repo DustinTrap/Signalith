@@ -472,7 +472,7 @@ func TestThreatIntelEndToEnd(t *testing.T) {
 		w.Write([]byte(feedBody))
 	}))
 	defer srv.Close()
-	feeds := &intel.Feeds{Store: store, List: []intel.Feed{{Name: "test-blocklist", URL: srv.URL, Format: "lines", Type: "auto",
+	feeds := &intel.Feeds{Store: store, AllowLoopback: true, List: []intel.Feed{{Name: "test-blocklist", URL: srv.URL, Format: "lines", Type: "auto",
 		Interval: time.Hour, MaxAge: 24 * time.Hour, Weight: 1.5, Description: "Known scanner", Enabled: true}}}
 	if st, err := feeds.Refresh(ctx, "test-blocklist"); err != nil || st.Count != 2 {
 		t.Fatalf("feed refresh = %+v %v", st, err)

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,6 +34,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
 )
@@ -118,6 +120,8 @@ func cmdInit(args []string) error {
 	osURL := fs.String("opensearch", "http://127.0.0.1:9200", "OpenSearch URL")
 	osUser := fs.String("opensearch-user", "", "OpenSearch username")
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
+	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
+	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	fs.Parse(args)
 
@@ -129,6 +133,10 @@ func cmdInit(args []string) error {
 	c.Server.PublicURL = *publicURL
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
+	// New installs receive syslog right away; existing configs without a
+	// syslog section keep it off.
+	c.Syslog.UDP = *syslogUDP
+	c.Syslog.TCP = *syslogTCP
 	pw := *password
 	generated := pw == ""
 	if generated {
@@ -152,17 +160,75 @@ func cmdInit(args []string) error {
 	if generated {
 		fmt.Printf("  Password:  %s   (shown once; change it with: signalith passwd)\n", pw)
 	}
+	if s := syslogSummary(c); s != "" {
+		fmt.Printf("  Syslog:    %s\n", s)
+	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
+}
+
+// syslogMaxAge is how old a syslog message's own timestamp may be and still
+// be its event time: a week, or the retention period when that is shorter,
+// since older events would only land in indices about to be deleted.
+func syslogMaxAge(retentionDays int) time.Duration {
+	if d := time.Duration(retentionDays) * 24 * time.Hour; d > 0 && d < syslog.DefaultMaxAge {
+		return d
+	}
+	return syslog.DefaultMaxAge
+}
+
+// syslogSummary describes the syslog listeners, or "" when syslog is off.
+func syslogSummary(c *config.Config) string {
+	var parts []string
+	for _, l := range []struct{ name, addr string }{{"UDP", c.Syslog.UDP}, {"TCP", c.Syslog.TCP}, {"TLS", c.Syslog.TLS}} {
+		if l.addr != "" {
+			parts = append(parts, l.name+" "+l.addr)
+		}
+	}
+	s := strings.Join(parts, ", ")
+	// public_port applies to UDP and TCP, whichever are on.
+	var fwd []string
+	for _, l := range []struct{ name, addr string }{{"UDP", c.Syslog.UDP}, {"TCP", c.Syslog.TCP}} {
+		if l.addr != "" {
+			fwd = append(fwd, l.name)
+		}
+	}
+	if c.Syslog.PublicPort > 0 && len(fwd) > 0 {
+		s += fmt.Sprintf(" (devices send %s to port %d)", strings.Join(fwd, " and "), c.Syslog.PublicPort)
+	}
+	return s
+}
+
+// printSyslogPorts prints the syslog listeners for install scripts, such
+// as "udp 514 10.0.0.0/8,192.0.2.10/32" or "tcp 514 any".
+func printSyslogPorts(c *config.Config) {
+	allow := "any"
+	if list := c.Syslog.AllowList(); len(list) > 0 {
+		var parts []string
+		for _, p := range list {
+			parts = append(parts, p.String())
+		}
+		allow = strings.Join(parts, ",")
+	}
+	for _, l := range []struct{ proto, addr string }{{"udp", c.Syslog.UDP}, {"tcp", c.Syslog.TCP}, {"tls", c.Syslog.TLS}} {
+		if _, port, err := net.SplitHostPort(l.addr); err == nil {
+			fmt.Println(l.proto, port, allow)
+		}
+	}
 }
 
 func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	path := configFlag(fs)
+	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
 	fs.Parse(args)
 	c, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	if *ports {
+		printSyslogPorts(c)
+		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
@@ -200,14 +266,36 @@ func cmdValidate(args []string) error {
 		}
 		fmt.Printf("Directory sign-in is on (%s), set up in %s. Test it on the Users page.\n", s.URL, from)
 	}
-	if feeds := intelFeeds(c); len(feeds) > 0 {
-		on := 0
-		for _, f := range feeds {
-			if f.Enabled {
+	feeds := newFeeds(c, nil, nil)
+	if err := feeds.Load(); err != nil {
+		fmt.Println("Warning:", err)
+	}
+	if list := feeds.Status(); len(list) > 0 {
+		on, page := 0, 0
+		for _, f := range list {
+			if f.Enabled && f.Problem == "" {
 				on++
 			}
+			if f.Source == intel.SourceUI {
+				page++
+			}
+			if f.Problem != "" {
+				fmt.Printf("Warning: threat intel feed %s (added on the Threat intel page): %s\n", f.Name, f.Problem)
+			}
 		}
-		fmt.Printf("%d threat intel feeds configured, %d enabled.\n", len(feeds), on)
+		fmt.Printf("%d threat intel feeds (%d in signalith.yaml, %d added on the Threat intel page), %d enabled.\n", len(list), len(list)-page, page, on)
+	}
+	if s := syslogSummary(c); s != "" {
+		allow := "any sender"
+		if len(c.Syslog.Allow) > 0 {
+			allow = strings.Join(c.Syslog.Allow, ", ")
+		}
+		fmt.Printf("Syslog receiver on %s, accepting %s.\n", s, allow)
+		if c.Syslog.UDP != "" && len(c.Syslog.Allow) > 0 {
+			fmt.Println("Note: over UDP a sender's address can be forged, so syslog.allow cannot fully protect syslog.udp. Use TCP or TLS for trusted senders, and limit the port with a firewall.")
+		}
+	} else {
+		fmt.Println("Syslog receiver is off (set syslog.udp or syslog.tcp to turn it on).")
 	}
 	if boards, err := dashboards.NewStore(c.DashboardsDir()); err != nil {
 		fmt.Printf("Warning: dashboards folder %s: %v\n", c.DashboardsDir(), err)
@@ -447,7 +535,41 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cl := newStore(c)
+	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix}
+	// Closed once the index template is in place, so syslog does not
+	// create the day's first indices with the wrong field types.
+	templateReady := make(chan struct{})
+	var receiver *syslog.Receiver
+	if c.Syslog.Enabled() {
+		receiver = syslog.New(syslog.Config{
+			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
+			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
+			Allow: c.Syslog.AllowList(), Ready: templateReady,
+			MaxAge: syslogMaxAge(c.Retention.Days), PublicPort: c.Syslog.PublicPort,
+		}, pipeline, log)
+		if err := receiver.Start(ctx); err != nil {
+			return err
+		}
+		// On the way out: stop receiving and write out what is queued.
+		defer func() {
+			cancel()
+			receiver.Wait()
+			s := receiver.Stats()
+			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
+		}()
+		var addrs []any
+		for _, l := range receiver.Stats().Listeners {
+			addrs = append(addrs, l.Protocol, l.Address)
+		}
+		allow := "any sender"
+		if len(c.Syslog.Allow) > 0 {
+			allow = strings.Join(c.Syslog.Allow, ", ")
+		}
+		log.Info("syslog receiver listening", append(addrs, "allow", allow)...)
+	}
 	eng := newEngine(c, cl)
 	lists, err := assets.NewStore(c.LookupsDir())
 	if err != nil {
@@ -459,8 +581,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
-	feeds := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
-		StatusFile: filepath.Join(c.LookupsDir(), "intel_feeds.json")}
+	feeds := newFeeds(c, indicators, log)
+	if err := feeds.Load(); err != nil {
+		log.Error("threat intel feeds added on the Threat intel page cannot be used until the file is fixed", "err", err)
+	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -506,7 +630,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	srv := &api.Server{
 		Config:     c,
 		Engine:     eng,
-		Pipeline:   &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix},
+		Pipeline:   pipeline,
+		Syslog:     receiver,
 		Backend:    cl,
 		Detections: lib,
 		Scheduler:  sched,
@@ -527,12 +652,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
 		}
+		close(templateReady)
 		if err := ibackend.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
 			go indicators.Watch(ctx, time.Minute, log)
-			if c.Detections.Scheduler && len(feeds.List) > 0 {
-				log.Info("threat intel feeds will download on their schedules", "feeds", len(feeds.List))
+			if c.Detections.Scheduler {
+				// Feeds can be added on the page at any time, so the
+				// downloader runs even with none yet.
+				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
 				go feeds.Start(ctx)
 			}
 		}
@@ -577,20 +705,29 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 }
 
-// intelFeeds converts the configured feeds; the config is already
+// intelFeeds converts the feeds in signalith.yaml; the config is already
 // validated, so durations parse.
 func intelFeeds(c *config.Config) []intel.Feed {
 	var out []intel.Feed
 	for _, f := range c.Intel.Feeds {
-		iv, _ := config.ParseFeedDuration(f.Interval)
-		age, _ := config.ParseFeedDuration(f.MaxAge)
-		out = append(out, intel.Feed{
-			Name: f.Name, URL: f.URL, Format: f.Format, Type: f.Type, Column: f.Column,
-			Interval: iv, MaxAge: age, Weight: f.Weight, Description: f.Description, Tags: f.Tags,
-			Headers: f.Headers, Enabled: f.IsEnabled(),
-		})
+		out = append(out, f.Feed(intel.SourceConfig))
 	}
 	return out
+}
+
+// newFeeds returns the feed downloader: the feeds in signalith.yaml and
+// those added on the Threat intel page.
+func newFeeds(c *config.Config, indicators *intel.Store, log *slog.Logger) *intel.Feeds {
+	f := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
+		File:          c.IntelFeedsFile(),
+		StatusFile:    filepath.Join(c.LookupsDir(), "intel_feeds.json"),
+		AllowLoopback: c.Intel.AllowLoopbackFeeds}
+	// Feed downloads never reach Signalith's own OpenSearch, which may
+	// accept requests without a password on the local network.
+	if p := intel.ProtectedAddr(c.OpenSearch.URL); p != "" {
+		f.Protected = []string{p}
+	}
+	return f
 }
 
 // reloadLookups picks up edits to the CSV files made outside the UI.

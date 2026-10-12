@@ -32,6 +32,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
+	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -68,6 +69,12 @@ type Server struct {
 	UI        fs.FS // web UI files; nil disables the UI
 	Log       *slog.Logger
 	Version   string
+
+	// Syslog is the syslog receiver, for its stats; nil when it is off.
+	Syslog *syslog.Receiver
+	// Runtime overrides what api/health says about the system the server
+	// runs on; nil looks it up.
+	Runtime *Runtime
 
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
 	Sessions *auth.Sessions
@@ -469,15 +476,26 @@ func (s *Server) handleLanguage(w http.ResponseWriter, r *http.Request) {
 
 // ---- agents and health ----
 
+// handleAgentConfig writes a Fluent Bit config. server=<url> replaces
+// server.public_url as the address agents send to, for when the configured
+// one (often localhost) is not reachable from the hosts being set up.
 func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
+	server := s.Config.Server.PublicURL
+	if o := v.Get("server"); o != "" {
+		if _, err := agents.ParseServerURL(o); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "server"})
+			return
+		}
+		server = o
+	}
 	token := ""
 	if len(s.Config.Ingest.Tokens) > 0 {
 		token = s.Config.Ingest.Tokens[0]
 	}
 	a, err := agents.Generate(agents.Options{
 		OS:          v.Get("os"),
-		ServerURL:   s.Config.Server.PublicURL,
+		ServerURL:   server,
 		Token:       token,
 		LinuxSource: v.Get("source"),
 		Sysmon:      v.Get("sysmon") == "true",
@@ -492,7 +510,9 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "config_file": s.Config.Path()}
+	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.Config.Path(),
+		// For the steps that turn syslog on: edit the section or add one.
+		"config_has_syslog": s.Config.HasSection("syslog"), "runtime": s.runtimeInfo()}
 	if status, err := s.Backend.Health(ctx); err != nil {
 		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": s.Config.OpenSearch.URL}
 	} else {
