@@ -51,6 +51,7 @@ Usage:
   signalith passwd    [-c file]           set the admin password
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
+  signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith version
 
@@ -94,6 +95,8 @@ func main() {
 		err = cmdAsk(args)
 	case "service":
 		err = cmdService(args)
+	case "archive":
+		err = cmdArchive(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -627,6 +630,13 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
 	}
+	ret := newRetention(c, cl, log)
+	if saved, err := ret.Store.Get(); err != nil {
+		log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
+	} else if saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
+		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
+			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
+	}
 	srv := &api.Server{
 		Config:     c,
 		Engine:     eng,
@@ -641,6 +651,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Feeds:      feeds,
 		Dashboards: boards,
 		Cases:      cstore,
+		Retention:  ret,
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
@@ -678,7 +689,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			log.Info("detection scheduler is off (detections.scheduler: false)")
 		}
 	}()
-	go retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log)
+	if c.Detections.Scheduler {
+		// Like detections, retention runs on one server only.
+		go ret.Start(ctx)
+	}
 
 	hs := &http.Server{
 		Addr:              c.Server.Listen,
@@ -702,6 +716,22 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return hs.Shutdown(shutdownCtx)
+	}
+}
+
+// newRetention returns the retention manager. Policies saved on the Data
+// retention page and the run history live next to the asset and identity
+// lists, which every install can write.
+func newRetention(c *config.Config, cl *store.Client, log *slog.Logger) *retention.Manager {
+	return &retention.Manager{
+		Cluster:     retention.NewOpenSearch(cl),
+		Prefix:      c.OpenSearch.IndexPrefix,
+		Config:      c.RetentionPolicies(),
+		Store:       retention.NewStore(filepath.Join(c.LookupsDir(), "retention.yaml")),
+		Archive:     &retention.Archive{Dir: c.ArchiveDir()},
+		HistoryFile: filepath.Join(c.LookupsDir(), "retention_history.json"),
+		Interval:    c.RetentionInterval(),
+		Log:         log,
 	}
 }
 

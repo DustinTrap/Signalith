@@ -31,6 +31,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/users"
@@ -64,6 +65,9 @@ type Server struct {
 	Dashboards *dashboards.Store
 	// Cases holds investigations; nil disables them.
 	Cases cases.Store
+	// Retention enforces data retention policies; nil disables the Data
+	// retention page.
+	Retention *retention.Manager
 	// Assistant is an optional AI model for plain-English questions.
 	Assistant *assistant.Client
 	UI        fs.FS // web UI files; nil disables the UI
@@ -128,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeDashboards(api)
 	s.routeCases(api)
 	s.routeUsers(api)
+	s.routeRetention(api)
 	if s.UI != nil {
 		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
 	}

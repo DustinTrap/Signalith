@@ -20,6 +20,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -78,9 +79,52 @@ type Search struct {
 	MaxEvents       int    `yaml:"max_events"`
 }
 
-// Retention controls how long events are kept.
+// Retention controls how long data is kept; see docs/retention.md. Most
+// installs set policies on the Data retention page instead. Anything set
+// here is shown there as "From signalith.yaml" and cannot be changed in
+// the page.
 type Retention struct {
+	// Days keeps event categories without their own policy searchable for
+	// this many days (0 keeps them forever), until a default policy is
+	// saved on the page.
 	Days int `yaml:"days"`
+	// Interval is how often policies are enforced. Default 1h.
+	Interval string `yaml:"interval,omitempty"`
+	// ArchiveDir holds archived days. A relative path is relative to the
+	// folder this config file is in. Default: an "archive" folder next to
+	// lookups.dir. SIGNALITH_ARCHIVE_DIR overrides it.
+	ArchiveDir string `yaml:"archive_dir,omitempty"`
+	// Default is the policy for event categories without their own.
+	Default *retention.Policy `yaml:"default,omitempty"`
+	// Policies sets a policy per category: a data model (authentication,
+	// endpoint, network_traffic, change), other, risk, findings or cases.
+	Policies map[string]retention.Policy `yaml:"policies,omitempty"`
+	// Guard deletes the oldest days when OpenSearch's disk gets too full.
+	Guard *retention.Guard `yaml:"guard,omitempty"`
+}
+
+// RetentionInterval returns retention.interval as a duration (1h if unset
+// or invalid; Validate reports invalid values).
+func (c *Config) RetentionInterval() time.Duration {
+	if d, err := detect.ParseDuration(c.Retention.Interval); err == nil && d > 0 {
+		return d
+	}
+	return retention.DefaultInterval
+}
+
+// ArchiveDir returns the absolute archive folder.
+func (c *Config) ArchiveDir() string {
+	if c.Retention.ArchiveDir != "" {
+		return c.resolve(c.Retention.ArchiveDir)
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(c.LookupsDir())), "archive")
+}
+
+// RetentionPolicies returns the retention settings for the retention
+// package.
+func (c *Config) RetentionPolicies() retention.Config {
+	return retention.Config{Days: c.Retention.Days, Default: c.Retention.Default,
+		Policies: c.Retention.Policies, Guard: c.Retention.Guard}
 }
 
 // Auth protects the UI and API.
@@ -487,6 +531,9 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_INTEL_FEEDS_FILE"); v != "" {
 		c.Intel.FeedsFile = v
 	}
+	if v := os.Getenv("SIGNALITH_ARCHIVE_DIR"); v != "" {
+		c.Retention.ArchiveDir = v
+	}
 	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
 		c.Assistant.APIKey = v
 	}
@@ -548,7 +595,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Retention.Days < 0 {
 		p = append(p, "retention.days cannot be negative (0 keeps data forever)")
+	} else if c.Retention.Days > retention.MaxKeepDays {
+		p = append(p, fmt.Sprintf("retention.days must be at most %d (0 keeps data forever)", retention.MaxKeepDays))
 	}
+	if c.Retention.Interval != "" {
+		if d, err := detect.ParseDuration(c.Retention.Interval); err != nil || d < 5*time.Minute || d > 24*time.Hour {
+			p = append(p, fmt.Sprintf("retention.interval %q must be a duration from 5m to 24h, for example 1h", c.Retention.Interval))
+		}
+	}
+	p = append(p, c.RetentionPolicies().Problems()...)
 	if c.Auth.AdminUser == "" {
 		p = append(p, "auth.admin_user is required")
 	}
@@ -718,7 +773,9 @@ const header = `# Signalith configuration.
 #                    page instead (see docs/users.md)
 # opensearch.*       where events are stored
 # search.*           default time range and result limits
-# retention.days     days of events to keep (0 = forever)
+# retention.days     days of events to keep (0 = forever) until a default is saved on the
+#                    Data retention page; per-category policies, the disk guard and
+#                    archiving are set there too (or here: see docs/retention.md)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
 # syslog.udp, .tcp   receive syslog from devices without an agent, e.g. 0.0.0.0:514
 #                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)

@@ -56,3 +56,7 @@ if ($LASTEXITCODE -ne 0) {
   }
 }
 Write-Host "Signalith is running. Open http://localhost:$($Listen.Split(':')[-1])"
+# Retention settings saved in the web UI go to $ConfigDir\lookups, and days
+# archived before deletion to $ConfigDir\archive (retention.archive_dir in
+# signalith.yaml moves them). Both inherit the folder's Administrators and
+# SYSTEM only permissions.

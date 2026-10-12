@@ -163,7 +163,11 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials |
 | `opensearch.index_prefix` | `signalith` | Indices are `<prefix>-<datamodel>-YYYY.MM.DD` |
 | `search.default_earliest` | `-24h` | Time range when a query sets none |
-| `retention.days` | `90` | Days of events to keep; `0` keeps everything |
+| `retention.days` | `90` | Days of events to keep (`0` keeps everything) until a default policy is saved on the Data retention page |
+| `retention.interval` | `1h` | How often retention policies are enforced |
+| `retention.archive_dir` | `archive` next to `lookups.dir` | Folder for archived days |
+| `retention.default`, `retention.policies.<category>` | none | Policies that override the page; see [Data retention](#data-retention) |
+| `retention.guard` | on, 85%, 7 days | Disk guard: `enabled`, `max_disk_percent`, `min_days` |
 | `auth.admin_user`, `auth.admin_password_hash` | `admin` | The built-in admin, a break-glass account; change its password with `signalith passwd` |
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
 | `auth.users_file` | `users.json` in `lookups.dir` | Where users added on the Users page are kept; directory settings go in `directory.json` next to it |
@@ -198,7 +202,7 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `auth.ldap` in this file only; directory sign-in set up on the Users page keeps its own) (also
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`,
 `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
-`SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
+`SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
 `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
 
 ## Detections and findings
@@ -389,6 +393,65 @@ panels:
 
 See [docs/dashboards.md](docs/dashboards.md) for every option and the API.
 
+## Data retention
+
+Admins set how long data is kept on the **Data retention** page. It lists every
+category with its size on disk, the days it holds and its policy:
+
+- each data model (Authentication, Endpoint, Network traffic, Change),
+- Other events,
+- Risk events,
+- Findings,
+- Investigations,
+- Threat intel, which is managed by its feeds.
+
+Each event category can have its own policy, or use the default policy:
+
+- **Keep**: how many days stay searchable (0 keeps them forever).
+- **Size cap**: the most disk the category may use. Its oldest days are deleted
+  first.
+- **Compact after**: makes old days read-only and merges them into one segment, so
+  they take less space and memory.
+- **Archive before deleting**: writes each day to a compressed, checksummed file
+  first. You can restore it later from the page or with `signalith archive restore`.
+
+Findings and investigations can be set to delete resolved and closed ones after a
+number of days. Open ones are never deleted, and neither are findings in an open
+case. **Preview** shows exactly which days a change deletes, archives or compacts
+before you save it. Saving applies the change at once, with no restart.
+
+The **disk guard**, on by default, deletes the oldest event days when OpenSearch's
+disk passes 85% and spares the last 7 days. This keeps OpenSearch from reaching 95%,
+where it makes every index read-only and ingest stops. A server upgraded while its
+OpenSearch disk is already above 85% trims old days at its first run. To avoid
+that, set `retention.guard` in signalith.yaml first.
+
+Retention runs every hour on the server with the detection scheduler. It never
+deletes today's data or indices that are not Signalith daily indices. The page keeps
+the last 50 actions with the reason for each.
+
+Page settings are saved in `retention.yaml` in `lookups.dir`. `retention.days` stays
+the default until you save a default on the page. Anything set under `retention` in
+signalith.yaml is shown as read-only on the page:
+
+```yaml
+retention:
+  days: 90
+  policies:
+    authentication: {keep_days: 365, compact_after_days: 7}
+    endpoint: {keep_days: 30, max_size_gb: 500, archive: true}
+    cases: {keep_days: 1095}
+  guard: {enabled: true, max_disk_percent: 85, min_days: 7}
+```
+
+See [docs/retention.md](docs/retention.md) for more:
+
+- how each rule works,
+- the archive format and restores,
+- compliance examples such as keeping 90 days searchable and a year archived,
+- running more than one server,
+- the API.
+
 ## Writing queries
 
 ```
@@ -455,6 +518,7 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
 | `internal/risk` | Risk event store |
 | `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX, format detection), the feed catalog, TAXII 2.1, guarded downloads and feeds managed on the page |
+| `internal/retention` | Retention policies, planner, disk guard, archives and restores |
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
