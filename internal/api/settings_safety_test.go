@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -136,7 +137,9 @@ func TestCheckOnly(t *testing.T) {
 		t.Errorf("check_only wrote the file: %v", err)
 	}
 	// HTTPS on: agents told http:// stop working.
-	_, out = check(`{"check_only":true,"values":{"server.tls_cert":"` + cert + `","server.tls_key":"` + key + `"}}`)
+	// json.Marshal, since Windows paths hold backslashes.
+	paths, _ := json.Marshal(map[string]string{"server.tls_cert": cert, "server.tls_key": key})
+	_, out = check(`{"check_only":true,"values":` + string(paths) + `}`)
 	confirm = out["confirm"].([]any)
 	texts := ""
 	for _, c := range confirm {
