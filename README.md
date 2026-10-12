@@ -26,6 +26,8 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 
 Open http://localhost:8080 and sign in as `admin` with the password set in
 `deploy/docker/docker-compose.yml` (change it first).
+To update, run `git pull` and then the same command. It rebuilds Signalith from the
+new code each time.
 
 ### Linux
 
