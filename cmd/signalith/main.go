@@ -116,7 +116,7 @@ func cmdInit(args []string) error {
 	publicURL := fs.String("public-url", "", "URL agents use to reach this server (default: derived from -listen)")
 	osURL := fs.String("opensearch", "http://127.0.0.1:9200", "OpenSearch URL")
 	osUser := fs.String("opensearch-user", "", "OpenSearch username")
-	password := fs.String("admin-password", "", "admin password (default: generate one)")
+	password := fs.String("admin-password", "", "admin password (default: $SIGNALITH_ADMIN_PASSWORD, else generate one)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	fs.Parse(args)
 
@@ -129,6 +129,11 @@ func cmdInit(args []string) error {
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
 	pw := *password
+	if pw == "" {
+		// The Windows installer passes the password this way so it never
+		// appears on a command line.
+		pw = os.Getenv("SIGNALITH_ADMIN_PASSWORD")
+	}
 	generated := pw == ""
 	if generated {
 		pw = config.RandomToken(9)

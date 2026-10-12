@@ -63,3 +63,69 @@ jobs:
         with:
           name: signalith-binaries
           path: dist/
+
+  windows-installer:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build signalith-setup.exe
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q nsis
+          version=0.4.${{ github.run_number }}
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$version" -o dist/signalith.exe ./cmd/signalith
+          makensis -WX -DVERSION=$version -DEXE=$PWD/dist/signalith.exe -DOUTFILE=$PWD/dist/signalith-setup.exe deploy/windows/installer/signalith.nsi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signalith-setup
+          path: dist/signalith-setup.exe
+
+  windows-install-test:
+    runs-on: windows-latest
+    needs: windows-installer
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: signalith-setup
+      - name: Install silently, downloading OpenSearch as a user's install would
+        shell: pwsh
+        run: |
+          $p = Start-Process -Wait -PassThru .\signalith-setup.exe -ArgumentList '/S', '/ADMINPASSWORD=ci-install-pass'
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+      - name: Signalith answers with the chosen password
+        shell: pwsh
+        run: |
+          Get-Service Signalith, signalith-opensearch | Format-Table Name, Status, StartType
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:ci-install-pass"))
+          $h = Invoke-RestMethod http://localhost:8080/api/health -Headers @{ Authorization = "Basic $auth" }
+          $h | ConvertTo-Json -Depth 4
+          if ($h.opensearch.status -notin @("green", "yellow")) { throw "OpenSearch is $($h.opensearch.status)" }
+          # The findings and cases indices exist once the server has finished starting.
+          $deadline = (Get-Date).AddMinutes(2)
+          do {
+            Start-Sleep 5
+            $cases = try { Invoke-RestMethod "http://localhost:8080/api/cases/summary" -Headers @{ Authorization = "Basic $auth" } } catch { $null }
+          } until ($cases -or (Get-Date) -gt $deadline)
+          if (-not $cases) { throw "the cases API did not come up" }
+      - name: Running the installer again keeps the settings
+        shell: pwsh
+        run: |
+          $p = Start-Process -Wait -PassThru .\signalith-setup.exe -ArgumentList '/S'
+          if ($p.ExitCode -ne 0) { throw "reinstall exit code $($p.ExitCode)" }
+          $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:ci-install-pass"))
+          Invoke-RestMethod http://localhost:8080/api/health -Headers @{ Authorization = "Basic $auth" } | Out-Null
+      - name: Uninstall removes the services
+        shell: pwsh
+        run: |
+          $p = Start-Process -Wait -PassThru "$env:ProgramFiles\Signalith\uninstall.exe" -ArgumentList '/S', "_?=$env:ProgramFiles\Signalith"
+          if (Get-Service Signalith, signalith-opensearch -ErrorAction SilentlyContinue) { throw "services are still installed" }
+          if (-not (Test-Path "$env:ProgramData\Signalith\signalith.yaml")) { throw "uninstall removed the settings" }
+      - name: Setup log
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Content "$env:ProgramData\Signalith\setup.log" -ErrorAction SilentlyContinue
+          Get-ChildItem "$env:ProgramData\Signalith\opensearch\logs" -Filter *.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 40 }

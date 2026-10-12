@@ -43,12 +43,30 @@ Open http://localhost:8080 and sign in as `admin` with the password set in
 
 ### Windows
 
-1. Install OpenSearch 2.x for Windows ([instructions](https://opensearch.org/docs/latest/install-and-configure/install-opensearch/windows/)).
-2. In an elevated PowerShell, from the folder holding `signalith.exe` and `deploy\windows\install.ps1`:
-   ```powershell
-   .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
-   ```
-   This writes `C:\ProgramData\Signalith\signalith.yaml`, installs the **Signalith** service and starts it.
+Run **signalith-setup.exe** (64-bit Windows 10, 11 or Server 2016 and later). It asks
+for an admin password, downloads OpenSearch (about 1 GB), and installs both as
+services that start with Windows. When it finishes, open http://localhost:8080 and
+sign in as `admin`. Running it again upgrades or repairs the install and keeps your
+settings; uninstall it from **Settings > Apps**, which keeps your data in
+`C:\ProgramData\Signalith`.
+
+Every CI run on `main` builds the installer (the `signalith-setup` artifact); to build
+it yourself, install [NSIS](https://nsis.sourceforge.io) and run:
+
+```sh
+GOOS=windows GOARCH=amd64 go build -o dist/signalith.exe ./cmd/signalith
+makensis -DVERSION=0.4.0 -DEXE=$PWD/dist/signalith.exe -DOUTFILE=$PWD/dist/signalith-setup.exe deploy/windows/installer/signalith.nsi
+```
+
+For automated installs: `signalith-setup.exe /S /ADMINPASSWORD=...`, with
+`/OPENSEARCHZIP=C:\path\opensearch.zip` to install OpenSearch from a file on machines
+without internet access, or `/OPENSEARCHURL=http://host:9200` to use an OpenSearch you
+already run. The setup log is `C:\ProgramData\Signalith\setup.log`.
+
+To install by hand instead, install OpenSearch 2.x for Windows
+([instructions](https://opensearch.org/docs/latest/install-and-configure/install-opensearch/windows/)),
+then run `.\install.ps1 -OpenSearchUrl http://127.0.0.1:9200` in an elevated PowerShell
+from a folder holding `signalith.exe` and `deploy\windows\install.ps1`.
 
 ### Send data
 
@@ -359,7 +377,7 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/config` | YAML config, validation, password hashing |
 | `internal/api` | REST API, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
-| `deploy/` | Docker Compose, systemd unit, Windows installer script |
+| `deploy/` | Docker Compose, systemd unit, Windows installer (NSIS) and install script |
 
 ## Building
 
