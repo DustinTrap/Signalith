@@ -179,6 +179,12 @@ func TestSniff(t *testing.T) {
 		{"spamhaus", "; DROP\n198.51.100.0/24 ; SBL1\n", "auto", "", FormatLines, ""},
 		{"title with a comma", "Bad IPs, updated daily\n203.0.113.1\n203.0.113.2\n", "auto", "", FormatLines, ""},
 		{"web page", "<!DOCTYPE html><html><body>Not here</body></html>", "auto", "", FormatLines, ""},
+		// Dotted column names (Elastic ECS, OpenCTI) read as domain names.
+		{"ecs columns", "source.ip,destination.ip,url.domain\n203.0.113.1,198.51.100.2,evil.example\n203.0.113.3,198.51.100.4,bad.example\n", "auto", "", FormatCSV, "source.ip"},
+		{"ecs domain columns", "url.domain,dns.question.name\nevil.example,bad.example\nx.example,y.example\n", "auto", "", FormatCSV, "url.domain"},
+		{"ecs hash column", "file.name,file.hash.sha256\nx.exe," + strings.Repeat("a", 64) + "\ny.dll," + strings.Repeat("b", 64) + "\n", "auto", "", FormatCSV, "file.hash.sha256"},
+		{"domains without a header", "evil.example,bad.example\nx.example,y.example\n", "auto", "", FormatLines, ""},
+		{"domain and word rows", "evil.example,botnet\nbad.example,phishing\n", "auto", "", FormatLines, ""},
 	}
 	for _, c := range cases {
 		format, col := Sniff([]byte(c.data), c.typ, c.column)
@@ -190,6 +196,11 @@ func TestSniff(t *testing.T) {
 	res, err := Parse([]byte(urlhausCSV), ParseOptions{Format: FormatAuto, Type: "auto"})
 	if err != nil || res.Format != FormatCSV || res.Column != "url" || values(res.Indicators) != "url:http://bad.example/x.sh url:http://other.example/y" {
 		t.Errorf("auto urlhaus = %+v %v", res, err)
+	}
+	// The header cell of a dotted column is never an indicator.
+	res, err = Parse([]byte(cases[len(cases)-5].data), ParseOptions{Format: FormatAuto, Type: "auto"})
+	if err != nil || values(res.Indicators) != "ip:203.0.113.1 ip:203.0.113.3" {
+		t.Errorf("auto ecs = %+v %v", res, err)
 	}
 }
 

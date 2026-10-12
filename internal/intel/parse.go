@@ -34,11 +34,19 @@ type ParseOptions struct {
 	// Column is the CSV column: a header name or a 1-based number.
 	Column string
 	Now    time.Time
+	// Keep, when above 0, keeps only the first Keep indicators while still
+	// counting all of them (Found, ByType), so a preview of a large feed
+	// does not hold every indicator in memory.
+	Keep int
 }
 
 // ParseResult is what a feed contained.
 type ParseResult struct {
 	Indicators []Indicator
+	// Found counts the valid indicators, and ByType counts them by type;
+	// with ParseOptions.Keep, Indicators holds only the first few.
+	Found  int
+	ByType map[string]int
 	// Skipped counts values that were not valid indicators of the type.
 	Skipped int
 	// Example is the first skipped value, to help fix a feed's settings.
@@ -55,7 +63,7 @@ type ParseResult struct {
 const maxIndicators = 2_000_000
 
 func (r *ParseResult) add(o ParseOptions, value, desc string, expires time.Time, tags []string, seen map[string]bool) {
-	if len(r.Indicators) >= maxIndicators {
+	if r.Found >= maxIndicators {
 		r.Skipped++
 		return
 	}
@@ -78,6 +86,14 @@ func (r *ParseResult) add(o ParseOptions, value, desc string, expires time.Time,
 		return
 	}
 	seen[typ+"\x00"+val] = true
+	r.Found++
+	if r.ByType == nil {
+		r.ByType = map[string]int{}
+	}
+	r.ByType[typ]++
+	if o.Keep > 0 && len(r.Indicators) >= o.Keep {
+		return
+	}
 	r.Indicators = append(r.Indicators, Indicator{Type: typ, Value: val, Description: desc, Expires: expires, Tags: tags})
 }
 

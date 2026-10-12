@@ -193,14 +193,15 @@ func (f *Feeds) Catalog() []CatalogView {
 }
 
 // catalogViews marks the entries already added: a feed made from the
-// entry, or with its URL or name.
+// entry, or with its URL. A feed that only shares the entry's name is
+// another feed; adding the entry then names it with a number.
 func catalogViews(list []Feed) []CatalogView {
 	out := make([]CatalogView, 0, len(Catalog))
 	for _, e := range Catalog {
 		v := CatalogView{CatalogEntry: e}
 		v.Tags = append([]string{}, e.Tags...)
 		for _, fd := range list {
-			if fd.Catalog == e.ID || fd.Name == e.ID || sameURL(fd.URL, e.URL) {
+			if fd.Catalog == e.ID || sameURL(fd.URL, e.URL) {
 				v.Added, v.Feed = true, fd.Name
 				break
 			}

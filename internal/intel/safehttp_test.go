@@ -95,6 +95,69 @@ func TestDownloadsRefuseBlockedAddresses(t *testing.T) {
 	}
 }
 
+func TestRedirectDropsRefererAndSignIn(t *testing.T) {
+	var mu sync.Mutex
+	got := map[string]http.Header{}
+	record := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			got[name] = r.Header.Clone()
+			mu.Unlock()
+			w.Write([]byte("203.0.113.9\n"))
+		}
+	}
+	other := feedServer(t, record("other"))
+	_, otherPort, _ := net.SplitHostPort(strings.TrimPrefix(other.URL, "http://"))
+	var first *httptest.Server
+	first = feedServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/feed":
+			// "localhost" is another host than "127.0.0.1", though Go
+			// counts it as close enough to keep Authorization.
+			http.Redirect(w, r, "http://localhost:"+otherPort+"/cdn/file.txt", http.StatusFound)
+		case "/same":
+			http.Redirect(w, r, first.URL+"/list.txt", http.StatusFound)
+		default:
+			record("first")(w, r)
+		}
+	})
+	f := &Feeds{Store: NewStore(NewMemory()), AllowLoopback: true}
+	ctx := context.Background()
+	in := FeedInput{URL: first.URL + "/feed?apikey=SECRETKEY123", Username: "u", Password: "pw-secret"}
+	if res, err := f.TestFeed(ctx, in, ""); err != nil || !res.OK {
+		t.Fatalf("test = %+v %v", res, err)
+	}
+	in.URL = first.URL + "/same?apikey=SECRETKEY123"
+	if res, err := f.TestFeed(ctx, in, ""); err != nil || !res.OK {
+		t.Fatalf("test = %+v %v", res, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if h := got["other"]; h.Get("Referer") != "" || h.Get("Authorization") != "" {
+		t.Errorf("another host got Referer %q, Authorization %q", h.Get("Referer"), h.Get("Authorization"))
+	}
+	// On the same server the sign-in stays, still without a Referer.
+	if h := got["first"]; h.Get("Referer") != "" || h.Get("Authorization") == "" {
+		t.Errorf("same host got Referer %q, Authorization %q", h.Get("Referer"), h.Get("Authorization"))
+	}
+	for _, c := range []struct {
+		a, b string
+		same bool
+	}{
+		{"http://feeds.example/a", "https://feeds.example/b", true},
+		{"https://feeds.example/a", "http://feeds.example/b", false},
+		{"https://feeds.example/a", "https://cdn.feeds.example/b", false},
+		{"https://feeds.example/a", "https://feeds.example:8443/b", false},
+		{"https://Feeds.Example./a", "https://feeds.example:443/b", true},
+	} {
+		a, _ := url.Parse(c.a)
+		b, _ := url.Parse(c.b)
+		if sameOrigin(a, b) != c.same {
+			t.Errorf("sameOrigin(%s, %s) = %v", c.a, c.b, !c.same)
+		}
+	}
+}
+
 func TestRedirectDropsSecretHeaders(t *testing.T) {
 	var mu sync.Mutex
 	var got http.Header
@@ -127,34 +190,87 @@ func TestRedirectDropsSecretHeaders(t *testing.T) {
 }
 
 func TestSafeDialerProxy(t *testing.T) {
-	srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {})
-	addr := strings.TrimPrefix(srv.URL, "http://")
-	d := newSafeDialer(false)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if c, err := d.DialContext(ctx, "tcp", addr); err == nil {
-		c.Close()
-		t.Fatal("dialed loopback")
-	} else if !strings.Contains(err.Error(), "loopback") {
-		t.Errorf("dial error = %v", err)
-	}
-	// The configured proxy may be on this machine.
-	d.proxies[addr] = true
-	c, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		t.Fatalf("proxy dial: %v", err)
-	}
-	c.Close()
-
-	t.Setenv("HTTPS_PROXY", "proxy.corp.example:3128")
-	t.Setenv("HTTP_PROXY", "http://127.0.0.1")
-	t.Setenv("https_proxy", "")
-	t.Setenv("http_proxy", "socks5://[::1]")
-	got := proxyAddrs()
-	for _, want := range []string{"proxy.corp.example:3128", "127.0.0.1:80", "[::1]:1080"} {
-		if !got[want] {
-			t.Errorf("proxy addresses %v lack %s", got, want)
+	// A local proxy, the way cntlm, Px or squid run on a Windows desktop.
+	var mu sync.Mutex
+	var asked []string
+	proxySrv := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.String())
+		mu.Unlock()
+		if r.URL.Host == "feeds.example" {
+			w.Write([]byte("203.0.113.9\n"))
+			return
 		}
+		w.Write([]byte("proxy manager page: 203.0.113.250\n"))
+	})
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(proxySrv.URL, "http://"))
+	proxyURL, _ := url.Parse("http://localhost:" + port)
+	// Like http.ProxyFromEnvironment: localhost is never sent through it.
+	proxy := func(r *http.Request) (*url.URL, error) {
+		if h := r.URL.Hostname(); h == "localhost" || h == "127.0.0.1" {
+			return nil, nil
+		}
+		return proxyURL, nil
+	}
+	f := &Feeds{Store: NewStore(NewMemory()), HTTP: newFeedClientWith(false, nil, proxy)}
+	ctx := context.Background()
+	// The proxy itself may be on this machine.
+	res, err := f.TestFeed(ctx, FeedInput{URL: "http://feeds.example/list.txt"}, "")
+	if err != nil || !res.OK || res.Total != 1 {
+		t.Fatalf("through the local proxy = %+v %v", res, err)
+	}
+	// But a feed at the proxy's address, which Go dials directly, is a
+	// loopback address like any other.
+	for _, u := range []string{"http://localhost:" + port + "/", "http://127.0.0.1:" + port + "/"} {
+		res, err = f.TestFeed(ctx, FeedInput{URL: u}, "")
+		if err != nil || res.OK || !strings.Contains(res.Error, "loopback") {
+			t.Errorf("%s = %+v %v", u, res, err)
+		}
+	}
+	// Neither reached the server at the proxy's address.
+	mu.Lock()
+	n := len(asked)
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("the proxy got %d requests: %v", n, asked)
+	}
+	// Without a recorded proxy, every dial is checked.
+	d := newSafeDialer(false, nil)
+	if c, err := d.DialContext(ctx, "tcp", "localhost:"+port); err == nil {
+		c.Close()
+		t.Error("dialed loopback")
+	}
+}
+
+func TestProtectedAddress(t *testing.T) {
+	srv := feedServer(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("203.0.113.9\n")) })
+	_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if got := ProtectedAddr("http://OpenSearch:9200/"); got != "opensearch:9200" {
+		t.Errorf("ProtectedAddr = %q", got)
+	}
+	if got := ProtectedAddr("https://os.corp.example"); got != "os.corp.example:443" {
+		t.Errorf("ProtectedAddr = %q", got)
+	}
+	// OpenSearch at localhost:port; loopback feeds are allowed otherwise.
+	f := &Feeds{Store: NewStore(NewMemory()), AllowLoopback: true, Protected: []string{ProtectedAddr("http://localhost:" + port)}}
+	ctx := context.Background()
+	for _, u := range []string{"http://localhost:" + port + "/_search", "http://127.0.0.1:" + port + "/_cat/indices"} {
+		res, err := f.TestFeed(ctx, FeedInput{URL: u}, "")
+		if err != nil || res.OK || !strings.Contains(res.Error, "OpenSearch") {
+			t.Errorf("%s = %+v %v", u, res, err)
+		}
+	}
+	// A redirect there is refused as well.
+	jump := feedServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:"+port+"/", http.StatusFound)
+	})
+	if res, _ := f.TestFeed(ctx, FeedInput{URL: jump.URL}, ""); res.OK || !strings.Contains(res.Error, "OpenSearch") {
+		t.Errorf("redirect = %+v", res)
+	}
+	// Other ports on the same machine still work.
+	other := feedServer(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("203.0.113.9\n")) })
+	if res, _ := f.TestFeed(ctx, FeedInput{URL: other.URL}, ""); !res.OK {
+		t.Errorf("another port = %+v", res)
 	}
 }
 
@@ -188,6 +304,20 @@ func TestDescribeErrors(t *testing.T) {
 		}
 		if strings.Contains(got, "key=abc") || strings.Contains(got, "sup3r-secret") {
 			t.Errorf("describe(%v) shows a secret: %q", c.err, got)
+		}
+	}
+	// A message that only repeats the status is left out; one that says
+	// more is kept.
+	for said, keep := range map[string]bool{
+		"404 page not found":            false,
+		"Error 404: Not Found":          false,
+		"Not Found.":                    false,
+		"Forbidden: API key required":   true,
+		"no such feed; see /downloads/": true,
+	} {
+		got := describe(&HTTPError{Code: 404, Status: "404 Not Found", Said: said}, plainFeed, time.Minute)
+		if strings.Contains(got, "It said") != keep {
+			t.Errorf("describe with %q = %q", said, got)
 		}
 	}
 	for in, want := range map[string]string{

@@ -108,7 +108,8 @@ suits you.
 ### Testing a feed
 
 **Test** downloads the feed without saving it, with a 1-minute time limit and at
-most 32 MB (a larger feed is checked from its first 32 MB, and the result says so);
+most 4 MB (a larger feed is checked from its first 4 MB, and the result says so; a
+STIX bundle larger than that cannot be checked in part, but can still be added);
 for TAXII, only the first page of the collection is read. It reports what a
 download would store, or why it failed, in plain words, for example:
 
@@ -121,7 +122,14 @@ download would store, or why it failed, in plain words, for example:
   such as a cloud metadata service.*
 
 When testing a saved feed, its saved API key and password are used, unless you
-enter new ones.
+enter new ones. A test shows counts and up to 10 examples, and keeps only those in
+memory. A server runs at most two tests (or TAXII collection lookups) at a time; a
+third is refused with *try again in a moment*.
+
+Test, like a feed, can reach servers on your local network (MISP and OpenCTI often
+live there), and shows a few values from what it reads. Only the admin can use it.
+It never reaches Signalith's own OpenSearch (`opensearch.url`), loopback addresses
+or the other addresses listed under [Network access and safety](#network-access-and-safety).
 
 ### TAXII 2.1
 
@@ -145,7 +153,15 @@ and replaces the feed's indicators with what it read. A full pull is used rather
 than an incremental one (`added_after` from the last run) because an incremental
 pull never learns that the server revoked or deleted an indicator, which would then
 keep matching until `max_age`. A pull stops after 1,000 pages, 500,000 objects or
-256 MB, and the feed's status then says that only part of the collection was read.
+256 MB in all, and the feed's status then says that only part of the collection was
+read; the feed then holds those indicators.
+
+A pull has 30 minutes in all, and 2 minutes for each page. If a slow server runs out
+of time after the first page, the pages read so far are stored, nothing is removed
+(the rest of the collection was not seen, so indicators from earlier pulls stay until
+`max_age`), and the status says how much was read. If the first page does not come
+in time, the download fails and the previous indicators are kept. **Refresh now**
+waits at most 5 minutes, so a large collection may be read in part that way.
 Only `indicator` objects with STIX patterns are used, as described under
 [Formats](#formats).
 
@@ -168,7 +184,9 @@ intel:
   `stix`; a CSV file with a header row is read as `csv`, from the column that holds
   the most indicators of the feed's type (or `column` if the header has it);
   anything else is read as `lines`. The detected format and column are shown by
-  **Test** and in the feed's status.
+  **Test**, and in the feed's details after each download (for example *CSV, column
+  dst_ip (detected)*). Dotted column names such as `source.ip` or `url.domain`
+  (Elastic ECS, OpenCTI exports) are recognized as a header.
 - **lines**: one indicator per line. Lines starting with `#`, `;` or `//` are
   comments. The first word is the indicator, so `1.2.3.0/24 ; SBL123` and
   `1.2.3.4 # note` work, and hosts files (`0.0.0.0 evil.example`) use the second word.
@@ -240,7 +258,9 @@ typed.
 If `intel_feeds.yaml` cannot be read (for example after a bad hand edit), the page
 shows the error, changes on the page are refused until it is fixed or deleted, and
 the feeds in it are not downloaded; indicators already stored are kept and age out
-normally. `signalith validate` reports problems in both files.
+normally. Signalith reads the file again each time the page loads, so after fixing
+or deleting it, reload the page; no restart is needed. `signalith validate` reports
+problems in both files.
 
 A name used in both files belongs to the signalith.yaml feed; the page's feed is
 shown with the problem and not downloaded.
@@ -248,10 +268,11 @@ shown with the problem and not downloaded.
 ### Several servers
 
 Feeds download on the server with `detections.scheduler: true`, from its own
-`intel_feeds.yaml`. Manage feeds on that server's page: on other servers the page
-says downloads do not run there (`"downloads": false` in the API), and feeds saved
-there are not downloaded unless that server runs the scheduler. Indicators are
-shared through OpenSearch, so matching works on every server.
+`intel_feeds.yaml`. Add and change feeds on that server's page. On other servers the
+page lists the feeds read-only and says where to manage them (`"downloads": false`
+and `"manage": false` in the API, which refuses changes there with 409), and
+**Refresh now** works only for feeds from signalith.yaml, which every server shares.
+Indicators are shared through OpenSearch, so matching works on every server.
 
 ### Network access and safety
 
@@ -275,13 +296,22 @@ follow these rules:
 - `intel.allow_loopback_feeds: true` allows loopback, for a feed server on the same
   machine. It never allows link-local or metadata addresses. A proxy from the
   environment may be on this machine either way.
+- Signalith's own OpenSearch (the host and port of `opensearch.url`) is never
+  allowed, by name or by any address the name resolves to, even with
+  `allow_loopback_feeds`. In the Docker setup OpenSearch answers without a password
+  on the Docker network, so this keeps a feed URL from reading it.
 - Through a proxy, the proxy looks up host names and connects, so only addresses
   written in the URL are checked; limit what the proxy may reach if that matters.
-- At most 5 redirects, each checked by the same rules. API key headers and the
-  password are not sent on a redirect to another host.
-- Downloads stop at 256 MB and 2 million indicators and time out after 5 minutes;
-  a test stops at 32 MB and 1 minute; listing TAXII collections times out after 30
-  seconds.
+  Only the connection to the proxy itself skips the check: a feed URL that names
+  the proxy's own address (such as `http://localhost:3128/`, which Go never sends
+  through a proxy) is checked like any other.
+- At most 5 redirects, each checked by the same rules. No `Referer` is sent, since
+  the feed URL's query may hold a key. API key headers and the password are only
+  sent on a redirect that stays on the same host and port (or only moves from http
+  to https).
+- Downloads stop at 256 MB and 2 million indicators and time out after 5 minutes
+  (TAXII: 30 minutes, 2 minutes a page); a test stops at 4 MB and 1 minute, and at
+  most two run at once; listing TAXII collections times out after 30 seconds.
 - Logs and error messages never show API keys, passwords or the query part of a
   URL (which often holds a key); URLs are logged as `https://host/path?…`, and a
   server's error text is shown with any secret replaced by `[hidden]`.

@@ -16,7 +16,8 @@ import (
 
 // fetchLimits bound one download.
 type fetchLimits struct {
-	// MaxBytes stops reading after this many bytes.
+	// MaxBytes stops reading after this many bytes. It must be above 0:
+	// a download with no budget left reads nothing.
 	MaxBytes int64
 	// Partial keeps what was read when MaxBytes is reached, instead of
 	// failing; tests use it to preview large feeds.
@@ -25,6 +26,9 @@ type fetchLimits struct {
 	Refuse int64
 	// Pages caps TAXII pages.
 	Pages int
+	// Keep, when above 0, keeps only this many indicators (a test's
+	// samples) while counting all of them.
+	Keep int
 	// Timeout is for messages; the context enforces it.
 	Timeout time.Duration
 }
@@ -36,9 +40,13 @@ type fetched struct {
 	// Truncated is set when a limit stopped the download early and only
 	// part of the feed was read.
 	Truncated bool
-	Note      string
-	html      bool
-	json      bool
+	// Incomplete is set when a TAXII pull stopped early because the server
+	// was slow: what was read is stored, but nothing is removed, since the
+	// rest of the collection was not seen.
+	Incomplete bool
+	Note       string
+	html       bool
+	json       bool
 }
 
 // TooBigError is a download over the size limit.
@@ -62,14 +70,20 @@ func (f *Feeds) httpGet(ctx context.Context, fd Feed, rawURL, accept string, lim
 	if err != nil {
 		return nil, false, nil, plain("The URL is not valid.")
 	}
-	if err := checkHost(u, f.AllowLoopback); err != nil {
+	if err := checkHost(u, f.AllowLoopback, f.Protected); err != nil {
 		return nil, false, nil, err
+	}
+	max := lim.MaxBytes
+	if max <= 0 {
+		// The caller's budget is spent; never fall back to a larger one.
+		return nil, false, nil, &TooBigError{Max: max}
 	}
 	names := make([]string, 0, len(fd.Headers))
 	for k := range fd.Headers {
 		names = append(names, k)
 	}
 	ctx = context.WithValue(ctx, secretHeadersKey{}, names)
+	ctx = context.WithValue(ctx, dialTrackKey{}, &dialTrack{})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, nil, plain("The URL is not valid.")
@@ -92,10 +106,6 @@ func (f *Feeds) httpGet(ctx context.Context, fd Feed, rawURL, accept string, lim
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return nil, false, resp.Header, &HTTPError{Code: resp.StatusCode, Status: resp.Status, Said: serverSaid(resp.Header.Get("Content-Type"), body)}
-	}
-	max := lim.MaxBytes
-	if max <= 0 {
-		max = MaxDownload
 	}
 	if lim.Refuse > 0 && resp.ContentLength > lim.Refuse {
 		return nil, false, resp.Header, &TooBigError{Max: lim.Refuse}
@@ -174,7 +184,7 @@ func (f *Feeds) fetch(ctx context.Context, fd Feed, now time.Time, lim fetchLimi
 		return nil, err
 	}
 	out := &fetched{Bytes: int64(len(data)), Truncated: truncated, html: looksHTML(data), json: looksLikeJSON(data)}
-	res, err := Parse(data, ParseOptions{Format: fd.Format, Type: fd.Type, Column: fd.Column, Now: now})
+	res, err := Parse(data, ParseOptions{Format: fd.Format, Type: fd.Type, Column: fd.Column, Now: now, Keep: lim.Keep})
 	if err != nil {
 		if truncated && (fd.Format == FormatSTIX || out.json) {
 			return nil, plain("The feed is larger than %s, too large to preview, since its JSON cannot be read in part. It can still be added: downloads allow up to %s.", fmtBytes(lim.MaxBytes), fmtBytes(f.maxBytes()))

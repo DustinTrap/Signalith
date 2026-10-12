@@ -254,3 +254,110 @@ func TestIntelFeedsOff(t *testing.T) {
 		}
 	}
 }
+
+// A server without the detection scheduler does not download feeds, so
+// its page cannot add or change them: its feeds file is not the one the
+// downloading server reads.
+func TestIntelFeedsWithoutScheduler(t *testing.T) {
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("203.0.113.9\n")) }))
+	defer feedSrv.Close()
+	store := intel.NewStore(intel.NewMemory())
+	if err := store.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	feeds := &intel.Feeds{Store: store, AllowLoopback: true, File: filepath.Join(t.TempDir(), "intel_feeds.yaml"), List: []intel.Feed{
+		{Name: "from-config", URL: feedSrv.URL + "/ips.txt", Format: "lines", Type: "auto", Interval: time.Hour, MaxAge: 24 * time.Hour, Weight: 1, Enabled: true},
+	}}
+	if _, err := feeds.AddFeed(intel.FeedInput{Name: "page-feed", URL: feedSrv.URL + "/b.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Config.Detections.Scheduler = false
+		s.Intel = store
+		s.Feeds = feeds
+	})
+	code, raw := call(t, ts, "GET", "/api/intel", "")
+	if out := asMap(t, raw); code != 200 || out["manage"] != false || out["downloads"] != false {
+		t.Errorf("overview = %d %v", code, out)
+	}
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/api/intel/feeds", `{"name":"x-feed","url":"https://feeds.example/x"}`},
+		{"PUT", "/api/intel/feeds/page-feed", `{"weight":2}`},
+		{"DELETE", "/api/intel/feeds/page-feed", ""},
+		{"POST", "/api/intel/catalog", `{"ids":["urlhaus"]}`},
+		{"POST", "/api/intel/feeds/page-feed/refresh", ""},
+	} {
+		if code, raw := call(t, ts, c.method, c.path, c.body); code != 409 || !strings.Contains(raw, "runs detections") {
+			t.Errorf("%s %s = %d %s", c.method, c.path, code, raw)
+		}
+	}
+	// A feed from signalith.yaml is the same on every server, so it can
+	// still be downloaded by hand here.
+	if code, raw := call(t, ts, "POST", "/api/intel/feeds/from-config/refresh", ""); code != 200 {
+		t.Errorf("refresh config feed = %d %s", code, raw)
+	}
+}
+
+// A feed that is off is not downloaded by hand either.
+func TestIntelRefreshFeedOff(t *testing.T) {
+	store := intel.NewStore(intel.NewMemory())
+	if err := store.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	feeds := &intel.Feeds{Store: store, File: filepath.Join(t.TempDir(), "intel_feeds.yaml")}
+	off := false
+	if _, err := feeds.AddFeed(intel.FeedInput{Name: "off-feed", URL: "https://feeds.example/x.txt", Enabled: &off}); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Intel = store
+		s.Feeds = feeds
+	})
+	if code, raw := call(t, ts, "POST", "/api/intel/feeds/off-feed/refresh", ""); code != 409 || !strings.Contains(raw, "turned off") {
+		t.Errorf("refresh = %d %s", code, raw)
+	}
+}
+
+// Feed tests are limited, so overlapping tests cannot use up the
+// server's memory.
+func TestIntelFeedTestBusy(t *testing.T) {
+	release := make(chan struct{})
+	in := make(chan struct{}, 4)
+	feedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		in <- struct{}{}
+		<-release
+		w.Write([]byte("203.0.113.9\n"))
+	}))
+	defer feedSrv.Close()
+	defer close(release)
+	store := intel.NewStore(intel.NewMemory())
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Intel = store
+		s.Feeds = &intel.Feeds{Store: store, AllowLoopback: true}
+	})
+	body := `{"url":"` + feedSrv.URL + `/ips.txt"}`
+	done := make(chan int, intel.MaxTests)
+	for range intel.MaxTests {
+		go func() {
+			code, _ := call(t, ts, "POST", "/api/intel/feeds/test", body)
+			done <- code
+		}()
+	}
+	for range intel.MaxTests {
+		<-in
+	}
+	if code, raw := call(t, ts, "POST", "/api/intel/feeds/test", body); code != 429 || !strings.Contains(raw, "try again") {
+		t.Errorf("third test = %d %s", code, raw)
+	}
+	if code, _ := call(t, ts, "POST", "/api/intel/taxii/collections", `{"url":"`+feedSrv.URL+`/api1/"}`); code != 429 {
+		t.Errorf("collections while busy = %d", code)
+	}
+	for range intel.MaxTests {
+		release <- struct{}{}
+	}
+	for range intel.MaxTests {
+		if code := <-done; code != 200 {
+			t.Errorf("test = %d", code)
+		}
+	}
+}

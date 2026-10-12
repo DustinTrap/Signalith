@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -19,6 +20,11 @@ import (
 // indicators, like any other feed. An incremental pull (added_after)
 // would never see indicators that the server revoked or deleted, so they
 // would stay until max_age; a full pull removes them at the next run.
+//
+// A pull has TAXIIRunTimeout in all and taxiiPageTimeout per page. When a
+// slow server runs out of time after the first page, the pages read are
+// stored and nothing is removed (the rest of the collection was not
+// seen); indicators not read this time keep matching until max_age.
 
 // TAXIIMediaType is the Accept header TAXII 2.1 servers expect.
 const TAXIIMediaType = "application/taxii+json;version=2.1"
@@ -27,7 +33,13 @@ const (
 	taxiiPageSize   = 1000
 	taxiiMaxPages   = 1000
 	taxiiMaxObjects = 500_000
+	// TAXIIRunTimeout bounds a scheduled TAXII pull; each page has
+	// taxiiPageTimeout.
+	TAXIIRunTimeout = 30 * time.Minute
 )
+
+// taxiiPageTimeout bounds one page of a TAXII pull; tests lower it.
+var taxiiPageTimeout = 2 * time.Minute
 
 type taxiiEnvelope struct {
 	More    bool         `json:"more"`
@@ -62,10 +74,24 @@ func (f *Feeds) fetchTAXII(ctx context.Context, fd Feed, now time.Time, lim fetc
 			out.Truncated = true
 			break
 		}
-		data, _, hdr, err := f.httpGet(ctx, fd, base+"?"+q.Encode(), TAXIIMediaType, fetchLimits{MaxBytes: maxBytes - out.Bytes})
+		left := maxBytes - out.Bytes
+		if left <= 0 {
+			out.Truncated = true // the size limit is reached
+			break
+		}
+		pctx, cancel := context.WithTimeout(ctx, taxiiPageTimeout)
+		data, _, hdr, err := f.httpGet(pctx, fd, base+"?"+q.Encode(), TAXIIMediaType, fetchLimits{MaxBytes: left})
+		cancel()
 		var tb *TooBigError
 		if errors.As(err, &tb) && page > 0 {
 			out.Truncated = true
+			break
+		}
+		if err != nil && page > 0 && slow(err) && !errors.Is(ctx.Err(), context.Canceled) {
+			// Keep what the slow server sent so far.
+			out.Truncated, out.Incomplete = true, true
+			out.Note = fmt.Sprintf("The server was slow, so only %s of the collection (%d objects) were read in the time allowed. Indicators not read this time are kept until they expire.",
+				plural(page, "page"), len(objs))
 			break
 		}
 		if err != nil {
@@ -91,12 +117,28 @@ func (f *Feeds) fetchTAXII(ctx context.Context, fd Feed, now time.Time, lim fetc
 			break
 		}
 	}
-	out.Result = stixIndicators(objs, ParseOptions{Format: FormatSTIX, Type: fd.Type, Now: now})
+	out.Result = stixIndicators(objs, ParseOptions{Format: FormatSTIX, Type: fd.Type, Now: now, Keep: lim.Keep})
 	out.Result.Format = FormatSTIX
-	if out.Truncated {
+	if out.Truncated && out.Note == "" {
 		out.Note = fmt.Sprintf("The collection has more objects; only the first %d were read.", len(objs))
 	}
 	return out, nil
+}
+
+// slow reports whether a download ran out of time.
+func slow(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+func plural(n int, one string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %ss", n, one)
 }
 
 // TAXIICollection is a collection a TAXII server offers.

@@ -65,8 +65,12 @@ type FeedStatus struct {
 	Example     string    `json:"skipped_example,omitempty"`
 	Reserved    int       `json:"reserved,omitempty"` // private or reserved networks skipped
 	Note        string    `json:"note,omitempty"`     // such as a TAXII collection read only in part
-	LastError   string    `json:"last_error,omitempty"`
-	Running     bool      `json:"running,omitempty"`
+	// Format and Column are what a feed set to auto was read as at its
+	// last download.
+	Format    string `json:"format,omitempty"`
+	Column    string `json:"column,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+	Running   bool   `json:"running,omitempty"`
 }
 
 // HeaderView names a request header without its value.
@@ -122,6 +126,9 @@ type Feeds struct {
 	HTTP *http.Client
 	// AllowLoopback lets feeds download from this machine.
 	AllowLoopback bool
+	// Protected lists host:port addresses feeds may never reach, such as
+	// Signalith's own OpenSearch (see ProtectedAddr).
+	Protected []string
 	// MaxBytes caps one download; 0 is MaxDownload.
 	MaxBytes int64
 	// StatusFile keeps feed status across restarts; "" keeps it in memory.
@@ -147,20 +154,29 @@ type Feeds struct {
 	storeMu    sync.Mutex
 	clientOnce sync.Once
 	httpc      *http.Client
+	// tests holds a slot for each running test or collections lookup.
+	testsOnce sync.Once
+	tests     chan struct{}
 }
 
 // MaxDownload caps a feed download.
 const MaxDownload = 256 << 20
 
 // TestMaxDownload caps the download of a feed test; a larger feed is
-// previewed from its first part.
-const TestMaxDownload = 32 << 20
+// previewed from its first part. A test only shows counts and a few
+// samples, so it stays small.
+const TestMaxDownload = 4 << 20
+
+// MaxTests is how many feed tests and TAXII collection lookups may run at
+// once; more are refused with ErrBusy.
+const MaxTests = 2
 
 // RetryAfterFailure is how soon a failed download is retried, unless the
 // feed's interval is shorter.
 const RetryAfterFailure = 15 * time.Minute
 
-// Time limits for a scheduled download and for a test.
+// Time limits for a scheduled download and for a test. A TAXII pull has
+// TAXIIRunTimeout instead of RunTimeout.
 const (
 	RunTimeout  = 5 * time.Minute
 	TestTimeout = time.Minute
@@ -184,7 +200,7 @@ func (f *Feeds) client() *http.Client {
 	if f.HTTP != nil {
 		return f.HTTP
 	}
-	f.clientOnce.Do(func() { f.httpc = newFeedClient(f.AllowLoopback) })
+	f.clientOnce.Do(func() { f.httpc = newFeedClient(f.AllowLoopback, f.Protected) })
 	return f.httpc
 }
 
@@ -197,13 +213,15 @@ func (f *Feeds) maxBytes() int64 {
 
 // Load reads the feeds file and the status file. It reports a feeds file
 // that cannot be read; until that is fixed, feeds cannot be added or
-// changed on the page, so a bad file is never overwritten. Feeds load
-// themselves on first use, so calling Load is optional.
+// changed on the page, so a bad file is never overwritten. A file that
+// could not be read is read again on each call, so fixing it takes effect
+// without a restart. Feeds load themselves on first use, so calling Load
+// is optional.
 func (f *Feeds) Load() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loadStatus()
-	f.loadFile()
+	f.retryFile()
 	return f.fileErr
 }
 
@@ -499,7 +517,7 @@ func (f *Feeds) RunDue(ctx context.Context) {
 
 func (f *Feeds) refreshAndLog(ctx context.Context, name string) {
 	_, err := f.Refresh(ctx, name)
-	if err != nil && !errors.Is(err, ErrFeedRunning) && !errors.Is(err, ErrFeedChanged) && !errors.Is(err, ErrUnknownFeed) {
+	if err != nil && !errors.Is(err, ErrFeedRunning) && !errors.Is(err, ErrFeedChanged) && !errors.Is(err, ErrUnknownFeed) && !errors.Is(err, ErrFeedOff) {
 		f.log().Warn("threat intel feed download failed", "feed", name, "err", err)
 	}
 }
@@ -531,6 +549,9 @@ var ErrFeedRunning = errors.New("this feed is already downloading")
 // downloaded; the result is thrown away and the feed downloads again.
 var ErrFeedChanged = errors.New("the feed's settings changed while it downloaded, so it will download again shortly")
 
+// ErrFeedOff is returned for a download of a feed that is turned off.
+var ErrFeedOff = errors.New("this feed is turned off; turn it on to download it")
+
 // Refresh downloads one feed now and replaces its indicators.
 func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
 	f.mu.Lock()
@@ -542,6 +563,10 @@ func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
 	if fd.Problem != "" {
 		f.mu.Unlock()
 		return FeedStatus{}, errors.New(fd.Problem)
+	}
+	if !fd.Enabled {
+		f.mu.Unlock()
+		return FeedStatus{}, ErrFeedOff
 	}
 	st := f.stateFor(name)
 	if st.Running {
@@ -563,6 +588,9 @@ func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
 	}
 	st = f.stateFor(name)
 	st.Running = false
+	if errors.Is(err, ErrFeedOff) {
+		return *st, ErrFeedOff // turned off while it downloaded
+	}
 	if errors.Is(err, ErrFeedChanged) || f.gen[name] != gen {
 		st.NextRun = time.Time{} // download again with the new settings
 		return *st, ErrFeedChanged
@@ -581,23 +609,36 @@ func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
 	st.NextRun = start.Add(fd.Interval)
 	st.Count, st.Added, st.Removed = len(res.Indicators), added, removed
 	st.Skipped, st.Example, st.Reserved, st.Note = res.Skipped, res.Example, res.Reserved, got.Note
+	st.Format, st.Column = "", ""
+	if fd.Format == FormatAuto {
+		st.Format, st.Column = res.Format, res.Column
+	}
 	f.saveStatus()
 	f.log().Info("threat intel feed downloaded", "feed", name, "indicators", st.Count, "added", added, "removed", removed, "skipped", res.Skipped)
 	return *st, nil
 }
 
 // download fetches a feed and stores its indicators, unless the feed
-// changed (gen) meanwhile. Errors are in plain words without secrets.
+// changed (gen) or was turned off meanwhile. Errors are in plain words
+// without secrets.
 func (f *Feeds) download(ctx context.Context, fd Feed, now time.Time, gen int) (*fetched, int, int, error) {
-	ctx, cancel := context.WithTimeout(ctx, RunTimeout)
+	timeout := RunTimeout
+	if fd.Kind == KindTAXII {
+		timeout = TAXIIRunTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	got, err := f.fetch(ctx, fd, now, fetchLimits{MaxBytes: f.maxBytes(), Refuse: f.maxBytes(), Timeout: RunTimeout})
+	got, err := f.fetch(ctx, fd, now, fetchLimits{MaxBytes: f.maxBytes(), Refuse: f.maxBytes(), Timeout: timeout})
 	if err != nil {
-		return nil, 0, 0, errors.New(describe(err, fd, RunTimeout))
+		if fd.Kind == KindTAXII {
+			timeout = taxiiPageTimeout // the first page timed out
+		}
+		return nil, 0, 0, errors.New(describe(err, fd, timeout))
 	}
 	res := got.Result
 	if len(res.Indicators) == 0 {
-		return nil, 0, 0, errors.New(emptyMessage(got) + " The previous indicators are kept.")
+		// The indicators from before stay; the page says so.
+		return nil, 0, 0, errors.New(emptyMessage(got))
 	}
 	expires := now.Add(fd.MaxAge)
 	for i := range res.Indicators {
@@ -615,10 +656,21 @@ func (f *Feeds) download(ctx context.Context, fd Feed, now time.Time, gen int) (
 	f.storeMu.Lock()
 	defer f.storeMu.Unlock()
 	f.mu.Lock()
+	cur, ok := f.get(fd.Name)
 	changed := f.gen[fd.Name] != gen
 	f.mu.Unlock()
-	if changed {
+	switch {
+	case changed:
 		return nil, 0, 0, ErrFeedChanged
+	case !ok || !cur.Enabled:
+		return nil, 0, 0, ErrFeedOff // turned off (or deleted) meanwhile
+	}
+	if got.Incomplete {
+		added, err := f.Store.MergeSource(ctx, fd.Name, res.Indicators)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("could not store indicators: %w", err)
+		}
+		return got, added, 0, nil
 	}
 	added, removed, err := f.Store.ReplaceSource(ctx, fd.Name, res.Indicators)
 	if err != nil {

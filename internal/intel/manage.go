@@ -169,7 +169,7 @@ func (in FeedInput) spec(old *Feed) (FeedSpec, []FeedProblem) {
 		s.Password = in.Password
 	case in.ClearPassword || s.Username == "" || old == nil || old.Password == "":
 	case moved:
-		probs = append(probs, FeedProblem{Field: "password", Msg: "enter the password again, or clear it: the URL now points to another server, and a saved password is only sent to the server it was entered for"})
+		probs = append(probs, FeedProblem{Field: "password", Msg: "enter the password again for the new server, or clear it: a saved password is only sent to the server it was entered for"})
 	default:
 		s.Password = old.Password
 	}
@@ -209,6 +209,26 @@ func (in *FeedInput) fillFromCatalog() []FeedProblem {
 		return []FeedProblem{{Field: "headers", Msg: fmt.Sprintf("%s needs an API key in the %s header. %s", e.Title, e.KeyHeader, e.KeyHelp)}}
 	}
 	return nil
+}
+
+// freeName returns base, or base-2, base-3 and so on when a feed (or one
+// of taken) already has that name; the caller holds f.mu.
+func (f *Feeds) freeName(base string, taken ...string) string {
+	used := map[string]bool{}
+	for _, fd := range f.all() {
+		used[fd.Name] = true
+	}
+	for _, n := range taken {
+		used[n] = true
+	}
+	if !used[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		if n := fmt.Sprintf("%s-%d", base, i); !used[n] {
+			return n
+		}
+	}
 }
 
 // nameProblems checks that a new feed's name is free; the caller holds f.mu.
@@ -263,7 +283,7 @@ func withoutKept(list []KeptFeed, name string) []KeptFeed {
 
 // writable reports why feeds cannot be changed; the caller holds f.mu.
 func (f *Feeds) writable() error {
-	f.loadFile()
+	f.retryFile()
 	return f.fileErr
 }
 
@@ -283,6 +303,9 @@ func (f *Feeds) changed(name string, enabled bool) {
 // runs the schedule).
 func (f *Feeds) AddFeed(in FeedInput) (FeedView, error) {
 	var probs []FeedProblem
+	// A catalog feed is named after its entry, or after it with a number
+	// when a feed already has that name.
+	pickName := strings.TrimSpace(in.Catalog) != "" && strings.TrimSpace(in.Name) == ""
 	if strings.TrimSpace(in.Catalog) != "" {
 		probs = in.fillFromCatalog()
 	}
@@ -293,6 +316,9 @@ func (f *Feeds) AddFeed(in FeedInput) (FeedView, error) {
 	defer f.mu.Unlock()
 	if err := f.writable(); err != nil {
 		return FeedView{}, err
+	}
+	if pickName {
+		in.Name = f.freeName(in.Name)
 	}
 	spec, p := in.spec(nil)
 	probs = append(probs, p...)
@@ -421,7 +447,7 @@ type CatalogSkip struct {
 
 // AddCatalog adds catalog feeds with their suggested settings, skipping
 // ones already added and ones that need an API key.
-func (f *Feeds) AddCatalog(ids []string) ([]FeedView, []CatalogSkip, error) {
+func (f *Feeds) AddCatalog(req []string) ([]FeedView, []CatalogSkip, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.writable(); err != nil {
@@ -430,15 +456,15 @@ func (f *Feeds) AddCatalog(ids []string) ([]FeedView, []CatalogSkip, error) {
 	views := catalogViews(f.all())
 	ui := cloneSpecs(f.ui)
 	kept := f.kept
-	var names []string
+	var ids, names []string
 	skipped := []CatalogSkip{}
-	for _, id := range ids {
+	for _, id := range req {
 		i := slices.IndexFunc(views, func(v CatalogView) bool { return v.ID == id })
 		switch {
 		case i < 0:
 			skipped = append(skipped, CatalogSkip{ID: id, Reason: "There is no catalog feed with this ID."})
 			continue
-		case views[i].Added || slices.Contains(names, id):
+		case views[i].Added || slices.Contains(ids, id):
 			skipped = append(skipped, CatalogSkip{ID: id, Reason: "Already added."})
 			continue
 		case views[i].NeedsKey:
@@ -446,6 +472,7 @@ func (f *Feeds) AddCatalog(ids []string) ([]FeedView, []CatalogSkip, error) {
 			continue
 		}
 		spec := views[i].Spec()
+		spec.Name = f.freeName(spec.Name, names...)
 		spec.Defaults()
 		if p := append(spec.Problems(false), f.nameProblems(spec.Name)...); len(p) > 0 {
 			skipped = append(skipped, CatalogSkip{ID: id, Reason: sentence(p[0].Msg)})
@@ -453,7 +480,8 @@ func (f *Feeds) AddCatalog(ids []string) ([]FeedView, []CatalogSkip, error) {
 		}
 		ui = append(ui, spec)
 		kept = withoutKept(kept, spec.Name)
-		names = append(names, id)
+		ids = append(ids, id)
+		names = append(names, spec.Name)
 	}
 	if len(names) == 0 {
 		return []FeedView{}, skipped, nil
@@ -510,18 +538,57 @@ var testMaxBytes int64 = TestMaxDownload
 // weight) are checked when the feed is saved.
 var testFields = []string{"kind", "url", "collection", "format", "type", "column", "headers", "username", "password", "catalog"}
 
+// ErrBusy is returned when MaxTests tests already run.
+var ErrBusy = errors.New("two feed tests are already running on this server; try again in a moment")
+
+// startTest takes a test slot; call the returned func when done.
+func (f *Feeds) startTest() (func(), error) {
+	f.testsOnce.Do(func() { f.tests = make(chan struct{}, MaxTests) })
+	select {
+	case f.tests <- struct{}{}:
+		return func() { <-f.tests }, nil
+	default:
+		return nil, ErrBusy
+	}
+}
+
+// savedForTest returns a saved feed for a test to start from, so its
+// stored secrets fill those the request leaves empty. A feed from
+// signalith.yaml has its ${ENV_VAR} references filled in here, and the
+// test then runs as a feed added on the page: values the request sends
+// are used as written and never read the environment, so a test cannot
+// send the server's own secrets to an address the request names. Saved
+// secrets are only reused on the server they were entered for (see spec).
+func (f *Feeds) savedForTest(name string) (*Feed, error) {
+	fd, ok := f.Get(name)
+	if !ok {
+		return nil, ErrUnknownFeed
+	}
+	if fd.Source != SourceUI {
+		if len(fd.Headers) > 0 {
+			h := make(map[string]string, len(fd.Headers))
+			for k, v := range fd.Headers {
+				h[k] = ExpandEnv(v)
+			}
+			fd.Headers = h
+		}
+		fd.Password = ExpandEnv(fd.Password)
+		fd.Source = SourceUI
+	}
+	return &fd, nil
+}
+
 // TestFeed downloads a feed without saving anything, with a smaller size
 // limit and one page of a TAXII collection. existing names a saved feed
-// whose stored secrets fill those the input leaves empty.
+// whose stored secrets fill those the input leaves empty. At most
+// MaxTests tests run at once.
 func (f *Feeds) TestFeed(ctx context.Context, in FeedInput, existing string) (*TestResult, error) {
 	var old *Feed
-	source := SourceUI
 	if existing != "" {
-		fd, ok := f.Get(existing)
-		if !ok {
-			return nil, ErrUnknownFeed
+		var err error
+		if old, err = f.savedForTest(existing); err != nil {
+			return nil, err
 		}
-		old, source = &fd, fd.Source
 	}
 	var probs []FeedProblem
 	if strings.TrimSpace(in.Catalog) != "" {
@@ -538,11 +605,16 @@ func (f *Feeds) TestFeed(ctx context.Context, in FeedInput, existing string) (*T
 	if len(probs) > 0 {
 		return nil, &InputError{Problems: probs}
 	}
-	fd := spec.Feed(source)
+	done, err := f.startTest()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	fd := spec.Feed(SourceUI)
 	ctx, cancel := context.WithTimeout(ctx, TestTimeout)
 	defer cancel()
 	start := time.Now()
-	lim := fetchLimits{MaxBytes: f.maxBytes(), Refuse: f.maxBytes(), Pages: 1, Timeout: TestTimeout}
+	lim := fetchLimits{MaxBytes: f.maxBytes(), Refuse: f.maxBytes(), Pages: 1, Timeout: TestTimeout, Keep: 10}
 	if lim.MaxBytes > testMaxBytes {
 		// Preview a large feed from its first part.
 		lim.MaxBytes, lim.Partial = testMaxBytes, true
@@ -560,9 +632,11 @@ func (f *Feeds) TestFeed(ctx context.Context, in FeedInput, existing string) (*T
 	r := got.Result
 	res.Format, res.Column = r.Format, r.Column
 	res.Bytes, res.Truncated, res.Note = got.Bytes, got.Truncated, got.Note
-	res.Total, res.Skipped, res.SkippedExample, res.Reserved = len(r.Indicators), r.Skipped, r.Example, r.Reserved
+	res.Total, res.Skipped, res.SkippedExample, res.Reserved = r.Found, r.Skipped, r.Example, r.Reserved
+	for t, n := range r.ByType {
+		res.ByType[t] = n
+	}
 	for _, ind := range r.Indicators {
-		res.ByType[ind.Type]++
 		if len(res.Samples) < 10 {
 			res.Samples = append(res.Samples, Sample{Type: ind.Type, Value: ind.Value, Description: ind.Description})
 		}
@@ -580,16 +654,15 @@ func (f *Feeds) TestFeed(ctx context.Context, in FeedInput, existing string) (*T
 }
 
 // TAXIICollections lists the collections of the TAXII server in the
-// input's URL, with its credentials (or those stored for existing).
+// input's URL, with its credentials (or those stored for existing). It
+// shares the test slots with TestFeed.
 func (f *Feeds) TAXIICollections(ctx context.Context, in FeedInput, existing string) (*TAXIIServer, error) {
 	var old *Feed
-	source := SourceUI
 	if existing != "" {
-		fd, ok := f.Get(existing)
-		if !ok {
-			return nil, ErrUnknownFeed
+		var err error
+		if old, err = f.savedForTest(existing); err != nil {
+			return nil, err
 		}
-		old, source = &fd, fd.Source
 	}
 	in.Kind, in.Format, in.Collection = KindTAXII, FormatSTIX, "x"
 	if !feedNamePattern.MatchString(strings.TrimSpace(in.Name)) {
@@ -602,7 +675,12 @@ func (f *Feeds) TAXIICollections(ctx context.Context, in FeedInput, existing str
 	if len(probs) > 0 {
 		return nil, &InputError{Problems: probs}
 	}
-	fd := spec.Feed(source)
+	done, err := f.startTest()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	fd := spec.Feed(SourceUI)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	srv, err := f.Collections(ctx, fd)

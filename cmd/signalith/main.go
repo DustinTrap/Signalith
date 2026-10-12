@@ -545,10 +545,16 @@ func intelFeeds(c *config.Config) []intel.Feed {
 // newFeeds returns the feed downloader: the feeds in signalith.yaml and
 // those added on the Threat intel page.
 func newFeeds(c *config.Config, indicators *intel.Store, log *slog.Logger) *intel.Feeds {
-	return &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
+	f := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
 		File:          c.IntelFeedsFile(),
 		StatusFile:    filepath.Join(c.LookupsDir(), "intel_feeds.json"),
 		AllowLoopback: c.Intel.AllowLoopbackFeeds}
+	// Feed downloads never reach Signalith's own OpenSearch, which may
+	// accept requests without a password on the local network.
+	if p := intel.ProtectedAddr(c.OpenSearch.URL); p != "" {
+		f.Protected = []string{p}
+	}
+	return f
 }
 
 // reloadLookups picks up edits to the CSV files made outside the UI.

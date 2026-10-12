@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -80,24 +81,25 @@ func sniffCSV(data []byte, typ, column string) (string, bool) {
 	if len(lines) == 0 {
 		return "", false
 	}
-	header, rows := splitCSV(lines[0]), lines[1:]
-	if !isHeader(header) {
-		header, rows = splitCSV(lastComment), lines
-		if !isHeader(header) {
+	parsed := make([][]string, len(lines))
+	for i, l := range lines {
+		parsed[i] = splitCSV(l)
+	}
+	header, rows := parsed[0], parsed[1:]
+	if !isHeader(header, rows) {
+		header, rows = splitCSV(lastComment), parsed
+		if !isHeader(header, rows) {
 			return "", false
 		}
 	}
 	if len(rows) == 0 {
 		return "", false
 	}
-	var parsed [][]string
 	same := 0
-	for _, l := range rows {
-		rec := splitCSV(l)
+	for _, rec := range rows {
 		if len(rec) == len(header) {
 			same++
 		}
-		parsed = append(parsed, rec)
 	}
 	if same*5 < len(rows)*4 {
 		return "", false // under 80% of rows match the header
@@ -115,7 +117,7 @@ func sniffCSV(data []byte, typ, column string) (string, bool) {
 	best, bestScore := -1, 0
 	for i := range header {
 		score := 0
-		for _, rec := range parsed {
+		for _, rec := range rows {
 			if i < len(rec) {
 				if _, _, err := Normalize(typ, rec[i]); err == nil {
 					score++
@@ -156,39 +158,97 @@ func splitCSV(line string) []string {
 }
 
 // isHeader reports whether a row looks like column names: two or more
-// fields, none of them an indicator, and at least one a word.
-func isHeader(rec []string) bool {
+// fields, at least one of them a word, and none of them an indicator.
+// Dotted column names such as source.ip or url.domain (Elastic ECS,
+// OpenCTI exports) read as domain names, so a row of them still counts
+// as a header when a name ends in a word no domain ends in, or when a
+// column's data clearly holds another kind of value than its first row.
+func isHeader(rec []string, rows [][]string) bool {
 	if len(rec) < 2 {
 		return false
 	}
-	words := 0
+	words, dotted, named := 0, false, false
 	for _, f := range rec {
 		f = strings.TrimSpace(f)
 		if f == "" {
 			continue
 		}
-		if _, _, err := Normalize("auto", f); err == nil {
-			return false
-		}
 		if strings.IndexFunc(f, func(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }) >= 0 {
 			words++
 		}
+		typ, _, err := Normalize("auto", f)
+		if err != nil {
+			continue
+		}
+		if typ != TypeDomain {
+			return false // an IP address, URL, hash or email: data
+		}
+		dotted = true
+		if i := strings.LastIndexByte(f, '.'); i >= 0 && slices.Contains(fieldWords, strings.ToLower(f[i+1:])) {
+			named = true
+		}
 	}
-	return words > 0
+	if words == 0 {
+		return false
+	}
+	if !dotted || named {
+		return true
+	}
+	for i := range rec {
+		if c := columnClass(rows, i); c != "" && c != fieldClass(rec[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// fieldWords end dotted column names (source.ip, file.hash.sha256); no
+// top-level domain is named like them.
+var fieldWords = []string{"ip", "address", "domain", "url", "full", "original", "hostname", "hash", "md5", "sha1", "sha256",
+	"value", "type", "port", "path", "indicator", "ioc", "registered_domain", "subdomain", "top_level_domain"}
+
+// columnClass is the indicator class (see Class) of at least 80% of a
+// column's values, or "".
+func columnClass(rows [][]string, col int) string {
+	counts := map[string]int{}
+	n := 0
+	for _, rec := range rows {
+		if col >= len(rec) {
+			continue
+		}
+		n++
+		if c := fieldClass(rec[col]); c != "" {
+			counts[c]++
+		}
+	}
+	for c, k := range counts {
+		if k*5 >= n*4 {
+			return c
+		}
+	}
+	return ""
+}
+
+func fieldClass(v string) string {
+	typ, _, err := Normalize("auto", strings.TrimSpace(v))
+	if err != nil {
+		return ""
+	}
+	return Class(typ)
 }
 
 var preferredNames = []string{"ioc", "ioc_value", "indicator", "value", "url", "domain", "hostname", "host",
 	"ip", "ip_address", "ipaddress", "dst_ip", "dstip", "src_ip", "md5", "md5_hash", "sha1", "sha1_hash",
 	"sha256", "sha256_hash", "email", "network", "cidr"}
 
+// preferredColumn reports whether a column is named like an indicator,
+// such as dst_ip, or file.hash.sha256 by its last part.
 func preferredColumn(h string) bool {
 	h = strings.ToLower(strings.TrimSpace(h))
-	for _, n := range preferredNames {
-		if h == n {
-			return true
-		}
+	if i := strings.LastIndexByte(h, '.'); i >= 0 {
+		h = h[i+1:]
 	}
-	return false
+	return slices.Contains(preferredNames, h)
 }
 
 // SuggestType names the feed type that fits the indicators found: one

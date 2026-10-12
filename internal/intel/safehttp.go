@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"os"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -79,11 +81,15 @@ func CheckAddr(ip netip.Addr, allowLoopback bool) error {
 	return nil
 }
 
-// checkHost checks a URL's host when it is an IP address, so blocked
-// addresses are refused even when a proxy makes the connection.
-func checkHost(u *url.URL, allowLoopback bool) error {
+// checkHost checks a URL's host when it is an IP address, and refuses the
+// protected addresses by name, so they are refused even when a proxy
+// makes the connection.
+func checkHost(u *url.URL, allowLoopback bool, protected []string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return plain("Feeds can only be downloaded over http or https.")
+	}
+	if p := protectedAddr(u, protected); p != "" {
+		return protectedError(p)
 	}
 	if ip, err := netip.ParseAddr(strings.Trim(u.Hostname(), "[]")); err == nil {
 		return CheckAddr(ip, allowLoopback)
@@ -91,70 +97,146 @@ func checkHost(u *url.URL, allowLoopback bool) error {
 	return nil
 }
 
-// safeDialer connects only to allowed addresses. Connections to the
-// configured proxy are not checked: the proxy makes the real connection,
-// and pointing HTTPS_PROXY at a local proxy is a normal setup.
-type safeDialer struct {
-	checked *net.Dialer
-	plain   *net.Dialer
-	proxies map[string]bool
+// hostPort returns a URL's lowercase host:port, with the scheme's default
+// port when it has none, the way the HTTP transport dials it.
+func hostPort(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443", "socks5": "1080", "socks5h": "1080"}[strings.ToLower(u.Scheme)]
+	}
+	return strings.ToLower(net.JoinHostPort(strings.TrimSuffix(u.Hostname(), "."), port))
 }
 
-func newSafeDialer(allowLoopback bool) *safeDialer {
-	control := func(_, address string, _ syscall.RawConn) error {
-		ap, err := netip.ParseAddrPort(address)
-		if err != nil {
-			return fmt.Errorf("unexpected address %q", address)
+// protectedAddr returns the protected host:port a URL names, or "".
+func protectedAddr(u *url.URL, protected []string) string {
+	hp := hostPort(u)
+	for _, p := range protected {
+		if strings.EqualFold(p, hp) {
+			return p
 		}
-		return CheckAddr(ap.Addr(), allowLoopback)
 	}
+	return ""
+}
+
+func protectedError(addr string) error {
+	return &BlockedError{Addr: addr, Why: "the OpenSearch database Signalith keeps its data in"}
+}
+
+// ProtectedAddr returns the host:port of a service URL that feeds must
+// never reach, such as Signalith's own OpenSearch, or "" if it has none.
+func ProtectedAddr(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return hostPort(u)
+}
+
+// dialTrack records the proxy the transport chose for a download's
+// current request (see newFeedClientWith), so the dialer leaves only
+// that connection unchecked.
+type dialTrack struct {
+	mu    sync.Mutex
+	proxy string // host:port, or "" for a direct connection
+}
+
+type dialTrackKey struct{}
+
+func (t *dialTrack) set(p string) {
+	t.mu.Lock()
+	t.proxy = p
+	t.mu.Unlock()
+}
+
+func (t *dialTrack) isProxy(addr string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.proxy != "" && strings.EqualFold(t.proxy, addr)
+}
+
+// safeDialer connects only to allowed addresses. A connection to the proxy
+// the transport chose for the request is not checked: the proxy makes the
+// real connection, and pointing HTTPS_PROXY at a proxy on this machine is
+// a normal setup. A download to that same address without the proxy, such
+// as http://localhost:3128/ (which Go never sends through a proxy), is
+// checked like any other.
+type safeDialer struct {
+	allowLoopback bool
+	protected     []string
+	plain         *net.Dialer
+	resolver      *net.Resolver
+}
+
+func newSafeDialer(allowLoopback bool, protected []string) *safeDialer {
 	return &safeDialer{
-		checked: &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: control},
-		plain:   &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second},
-		proxies: proxyAddrs(),
+		allowLoopback: allowLoopback,
+		protected:     protected,
+		plain:         &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second},
+		resolver:      net.DefaultResolver,
 	}
 }
 
 func (d *safeDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	if d.proxies[strings.ToLower(addr)] {
+	if t, ok := ctx.Value(dialTrackKey{}).(*dialTrack); ok && t.isProxy(addr) {
 		return d.plain.DialContext(ctx, network, addr)
 	}
-	return d.checked.DialContext(ctx, network, addr)
-}
-
-// proxyAddrs returns the host:port of each proxy set in the environment,
-// the way the HTTP transport writes them when it dials one.
-func proxyAddrs() map[string]bool {
-	out := map[string]bool{}
-	for _, name := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
-		v := strings.TrimSpace(os.Getenv(name))
-		if v == "" {
+	// The protected services' addresses on this port, looked up now so a
+	// name that leads to them is refused too.
+	_, port, _ := net.SplitHostPort(addr)
+	var deny []netip.Addr
+	for _, p := range d.protected {
+		host, pport, err := net.SplitHostPort(p)
+		if err != nil || pport != port {
 			continue
 		}
-		if !strings.Contains(v, "://") {
-			v = "http://" + v
-		}
-		u, err := url.Parse(v)
-		if err != nil || u.Hostname() == "" {
+		if ip, err := netip.ParseAddr(host); err == nil {
+			deny = append(deny, ip.Unmap())
 			continue
 		}
-		port := u.Port()
-		if port == "" {
-			port = map[string]string{"http": "80", "https": "443", "socks5": "1080", "socks5h": "1080"}[u.Scheme]
+		if ips, err := d.resolver.LookupNetIP(ctx, "ip", host); err == nil {
+			for _, ip := range ips {
+				deny = append(deny, ip.Unmap())
+			}
 		}
-		out[strings.ToLower(net.JoinHostPort(u.Hostname(), port))] = true
 	}
-	return out
+	checked := *d.plain
+	checked.Control = func(_, address string, _ syscall.RawConn) error {
+		ap, err := netip.ParseAddrPort(address)
+		if err != nil {
+			return fmt.Errorf("unexpected address %q", address)
+		}
+		if slices.Contains(deny, ap.Addr().Unmap()) {
+			return protectedError(addr)
+		}
+		return CheckAddr(ap.Addr(), d.allowLoopback)
+	}
+	return checked.DialContext(ctx, network, addr)
 }
 
 // newFeedClient returns the HTTP client feeds download with. It uses the
-// proxy from HTTPS_PROXY, HTTP_PROXY and NO_PROXY, refuses blocked
-// addresses at connect time, and follows at most MaxRedirects redirects.
-// Timeouts come from each request's context.
-func newFeedClient(allowLoopback bool) *http.Client {
-	d := newSafeDialer(allowLoopback)
+// proxy from HTTPS_PROXY, HTTP_PROXY and NO_PROXY, refuses blocked and
+// protected addresses at connect time, and follows at most MaxRedirects
+// redirects. Timeouts come from each request's context.
+func newFeedClient(allowLoopback bool, protected []string) *http.Client {
+	return newFeedClientWith(allowLoopback, protected, http.ProxyFromEnvironment)
+}
+
+func newFeedClientWith(allowLoopback bool, protected []string, proxy func(*http.Request) (*url.URL, error)) *http.Client {
+	d := newSafeDialer(allowLoopback, protected)
 	tr := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Record the proxy chosen for each request (redirects included),
+		// so the dialer knows which connection is the proxy's.
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			u, err := proxy(req)
+			if t, ok := req.Context().Value(dialTrackKey{}).(*dialTrack); ok {
+				p := ""
+				if err == nil && u != nil {
+					p = hostPort(u)
+				}
+				t.set(p)
+			}
+			return u, err
+		},
 		DialContext:           d.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          20,
@@ -164,21 +246,25 @@ func newFeedClient(allowLoopback bool) *http.Client {
 		ExpectContinueTimeout: time.Second,
 	}
 	return &http.Client{Transport: tr, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		return checkRedirect(req, via, allowLoopback)
+		return checkRedirect(req, via, allowLoopback, protected)
 	}}
 }
 
-// checkRedirect limits redirects, checks the new address, and drops a
-// feed's secret headers when the redirect leaves the original host. (The
-// HTTP client already drops Authorization in that case.)
-func checkRedirect(req *http.Request, via []*http.Request, allowLoopback bool) error {
+// checkRedirect limits redirects and checks the new address. It never
+// sends a Referer (the feed URL's query may hold a key), and it drops the
+// feed's secret headers and its sign-in (Authorization) unless the
+// redirect stays on the original server, or only moves it from http to
+// https.
+func checkRedirect(req *http.Request, via []*http.Request, allowLoopback bool, protected []string) error {
 	if len(via) >= MaxRedirects {
 		return errTooManyRedirects
 	}
-	if err := checkHost(req.URL, allowLoopback); err != nil {
+	if err := checkHost(req.URL, allowLoopback, protected); err != nil {
 		return err
 	}
-	if len(via) > 0 && !strings.EqualFold(req.URL.Host, via[0].URL.Host) {
+	req.Header.Del("Referer")
+	if len(via) > 0 && !sameOrigin(via[0].URL, req.URL) {
+		req.Header.Del("Authorization")
 		if names, ok := req.Context().Value(secretHeadersKey{}).([]string); ok {
 			for _, n := range names {
 				req.Header.Del(n)
@@ -186,6 +272,21 @@ func checkRedirect(req *http.Request, via []*http.Request, allowLoopback bool) e
 		}
 	}
 	return nil
+}
+
+// sameOrigin reports whether a redirect from a to b stays on the same
+// server: the same host and port, and the same scheme or http to https.
+func sameOrigin(a, b *url.URL) bool {
+	if !strings.EqualFold(strings.TrimSuffix(a.Hostname(), "."), strings.TrimSuffix(b.Hostname(), ".")) {
+		return false
+	}
+	as, bs := strings.ToLower(a.Scheme), strings.ToLower(b.Scheme)
+	if as == bs {
+		return hostPort(a) == hostPort(b)
+	}
+	// An upgrade to https on the default ports keeps the secrets; a
+	// downgrade to http never does.
+	return as == "http" && bs == "https" && (a.Port() == "" || a.Port() == "80") && (b.Port() == "" || b.Port() == "443")
 }
 
 var errTooManyRedirects = fmt.Errorf("the server redirected more than %d times", MaxRedirects)
@@ -305,11 +406,28 @@ func describeStatus(he *HTTPError, fd Feed) string {
 	case he.Code >= 500:
 		msg += " The feed's server has a problem; try again later."
 	}
-	// Skip a message that only repeats the status, such as "Unauthorized".
-	if said := strings.TrimRight(he.Said, "."); said != "" && !strings.EqualFold(said, http.StatusText(he.Code)) && !strings.EqualFold(said, he.Status) {
+	// Skip a message that only repeats the status, such as "Unauthorized"
+	// or "404 page not found".
+	if he.Said != "" && !onlyStatus(he.Said, he.Code) {
 		msg += fmt.Sprintf(" It said: %q", he.Said)
 	}
 	return msg
+}
+
+// onlyStatus reports whether a server's message says no more than its
+// status: the code, the status text, and filler words.
+func onlyStatus(said string, code int) bool {
+	allowed := map[string]bool{"page": true, "error": true, "http": true, "status": true, "the": true, "is": true, "was": true}
+	for _, w := range strings.Fields(strings.ToLower(http.StatusText(code))) {
+		allowed[w] = true
+	}
+	words := strings.FieldsFunc(strings.ToLower(said), func(r rune) bool { return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') })
+	for _, w := range words {
+		if w != strconv.Itoa(code) && !allowed[w] {
+			return false
+		}
+	}
+	return true
 }
 
 func fmtWait(d time.Duration) string {

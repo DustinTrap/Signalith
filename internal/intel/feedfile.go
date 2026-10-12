@@ -44,7 +44,7 @@ type FileError struct {
 }
 
 func (e *FileError) Error() string {
-	return fmt.Sprintf("The feeds file %s could not be read (%v). Fix or delete it to manage feeds on this page.", e.Path, e.Err)
+	return fmt.Sprintf("The feeds file %s could not be read (%v). Fix or delete it, then reload this page.", e.Path, e.Err)
 }
 
 func (e *FileError) Unwrap() error { return e.Err }
@@ -78,6 +78,15 @@ func (f *Feeds) loadFile() {
 		ff.Feeds[i].Defaults()
 	}
 	f.ui, f.kept = ff.Feeds, ff.Kept
+}
+
+// retryFile reads the feeds file again if it could not be read before, so
+// a fixed file takes effect without a restart; the caller holds f.mu.
+func (f *Feeds) retryFile() {
+	if f.fileRead && f.fileErr != nil {
+		f.fileRead, f.fileErr = false, nil
+	}
+	f.loadFile()
 }
 
 // saveFile writes the feeds file; the caller holds f.mu. The caller

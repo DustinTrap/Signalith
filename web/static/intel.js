@@ -8,6 +8,7 @@ const tiState = {
   offset: 0, limit: 100, type: '', overview: null, list: [], total: 0, lookup: null, open: null, seq: 0, listSeq: 0, loaded: false, poll: null,
   // feeds
   feeds: [], downloads: true, manage: true, fileError: '',
+  allFeeds: false, // show every feed, not only the first few
   expanded: new Set(), // feeds whose details are open
   pending: new Map(), // feeds changed here, polled until their download is done
   deferred: false, // a redraw waits for an open row menu to close
@@ -42,6 +43,19 @@ const TI_HUNT = '* | threatmatch\n| table _time, threat_match_field, threat_matc
 const tiSourceLabel = (s) => (s === 'manual' ? 'Manual' : s);
 const tiChip = (ind) => el('span', { class: 'chip', 'data-kind': TI_CLASS[ind.type] || 'hash', title: ind.value }, el('span', {}, ind.value));
 const tiPlural = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many || one + 's'}`;
+// Weights may be set in quarters (the Tor exit list is 0.25).
+const tiWeight = (v) => (typeof v === 'number' ? v.toLocaleString(undefined, { maximumFractionDigits: 2 }) : riNum(v));
+// tiBusy is busy() that keeps keyboard focus on the button: a focused
+// button that is disabled sends focus to the page body.
+function tiBusy(btn, label) {
+  const had = document.activeElement === btn;
+  const done = busy(btn, label);
+  return () => {
+    done();
+    const a = document.activeElement;
+    if (had && btn.isConnected && (!a || a === document.body)) btn.focus({ preventScroll: true });
+  };
+}
 
 // Feed settings in words. A feed's type is auto, hash or an indicator
 // type; TI_NOUN has the [one, many] nouns for counts.
@@ -103,7 +117,12 @@ function loadCatalog(force) {
 const tiCatalogFor = (f) => (tiCat.list || []).find((e) => (f.catalog && e.id === f.catalog) || e.feed === f.name) || null;
 
 // ---------- overview: errors, type pills, feeds ----------
-async function loadIntel() {
+// loadIntel loads the page. While feeds download it checks again every
+// few seconds in the background: a background check redraws the feeds
+// and counts only, so keyboard focus stays put, and reloads the
+// indicators only when the counts changed.
+async function loadIntel(opts = {}) {
+  const bg = !!opts.background;
   const seq = ++tiState.seq;
   clearTimeout(tiState.poll);
   if (!tiState.overview) {
@@ -112,18 +131,33 @@ async function loadIntel() {
     $('ti-feeds').replaceChildren(sk);
     $('ti-list').replaceChildren(riSkeleton(TI_IND_COLS));
   }
-  $('ti-refresh').disabled = true;
+  const refresh = $('ti-refresh');
+  const hadFocus = document.activeElement === refresh;
+  if (!bg) refresh.disabled = true;
+  const enable = () => {
+    refresh.disabled = false;
+    if (hadFocus && document.activeElement === document.body) refresh.focus({ preventScroll: true });
+  };
+  // The catalog names each catalog feed's provider and fills the empty
+  // state's offer, so it loads alongside.
+  const cat = tiCat.list ? null : loadCatalog().catch(() => null);
   let res;
   try {
     res = await api('api/intel');
+    // With no feeds, wait for the catalog so the empty state shows its
+    // offer at once instead of changing under the pointer.
+    if (cat && !(res.feeds || []).length) await cat;
   } catch (e) {
     if (seq !== tiState.seq) return;
-    $('ti-refresh').disabled = false;
-    showIntelError(e);
+    enable();
+    if (bg) tiState.poll = setTimeout(() => { if (currentPage === 'intel') loadIntel({ background: true }); }, 5000);
+    else showIntelError(e);
     return;
   }
   if (seq !== tiState.seq) return;
-  $('ti-refresh').disabled = false;
+  enable();
+  const counts = (o) => JSON.stringify(o && o.summary);
+  const changed = counts(tiState.overview) !== counts(res);
   tiState.overview = res;
   tiState.feeds = res.feeds || [];
   tiState.downloads = !!res.downloads;
@@ -133,23 +167,28 @@ async function loadIntel() {
   $('ti-main').classList.remove('hidden');
   $('ti-add-open').disabled = false;
   $('ti-hunt').disabled = false;
+  // Feeds are added on the server that downloads them; here the note says so.
+  $('ti-feed-add').hidden = !tiState.manage;
   $('ti-feed-add').disabled = !tiState.manage || !!tiState.fileError;
-  renderTypePills();
+  if (!bg || changed) renderTypePills();
   settlePending();
   renderFeeds();
-  // The catalog names each catalog feed's provider.
-  if (!tiCat.list && tiState.manage) loadCatalog().then(() => { if (currentPage === 'intel') renderFeeds(); }, () => {});
+  if (cat && tiState.feeds.length) cat.then(() => { if (seq === tiState.seq && currentPage === 'intel' && tiCat.list) renderFeeds(); });
   const sources = Object.keys((res.summary || {}).by_source || {}).sort();
   const sel = $('ti-source');
   const cur = sel.value;
-  sel.replaceChildren(el('option', { value: '' }, 'Any source'), ...sources.map((s) => el('option', { value: s }, tiSourceLabel(s))));
-  if (sources.includes(cur)) sel.value = cur;
-  else if (cur) { sel.value = ''; tiState.offset = 0; }
+  if (!bg || changed) {
+    const keep = document.activeElement === sel;
+    sel.replaceChildren(el('option', { value: '' }, 'Any source'), ...sources.map((s) => el('option', { value: s }, tiSourceLabel(s))));
+    if (sources.includes(cur)) sel.value = cur;
+    else if (cur) { sel.value = ''; tiState.offset = 0; }
+    if (keep) sel.focus({ preventScroll: true });
+  }
   // While a feed downloads, check again so its status settles by itself.
   if (tiState.feeds.some((f) => f.status && f.status.running) || tiState.pending.size) {
-    tiState.poll = setTimeout(() => { if (currentPage === 'intel') loadIntel(); }, 2500);
+    tiState.poll = setTimeout(() => { if (currentPage === 'intel') loadIntel({ background: true }); }, 2500);
   }
-  loadIndicators();
+  if (!bg || changed) loadIndicators();
 }
 
 // showIntelError replaces the page with what failed (threat intel may be
@@ -170,7 +209,7 @@ function renderTypePills() {
   const counts = {};
   for (const [t, n] of Object.entries(sum.by_type || {})) counts[TI_CLASS[t] || t] = (counts[TI_CLASS[t] || t] || 0) + n;
   const pill = (cls, label, name, n) => {
-    const b = el('button', { class: 'pill', type: 'button', 'aria-pressed': String(tiState.type === cls) }, icon(name), label, el('span', { class: 'num' }, n.toLocaleString()));
+    const b = el('button', { class: 'pill', type: 'button', 'aria-pressed': String(tiState.type === cls), 'data-cls': cls }, icon(name), label, el('span', { class: 'num' }, n.toLocaleString()));
     b.addEventListener('click', () => {
       if (tiState.type === cls) return;
       tiState.type = cls;
@@ -180,8 +219,14 @@ function renderTypePills() {
     });
     return b;
   };
-  $('ti-type').replaceChildren(pill('', 'All', 'layers', sum.total || 0),
+  const box = $('ti-type');
+  const focused = box.contains(document.activeElement) ? document.activeElement.dataset.cls : null;
+  box.replaceChildren(pill('', 'All', 'layers', sum.total || 0),
     ...TI_CLASSES.filter(([cls]) => counts[cls] || tiState.type === cls).map(([cls, label, name]) => pill(cls, label, name, counts[cls] || 0)));
+  if (focused !== null && focused !== undefined) {
+    const again = box.querySelector(`[data-cls="${CSS.escape(focused)}"]`) || box.firstElementChild;
+    if (again) again.focus({ preventScroll: true });
+  }
 }
 
 // ---------- feeds list ----------
@@ -211,6 +256,10 @@ function feedState(f) {
   return ['wait', 'Waiting for its first download'];
 }
 
+// TI_FEEDS_SHOWN is how many feeds the card lists before "Show all", so
+// the indicators stay in view; failing feeds are always listed.
+const TI_FEEDS_SHOWN = 6;
+
 function renderFeeds() {
   const box = $('ti-feeds');
   // Redrawing would close an open row menu; wait until it closes.
@@ -226,15 +275,15 @@ function renderFeeds() {
   $('ti-feed-add').classList.toggle('btn--secondary', !hasFeeds && tiState.manage);
   const notes = [];
   if (tiState.fileError) notes.push(riAlert('danger', 'Feeds can’t be changed on this page right now.', el('p', {}, tiState.fileError)));
-  if (!tiState.downloads && hasFeeds) {
-    notes.push(riAlert('info', 'This server doesn’t download feeds on a schedule.',
-      el('p', {}, 'Its detection scheduler is off (detections.scheduler: false). Add and change feeds on the server that runs detections. Refresh now still works here.')));
+  if (!tiState.downloads) {
+    notes.push(riAlert('info', 'Feeds are managed on another server.',
+      el('p', {}, 'This server’s detection scheduler is off (detections.scheduler: false), so it doesn’t download feeds. Add and change feeds on the Signalith server that runs detections.')));
   }
   const noteBox = notes.length ? el('div', { class: 'ti-feeds__notes' }, ...notes) : null;
   if (!hasFeeds) {
     $('ti-feeds-sub').textContent = 'Lists of known-bad indicators, downloaded on a schedule';
-    // With the feeds file unreadable, its alert says all there is to say.
-    fill(box, noteBox, tiState.fileError ? null : feedsEmpty());
+    // With a note, it says all there is to say.
+    fill(box, noteBox, notes.length ? null : feedsEmpty());
   } else {
     const failing = feeds.filter((f) => feedState(f)[0] === 'bad').length;
     const off = feeds.filter((f) => !f.enabled).length;
@@ -243,9 +292,24 @@ function renderFeeds() {
     if (failing) sub.push(`${failing} failing`);
     if (off) sub.push(`${off} off`);
     $('ti-feeds-sub').textContent = sub.join(' · ');
+    let shown = feeds;
+    const many = feeds.length > TI_FEEDS_SHOWN + 1;
+    if (many && !tiState.allFeeds) {
+      // Failing, open and downloading feeds always show; others fill up the rest.
+      const must = (f) => feedState(f)[0] === 'bad' || tiState.expanded.has(f.name) || tiState.pending.has(f.name);
+      let room = TI_FEEDS_SHOWN - feeds.filter(must).length;
+      shown = feeds.filter((f) => must(f) || room-- > 0);
+    }
     const rows = [];
-    for (const f of feeds) rows.push(...feedRows(f));
-    fill(box, noteBox, el('table', { class: 'table ti-feed-table' }, riHead(TI_FEED_COLS), el('tbody', {}, ...rows)));
+    for (const f of shown) rows.push(...feedRows(f));
+    let more = null;
+    if (many) {
+      const btn = el('button', { class: 'link-btn', type: 'button', 'data-key': 'feeds:more', 'aria-expanded': String(tiState.allFeeds) },
+        icon(tiState.allFeeds ? 'chevron-up' : 'chevron-down', 'icon--sm'), tiState.allFeeds ? 'Show fewer feeds' : `Show all ${feeds.length} feeds`);
+      btn.addEventListener('click', () => { tiState.allFeeds = !tiState.allFeeds; renderFeeds(); });
+      more = el('div', { class: 'ti-feeds__more' }, btn);
+    }
+    fill(box, noteBox, el('table', { class: 'table ti-feed-table' }, riHead(TI_FEED_COLS), el('tbody', {}, ...rows)), more);
   }
   if (focusKey) {
     // Keep keyboard focus on the same control after a redraw.
@@ -277,7 +341,8 @@ function feedsEmpty() {
 
 // addRecommended adds catalog feeds by ID and starts their downloads.
 async function addRecommended(ids, btn) {
-  const done = busy(btn, 'Turning on…');
+  const fromEmpty = !!btn.closest('.ti-feeds__empty');
+  const done = tiBusy(btn, 'Turning on…');
   let r;
   try {
     r = await api('api/intel/catalog', { ids });
@@ -289,14 +354,18 @@ async function addRecommended(ids, btn) {
   done();
   const added = r.added || [];
   for (const v of added) tiWatch(v);
-  for (const e of tiCat.list || []) if (added.some((v) => v.catalog === e.id)) { e.added = true; e.feed = e.id; }
-  if (added.length) {
-    const how = tiState.downloads ? ' They’re downloading now.' : ' Use Refresh now to download them on this server.';
-    toast(`Turned on ${tiPlural(added.length, 'feed')}.${how}`);
-  } else if ((r.skipped || []).length) {
-    toast(r.skipped[0].reason, null, { tone: 'danger', title: 'No feeds were added' });
+  for (const e of tiCat.list || []) {
+    const v = added.find((x) => x.catalog === e.id);
+    if (v) { e.added = true; e.feed = v.name; }
   }
-  loadIntel();
+  if (added.length) toast(`Turned on ${tiPlural(added.length, 'feed')}. They’re downloading now.`);
+  else if ((r.skipped || []).length) toast(r.skipped[0].reason, null, { tone: 'danger', title: 'No feeds were added' });
+  await loadIntel();
+  // The empty state's button is gone; go on to the first new feed.
+  if (fromEmpty && added.length && currentPage === 'intel') {
+    const row = $('ti-feeds').querySelector(`[data-key="${CSS.escape('t:' + added[0].name)}"]`) || $('ti-feeds').querySelector('.ti-feed__toggle');
+    if (row) row.focus();
+  }
   return r;
 }
 
@@ -309,7 +378,7 @@ function feedRows(f) {
   const detailId = 'ti-fd-' + f.name.replace(/[^a-z0-9_-]/gi, '_');
   const toggle = el('button', { class: 'ti-feed__toggle', type: 'button', 'aria-expanded': String(open), 'aria-controls': detailId, 'data-key': 't:' + f.name },
     icon('chevron-right', 'ti-chev'), el('span', { class: 'ti-dot', 'data-state': state, title: label }),
-    el('span', { class: 'ti-feed__name' }, f.name), el('span', { class: 'sr-only' }, `, ${label}`));
+    el('span', { class: 'ti-feed__name', title: f.name }, f.name), el('span', { class: 'sr-only' }, `, ${label}`));
   const line = el('div', { class: 'ti-feed__line' }, toggle,
     f.source === 'config' ? el('span', { class: 'badge badge--outline', title: 'Change it in signalith.yaml' }, 'From signalith.yaml') : null);
   const origin = cat ? cat.provider : tiHost(f.url) + (f.kind === 'taxii' ? ' · TAXII' : '');
@@ -345,18 +414,22 @@ function feedUpdatedText(f, state) {
   if (state === 'run') return 'Downloading…';
   if (!f.enabled) return 'Off';
   if (st.last_success) return ago(st.last_success);
+  if (!tiState.downloads && !st.last_attempt) return '—'; // downloaded by another server
   return st.last_attempt ? 'Never' : 'Not yet';
 }
 function feedUpdated(f, state) {
   const st = f.status || {};
-  return el('span', { class: 'ti-upd' + (state === 'run' ? ' ti-upd--run' : ''), title: st.last_success ? 'Last downloaded ' + fmtTime(st.last_success) : '' }, feedUpdatedText(f, state));
+  const title = st.last_success ? 'Last downloaded ' + fmtTime(st.last_success) : !tiState.downloads ? 'Downloaded by the server that runs detections' : '';
+  return el('span', { class: 'ti-upd' + (state === 'run' ? ' ti-upd--run' : ''), title }, feedUpdatedText(f, state));
 }
 
-// feedMenu: feeds from signalith.yaml can only be refreshed here.
+// feedMenu: feeds from signalith.yaml can only be refreshed here. On a
+// server that doesn't download feeds, only those can be (they are the
+// same on every server).
 function feedMenu(f) {
   const mine = f.source === 'ui' && tiState.manage && !tiState.fileError;
   const items = [];
-  if (f.enabled && !f.problem) items.push({ icon: 'refresh-cw', label: 'Refresh now', run: () => refreshFeed(f) });
+  if (f.enabled && !f.problem && (tiState.downloads || f.source === 'config')) items.push({ icon: 'refresh-cw', label: 'Refresh now', run: () => refreshFeed(f) });
   if (mine) {
     items.push({ icon: 'pencil', label: 'Edit', run: () => openFeedDialog({ feed: f }) });
     if (!f.problem) items.push({ icon: 'power', label: f.enabled ? 'Turn off' : 'Turn on', run: () => setFeedEnabled(f, !f.enabled) });
@@ -376,19 +449,22 @@ function feedMenu(f) {
 function feedDetails(f, cat) {
   const st = f.status || {};
   const items = [];
-  const add = (k, v, wide) => items.push(el('div', { class: 'ti-kv__item' + (wide ? ' ti-kv__item--wide' : '') }, el('dt', {}, k), el('dd', {}, ...[].concat(v))));
+  const add = (k, v, cls) => items.push(el('div', { class: 'ti-kv__item' + (cls ? ' ti-kv__item--' + cls : '') }, el('dt', {}, k), el('dd', {}, ...[].concat(v))));
+  // On a phone the row cuts a long name short.
+  add('Name', el('span', { class: 'mono ti-break' }, f.name), 'sm');
   if (f.kind === 'taxii') {
-    add('TAXII server', el('span', { class: 'mono ti-break' }, f.url), true);
+    add('TAXII server', el('span', { class: 'mono ti-break' }, f.url), 'wide');
     add('Collection', el('span', { class: 'mono ti-break' }, f.collection));
   } else {
-    add('Address', el('span', { class: 'mono ti-break' }, f.url), true);
-    add('Format', tiFormatText(f.format, f.column));
+    add('Address', el('span', { class: 'mono ti-break' }, f.url), 'wide');
+    // For auto, what the last download was read as.
+    add('Format', f.format === 'auto' && st.format ? `${tiFormatText(st.format, st.column)} (detected)` : tiFormatText(f.format, f.column));
   }
   add('Type', TI_FEED_TYPE[f.type] || f.type);
   const next = f.enabled && tiState.downloads && st.next_run && !st.running ? `, next ${until(st.next_run)}` : '';
   add('Downloads', riCap(tiEvery(f.interval)) + next);
   add('If downloads stop', `Indicators stay ${tiDur(f.max_age)}`);
-  add('Weight', `${riNum(f.weight)} (multiplies the risk a match adds)`);
+  add('Weight', `${tiWeight(f.weight)} (multiplies the risk a match adds)`);
   if (st.last_success) {
     add('Last download', [el('span', { title: fmtTime(st.last_success) }, ago(st.last_success)),
       ` · ${tiPlural(st.count || 0, 'indicator')}, ${(st.added || 0).toLocaleString()} new, ${(st.removed || 0).toLocaleString()} gone`]);
@@ -476,7 +552,7 @@ function confirmFeedDelete(f) {
     el('div', { class: 'modal__foot' }, el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => d.close() }, 'Cancel'), ok));
   ok.addEventListener('click', async () => {
     const drop = !n || remove.checked;
-    const done = busy(ok, 'Deleting…');
+    const done = tiBusy(ok, 'Deleting…');
     let r;
     try {
       r = await api(`api/intel/feeds/${encodeURIComponent(f.name)}?indicators=${drop ? 'remove' : 'keep'}`, undefined, 'DELETE');
@@ -628,7 +704,7 @@ function catalogCard(e, rerender) {
     el('p', { class: 'ti-cat-card__desc' }, e.description), keyBox, msg);
   const doAdd = async (btn, key) => {
     msg.replaceChildren();
-    const done = busy(btn, 'Adding…');
+    const done = tiBusy(btn, 'Adding…');
     let v;
     try {
       v = await api('api/intel/feeds', { catalog: e.id, headers: key ? [{ name: e.key_header, value: key }] : [] });
@@ -753,6 +829,16 @@ function feedForm(kind, feed) {
   const pw = { saved: !!(feed && feed.password && feed.password.set), state: 'keep' };
   let auth = feed && feed.username ? 'basic' : feed && savedHeaders.length ? 'key' : 'none';
   let chosen = feed && taxii ? { api_root: feed.url, id: feed.collection, title: '' } : null;
+  // collsFor is the address the collections were found at. A Test or Find
+  // collections answer counts only while the address it was asked for is
+  // still the one in the field (req changes with every request and every
+  // edit of the address).
+  const addr = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
+  let collsFor = chosen ? addr(feed.url) : '';
+  let req = 0;
+  let running = null; // re-enables the button of the request in flight
+  // failedFor is the request a failed Test was for; saving it then says "anyway".
+  let failedFor = null;
   const currentURL = () => (taxii && chosen ? chosen.api_root : url.value.trim());
   const moved = () => edit && tiServer(currentURL()) !== tiServer(feed.url);
   const newKeyRow = () => keyShown || (taxii && !savedHeaders.length);
@@ -802,9 +888,6 @@ function feedForm(kind, feed) {
         icon('plus', 'icon--sm'), savedHeaders.length ? 'Add another header' : cat && cat.key_header ? `Add your ${cat.provider} key` : 'Add an API key'));
     }
     if (newKeyRow()) rows.push(keyHint());
-    if (moved() && savedHeaders.some((h) => h.state !== 'remove')) {
-      rows.unshift(el('p', { class: 'hint ti-hint-wrap' }, icon('info'), 'The address is on another server now, and saved keys are only sent to the server they were entered for. Enter them again or remove them.'));
-    }
     fill(keys, ...rows);
   };
   const pwBox = el('div', { class: 'field', id: p + '-pw' });
@@ -937,7 +1020,15 @@ function feedForm(kind, feed) {
     if (taxii && auth === 'basic') {
       if (!user.value.trim()) { markField(user, 'Enter the user name.'); user.focus(); return false; }
       if (!pw.saved && !pass.value) { markField(pass, 'Enter the password.'); pass.focus(); return false; }
+      if (pw.saved && pw.state === 'replace' && moved() && !pass.value) {
+        markField(pwBox, 'Enter the password again for the new server, or remove it.');
+        pass.focus();
+        return false;
+      }
     }
+    // Saved keys are only sent to the server they were entered for.
+    const again = moved() && (!taxii || auth === 'key') ? savedHeaders.find((h) => h.state === 'replace' && !h.input.value.trim()) : null;
+    if (again) { markField(keys, `Enter ${again.name} again for the new server, or remove it.`); again.input.focus(); return false; }
     if (!newKeyRow() || (taxii && auth !== 'key')) return true;
     const n = keyName.value.trim();
     const v = keyValue.value.trim();
@@ -951,21 +1042,27 @@ function feedForm(kind, feed) {
     clearErrors();
     if (!needURL() || !needAuth()) return;
     if (taxii && !chosen) { markField(colls, 'Find the server’s collections and choose one first.'); findBtn.focus(); return; }
-    const done = busy(testBtn, 'Testing…');
+    const my = ++req;
+    const b = body(true);
+    const done = tiBusy(testBtn, 'Testing…');
+    running = done;
     result.replaceChildren(el('div', { class: 'ti-test', 'data-tone': 'busy' }, icon('cloud-download'),
       el('div', { class: 'ti-test__body' }, el('b', {}, `Downloading from ${tiHost(currentURL()) || 'the server'}…`), el('span', { class: 'skeleton' }))));
     let r;
     try {
-      r = await api('api/intel/feeds/test', body(true));
+      r = await api('api/intel/feeds/test', b);
     } catch (e) {
-      if (!alive()) return;
+      if (!alive() || my !== req) return;
       done();
+      running = null;
       result.replaceChildren();
       showErrors(e, 'Couldn’t test the feed.');
       return;
     }
-    if (!alive()) return;
+    // The address changed meanwhile: this answer is for another feed.
+    if (!alive() || my !== req) return;
     done();
+    running = null;
     if (r.ok && !taxii) {
       // Fill in what was detected, unless set by hand.
       if (!own.has('format') && format.value === 'auto' && r.format) format.value = r.format;
@@ -973,6 +1070,8 @@ function feedForm(kind, feed) {
       if (!own.has('type') && type.value === 'auto' && r.type) type.value = r.type;
       syncMore();
     }
+    failedFor = r.ok ? null : JSON.stringify(body(true));
+    syncSave();
     result.replaceChildren(testResult(r));
     result.scrollIntoView({ block: 'nearest' });
   };
@@ -1001,34 +1100,44 @@ function feedForm(kind, feed) {
   const findCollections = async () => {
     clearErrors();
     if (!needURL() || !needAuth()) return;
-    const done = busy(findBtn, 'Looking…');
+    const my = ++req;
+    const asked = url.value.trim();
+    const done = tiBusy(findBtn, 'Looking…');
+    running = done;
     fill(colls, el('div', { class: 'ti-test', 'data-tone': 'busy' }, icon('server'),
-      el('div', { class: 'ti-test__body' }, el('b', {}, `Asking ${tiHost(url.value.trim())}…`), el('span', { class: 'skeleton' }))));
+      el('div', { class: 'ti-test__body' }, el('b', {}, `Asking ${tiHost(asked)}…`), el('span', { class: 'skeleton' }))));
     const b = body(true);
-    b.url = url.value.trim();
+    b.url = asked;
     if (edit) b.feed = feed.name;
     let r;
     try {
       r = await api('api/intel/taxii/collections', b);
     } catch (e) {
-      if (!alive()) return;
+      if (!alive() || my !== req) return;
       done();
+      running = null;
       colls.replaceChildren();
       showErrors(e, 'Couldn’t list the collections.');
       return;
     }
-    if (!alive()) return;
+    // The address changed meanwhile: these are another server's collections.
+    if (!alive() || my !== req) return;
     done();
+    running = null;
     result.replaceChildren();
+    failedFor = null;
+    syncSave();
     if (!r.ok) {
       chosen = null;
+      collsFor = '';
       testRow.hidden = true;
       fill(colls, riAlert('danger', 'Couldn’t list the collections.', el('p', {}, r.error)));
       return;
     }
     const readable = (r.collections || []).filter((c) => c.can_read);
     const hidden = (r.collections || []).length - readable.length;
-    chosen = (chosen && readable.find((c) => c.id === chosen.id)) || (readable.length === 1 ? readable[0] : null);
+    chosen = (chosen && readable.find((c) => c.id === chosen.id && addr(c.api_root) === addr(chosen.api_root))) || (readable.length === 1 ? readable[0] : null);
+    collsFor = addr(asked);
     if (chosen && !own.has('name') && !edit) { name.value = tiUniqueName(tiSlug(chosen.title || chosen.id)); syncMore(); }
     if (!readable.length) {
       testRow.hidden = true;
@@ -1041,6 +1150,13 @@ function feedForm(kind, feed) {
     if (pick) pick.focus();
   };
 
+  // syncSave says "anyway" on the main button after a failed Test of the
+  // settings in the form.
+  const syncSave = () => {
+    const anyway = failedFor !== null && failedFor === JSON.stringify(body(true));
+    saveBtn.textContent = anyway ? (edit ? 'Save anyway' : 'Add anyway') : (edit ? 'Save changes' : 'Add feed');
+  };
+
   // Save adds the feed or saves the changes; it downloads at once.
   const save = async (ev) => {
     ev.preventDefault();
@@ -1048,7 +1164,7 @@ function feedForm(kind, feed) {
     if (!needURL() || !needAuth()) return;
     if (taxii && !chosen) { markField(colls, 'Find the server’s collections and choose one.'); findBtn.focus(); return; }
     if (!edit && !name.value.trim()) name.value = taxii ? tiUniqueName(tiSlug((chosen && chosen.title) || 'taxii')) : tiNameFor(url.value.trim()) || tiUniqueName('feed');
-    const done = busy(saveBtn, edit ? 'Saving…' : 'Adding…');
+    const done = tiBusy(saveBtn, edit ? 'Saving…' : 'Adding…');
     let v;
     try {
       v = edit ? await api('api/intel/feeds/' + encodeURIComponent(feed.name), body(false), 'PUT') : await api('api/intel/feeds', body(false));
@@ -1062,8 +1178,7 @@ function feedForm(kind, feed) {
     done();
     $('ti-feed-dialog').close();
     tiWatch(v);
-    const how = !v.enabled ? '' : tiState.downloads ? ' It’s downloading now.' : ' Use Refresh now to download it on this server.';
-    toast((edit ? `Saved ${v.name}.` : `Added ${v.name}.`) + how);
+    toast((edit ? `Saved ${v.name}.` : `Added ${v.name}.`) + (v.enabled ? ' It’s downloading now.' : ''));
     for (const e of tiCat.list || []) if (e.id === v.catalog) { e.added = true; e.feed = v.name; }
     loadIntel();
   };
@@ -1085,6 +1200,7 @@ function feedForm(kind, feed) {
     el('div', { class: 'modal__body' }, ...parts),
     el('div', { class: 'modal__foot' }, el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => $('ti-feed-dialog').close() }, 'Cancel'), saveBtn));
   node.addEventListener('submit', save);
+  for (const ev of ['input', 'change']) node.addEventListener(ev, () => { if (failedFor !== null) syncSave(); });
   testBtn.addEventListener('click', runTest);
   findBtn.addEventListener('click', findCollections);
   url.addEventListener('keydown', (ev) => {
@@ -1093,6 +1209,11 @@ function feedForm(kind, feed) {
     (taxii ? findCollections : runTest)();
   });
   url.addEventListener('input', () => {
+    // An answer still on its way belongs to the old address: drop it, and
+    // let Test and Find collections run again at once.
+    req++;
+    const asking = !!colls.querySelector('[data-tone="busy"]');
+    if (running) { running(); running = null; }
     result.replaceChildren();
     if (!edit && !own.has('name') && !taxii) name.value = tiNameFor(url.value.trim());
     if (!taxii) {
@@ -1100,8 +1221,10 @@ function feedForm(kind, feed) {
       if (!own.has('format')) format.value = 'auto';
       if (!own.has('type')) type.value = 'auto';
       if (!own.has('column')) column.value = '';
-    } else if (chosen && tiServer(url.value) !== tiServer(chosen.api_root)) {
+    } else if (asking || addr(url.value) !== collsFor) {
+      // The collections, and the one chosen, are another address's.
       chosen = null;
+      collsFor = '';
       colls.replaceChildren();
       testRow.hidden = true;
     }
@@ -1164,6 +1287,9 @@ const tiFiltered = () => !!($('ti-q').value.trim() || tiState.type || $('ti-sour
 
 function renderIndicators() {
   const box = $('ti-list');
+  // A redraw keeps keyboard focus on the same row.
+  const a = document.activeElement;
+  const focusId = a && box.contains(a) ? (a.closest('tr[data-id]') || {}).dataset?.id : null;
   const list = tiState.list;
   const end = tiState.offset + list.length;
   $('ti-prev').disabled = tiState.offset === 0;
@@ -1192,7 +1318,7 @@ function renderIndicators() {
       el('td', { class: 'ti-c-ind' }, tiChip(ind), el('span', { class: 'ti-sub' }, ind.description || (ind.tags || []).join(', '))),
       el('td', { class: 'hide-sm ti-c-type muted' }, TI_TYPE_SHORT[ind.type] || ind.type),
       el('td', { class: 'hide-sm ti-c-source muted' }, tiSourceLabel(ind.source)),
-      el('td', { class: 'num hide-sm ti-c-weight' }, riNum(ind.weight)),
+      el('td', { class: 'num hide-sm ti-c-weight' }, tiWeight(ind.weight)),
       el('td', { class: 'hide-sm ti-c-seen' }, el('span', { class: 'age', title: ind.first_seen ? 'First seen ' + fmtTime(ind.first_seen) : '' }, ago(ind.last_seen))),
       el('td', { class: 'hide-sm ti-c-exp' }, el('span', { class: 'age', title: ind.expires ? fmtTime(ind.expires) : '' }, ind.expires ? until(ind.expires) : 'Never')));
     if (ind.id === tiState.open) tr.setAttribute('aria-selected', 'true');
@@ -1203,6 +1329,10 @@ function renderIndicators() {
     tiState.lookup ? el('div', { class: 'ti-note' }, el('div', { class: 'callout' }, icon('info'),
       el('div', {}, 'No indicator contains ', el('b', { class: 'mono' }, $('ti-q').value.trim()), ', but it matches these the way a search would.'))) : null,
     el('table', { class: 'table ti-ind-table' }, riHead(TI_IND_COLS), el('tbody', {}, ...rows)));
+  if (focusId) {
+    const row = box.querySelector(`tr[data-id="${CSS.escape(focusId)}"]`);
+    if (row) row.focus({ preventScroll: true });
+  }
 }
 
 function clearIntelFilters() {
@@ -1248,12 +1378,12 @@ function showIndicator(id) {
     riIconBtn('x', 'Close details', closeIndicator));
   const title = el('h2', { class: 'inspector__title mono ti-value', tabindex: '-1' }, ind.value);
   const meta = el('div', { class: 'inspector__meta' }, el('span', {}, tiSourceLabel(ind.source)), el('span', { class: 'dotsep' }),
-    el('span', {}, `Weight ${riNum(ind.weight)}`), el('span', { class: 'dotsep' }), el('span', { title: fmtTime(ind.last_seen) }, 'seen ' + ago(ind.last_seen)));
+    el('span', {}, `Weight ${tiWeight(ind.weight)}`), el('span', { class: 'dotsep' }), el('span', { title: fmtTime(ind.last_seen) }, 'seen ' + ago(ind.last_seen)));
   const kv = [];
   const add = (k, v) => { if (v) kv.push(el('dt', {}, k), el('dd', {}, v)); };
   add('Type', TI_TYPE_LABEL[ind.type] || ind.type);
   add('Source', ind.source === 'manual' ? 'Added by hand or uploaded' : ind.source);
-  add('Weight', `${riNum(ind.weight)} (multiplies the risk a match adds)`);
+  add('Weight', `${tiWeight(ind.weight)} (multiplies the risk a match adds)`);
   add('First seen', ind.first_seen ? fmtTime(ind.first_seen) : '');
   add('Last seen', ind.last_seen ? fmtTime(ind.last_seen) : '');
   add('Expires', ind.expires ? `${fmtTime(ind.expires)} (${until(ind.expires)})` : 'Never');

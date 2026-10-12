@@ -351,8 +351,11 @@ func TestFeedRefresh(t *testing.T) {
 	mu.Lock()
 	body = "maintenance\n"
 	mu.Unlock()
-	if _, err := f.Refresh(ctx, "blocklist"); err == nil || !strings.Contains(err.Error(), "None of the 1 values") || !strings.Contains(err.Error(), "previous indicators are kept") {
-		t.Errorf("junk = %v", err)
+	// The indicators from before stay; the page says so only when there
+	// were some, so the message does not.
+	if _, err := f.Refresh(ctx, "blocklist"); err == nil || !strings.Contains(err.Error(), "None of the 1 values") ||
+		strings.Contains(err.Error(), "previous indicators") || s.CountSource("blocklist") != 2 {
+		t.Errorf("junk = %v, %d left", err, s.CountSource("blocklist"))
 	}
 	// Indicators that disappear from the feed are removed.
 	mu.Lock()

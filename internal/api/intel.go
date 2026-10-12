@@ -11,6 +11,12 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 )
 
+// routeIntel registers the threat intel routes. Today every route needs
+// the admin. When user roles arrive, the routes that change feeds or make
+// this server download from an address the request names (feeds POST,
+// PUT and DELETE, feeds/test, feeds/{name}/refresh, catalog POST and
+// taxii/collections) must stay admin-only: a test can read services on
+// the local network.
 func (s *Server) routeIntel(api *http.ServeMux) {
 	api.HandleFunc("GET /api/intel", s.handleIntelOverview)
 	api.HandleFunc("GET /api/intel/feeds", s.handleIntelFeeds)
@@ -48,10 +54,11 @@ func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"summary":   s.Intel.Summary(),
 		"loaded":    s.Intel.Loaded(),
-		"downloads": s.Config != nil && s.Config.Detections.Scheduler,
+		"downloads": s.downloads(),
 		"types":     intel.Types,
-		// manage says whether feeds can be added and changed on the page.
-		"manage": s.Feeds != nil,
+		// manage says whether feeds can be added and changed on the page:
+		// only on the server that downloads them.
+		"manage": s.Feeds != nil && s.downloads(),
 	}
 	if s.Feeds != nil {
 		feeds = s.Feeds.Status()
@@ -73,13 +80,20 @@ func (s *Server) handleIntelRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	// A feed added on the page is only kept by the server that runs the
+	// schedule; indicators another server downloads for it would be
+	// removed when that server starts.
+	if fd, ok := s.Feeds.Get(name); ok && fd.Source == intel.SourceUI && !s.downloads() {
+		writeError(w, http.StatusConflict, errNoSchedule)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 	st, err := s.Feeds.Refresh(ctx, name)
 	switch {
 	case errors.Is(err, intel.ErrUnknownFeed):
 		writeError(w, http.StatusNotFound, err)
-	case errors.Is(err, intel.ErrFeedRunning), errors.Is(err, intel.ErrFeedChanged):
+	case errors.Is(err, intel.ErrFeedRunning), errors.Is(err, intel.ErrFeedChanged), errors.Is(err, intel.ErrFeedOff):
 		writeError(w, http.StatusConflict, err)
 	case err != nil:
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "status": st})
@@ -211,12 +225,35 @@ func (s *Server) handleIntelLookup(w http.ResponseWriter, r *http.Request) {
 
 var errFeedsOff = errors.New("threat intel feeds are not available on this server")
 
+// errNoSchedule refuses feed changes on a server that does not download
+// feeds: its feeds file is not the one the downloading server reads.
+var errNoSchedule = errors.New("this server does not download feeds (its detection scheduler is off), so feeds are added and changed on the Signalith server that runs detections")
+
+// downloads reports whether this server downloads feeds on their
+// schedules (the one with the detection scheduler).
+func (s *Server) downloads() bool {
+	return s.Config != nil && s.Config.Detections.Scheduler
+}
+
 func (s *Server) feedsOK(w http.ResponseWriter) bool {
 	if !s.intelOK(w) {
 		return false
 	}
 	if s.Feeds == nil {
 		writeError(w, http.StatusServiceUnavailable, errFeedsOff)
+		return false
+	}
+	return true
+}
+
+// feedsWritable also refuses changes on a server that does not download
+// feeds.
+func (s *Server) feedsWritable(w http.ResponseWriter) bool {
+	if !s.feedsOK(w) {
+		return false
+	}
+	if !s.downloads() {
+		writeError(w, http.StatusConflict, errNoSchedule)
 		return false
 	}
 	return true
@@ -235,6 +272,8 @@ func writeFeedError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, err)
 	case errors.As(err, &fe):
 		writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, intel.ErrBusy):
+		writeError(w, http.StatusTooManyRequests, err)
 	default:
 		writeError(w, http.StatusInternalServerError, err)
 	}
@@ -248,7 +287,8 @@ func (s *Server) handleIntelFeeds(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{
 		"feeds":      s.Feeds.Status(),
-		"downloads":  s.Config != nil && s.Config.Detections.Scheduler,
+		"downloads":  s.downloads(),
+		"manage":     s.downloads(),
 		"feeds_file": s.Feeds.File,
 		"formats":    append(append([]string{}, intel.Formats...), intel.FormatAuto),
 		"types":      intel.FeedTypes,
@@ -260,7 +300,7 @@ func (s *Server) handleIntelFeeds(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIntelFeedAdd(w http.ResponseWriter, r *http.Request) {
-	if !s.feedsOK(w) {
+	if !s.feedsWritable(w) {
 		return
 	}
 	var in intel.FeedInput
@@ -280,7 +320,7 @@ func (s *Server) handleIntelFeedAdd(w http.ResponseWriter, r *http.Request) {
 // handleIntelFeedUpdate changes a feed added on the page. Settings the
 // request leaves out stay as they are, and so do secrets sent empty.
 func (s *Server) handleIntelFeedUpdate(w http.ResponseWriter, r *http.Request) {
-	if !s.feedsOK(w) {
+	if !s.feedsWritable(w) {
 		return
 	}
 	name := r.PathValue("name")
@@ -305,7 +345,7 @@ func (s *Server) handleIntelFeedUpdate(w http.ResponseWriter, r *http.Request) {
 // handleIntelFeedDelete deletes a feed added on the page. Its indicators
 // are removed too, unless ?indicators=keep, which lets them age out.
 func (s *Server) handleIntelFeedDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.feedsOK(w) {
+	if !s.feedsWritable(w) {
 		return
 	}
 	name := r.PathValue("name")
@@ -396,7 +436,7 @@ func (s *Server) handleIntelTAXIICollections(w http.ResponseWriter, r *http.Requ
 	srv, err := s.Feeds.TAXIICollections(r.Context(), req.FeedInput, req.Feed)
 	var ie *intel.InputError
 	switch {
-	case errors.As(err, &ie), errors.Is(err, intel.ErrUnknownFeed):
+	case errors.As(err, &ie), errors.Is(err, intel.ErrUnknownFeed), errors.Is(err, intel.ErrBusy):
 		writeFeedError(w, err)
 	case err != nil:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "collections": []any{}})
@@ -417,7 +457,7 @@ func (s *Server) handleIntelCatalog(w http.ResponseWriter, r *http.Request) {
 // handleIntelCatalogAdd adds catalog feeds by ID, such as the recommended
 // set, with their suggested settings.
 func (s *Server) handleIntelCatalogAdd(w http.ResponseWriter, r *http.Request) {
-	if !s.feedsOK(w) {
+	if !s.feedsWritable(w) {
 		return
 	}
 	var req struct {
