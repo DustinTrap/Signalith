@@ -9,30 +9,45 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
-// routeIntel registers the threat intel routes. Today every route needs
-// the admin. When user roles arrive, the routes that change feeds or make
-// this server download from an address the request names (feeds POST,
-// PUT and DELETE, feeds/test, feeds/{name}/refresh, catalog POST and
-// taxii/collections) must stay admin-only: a test can read services on
-// the local network.
-func (s *Server) routeIntel(api *http.ServeMux) {
-	api.HandleFunc("GET /api/intel", s.handleIntelOverview)
-	api.HandleFunc("GET /api/intel/feeds", s.handleIntelFeeds)
-	api.HandleFunc("POST /api/intel/feeds", s.handleIntelFeedAdd)
-	api.HandleFunc("POST /api/intel/feeds/test", s.handleIntelFeedTest)
-	api.HandleFunc("PUT /api/intel/feeds/{name}", s.handleIntelFeedUpdate)
-	api.HandleFunc("DELETE /api/intel/feeds/{name}", s.handleIntelFeedDelete)
-	api.HandleFunc("POST /api/intel/feeds/{name}/refresh", s.handleIntelRefresh)
-	api.HandleFunc("GET /api/intel/catalog", s.handleIntelCatalog)
-	api.HandleFunc("POST /api/intel/catalog", s.handleIntelCatalogAdd)
-	api.HandleFunc("POST /api/intel/taxii/collections", s.handleIntelTAXIICollections)
-	api.HandleFunc("GET /api/intel/indicators", s.handleIntelList)
-	api.HandleFunc("POST /api/intel/indicators", s.handleIntelAdd)
-	api.HandleFunc("DELETE /api/intel/indicators/{id}", s.handleIntelDelete)
-	api.HandleFunc("POST /api/intel/upload", s.handleIntelUpload)
-	api.HandleFunc("GET /api/intel/lookup", s.handleIntelLookup)
+// routeIntel registers the threat intel routes. Everyone can see feeds
+// and indicators, and analysts add and remove indicators by hand. Feeds
+// and bulk uploads are admin work, and so is anything that makes this
+// server download from an address the request names (feeds/test and
+// taxii/collections), since a test can read services on the local network.
+func (s *Server) routeIntel(api *router) {
+	api.viewer("GET /api/intel", s.handleIntelOverview)
+	api.viewer("GET /api/intel/feeds", s.handleIntelFeeds)
+	api.viewer("GET /api/intel/catalog", s.handleIntelCatalog)
+	api.viewer("GET /api/intel/indicators", s.handleIntelList)
+	api.viewer("GET /api/intel/lookup", s.handleIntelLookup)
+	api.analyst("POST /api/intel/indicators", s.handleIntelAdd)
+	api.analyst("DELETE /api/intel/indicators/{id}", s.handleIntelDelete)
+	api.admin("POST /api/intel/feeds", s.handleIntelFeedAdd)
+	api.admin("POST /api/intel/feeds/test", s.handleIntelFeedTest)
+	api.admin("PUT /api/intel/feeds/{name}", s.handleIntelFeedUpdate)
+	api.admin("DELETE /api/intel/feeds/{name}", s.handleIntelFeedDelete)
+	api.admin("POST /api/intel/feeds/{name}/refresh", s.handleIntelRefresh)
+	api.admin("POST /api/intel/catalog", s.handleIntelCatalogAdd)
+	api.admin("POST /api/intel/taxii/collections", s.handleIntelTAXIICollections)
+	api.admin("POST /api/intel/upload", s.handleIntelUpload)
+}
+
+// feedsFor lists the feeds as the request's user may see them. A feed's
+// address can carry an API key in its query, and a TAXII sign-in names an
+// account, so only admins see those in full.
+func (s *Server) feedsFor(r *http.Request) []intel.FeedView {
+	list := s.Feeds.Status()
+	if p := principalOf(r); p != nil && p.Role.AtLeast(users.Admin) {
+		return list
+	}
+	for i := range list {
+		list[i].URL = intel.RedactURL(list[i].URL)
+		list[i].Username = ""
+	}
+	return list
 }
 
 var errIntelOff = errors.New("threat intel is not available on this server")
@@ -61,7 +76,7 @@ func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
 		"manage": s.Feeds != nil && s.downloads(),
 	}
 	if s.Feeds != nil {
-		feeds = s.Feeds.Status()
+		feeds = s.feedsFor(r)
 		// A broken feeds file blocks changes on the page until it is fixed.
 		if err := s.Feeds.Load(); err != nil {
 			out["file_error"] = err.Error()
@@ -286,7 +301,7 @@ func (s *Server) handleIntelFeeds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{
-		"feeds":      s.Feeds.Status(),
+		"feeds":      s.feedsFor(r),
 		"downloads":  s.downloads(),
 		"manage":     s.downloads(),
 		"feeds_file": s.Feeds.File,

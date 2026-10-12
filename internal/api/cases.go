@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -13,19 +14,21 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
-func (s *Server) routeCases(api *http.ServeMux) {
-	api.HandleFunc("GET /api/cases", s.handleListCases)
-	api.HandleFunc("POST /api/cases", s.handleCreateCase)
-	api.HandleFunc("GET /api/cases/summary", s.handleCasesSummary)
-	api.HandleFunc("GET /api/cases/{id}", s.handleGetCase)
-	api.HandleFunc("PATCH /api/cases/{id}", s.handleUpdateCase)
-	api.HandleFunc("POST /api/cases/{id}/findings", s.handleAddCaseFindings)
-	api.HandleFunc("DELETE /api/cases/{id}/findings/{fid}", s.handleRemoveCaseFinding)
-	api.HandleFunc("POST /api/cases/{id}/entries", s.handleAddCaseEntry)
-	api.HandleFunc("DELETE /api/cases/{id}/entries/{entry}", s.handleRemoveCaseEntry)
-	api.HandleFunc("POST /api/cases/{id}/entities", s.handleAddCaseEntity)
+func (s *Server) routeCases(api *router) {
+	api.viewer("GET /api/cases", s.handleListCases)
+	api.viewer("GET /api/cases/summary", s.handleCasesSummary)
+	api.viewer("GET /api/cases/{id}", s.handleGetCase)
+	// Working investigations is analyst work.
+	api.analyst("POST /api/cases", s.handleCreateCase)
+	api.analyst("PATCH /api/cases/{id}", s.handleUpdateCase)
+	api.analyst("POST /api/cases/{id}/findings", s.handleAddCaseFindings)
+	api.analyst("DELETE /api/cases/{id}/findings/{fid}", s.handleRemoveCaseFinding)
+	api.analyst("POST /api/cases/{id}/entries", s.handleAddCaseEntry)
+	api.analyst("DELETE /api/cases/{id}/entries/{entry}", s.handleRemoveCaseEntry)
+	api.analyst("POST /api/cases/{id}/entities", s.handleAddCaseEntity)
 }
 
 var errCasesOff = errors.New("investigation cases are not configured on this server")
@@ -72,10 +75,18 @@ func (s *Server) modifyCase(ctx context.Context, id string, change func(c *cases
 // badRequest marks an error as the client's fault.
 type badRequest struct{ error }
 
+// notYours refuses a change to what someone else added.
+type notYours struct{ error }
+
 func (s *Server) writeModifyError(w http.ResponseWriter, err error) {
 	var br badRequest
 	if errors.As(err, &br) {
 		writeError(w, http.StatusBadRequest, br.error)
+		return
+	}
+	var ny notYours
+	if errors.As(err, &ny) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": ny.Error(), "code": "not_author"})
 		return
 	}
 	writeCaseError(w, err)
@@ -503,10 +514,16 @@ func (s *Server) handleRemoveCaseEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, user := r.PathValue("entry"), userOf(r)
+	p := principalOf(r)
 	c, err := s.modifyCase(r.Context(), r.PathValue("id"), func(c *cases.Case) (bool, error) {
 		i := slices.IndexFunc(c.Entries, func(e cases.Entry) bool { return e.ID == id })
 		if i >= 0 && c.Entries[i].Kind == cases.KindFinding {
 			return false, badRequest{errors.New("remove the finding from the case instead")}
+		}
+		// Notes, pinned events and searches are evidence: analysts remove
+		// only their own, admins anyone's.
+		if i >= 0 && !p.Role.AtLeast(users.Admin) && !strings.EqualFold(c.Entries[i].Author, p.Username) {
+			return false, notYours{fmt.Errorf("only %s or an admin can remove this; you can remove what you added yourself", c.Entries[i].Author)}
 		}
 		return true, c.RemoveEntry(id, user, time.Now().UTC())
 	})

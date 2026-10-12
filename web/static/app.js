@@ -48,27 +48,81 @@ const looksLikeIP = (v) => /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || /^[0-9a-f]*:[0-9
 // works behind a proxy; a signed-out session goes to the sign-in page and
 // comes back here afterwards.
 let signingIn = false;
+const toSignIn = (change) => {
+  if (signingIn) return;
+  signingIn = true;
+  location.assign('login?' + (change ? 'change=1&' : '') + 'next=' + encodeURIComponent(location.pathname + location.search + location.hash));
+};
 async function api(path, body, method) {
   const opts = body === undefined ? { method: method || 'GET' } : {
     method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   };
   const resp = await fetch(path.replace(/^\//, ''), opts);
   const data = await resp.json().catch(() => ({}));
-  if (resp.status === 401 && !signingIn) {
-    signingIn = true;
-    location.assign('login?next=' + encodeURIComponent(location.pathname + location.search + location.hash));
+  if (resp.status === 401) toSignIn();
+  // A temporary password must be replaced first; the sign-in page asks for it.
+  if (resp.status === 403 && data.code === 'password_change_required') toSignIn(true);
+  if (resp.status === 403 && data.code === 'forbidden') {
+    // An admin changed this user's role since the page loaded: reload, so
+    // every page, menu and button matches the new role at once.
+    if (data.role && me && data.role !== me.role) roleChanged(data.role);
+    else if (typeof toast === 'function') toast(data.error, null, { tone: 'danger', title: 'Your role can’t do that' });
   }
   if (!resp.ok) {
     const err = new Error(data.error || resp.statusText);
     err.status = resp.status;
     err.pos = data.pos;
     err.problems = data.problems;
+    err.code = data.code;
     err.field = data.field;
     err.fields = data.fields; // setting name -> problem, to mark form fields
     throw err;
   }
   return data;
 }
+
+// ---------- the signed-in user and roles ----------
+// me is the reply of api/me. Controls a role cannot use carry
+// data-min-role="analyst" or "admin", and CSS hides them unless
+// <body data-role> is high enough; code asks can(role). Until the role is
+// known every such control stays hidden. The server still decides: a
+// refused request shows its message as a toast (see api above).
+const ROLE_RANK = { viewer: 1, analyst: 2, admin: 3 };
+let me = null;
+const can = (role) => !!me && (ROLE_RANK[me.role] || 0) >= (ROLE_RANK[role] || 3);
+function setRole(role) {
+  if (me) me.role = role;
+  document.body.dataset.role = role;
+}
+// roleChanged reloads the app for a new role, and says why once it has.
+const ROLE_NOTE_KEY = 'signalith.roleChanged';
+let reloading = false;
+function roleChanged(role) {
+  if (reloading) return;
+  reloading = true;
+  try { sessionStorage.setItem(ROLE_NOTE_KEY, role); } catch (_) { /* storage may be blocked */ }
+  location.reload();
+}
+// meReady resolves once api/me has answered (to null if it failed).
+const meReady = api('api/me').then((m) => {
+  if (m.must_change_password) { toSignIn(true); return m; }
+  me = m;
+  setRole(m.role);
+  showUser(m);
+  let note = null;
+  try { note = sessionStorage.getItem(ROLE_NOTE_KEY); sessionStorage.removeItem(ROLE_NOTE_KEY); } catch (_) { /* ignore */ }
+  if (note && typeof toast === 'function') {
+    toast(`An admin changed your role to ${m.role_label || m.role}. The page reloaded to match.`, null, { title: 'Your role changed' });
+  }
+  return m;
+}).catch(() => null);
+
+// pageRole is the least role a page needs ('' for any), from its nav item.
+function pageRole(name) {
+  const item = document.querySelector(`.nav__item[data-page="${name}"][data-min-role]`);
+  return item ? item.dataset.minRole : '';
+}
+const pageAllowed = (name) => !pageRole(name) || can(pageRole(name));
 
 // ---------- app shell: navigation ----------
 // Each page is a <section id="page-NAME" class="page">; its nav item
@@ -102,6 +156,12 @@ function selectPage(name) {
 // current history entry instead of adding one.
 function showPage(name, opts = {}) {
   if (!$('page-' + name)) return;
+  if (!pageAllowed(name)) {
+    const who = pageRole(name) === 'admin' ? 'admins' : 'analysts and admins';
+    if (me && typeof toast === 'function') toast(`${pageInfo(name).title} is only for ${who}.`, null, { tone: 'danger' });
+    name = 'search';
+    opts = { ...opts, replace: true };
+  }
   const switching = name !== currentPage;
   // A dialog left open on the page being hidden would keep the whole app
   // inert while showing nothing (for example after Back), so close it.
@@ -207,6 +267,7 @@ const JUMP_WORDS = {
   risk: 'risk scores', search: 'query events logs hunt', intel: 'threat intel ioc indicators feeds',
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
   data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', health: 'status opensearch ingest', help: 'help syntax language commands',
+  users: 'accounts people roles permissions ldap active directory sign-in passwords',
 };
 const jump = $('jump');
 $('jump-key').textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? '\u2318K' : 'Ctrl K';
@@ -216,7 +277,7 @@ function jumpMatches() {
   const hits = [];
   document.querySelectorAll('#sidebar .nav__item[data-page]').forEach((a) => {
     const words = [a.textContent, a.dataset.page, JUMP_WORDS[a.dataset.page] || ''].join(' ').toLowerCase();
-    const hit = !q || words.includes(q);
+    const hit = pageAllowed(a.dataset.page) && (!q || words.includes(q));
     a.classList.toggle('hidden', !hit);
     if (hit) hits.push(a);
   });
@@ -320,19 +381,27 @@ document.addEventListener('keydown', (ev) => {
 });
 
 // ---------- app shell: user menu ----------
-api('api/me').then((m) => {
-  const name = m.user || '';
+// showUser fills the top bar and the account menu from api/me: the
+// display name (or username), and the username and role under it.
+const SOURCE_NOTE = { builtin: 'built-in account', directory: 'directory account' };
+function showUser(m) {
+  const name = m.name || m.username || m.user || '';
   const initial = (name.replace(/^[^a-z0-9]+/i, '').charAt(0) || '?').toUpperCase();
   $('user-avatar').textContent = initial;
   $('user-avatar-lg').textContent = initial;
   $('user-name').textContent = name;
   $('user-menu-name').textContent = name;
+  const meta = [m.name && m.name !== m.username ? m.username : '', m.role_label, SOURCE_NOTE[m.source] || ''].filter(Boolean);
+  $('user-menu-meta').textContent = meta.join(' · ');
+  $('user-menu').querySelector('summary').setAttribute('aria-label', `Account menu: ${name}, ${m.role_label || m.role}`);
+  $('change-password').classList.toggle('hidden', !m.can_change_password);
   // A browser that signed in with HTTP Basic auth keeps sending the
   // password, so signing out would not stick.
   const basic = m.auth === 'basic';
   $('sign-out').classList.toggle('hidden', basic);
   $('basic-note').classList.toggle('hidden', !basic);
-}).catch(() => {});
+  jumpMatches();
+}
 $('sign-out').addEventListener('click', async () => {
   $('sign-out').disabled = true;
   try { await fetch('api/logout', { method: 'POST' }); } catch (_) { /* the session ends when it expires */ }
@@ -376,7 +445,7 @@ function renderHealthCard(h) {
   card.title = ['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n');
   card.setAttribute('aria-label', `Health: ${title}, OpenSearch ${os.status || 'unknown'}, ${meta.join(', ')}`);
   card.classList.remove('hidden');
-  if (h.version) $('user-menu-meta').textContent = 'Signalith ' + h.version;
+  if (h.version) $('user-menu-version').textContent = 'Signalith ' + h.version;
 }
 refreshHealthCard();
 setInterval(refreshHealthCard, 30000);
@@ -387,8 +456,9 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) refr
 let firstPage = pageFromHash();
 try { firstPage = firstPage || localStorage.getItem('signalith.page'); } catch (_) { /* ignore */ }
 if (!firstPage || !$('page-' + firstPage)) firstPage = 'search';
-selectPage(firstPage);
-document.addEventListener('DOMContentLoaded', () => showPage(firstPage, { replace: true }));
+// A page only some roles may open waits for the role.
+if (!pageRole(firstPage)) selectPage(firstPage);
+document.addEventListener('DOMContentLoaded', () => meReady.then(() => showPage(firstPage, { replace: true })));
 
 // ---------- query text helpers ----------
 // splitPipes returns [search, rest] split at the first | outside quotes.
@@ -1428,7 +1498,7 @@ function showCellMenu(ev, col, value, kind, row, canSort) {
     type: 'button', class: 'menu__item', role: 'menuitem', title: label,
     onclick: (e) => { e.stopPropagation(); hideCellMenu(); act(); },
   }, icon(iconName), el('span', {}, label));
-  const pin = kind === 'events' && row && typeof pinEventToCase === 'function' ? item('pin', 'Pin this event to a case', () => pinEventToCase(row)) : null;
+  const pin = kind === 'events' && row && can('analyst') && typeof pinEventToCase === 'function' ? item('pin', 'Pin this event to a case', () => pinEventToCase(row)) : null;
   if (value === null || value === undefined || col === 'count' || col === 'percent' || (col === '_raw' && !pin)) return;
   if (col === '_raw') {
     openCellMenu(ev, [pin]);
@@ -2826,7 +2896,7 @@ function healthPageRender(h) {
   if (failed) ingRow = ['warn', 'Some events failed', `${healthPageNum(failed)} of ${healthPageNum(received)} events since start could not be stored.`];
   else if (recent) ingRow = ['', 'Receiving', `Last event ${lastAgo}.`];
   else if (ing.last_seen) ingRow = ['idle', 'Quiet', `Last event ${lastAgo}.`];
-  else ingRow = ['idle', 'Waiting', ['No events since the server started. ', el('a', { href: '#data', 'data-page': 'data' }, 'Add data')]];
+  else ingRow = ['idle', 'Waiting', ['No events since the server started. ', el('a', { href: '#data', 'data-page': 'data', 'data-min-role': 'admin' }, 'Add data')]];
 
   const table = el('table', { class: 'table hp-table' },
     el('thead', {}, el('tr', {}, el('th', { scope: 'col', 'data-col': 'name' }, 'Component'), el('th', { scope: 'col', 'data-col': 'state' }, 'Status'), el('th', { scope: 'col' }, 'Details'))),

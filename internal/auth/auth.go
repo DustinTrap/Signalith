@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -93,6 +94,41 @@ func (s *Sessions) Delete(token string) {
 	delete(s.byID, hash(token))
 }
 
+// EndUser ends every session of a user except the one with token keep
+// ("" keeps none), and reports how many ended. Usernames ignore case.
+func (s *Sessions) EndUser(user, keep string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keepID := hash(keep)
+	n := 0
+	for id, ss := range s.byID {
+		if strings.EqualFold(ss.User, user) && (keep == "" || id != keepID) {
+			delete(s.byID, id)
+			n++
+		}
+	}
+	return n
+}
+
+// Users lists the users with a session that has not expired, each once,
+// in lower case.
+func (s *Sessions) Users() []string {
+	now := s.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	out := []string{}
+	for _, ss := range s.byID {
+		u := strings.ToLower(ss.User)
+		if !s.expired(ss, now) && !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Len reports how many sessions are stored.
 func (s *Sessions) Len() int {
 	s.mu.Lock()
@@ -130,86 +166,196 @@ func (s *Sessions) evictLocked(n int) {
 	}
 }
 
-// Limiter slows password guessing: after Max failures from one client
-// within Window, that client is refused for Lockout.
+// Limiter slows password guessing. It counts failed sign-ins three ways,
+// each within Window, and a count that reaches its limit locks for Lockout:
+//
+//   - per address and account: Max failures lock that account for that
+//     address;
+//   - per address: MaxPerAddress failures, whatever the accounts, lock the
+//     address (one address trying many accounts);
+//   - per account: MaxPerAccount failures, from any address, lock the
+//     account everywhere (many addresses guessing one account). It is above
+//     Max, so one address alone cannot lock someone else out.
+//
+// A successful sign-in clears only its own address-and-account count, so
+// signing in to one account never helps guess another. Attempts still being
+// checked count too, so parallel requests cannot all slip in before the
+// first failure is recorded.
 type Limiter struct {
-	Max     int
-	Window  time.Duration
-	Lockout time.Duration
-	Now     func() time.Time
+	Max           int
+	MaxPerAddress int
+	MaxPerAccount int
+	Window        time.Duration
+	Lockout       time.Duration
+	Now           func() time.Time
 
 	mu      sync.Mutex
-	clients map[string]*attempts
+	buckets map[string]*bucket
 }
 
-type attempts struct {
+type bucket struct {
 	failures    []time.Time
+	pending     int
 	lockedUntil time.Time
 }
 
-// NewLimiter allows 10 failures per 15 minutes, then refuses for 15
-// minutes.
+// NewLimiter allows 10 failures per address and account, 30 per address
+// and 30 per account within 15 minutes, then refuses for 15 minutes.
 func NewLimiter() *Limiter {
-	return &Limiter{Max: 10, Window: 15 * time.Minute, Lockout: 15 * time.Minute, Now: time.Now, clients: map[string]*attempts{}}
+	return &Limiter{Max: 10, MaxPerAddress: 30, MaxPerAccount: 30, Window: 15 * time.Minute, Lockout: 15 * time.Minute,
+		Now: time.Now, buckets: map[string]*bucket{}}
 }
 
-// Allow reports whether a client may try to sign in, and if not, how long
-// until it may.
-func (l *Limiter) Allow(client string) (bool, time.Duration) {
+// Attempt is one sign-in being checked. End it with exactly one of Fail,
+// Succeed or Done.
+type Attempt struct {
+	l    *Limiter
+	keys [3]string
+	pair string
+	done bool
+}
+
+// Busy is the wait Begin reports when the limit is only reached by attempts
+// still being checked: the client should try again in a moment.
+const Busy = 5 * time.Second
+
+// Begin starts an attempt to sign in to account from client, or reports
+// how long until one is allowed. Account names ignore case and spacing.
+func (l *Limiter) Begin(client, account string) (*Attempt, bool, time.Duration) {
+	account = strings.ToLower(strings.TrimSpace(account))
+	pair := "p\x00" + client + "\x00" + account
+	keys := [3]string{pair, "a\x00" + client, "u\x00" + account}
+	limits := [3]int{l.Max, l.MaxPerAddress, l.MaxPerAccount}
 	now := l.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	a, ok := l.clients[client]
-	if !ok {
-		return true, 0
+	if l.buckets == nil {
+		l.buckets = map[string]*bucket{}
 	}
-	if wait := a.lockedUntil.Sub(now); wait > 0 {
-		return false, wait
-	}
-	return true, 0
-}
-
-// Fail records a failed attempt and reports whether the client is now
-// locked out.
-func (l *Limiter) Fail(client string) bool {
-	now := l.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.clients) > 50000 {
+	if len(l.buckets) > 50000 {
 		l.pruneLocked(now)
 	}
-	a, ok := l.clients[client]
-	if !ok {
-		a = &attempts{}
-		l.clients[client] = a
+	var wait time.Duration
+	for i, k := range keys {
+		b, ok := l.buckets[k]
+		if !ok {
+			continue
+		}
+		if w := b.lockedUntil.Sub(now); w > 0 {
+			wait = max(wait, w)
+			continue
+		}
+		if limits[i] > 0 && len(b.recent(now, l.Window))+b.pending >= limits[i] {
+			wait = max(wait, Busy)
+		}
 	}
-	keep := a.failures[:0]
-	for _, t := range a.failures {
-		if now.Sub(t) < l.Window {
+	if wait > 0 {
+		return nil, false, wait
+	}
+	for _, k := range keys {
+		b, ok := l.buckets[k]
+		if !ok {
+			b = &bucket{}
+			l.buckets[k] = b
+		}
+		b.pending++
+	}
+	return &Attempt{l: l, keys: keys, pair: pair}, true, 0
+}
+
+// endLocked releases the attempt's place and reports whether it was
+// still open; the caller holds l.mu.
+func (a *Attempt) endLocked() bool {
+	if a == nil || a.done {
+		return false
+	}
+	a.done = true
+	for _, k := range a.keys {
+		if b, ok := a.l.buckets[k]; ok && b.pending > 0 {
+			b.pending--
+		}
+	}
+	return true
+}
+
+// Fail records a wrong password and reports whether this locked out the
+// account, the address, or both.
+func (a *Attempt) Fail() bool {
+	if a == nil {
+		return false
+	}
+	l := a.l
+	now := l.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !a.endLocked() {
+		return false
+	}
+	limits := [3]int{l.Max, l.MaxPerAddress, l.MaxPerAccount}
+	locked := false
+	for i, k := range a.keys {
+		b := l.buckets[k]
+		if b == nil {
+			b = &bucket{}
+			l.buckets[k] = b
+		}
+		b.failures = append(b.recent(now, l.Window), now)
+		if limits[i] > 0 && len(b.failures) >= limits[i] {
+			b.lockedUntil = now.Add(l.Lockout)
+			b.failures = nil
+			locked = true
+		}
+	}
+	return locked
+}
+
+// Succeed ends an attempt with the right password. It clears the failures
+// of this address and account only.
+func (a *Attempt) Succeed() {
+	if a == nil {
+		return
+	}
+	l := a.l
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !a.endLocked() {
+		return
+	}
+	if b, ok := l.buckets[a.pair]; ok {
+		b.failures = nil
+		if b.pending == 0 && b.lockedUntil.IsZero() {
+			delete(l.buckets, a.pair)
+		}
+	}
+}
+
+// Done ends an attempt that neither failed nor succeeded, such as one the
+// directory could not answer.
+func (a *Attempt) Done() {
+	if a == nil {
+		return
+	}
+	a.l.mu.Lock()
+	defer a.l.mu.Unlock()
+	a.endLocked()
+}
+
+// recent returns the failures still inside the window.
+func (b *bucket) recent(now time.Time, window time.Duration) []time.Time {
+	keep := b.failures[:0]
+	for _, t := range b.failures {
+		if now.Sub(t) < window {
 			keep = append(keep, t)
 		}
 	}
-	a.failures = append(keep, now)
-	if len(a.failures) >= l.Max {
-		a.lockedUntil = now.Add(l.Lockout)
-		a.failures = nil
-		return true
-	}
-	return false
-}
-
-// Succeed clears a client's failures.
-func (l *Limiter) Succeed(client string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.clients, client)
+	b.failures = keep
+	return keep
 }
 
 func (l *Limiter) pruneLocked(now time.Time) {
-	for c, a := range l.clients {
-		recent := len(a.failures) > 0 && now.Sub(a.failures[len(a.failures)-1]) < l.Window
-		if !recent && now.After(a.lockedUntil) {
-			delete(l.clients, c)
+	for k, b := range l.buckets {
+		if b.pending == 0 && len(b.recent(now, l.Window)) == 0 && !now.Before(b.lockedUntil) {
+			delete(l.buckets, k)
 		}
 	}
 }

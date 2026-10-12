@@ -39,18 +39,22 @@
   }
 
   // setView shows one of the messages above the form: error, locked,
-  // signedout, or none.
-  function setView(view) {
+  // signedout, or none. invalid is the field the error is about, if any:
+  // only a wrong or missing value marks a field, so a refusal for another
+  // reason (a disabled account, say) does not look like a wrong password.
+  function setView(view, invalid) {
     auth.dataset.view = view || '';
-    if (view === 'error') pass.setAttribute('aria-invalid', 'true');
-    else pass.removeAttribute('aria-invalid');
+    for (const f of [user, pass]) {
+      if (f === invalid) f.setAttribute('aria-invalid', 'true');
+      else f.removeAttribute('aria-invalid');
+    }
   }
 
-  function showError(title, text) {
+  function showError(title, text, invalid) {
     $('login-error-title').textContent = title;
     $('login-error-text').textContent = text || '';
     $('login-error-text').hidden = !text;
-    setView('error');
+    setView('error', invalid);
   }
 
   function sentence(s) {
@@ -67,7 +71,7 @@
 
   // locked pauses the form until the server's Retry-After has passed.
   function locked(message, seconds) {
-    $('login-locked-text').textContent = sentence(message) || 'Too many failed sign-ins from this address. Try again later.';
+    $('login-locked-text').textContent = sentence(message) || 'Too many failed sign-ins. Try again later.';
     setView('locked');
     submit.disabled = true;
     clearTimeout(lockTimer);
@@ -113,12 +117,22 @@
     try { localStorage.setItem('signalith.theme', root.dataset.theme); } catch (_) { /* storage may be blocked */ }
   }));
 
+  // Messages for the sign-in refusals the server names with a code.
+  const REFUSED = {
+    wrong_credentials: ['That username and password don’t match.', 'After 10 failed attempts, sign-in pauses for 15 minutes.'],
+    disabled: ['This account is disabled.', 'Ask a Signalith admin to enable it.'],
+    not_in_group: ['Your account can’t use Signalith yet.', 'It isn’t in a directory group that Signalith lets in. Ask a Signalith admin to add you to one.'],
+    password_expired: ['Your directory password has expired.', 'Change it the way you usually do, for example by signing in to Windows, then sign in here again.'],
+    directory_unavailable: ['Signalith can’t reach your directory right now.', 'Try again in a minute. If it keeps happening, tell a Signalith admin.'],
+  };
+
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (submit.disabled) return;
     if (!user.value.trim() || !pass.value) {
-      showError('Enter your username and password.', '');
-      (user.value.trim() ? pass : user).focus();
+      const missing = user.value.trim() ? pass : user;
+      showError('Enter your username and password.', '', missing);
+      missing.focus();
       return;
     }
     setBusy(true);
@@ -134,20 +148,128 @@
       showError('Could not reach the Signalith server.', 'Check your connection and try again.');
       return;
     }
+    const data = await resp.json().catch(() => ({}));
     if (resp.ok) {
+      if (data.must_change_password) {
+        setBusy(false);
+        showChange(data, pass.value);
+        return;
+      }
       location.replace(nextPath());
       return;
     }
-    const data = await resp.json().catch(() => ({}));
     setBusy(false);
     if (resp.status === 429) {
       locked(data.error, resp.headers.get('Retry-After'));
       return;
     }
-    if (resp.status === 401) showError('That username and password don’t match.', 'After 10 failed attempts, sign-in pauses for 15 minutes.');
+    const wrong = resp.status === 401 || data.code === 'wrong_credentials';
+    const known = REFUSED[data.code] || (wrong ? REFUSED.wrong_credentials : null);
+    if (known) showError(known[0], known[1], wrong ? pass : null);
     else showError('Sign-in failed.', sentence(data.error) || 'Try again.');
-    pass.select();
+    // Only a wrong password is worth retyping; the other refusals would be
+    // refused again (and retries count toward the lockout). Focus stays on
+    // the button, which was disabled while signing in.
+    if (wrong) pass.select();
+    else submit.focus();
   });
+
+  // ---- Choose a new password -------------------------------------------
+  // After signing in with a temporary password the only way on is to
+  // choose a new one. The server refuses everything else until then.
+  const change = $('change-form');
+  const cCurrent = $('change-current');
+  const cNew = $('change-new');
+  const cAgain = $('change-again');
+  const cSubmit = $('change-submit');
+  const cLabel = $('change-submit-label');
+  let temporary = '';
+
+  function changeError(title, text, input) {
+    $('change-error-title').textContent = title;
+    $('change-error-text').textContent = text || '';
+    $('change-error-text').hidden = !text;
+    $('change-error').hidden = false;
+    [cCurrent, cNew, cAgain].forEach((el) => el.removeAttribute('aria-invalid'));
+    if (input) {
+      input.setAttribute('aria-invalid', 'true');
+      input.focus();
+      input.select();
+    }
+  }
+
+  function showChange(me, typed) {
+    temporary = typed || '';
+    const who = me && (me.name || me.username);
+    $('change-sub').textContent = (who ? who + ', you' : 'You') + ' signed in with a temporary password. Choose your own to continue.';
+    $('change-current-field').hidden = !!temporary;
+    $('change-error').hidden = true;
+    form.hidden = true;
+    change.hidden = false;
+    setView('');
+    document.title = 'Choose a new password · Signalith';
+    (temporary ? cNew : cCurrent).focus();
+  }
+
+  function showSignIn() {
+    change.hidden = true;
+    form.hidden = false;
+    temporary = '';
+    [cCurrent, cNew, cAgain].forEach((el) => { el.value = ''; });
+    pass.value = '';
+    document.title = 'Sign in · Signalith';
+    setView('signedout');
+    user.focus();
+  }
+
+  change.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    if (cSubmit.disabled) return;
+    const current = temporary || cCurrent.value;
+    if (!current) { changeError('Enter your temporary password.', '', cCurrent); return; }
+    if (cNew.value.length < 8) { changeError('Use at least 8 characters.', '', cNew); return; }
+    if (cNew.value !== cAgain.value) { changeError('The two new passwords don’t match.', 'Type the same password in both boxes.', cAgain); return; }
+    if (cNew.value === current) { changeError('Choose a password that is different from the temporary one.', '', cNew); return; }
+    cSubmit.disabled = true;
+    cLabel.textContent = 'Saving…';
+    let resp;
+    try {
+      resp = await fetch('api/me/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_password: current, new_password: cNew.value }),
+      });
+    } catch (_) {
+      resp = null;
+    }
+    cSubmit.disabled = false;
+    cLabel.textContent = 'Save and continue';
+    if (!resp) { changeError('Could not reach the Signalith server.', 'Check your connection and try again.'); return; }
+    if (resp.ok) { location.replace(nextPath()); return; }
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 401) { showSignIn(); showError('Your session ended.', 'Sign in again with your temporary password.'); return; }
+    if (resp.status === 429) { changeError('Too many tries.', sentence(data.error)); return; }
+    if (data.field === 'current_password') {
+      // The typed temporary password was replaced in the meantime: ask for it.
+      temporary = '';
+      $('change-current-field').hidden = false;
+      changeError('Your temporary password is not right.', 'An admin may have reset it again. Ask them for the newest one.', cCurrent);
+      return;
+    }
+    changeError(sentence(data.error) || 'Your password could not be changed.', '', data.field === 'new_password' ? cNew : null);
+  });
+
+  $('change-signout').addEventListener('click', async () => {
+    try { await fetch('api/logout', { method: 'POST' }); } catch (_) { /* signing out locally is enough */ }
+    showSignIn();
+  });
+
+  // A session that still needs a new password is sent here from the app
+  // with ?change=1. Asking api/me without a session would log a 401.
+  if (params.has('change')) fetch('api/me', { headers: { Accept: 'application/json' } })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((me) => { if (me && me.must_change_password && change.hidden) showChange(me, ''); })
+    .catch(() => { /* not signed in */ });
 
   (user.value ? pass : user).focus();
 }());

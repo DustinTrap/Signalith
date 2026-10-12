@@ -27,9 +27,10 @@ var askExamples = []string{
 	"which hosts have the highest risk score",
 }
 
-func (s *Server) routeAsk(api *http.ServeMux) {
-	api.HandleFunc("GET /api/ask", s.handleAskInfo)
-	api.HandleFunc("POST /api/ask", s.handleAsk)
+func (s *Server) routeAsk(api *router) {
+	api.viewer("GET /api/ask", s.handleAskInfo)
+	// The Ask box can call a paid AI model, so it is for analysts.
+	api.analyst("POST /api/ask", s.handleAsk)
 }
 
 func (s *Server) handleAskInfo(w http.ResponseWriter, r *http.Request) {

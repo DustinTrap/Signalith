@@ -161,7 +161,8 @@ async function loadIntel(opts = {}) {
   tiState.overview = res;
   tiState.feeds = res.feeds || [];
   tiState.downloads = !!res.downloads;
-  tiState.manage = res.manage !== false;
+  // Only admins add and change feeds.
+  tiState.manage = res.manage !== false && can('admin');
   tiState.fileError = res.file_error || '';
   $('ti-error').classList.add('hidden');
   $('ti-main').classList.remove('hidden');
@@ -274,8 +275,8 @@ function renderFeeds() {
   $('ti-feed-add').classList.toggle('btn--primary', hasFeeds || !tiState.manage);
   $('ti-feed-add').classList.toggle('btn--secondary', !hasFeeds && tiState.manage);
   const notes = [];
-  if (tiState.fileError) notes.push(riAlert('danger', 'Feeds can’t be changed on this page right now.', el('p', {}, tiState.fileError)));
-  if (!tiState.downloads) {
+  if (tiState.fileError && can('admin')) notes.push(riAlert('danger', 'Feeds can’t be changed on this page right now.', el('p', {}, tiState.fileError)));
+  if (!tiState.downloads && can('admin')) {
     notes.push(riAlert('info', 'Feeds are managed on another server.',
       el('p', {}, 'This server’s detection scheduler is off (detections.scheduler: false), so it doesn’t download feeds. Add and change feeds on the Signalith server that runs detections.')));
   }
@@ -324,7 +325,7 @@ function feedsEmpty() {
   const providers = [...new Set(rec.map((e) => e.provider))];
   const text = rec.length
     ? `Start with ${TI_NUMBER_WORD[rec.length] || rec.length} free, low-noise feeds from ${tiListWords(providers)}, or pick your own.`
-    : 'Feeds keep lists of known-bad IPs, URLs and file hashes up to date by downloading them on a schedule.';
+    : 'Feeds keep lists of known-bad IPs, URLs and file hashes up to date by downloading them on a schedule.' + (can('admin') ? '' : ' An admin sets them up.');
   const actions = el('div', { class: 'empty__actions' });
   if (tiState.manage && !tiState.fileError) {
     if (rec.length) {
@@ -429,7 +430,7 @@ function feedUpdated(f, state) {
 function feedMenu(f) {
   const mine = f.source === 'ui' && tiState.manage && !tiState.fileError;
   const items = [];
-  if (f.enabled && !f.problem && (tiState.downloads || f.source === 'config')) items.push({ icon: 'refresh-cw', label: 'Refresh now', run: () => refreshFeed(f) });
+  if (can('admin') && f.enabled && !f.problem && (tiState.downloads || f.source === 'config')) items.push({ icon: 'refresh-cw', label: 'Refresh now', run: () => refreshFeed(f) });
   if (mine) {
     items.push({ icon: 'pencil', label: 'Edit', run: () => openFeedDialog({ feed: f }) });
     if (!f.problem) items.push({ icon: 'power', label: f.enabled ? 'Turn off' : 'Turn on', run: () => setFeedEnabled(f, !f.enabled) });
@@ -1309,7 +1310,7 @@ function renderIndicators() {
   if (!shown.length) {
     box.replaceChildren(tiFiltered()
       ? riEmpty({ icon: 'search', title: 'No indicators match', text: 'Nothing matches these filters. A value inside a listed network still counts as a match.', action: { label: 'Clear filters', run: clearIntelFilters } })
-      : riEmpty({ icon: 'radar', title: 'No indicators yet', text: 'Indicators come from feeds. Add your own with Add indicators.' }));
+      : riEmpty({ icon: 'radar', title: 'No indicators yet', text: can('analyst') ? 'Indicators come from feeds. Add your own with Add indicators.' : 'Indicators come from feeds and from analysts.' }));
     return;
   }
   const rows = shown.map((ind) => {
@@ -1402,7 +1403,7 @@ function showIndicator(id) {
       : el('div', {}, 'This comes from the feed ', el('b', {}, ind.source), ' and returns with its next download. To stop using it, turn the feed off.')));
   const foot = el('div', { class: 'inspector__foot' },
     el('button', { class: 'btn btn--secondary', type: 'button', title: 'Search the last 7 days for this indicator', onclick: () => openSearch(huntQuery(ind), '-7d') }, icon('search'), 'Search events'));
-  if (manual || feedGone) {
+  if ((manual || feedGone) && can('analyst')) {
     foot.append(el('span', { class: 'spacer' }), el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => confirmDelete(ind) }, icon('trash-2'), 'Delete'));
   }
   box.replaceChildren(bar, el('div', { class: 'inspector__head' }, title, meta), body, foot);

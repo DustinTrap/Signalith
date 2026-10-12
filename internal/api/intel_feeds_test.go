@@ -14,10 +14,11 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
-// call sends a signed-in request and returns the status and raw body.
-func call(t *testing.T, ts *httptest.Server, method, path, body string, header ...string) (int, string) {
+// feedCall sends a signed-in request and returns the status and raw body.
+func feedCall(t *testing.T, ts *httptest.Server, method, path, body string, header ...string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
 	req.SetBasicAuth("admin", "s3cret-pass")
@@ -35,7 +36,7 @@ func call(t *testing.T, ts *httptest.Server, method, path, body string, header .
 
 func getRaw(t *testing.T, ts *httptest.Server, path string) string {
 	t.Helper()
-	_, body := call(t, ts, "GET", path, "")
+	_, body := feedCall(t, ts, "GET", path, "")
 	return body
 }
 
@@ -78,7 +79,7 @@ func TestIntelFeedsAPI(t *testing.T) {
 	var bodies []string
 	send := func(method, path, body string) (int, map[string]any) {
 		t.Helper()
-		code, raw := call(t, ts, method, path, body)
+		code, raw := feedCall(t, ts, method, path, body)
 		bodies = append(bodies, raw)
 		if len(raw) == 0 || raw[0] != '{' {
 			return code, nil
@@ -210,11 +211,11 @@ func TestIntelFeedsAPI(t *testing.T) {
 	}
 
 	// Changes from another site are refused.
-	code, _ = call(t, ts, "POST", "/api/intel/feeds", `{"name":"evil","url":"https://evil.example/x"}`, "Sec-Fetch-Site", "cross-site")
+	code, _ = feedCall(t, ts, "POST", "/api/intel/feeds", `{"name":"evil","url":"https://evil.example/x"}`, "Sec-Fetch-Site", "cross-site")
 	if code != 403 {
 		t.Errorf("cross-site add = %d", code)
 	}
-	code, _ = call(t, ts, "DELETE", "/api/intel/feeds/spamhaus-drop", "", "Origin", "https://evil.example")
+	code, _ = feedCall(t, ts, "DELETE", "/api/intel/feeds/spamhaus-drop", "", "Origin", "https://evil.example")
 	if code != 403 {
 		t.Errorf("cross-site delete = %d", code)
 	}
@@ -235,12 +236,12 @@ func TestIntelFeedsBrokenFile(t *testing.T) {
 		s.Intel = store
 		s.Feeds = &intel.Feeds{Store: store, Log: s.Log, File: file}
 	})
-	code, raw := call(t, ts, "GET", "/api/intel", "")
+	code, raw := feedCall(t, ts, "GET", "/api/intel", "")
 	out := asMap(t, raw)
 	if code != 200 || !strings.Contains(fmt.Sprint(out["file_error"]), "intel_feeds.yaml") {
 		t.Errorf("overview = %d %v", code, out)
 	}
-	if code, _ := call(t, ts, "POST", "/api/intel/feeds", `{"name":"x-feed","url":"https://feeds.example/x"}`); code != 503 {
+	if code, _ := feedCall(t, ts, "POST", "/api/intel/feeds", `{"name":"x-feed","url":"https://feeds.example/x"}`); code != 503 {
 		t.Errorf("add with a broken file = %d", code)
 	}
 }
@@ -249,7 +250,7 @@ func TestIntelFeedsOff(t *testing.T) {
 	store := intel.NewStore(intel.NewMemory())
 	ts, _ := newTestServerWith(t, func(s *Server) { s.Intel = store })
 	for _, p := range []string{"/api/intel/feeds", "/api/intel/catalog"} {
-		if code, _ := call(t, ts, "GET", p, ""); code != 503 {
+		if code, _ := feedCall(t, ts, "GET", p, ""); code != 503 {
 			t.Errorf("%s without feeds = %d", p, code)
 		}
 	}
@@ -276,7 +277,7 @@ func TestIntelFeedsWithoutScheduler(t *testing.T) {
 		s.Intel = store
 		s.Feeds = feeds
 	})
-	code, raw := call(t, ts, "GET", "/api/intel", "")
+	code, raw := feedCall(t, ts, "GET", "/api/intel", "")
 	if out := asMap(t, raw); code != 200 || out["manage"] != false || out["downloads"] != false {
 		t.Errorf("overview = %d %v", code, out)
 	}
@@ -287,13 +288,13 @@ func TestIntelFeedsWithoutScheduler(t *testing.T) {
 		{"POST", "/api/intel/catalog", `{"ids":["urlhaus"]}`},
 		{"POST", "/api/intel/feeds/page-feed/refresh", ""},
 	} {
-		if code, raw := call(t, ts, c.method, c.path, c.body); code != 409 || !strings.Contains(raw, "runs detections") {
+		if code, raw := feedCall(t, ts, c.method, c.path, c.body); code != 409 || !strings.Contains(raw, "runs detections") {
 			t.Errorf("%s %s = %d %s", c.method, c.path, code, raw)
 		}
 	}
 	// A feed from signalith.yaml is the same on every server, so it can
 	// still be downloaded by hand here.
-	if code, raw := call(t, ts, "POST", "/api/intel/feeds/from-config/refresh", ""); code != 200 {
+	if code, raw := feedCall(t, ts, "POST", "/api/intel/feeds/from-config/refresh", ""); code != 200 {
 		t.Errorf("refresh config feed = %d %s", code, raw)
 	}
 }
@@ -313,7 +314,7 @@ func TestIntelRefreshFeedOff(t *testing.T) {
 		s.Intel = store
 		s.Feeds = feeds
 	})
-	if code, raw := call(t, ts, "POST", "/api/intel/feeds/off-feed/refresh", ""); code != 409 || !strings.Contains(raw, "turned off") {
+	if code, raw := feedCall(t, ts, "POST", "/api/intel/feeds/off-feed/refresh", ""); code != 409 || !strings.Contains(raw, "turned off") {
 		t.Errorf("refresh = %d %s", code, raw)
 	}
 }
@@ -339,17 +340,17 @@ func TestIntelFeedTestBusy(t *testing.T) {
 	done := make(chan int, intel.MaxTests)
 	for range intel.MaxTests {
 		go func() {
-			code, _ := call(t, ts, "POST", "/api/intel/feeds/test", body)
+			code, _ := feedCall(t, ts, "POST", "/api/intel/feeds/test", body)
 			done <- code
 		}()
 	}
 	for range intel.MaxTests {
 		<-in
 	}
-	if code, raw := call(t, ts, "POST", "/api/intel/feeds/test", body); code != 429 || !strings.Contains(raw, "try again") {
+	if code, raw := feedCall(t, ts, "POST", "/api/intel/feeds/test", body); code != 429 || !strings.Contains(raw, "try again") {
 		t.Errorf("third test = %d %s", code, raw)
 	}
-	if code, _ := call(t, ts, "POST", "/api/intel/taxii/collections", `{"url":"`+feedSrv.URL+`/api1/"}`); code != 429 {
+	if code, _ := feedCall(t, ts, "POST", "/api/intel/taxii/collections", `{"url":"`+feedSrv.URL+`/api1/"}`); code != 429 {
 		t.Errorf("collections while busy = %d", code)
 	}
 	for range intel.MaxTests {
@@ -358,6 +359,51 @@ func TestIntelFeedTestBusy(t *testing.T) {
 	for range intel.MaxTests {
 		if code := <-done; code != 200 {
 			t.Errorf("test = %d", code)
+		}
+	}
+}
+
+// TestIntelFeedsForViewers checks that viewers see the feeds without the
+// parts of an address or sign-in that can hold a secret, and cannot make
+// the server download from an address they name.
+func TestIntelFeedsForViewers(t *testing.T) {
+	store := intel.NewStore(intel.NewMemory())
+	if err := store.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Intel = store
+		s.Engine.Intel = store
+		s.Feeds = &intel.Feeds{Store: store, Log: s.Log, File: filepath.Join(t.TempDir(), "intel_feeds.yaml"), List: []intel.Feed{
+			{Name: "partner", URL: "https://feeds.example.com/list.txt?apikey=k3y-in-query", Format: "lines", Type: "auto",
+				Interval: time.Hour, MaxAge: 24 * time.Hour, Weight: 1, Enabled: true},
+			{Name: "taxii", Kind: intel.KindTAXII, URL: "https://taxii.example.com/api1/", Collection: "c1", Format: "stix", Type: "auto",
+				Interval: time.Hour, MaxAge: 24 * time.Hour, Weight: 1, Enabled: true, Username: "svc-signalith", Password: "pw-secret"},
+		}}
+		s.Users = users.NewMemory()
+		if _, err := s.Users.Create(users.NewUser{Username: "vera", Role: users.Viewer, Password: "role-password"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, path := range []string{"/api/intel/feeds", "/api/intel"} {
+		code, _, raw := call(t, ts, "GET", path, "", "vera", "role-password", nil)
+		if code != 200 || !strings.Contains(raw, "https://feeds.example.com/list.txt?…") {
+			t.Errorf("viewer %s = %d %s", path, code, raw)
+		}
+		for _, secret := range []string{"k3y-in-query", "svc-signalith", "pw-secret"} {
+			if strings.Contains(raw, secret) {
+				t.Errorf("viewer %s shows %q: %s", path, secret, raw)
+			}
+		}
+		// Admins see the address they set, to edit it.
+		if raw := getRaw(t, ts, path); !strings.Contains(raw, "apikey=k3y-in-query") || !strings.Contains(raw, "svc-signalith") {
+			t.Errorf("admin %s = %s", path, raw)
+		}
+	}
+	for _, path := range []string{"/api/intel/feeds/test", "/api/intel/taxii/collections"} {
+		code, out := doAs(t, ts, "vera", "role-password", "POST", path, `{"url":"http://10.0.0.1/"}`)
+		if code != http.StatusForbidden || out["code"] != "forbidden" {
+			t.Errorf("viewer POST %s = %d %v", path, code, out)
 		}
 	}
 }

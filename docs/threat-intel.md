@@ -53,6 +53,9 @@ On the **Threat intel** page, **Add feed** offers three ways:
 
 A new or changed feed downloads at once; after that, every `interval`. Feeds from
 signalith.yaml show on the page as read-only and are changed in the file.
+Only admins add, change, test and refresh feeds. Viewers and analysts see the feeds and
+their status, with the address cut at `?` (a query can hold an API key) and no TAXII
+user name.
 
 Feed settings are the same wherever a feed is defined:
 

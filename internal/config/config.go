@@ -20,6 +20,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,9 @@ type Config struct {
 
 	// path is where the file was loaded from.
 	path string
+	// ldapBindPassword comes from SIGNALITH_LDAP_BIND_PASSWORD. It is kept
+	// apart from Auth.LDAP so saving the file never writes it out.
+	ldapBindPassword string
 	// sections are the top-level keys in that file.
 	sections map[string]bool
 }
@@ -81,11 +85,63 @@ type Retention struct {
 
 // Auth protects the UI and API.
 type Auth struct {
+	// AdminUser and AdminPasswordHash are the built-in admin: a break-glass
+	// account that always works, whatever happens to other users.
 	AdminUser         string `yaml:"admin_user"`
 	AdminPasswordHash string `yaml:"admin_password_hash"`
 	// SessionTimeout signs the web UI out after this long without use,
 	// unless "keep me signed in" was ticked. Default 12h.
 	SessionTimeout string `yaml:"session_timeout,omitempty"`
+	// UsersFile holds the users added on the Users page. Default
+	// users.json in lookups.dir; directory.json (directory sign-in
+	// settings from the Users page) goes in the same folder.
+	UsersFile string `yaml:"users_file,omitempty"`
+	// LDAP sets up directory sign-in here instead of on the Users page,
+	// which then shows it read-only.
+	LDAP *users.LDAPSettings `yaml:"ldap,omitempty"`
+}
+
+// UsersFile returns the absolute path of the users file.
+func (c *Config) UsersFile() string {
+	if c.Auth.UsersFile != "" {
+		return c.resolve(c.Auth.UsersFile)
+	}
+	return filepath.Join(c.LookupsDir(), "users.json")
+}
+
+// DirectoryFile returns where directory sign-in settings from the Users
+// page are kept: directory.json next to the users file.
+func (c *Config) DirectoryFile() string {
+	return filepath.Join(filepath.Dir(c.UsersFile()), "directory.json")
+}
+
+// LDAP returns the directory sign-in settings from auth.ldap, with
+// defaults filled in and the bind password from the environment if set
+// there, or nil when the file has no auth.ldap.
+func (c *Config) LDAP() (*users.LDAPSettings, error) {
+	if c.Auth.LDAP == nil {
+		return nil, nil
+	}
+	s := c.Auth.LDAP.Clone()
+	if s.Enabled == nil {
+		on := true
+		s.Enabled = &on
+	}
+	if c.ldapBindPassword != "" {
+		s.BindPassword = c.ldapBindPassword
+	}
+	if s.CACertFile != "" {
+		if strings.TrimSpace(s.CACert) != "" {
+			return nil, errors.New("auth.ldap: set ca_cert or ca_cert_file, not both")
+		}
+		b, err := os.ReadFile(c.resolve(s.CACertFile))
+		if err != nil {
+			return nil, fmt.Errorf("auth.ldap.ca_cert_file: %w", err)
+		}
+		s.CACert = string(b)
+	}
+	s.Normalize()
+	return &s, nil
 }
 
 // SessionIdle returns auth.session_timeout as a duration.
@@ -413,6 +469,12 @@ func (c *Config) applyEnv() error {
 		}
 		c.Auth.AdminPasswordHash = h
 	}
+	if v := os.Getenv("SIGNALITH_USERS_FILE"); v != "" {
+		c.Auth.UsersFile = v
+	}
+	if v := os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD"); v != "" {
+		c.ldapBindPassword = v
+	}
 	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
 		c.Detections.Dir = v
 	}
@@ -500,6 +562,19 @@ func (c *Config) Validate() error {
 			p = append(p, fmt.Sprintf("auth.session_timeout %q must be a duration of at least 5m, for example 12h or 1d", c.Auth.SessionTimeout))
 		}
 	}
+	if c.Auth.LDAP != nil {
+		if s, err := c.LDAP(); err != nil {
+			p = append(p, err.Error())
+		} else {
+			for _, pr := range s.Problems() {
+				msg := pr.Message
+				if pr.Field == "bind_password" {
+					msg = "set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD environment variable"
+				}
+				p = append(p, "auth.ldap."+pr.Field+": "+msg)
+			}
+		}
+	}
 	if c.Detections.Dir == "" {
 		p = append(p, "detections.dir is required, for example: detections")
 	}
@@ -569,18 +644,14 @@ func defaultPublicURL(s Server) string {
 	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
-// HashPassword returns a bcrypt hash for the admin password.
-func HashPassword(pw string) (string, error) {
-	if len(pw) < 8 {
-		return "", errors.New("password must be at least 8 characters")
-	}
-	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
-	return string(h), err
-}
+// HashPassword returns a bcrypt hash for the admin password. Users'
+// passwords follow the same rules.
+func HashPassword(pw string) (string, error) { return users.HashPassword(pw) }
 
-// CheckPassword reports whether pw matches the admin hash.
+// CheckPassword reports whether user and pw are the built-in admin's. The
+// username ignores case, like every other username.
 func (c *Config) CheckPassword(user, pw string) bool {
-	if user != c.Auth.AdminUser {
+	if !strings.EqualFold(strings.TrimSpace(user), c.Auth.AdminUser) {
 		return false
 	}
 	return bcrypt.CompareHashAndPassword([]byte(c.Auth.AdminPasswordHash), []byte(pw)) == nil
@@ -635,11 +706,16 @@ or CIDRs such as 10.0.0.0/8; empty allows any sender.`,
 const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
-# SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY.
+# SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
+# SIGNALITH_LDAP_BIND_PASSWORD.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
+# auth.admin_user    the built-in admin, a break-glass account; add other users on the Users page
 # auth.session_timeout  sign the web UI out after this long idle (default 12h)
+# auth.users_file    where Users page accounts are kept (default users.json in lookups.dir)
+# auth.ldap          optional LDAP / Active Directory sign-in; usually set up on the Users
+#                    page instead (see docs/users.md)
 # opensearch.*       where events are stored
 # search.*           default time range and result limits
 # retention.days     days of events to keep (0 = forever)
