@@ -13,6 +13,10 @@ mitre: [T1110]
 throttle:
   fields: [src, dest]
   window: 1h
+risk:
+  score: 30
+  objects:
+    - {field: src, type: system}
 enabled: true
 tags: [authentication]
 guidance: Check whether the source is internal, whether any attempt succeeded (see the successful brute force detection), and block the source if it is external.

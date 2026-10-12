@@ -17,12 +17,14 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/api"
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/web"
@@ -170,6 +172,11 @@ func cmdValidate(args []string) error {
 		}
 	}
 	fmt.Printf("%d detections loaded, %d enabled (custom ones in %s).\n", len(lib.List()), enabled, c.DetectionsDir())
+	lists, err := assets.NewStore(c.LookupsDir())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d assets and %d identities loaded from %s.\n", len(lists.Assets()), len(lists.Identities()), c.LookupsDir())
 	cl := newStore(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -267,6 +274,9 @@ func cmdQuery(args []string) error {
 		q.Earliest = c.Search.DefaultEarliest
 	}
 	eng := newEngine(c, newStore(c))
+	if lists, err := assets.NewStore(c.LookupsDir()); err == nil {
+		eng.Assets = lists
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if *explain {
@@ -304,6 +314,13 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	cl := newStore(c)
 	eng := newEngine(c, cl)
+	lists, err := assets.NewStore(c.LookupsDir())
+	if err != nil {
+		return err
+	}
+	log.Info("asset and identity lists loaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()), "dir", c.LookupsDir())
+	eng.Assets = lists
+	go reloadLookups(ctx, lists, log)
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -315,6 +332,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	fstore := findings.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	sched := &detect.Scheduler{
 		Library: lib, Engine: eng, Findings: fstore, Log: log,
+		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
 	}
 	srv := &api.Server{
@@ -325,6 +343,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Detections: lib,
 		Scheduler:  sched,
 		Findings:   fstore,
+		Assets:     lists,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,
@@ -372,6 +391,24 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 }
 
 // ensureTemplate installs the index template, retrying until OpenSearch is up.
+// reloadLookups picks up edits to the CSV files made outside the UI.
+func reloadLookups(ctx context.Context, lists *assets.Store, log *slog.Logger) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if changed, err := lists.Reload(); err != nil {
+			log.Error("asset or identity list has errors; keeping the previous version", "err", err)
+		} else if changed {
+			log.Info("asset and identity lists reloaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()))
+		}
+	}
+}
+
 // It reports false if ctx ended first.
 func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log *slog.Logger) bool {
 	tmpl := ingest.IndexTemplate(c.OpenSearch.IndexPrefix, c.OpenSearch.Replicas)

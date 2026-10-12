@@ -8,10 +8,13 @@ const DISPOSITION_LABEL = {
   false_positive: 'False positive', undetermined: 'Undetermined',
 };
 
+// Other scripts add page hooks here.
+const pageHooks = [];
 function onPageShown(name) {
   if (name === 'findings') loadFindings();
   if (name === 'detections') loadDetections();
   if (name === 'coverage') loadCoverage();
+  pageHooks.forEach((h) => h(name));
 }
 
 // fill replaces a node's children, skipping null placeholders.
@@ -58,7 +61,7 @@ async function refreshOpenCount() {
     const b = $('open-count');
     b.textContent = s.open;
     b.classList.toggle('hidden', !s.open);
-    const crit = (s.by_severity.critical || 0) + (s.by_severity.high || 0);
+    const crit = (s.by_urgency.critical || 0) + (s.by_urgency.high || 0);
     b.classList.toggle('hot', crit > 0);
     return s;
   } catch (_) { return null; }
@@ -68,17 +71,17 @@ async function loadFindings() {
   const s = await refreshOpenCount();
   if (s) {
     $('f-summary').replaceChildren(el('span', { class: 'muted' }, `${s.open} open`),
-      ...SEVERITIES.filter((sv) => s.by_severity[sv]).map((sv) => el('button', {
-        class: 'chip', title: 'Show open ' + sv + ' findings',
+      ...SEVERITIES.filter((sv) => s.by_urgency[sv]).map((sv) => el('button', {
+        class: 'chip', title: 'Show open findings with ' + sv + ' urgency',
         onclick: () => { $('f-severity').value = ''; filterSeverity(sv); },
-      }, sevBadge(sv), ' ' + s.by_severity[sv])));
+      }, sevBadge(sv), ' ' + s.by_urgency[sv])));
   }
   const p = new URLSearchParams();
-  for (const [k, id] of [['status', 'f-status'], ['severity', 'f-severity'], ['owner', 'f-owner'], ['q', 'f-text'], ['since', 'f-since']]) {
+  for (const [k, id] of [['status', 'f-status'], ['urgency', 'f-severity'], ['owner', 'f-owner'], ['q', 'f-text'], ['since', 'f-since']]) {
     const v = $(id).value.trim();
     if (v) p.set(k, v);
   }
-  if (severityOverride) p.set('severity', severityOverride);
+  if (severityOverride) p.set('urgency', severityOverride);
   p.set('limit', '500');
   try {
     const res = await api('/api/findings?' + p);
@@ -114,14 +117,14 @@ function renderFindings(total) {
     return el('tr', { class: openFinding === f.id ? 'sel' : '', onclick: () => showFinding(f.id) },
       el('td', {}, cb),
       el('td', { title: new Date(f.created).toLocaleString() }, ago(f.created)),
-      el('td', {}, sevBadge(f.severity)),
+      el('td', { title: (f.urgency || f.severity) !== f.severity ? `Severity ${f.severity}, adjusted for asset or user priority` : '' }, sevBadge(f.urgency || f.severity)),
       el('td', { class: 'wrap' }, el('div', {}, f.title), el('div', { class: 'entities' }, ...ents)),
       el('td', {}, statusBadge(f.status)),
       el('td', {}, f.owner || el('span', { class: 'muted' }, 'unassigned')),
       el('td', { class: 'muted' }, f.detection_id));
   });
   const table = el('table', { class: 'grid findings' },
-    el('thead', {}, el('tr', {}, el('th', {}, all), el('th', {}, 'Created'), el('th', {}, 'Severity'), el('th', {}, 'Finding'),
+    el('thead', {}, el('tr', {}, el('th', {}, all), el('th', {}, 'Created'), el('th', {}, 'Urgency'), el('th', {}, 'Finding'),
       el('th', {}, 'Status'), el('th', {}, 'Owner'), el('th', {}, 'Detection'))),
     el('tbody', {}, ...rows));
   const note = total > findingsList.length ? el('div', { class: 'muted', style: 'padding:6px 10px' }, `Showing ${findingsList.length} of ${total}; narrow the filters to see the rest.`) : null;
@@ -203,7 +206,9 @@ async function showFinding(id) {
 
   fill(box, 
     el('div', { class: 'detail-head' }, el('h3', {}, f.title), el('button', { class: 'link', onclick: () => { box.classList.add('hidden'); openFinding = null; } }, 'Close')),
-    el('div', { class: 'meta' }, sevBadge(f.severity), statusBadge(f.status), el('span', { class: 'muted' }, 'Created ' + new Date(f.created).toLocaleString()), el('span', { class: 'muted' }, 'ID ' + f.id)),
+    el('div', { class: 'meta' }, sevBadge(f.urgency || f.severity),
+      (f.urgency || f.severity) !== f.severity ? el('span', { class: 'muted small' }, `urgency (severity ${f.severity}, adjusted for priority)`) : null,
+      statusBadge(f.status), el('span', { class: 'muted' }, 'Created ' + new Date(f.created).toLocaleString()), el('span', { class: 'muted' }, 'ID ' + f.id)),
     f.description ? el('p', {}, f.description) : null,
     d && d.guidance ? el('div', { class: 'notice' }, el('b', {}, 'How to triage: '), d.guidance) : null,
     (f.mitre || []).length ? el('div', { class: 'meta' }, 'ATT&CK: ', ...f.mitre.map(techLink)) : null,
@@ -214,10 +219,12 @@ async function showFinding(id) {
     el('div', { class: 'row' }, save, mine,
       el('button', { onclick: () => openSearch(f.query, f.earliest, f.latest), title: f.query }, 'View contributing events')),
     Object.keys(f.entities || {}).length ? el('h4', {}, 'Entities') : null,
-    el('div', { class: 'entities' }, ...Object.entries(f.entities || {}).map(([k, v]) => el('a', {
-      class: 'entity link', title: 'Search all events for ' + k + '=' + v,
-      onclick: () => openSearch(k + '=' + quoteValue(String(v)), '-7d'),
-    }, `${k}: ${v}`))),
+    el('table', { class: 'kv' }, el('tbody', {}, ...Object.entries(f.entities || {}).filter(([k]) => k !== 'risk_object_type').map(([k, v]) => el('tr', {},
+      el('th', {}, k),
+      el('td', {}, el('a', {
+        class: 'entity link', title: 'Search all events for ' + k + '=' + v,
+        onclick: () => openSearch((k === 'risk_object' ? 'datamodel=Risk ' : '') + k + '=' + quoteValue(String(v)), '-7d'),
+      }, String(v)), ' ', (typeof contextLine === 'function' && f.context) ? contextLine(f.context[k]) : null))))),
     el('h4', {}, 'What the detection found'),
     el('table', { class: 'kv' }, el('tbody', {}, ...resultRows)),
     raw,
@@ -270,6 +277,8 @@ function renderDetections() {
       el('td', { class: 'wrap' }, el('div', {}, d.title), el('div', { class: 'muted small' }, d.id + (d.source !== 'builtin' ? ' · ' + d.source : ''))),
       el('td', {}, sevBadge(d.severity)),
       el('td', {}, ...(d.mitre || []).map((t) => el('span', { class: 'tech' }, t))),
+      el('td', {}, d.risk ? el('span', { title: 'Adds ' + d.risk.score + ' risk to ' + d.risk.objects.map((o) => o.field).join(', ') }, '+' + d.risk.score) : '',
+        d.risk && d.risk.only ? el('div', { class: 'muted small' }, 'risk only') : null),
       el('td', {}, `every ${d.schedule}`, el('div', { class: 'muted small' }, `looks back ${d.lookback}`)),
       el('td', {}, last, st.last_error ? el('div', { class: 'bad small', title: st.last_error }, 'failed') : null),
       el('td', { class: 'num' }, st.last_run ? String(st.last_findings) : ''));
@@ -277,7 +286,7 @@ function renderDetections() {
   $('d-list').replaceChildren(
     el('div', { class: 'muted', style: 'padding:6px 10px' }, `${enabled} of ${detections.length} detections enabled`),
     el('table', { class: 'grid' },
-      el('thead', {}, el('tr', {}, el('th', {}, 'On'), el('th', {}, 'Detection'), el('th', {}, 'Severity'), el('th', {}, 'ATT&CK'),
+      el('thead', {}, el('tr', {}, el('th', {}, 'On'), el('th', {}, 'Detection'), el('th', {}, 'Severity'), el('th', {}, 'ATT&CK'), el('th', {}, 'Risk'),
         el('th', {}, 'Schedule'), el('th', {}, 'Last run'), el('th', {}, 'Findings'))),
       el('tbody', {}, ...rows)));
 }
@@ -309,6 +318,10 @@ function editDetection(d, opts = {}) {
   const twindow = inp('twindow', (d.throttle || {}).window || '', { placeholder: '1h' });
   const guidance = el('textarea', { rows: 2 }); guidance.value = d.guidance || '';
   const enabled = el('input', { type: 'checkbox' }); enabled.checked = !!d.enabled;
+  const risk = d.risk || null;
+  const riskScore = inp('riskscore', risk ? risk.score : '', { placeholder: 'none', type: 'number', min: 1, max: 1000 });
+  const riskObjs = inp('riskobjs', risk ? risk.objects.map((o) => o.field + ':' + o.type).join(', ') : '', { placeholder: 'user:user, dest:system' });
+  const riskOnly = el('input', { type: 'checkbox' }); riskOnly.checked = !!(risk && risk.only);
   const out = el('div', { class: 'preview' });
   const err = el('div', { class: 'error hidden' });
   const list = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
@@ -317,6 +330,11 @@ function editDetection(d, opts = {}) {
     schedule: schedule.value.trim(), lookback: lookback.value.trim(), severity: severity.value,
     mitre: list(mitre.value), throttle: { fields: list(tfields.value), window: twindow.value.trim() },
     enabled: enabled.checked, guidance: guidance.value.trim(), tags: d.tags || [],
+    risk: riskScore.value.trim() ? {
+      score: parseInt(riskScore.value, 10),
+      objects: list(riskObjs.value).map((x) => { const [field, type] = x.split(':').map((s) => s.trim()); return { field, type: type || 'other' }; }),
+      only: riskOnly.checked,
+    } : undefined,
   });
   const fail = (e) => {
     err.textContent = e.problems ? 'Please fix:\n- ' + e.problems.join('\n- ') : e.message;
@@ -377,7 +395,10 @@ function editDetection(d, opts = {}) {
       field('Title', title, 'Use $field$ to insert values from the result, like $src$'), field('ID', id),
       field('Severity', severity), field('ATT&CK techniques', mitre, 'Comma-separated IDs'),
       field('Run every', schedule, 'For example 5m, 1h, 1d'), field('Search back', lookback, 'Time window each run searches'),
-      field('Group repeats by', tfields, 'One finding per value of these fields'), field('For', twindow, 'How long to suppress repeats')),
+      field('Group repeats by', tfields, 'One finding per value of these fields'), field('For', twindow, 'How long to suppress repeats'),
+      field('Risk score', riskScore, 'Adds risk to each object in a result; empty for none'),
+      field('Risk objects', riskObjs, 'field:type pairs; type is user, system or other')),
+    el('label', { class: 'inline' }, riskOnly, ' Risk only: record risk without raising a finding per result'),
     field('Query', query, 'Each result row becomes a finding. Do not set earliest= or latest=; "Search back" sets the window.'),
     field('Description', desc), field('Triage guidance', guidance),
     el('label', { class: 'inline' }, enabled, ' Enabled'),

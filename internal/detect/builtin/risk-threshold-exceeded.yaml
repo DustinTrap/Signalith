@@ -1,0 +1,17 @@
+id: risk-threshold-exceeded
+title: Risk score $risk_score$ for $risk_object_type$ $risk_object$
+description: Detections added up to a high risk score for one user or system in the last 24 hours. Each signal alone may be weak; together they deserve a look.
+query: |
+  datamodel=Risk
+  | stats sum(risk_score) as risk_score, dc(detection_id) as detections, count as events by risk_object, risk_object_type
+  | where risk_score >= 100
+  | sort -risk_score
+schedule: 15m
+lookback: 24h
+severity: high
+throttle:
+  fields: [risk_object, risk_object_type]
+  window: 24h
+enabled: true
+tags: [risk-incident]
+guidance: Open the Risk page for this object to see every detection that contributed, oldest first, and look for a story (initial access, then discovery, then persistence).

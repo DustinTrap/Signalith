@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
@@ -54,7 +55,8 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeOS) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng := &search.Engine{Store: fos}
+	lists, _ := assets.NewStore(t.TempDir())
+	eng := &search.Engine{Store: fos, Assets: lists}
 	fs := findings.NewMemory()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s := &Server{
@@ -65,6 +67,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeOS) {
 		Detections: lib,
 		Scheduler:  &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Log: logger},
 		Findings:   fs,
+		Assets:     lists,
 		Log:        logger,
 		Version:    "test",
 	}

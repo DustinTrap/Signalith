@@ -28,6 +28,7 @@ type Config struct {
 	Auth       Auth       `yaml:"auth"`
 	Ingest     Ingest     `yaml:"ingest"`
 	Detections Detections `yaml:"detections"`
+	Lookups    Lookups    `yaml:"lookups"`
 
 	// path is where the file was loaded from.
 	path string
@@ -91,14 +92,25 @@ type Detections struct {
 	MaxFindingsPerRun int `yaml:"max_findings_per_run"`
 }
 
-// DetectionsDir returns the absolute detections folder.
-func (c *Config) DetectionsDir() string {
-	d := c.Detections.Dir
+// Lookups holds the asset and identity lists.
+type Lookups struct {
+	// Dir holds assets.csv and identities.csv. A relative path is relative
+	// to the folder this config file is in.
+	Dir string `yaml:"dir"`
+}
+
+// LookupsDir returns the absolute lookups folder.
+func (c *Config) LookupsDir() string { return c.resolve(c.Lookups.Dir) }
+
+func (c *Config) resolve(d string) string {
 	if d == "" || filepath.IsAbs(d) || c.path == "" {
 		return d
 	}
 	return filepath.Join(filepath.Dir(c.path), d)
 }
+
+// DetectionsDir returns the absolute detections folder.
+func (c *Config) DetectionsDir() string { return c.resolve(c.Detections.Dir) }
 
 // Default returns a config with every default filled in.
 func Default() *Config {
@@ -109,6 +121,7 @@ func Default() *Config {
 		Retention:  Retention{Days: 90},
 		Auth:       Auth{AdminUser: "admin"},
 		Detections: Detections{Dir: "detections", Scheduler: true, MaxFindingsPerRun: 100},
+		Lookups:    Lookups{Dir: "lookups"},
 	}
 }
 
@@ -165,6 +178,9 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
 		c.Detections.Dir = v
 	}
+	if v := os.Getenv("SIGNALITH_LOOKUPS_DIR"); v != "" {
+		c.Lookups.Dir = v
+	}
 	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
 		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
 	}
@@ -219,6 +235,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Detections.Dir == "" {
 		p = append(p, "detections.dir is required, for example: detections")
+	}
+	if c.Lookups.Dir == "" {
+		p = append(p, "lookups.dir is required, for example: lookups")
 	}
 	if c.Detections.MaxFindingsPerRun < 1 || c.Detections.MaxFindingsPerRun > 10000 {
 		p = append(p, "detections.max_findings_per_run must be between 1 and 10000")
@@ -306,5 +325,6 @@ const header = `# Signalith configuration.
 # retention.days     days of events to keep (0 = forever)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
 # detections.dir     folder for custom detections (relative to this file)
+# lookups.dir        folder for assets.csv and identities.csv (relative to this file)
 
 `

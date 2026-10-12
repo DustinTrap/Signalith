@@ -165,6 +165,10 @@ type Table struct{ Fields []string }
 // Rename renames columns: rename src as source_ip.
 type Rename struct{ Pairs [][2]string }
 
+// Enrich adds asset and identity context: enrich, or enrich user, dest.
+// With no fields it enriches the usual entity fields.
+type Enrich struct{ Fields []string }
+
 func (*Stats) Name() string     { return "stats" }
 func (*Timechart) Name() string { return "timechart" }
 func (*Top) Name() string       { return "top" }
@@ -173,6 +177,7 @@ func (*Sort) Name() string      { return "sort" }
 func (*Head) Name() string      { return "head" }
 func (*Table) Name() string     { return "table" }
 func (*Rename) Name() string    { return "rename" }
+func (*Enrich) Name() string    { return "enrich" }
 
 // String renders the query back to canonical text.
 func (q *Query) String() string {
@@ -253,6 +258,11 @@ func CommandString(c Command) string {
 			ps[i] = p[0] + " as " + p[1]
 		}
 		return "rename " + strings.Join(ps, ", ")
+	case *Enrich:
+		if len(c.Fields) == 0 {
+			return "enrich"
+		}
+		return "enrich " + strings.Join(c.Fields, ", ")
 	}
 	return c.Name()
 }

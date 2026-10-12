@@ -13,5 +13,11 @@ mitre: [T1033, T1087, T1082, T1016]
 throttle:
   fields: [dest, user]
   window: 4h
+risk:
+  score: 30
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
+  only: true
 enabled: true
 tags: [discovery, windows]

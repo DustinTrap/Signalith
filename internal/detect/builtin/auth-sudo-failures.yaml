@@ -12,5 +12,10 @@ mitre: [T1548.003]
 throttle:
   fields: [src_user, dest]
   window: 1h
+risk:
+  score: 20
+  objects:
+    - {field: src_user, type: user}
+  only: true
 enabled: true
 tags: [authentication, linux]

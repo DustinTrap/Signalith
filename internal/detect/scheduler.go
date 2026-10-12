@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
@@ -27,7 +28,11 @@ type Scheduler struct {
 	Library  *Library
 	Engine   Runner
 	Findings findings.Store
-	Log      *slog.Logger
+	// Risk stores risk events; nil disables risk.
+	Risk RiskStore
+	// Assets adds business context and scales risk; nil means none.
+	Assets *assets.Store
+	Log    *slog.Logger
 	// MaxFindingsPerRun caps the findings one run can raise (default 100),
 	// so a noisy rule cannot flood the queue.
 	MaxFindingsPerRun int
@@ -54,6 +59,7 @@ type RunState struct {
 type RunResult struct {
 	Results   int                 `json:"results"`
 	Findings  []*findings.Finding `json:"findings"`
+	Risk      int                 `json:"risk_events"`
 	Throttled int                 `json:"throttled"`
 	Capped    bool                `json:"capped,omitempty"`
 	Earliest  time.Time           `json:"earliest"`
@@ -169,8 +175,8 @@ func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	st.LastError = ""
 	st.LastResults = res.Results
 	st.LastFindings = len(res.Findings)
-	if len(res.Findings) > 0 {
-		s.log().Info("detection raised findings", "detection", d.ID, "findings", len(res.Findings), "throttled", res.Throttled)
+	if len(res.Findings) > 0 || res.Risk > 0 {
+		s.log().Info("detection fired", "detection", d.ID, "findings", len(res.Findings), "risk_events", res.Risk, "throttled", res.Throttled)
 	}
 	return res, nil
 }
@@ -236,8 +242,17 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 			continue
 		}
 		seen[key] = true
+		riskOnly := d.Risk != nil && d.Risk.Only
 		if window > 0 {
-			dup, err := s.Findings.Exists(ctx, d.ID, key, now.Add(-window))
+			var dup bool
+			var err error
+			if riskOnly {
+				if s.Risk != nil {
+					dup, err = s.Risk.Exists(ctx, d.ID, key, now.Add(-window))
+				}
+			} else {
+				dup, err = s.Findings.Exists(ctx, d.ID, key, now.Add(-window))
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -246,11 +261,23 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 				continue
 			}
 		}
-		if len(out.Findings) >= maxF {
+		if len(out.Findings) >= maxF || out.Risk >= maxF*4 {
 			out.Capped = true
 			break
 		}
+		if d.Risk != nil && s.Risk != nil {
+			evs := RiskEvents(d, row, key, s.Assets, now)
+			if err := s.Risk.Write(ctx, evs); err != nil {
+				return nil, err
+			}
+			out.Risk += len(evs)
+		}
+		if riskOnly {
+			continue
+		}
 		f := NewFinding(d, q, row, key, earliest, latest, now)
+		f.Context = EntityContext(s.Assets, f.Entities)
+		f.Urgency = Urgency(f.Severity, f.Context)
 		if err := s.Findings.Create(ctx, f); err != nil {
 			return nil, err
 		}
@@ -287,7 +314,17 @@ func withoutTime(row map[string]any) map[string]any {
 }
 
 // EntityFields are the result columns copied into a finding's entities.
-var EntityFields = []string{"user", "src_user", "src", "src_host", "dest", "dest_host", "host", "process_name", "object", "member"}
+var EntityFields = []string{"user", "src_user", "src", "src_host", "dest", "dest_host", "host", "process_name", "object", "member", "risk_object", "risk_object_type"}
+
+func entities(row map[string]any) map[string]any {
+	ents := map[string]any{}
+	for _, f := range EntityFields {
+		if v, ok := row[f]; ok && v != nil && fmt.Sprint(v) != "" {
+			ents[f] = v
+		}
+	}
+	return ents
+}
 
 // NewFinding builds the finding for one result row.
 func NewFinding(d *Detection, q *query.Query, row map[string]any, key string, earliest, latest, now time.Time) *findings.Finding {
@@ -298,18 +335,14 @@ func NewFinding(d *Detection, q *query.Query, row map[string]any, key string, ea
 		}
 		result[k] = v
 	}
-	ents := map[string]any{}
-	for _, f := range EntityFields {
-		if v, ok := row[f]; ok && v != nil && fmt.Sprint(v) != "" {
-			ents[f] = v
-		}
-	}
+	ents := entities(row)
 	return &findings.Finding{
 		ID:          NewID(now),
 		DetectionID: d.ID,
 		Title:       RenderTitle(d.Title, row),
 		Description: d.Description,
 		Severity:    d.Severity,
+		Urgency:     d.Severity,
 		Status:      findings.StatusNew,
 		MITRE:       append([]string(nil), d.MITRE...),
 		Entities:    ents,

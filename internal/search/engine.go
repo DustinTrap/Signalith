@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -25,6 +26,8 @@ type Options struct {
 type Engine struct {
 	Store store.Searcher
 	Opt   Options
+	// Assets backs the enrich command; nil makes enrich an error.
+	Assets *assets.Store
 }
 
 // Row is one result row.
@@ -77,7 +80,8 @@ func (e *Engine) IndexPattern(q *query.Query) string {
 	if q.Datamodel != "" {
 		return o.IndexPrefix + "-" + strings.ToLower(q.Datamodel) + "-*"
 	}
-	return o.IndexPrefix + "-*"
+	// All data except risk events, which are derived from other events.
+	return o.IndexPrefix + "-*,-" + o.IndexPrefix + "-risk-*"
 }
 
 // Compile builds the OpenSearch request for a query without running it.
@@ -227,7 +231,7 @@ func leadingHead(cmds []query.Command) (int, bool) {
 		switch c := c.(type) {
 		case *query.Head:
 			return c.N, true
-		case *query.Table, *query.Rename:
+		case *query.Table, *query.Rename, *query.Enrich:
 			continue
 		}
 		return 0, false
@@ -238,6 +242,9 @@ func leadingHead(cmds []query.Command) (int, bool) {
 func metricAggs(aggs []query.Agg) (map[string]any, error) {
 	out := map[string]any{}
 	for i, a := range aggs {
+		if a.Field == "_time" {
+			a.Field = TimeField
+		}
 		var m map[string]any
 		switch a.Func {
 		case "count":
@@ -295,7 +302,13 @@ func (e *Engine) Execute(ctx context.Context, q *query.Query) (*Result, error) {
 		return nil, err
 	}
 	for _, c := range p.post {
-		if err := applyCommand(res, c); err != nil {
+		var err error
+		if en, ok := c.(*query.Enrich); ok {
+			err = e.enrich(res, en)
+		} else {
+			err = applyCommand(res, c)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}

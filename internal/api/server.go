@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/agents"
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -45,9 +46,11 @@ type Server struct {
 	Detections *detect.Library
 	Scheduler  *detect.Scheduler
 	Findings   findings.Store
-	UI         fs.FS // web UI files; nil disables the UI
-	Log        *slog.Logger
-	Version    string
+	// Assets holds the asset and identity lists; nil disables them.
+	Assets  *assets.Store
+	UI      fs.FS // web UI files; nil disables the UI
+	Log     *slog.Logger
+	Version string
 
 	authCache sync.Map // sha256(user:pass) -> struct{}
 }
@@ -69,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/agents/config", s.handleAgentConfig)
 	api.HandleFunc("GET /api/language", s.handleLanguage)
 	s.routeDetections(api)
+	s.routeRisk(api)
 	if s.UI != nil {
 		api.Handle("GET /", http.FileServerFS(s.UI))
 	}

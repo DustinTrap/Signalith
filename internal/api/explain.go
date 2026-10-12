@@ -172,6 +172,12 @@ func describeCommand(c query.Command) string {
 			parts[i] = p[0] + " to " + p[1]
 		}
 		return "Rename " + strings.Join(parts, ", ") + "."
+	case *query.Enrich:
+		what := "user, src, dest and host fields"
+		if len(c.Fields) > 0 {
+			what = strings.Join(c.Fields, ", ")
+		}
+		return "Add owner, priority and category from the asset and identity lists for " + what + "."
 	}
 	return query.CommandString(c)
 }

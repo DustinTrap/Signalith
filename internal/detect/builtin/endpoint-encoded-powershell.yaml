@@ -11,6 +11,11 @@ mitre: [T1059.001, T1027]
 throttle:
   fields: [dest, user, process]
   window: 24h
+risk:
+  score: 40
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
 enabled: true
 tags: [execution, windows]
 guidance: Decode the command (it is base64 of UTF-16LE text) and check what it downloads or runs.

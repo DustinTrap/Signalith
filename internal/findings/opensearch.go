@@ -41,23 +41,37 @@ func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
 		"mappings": map[string]any{
 			"dynamic": "false",
 			"properties": map[string]any{
-				"id": kw, "detection_id": kw, "severity": kw, "status": kw, "owner": kw,
+				"id": kw, "detection_id": kw, "severity": kw, "urgency": kw, "status": kw, "owner": kw,
 				"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw,
 				"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
 				"description": map[string]any{"type": "text"},
 				"created":     map[string]any{"type": "date"},
 				"updated":     map[string]any{"type": "date"},
 				"result":      notIndexed, "entities": notIndexed, "comments": notIndexed, "history": notIndexed,
-				"query": map[string]any{"type": "keyword", "index": false},
+				"context": notIndexed,
+				"query":   map[string]any{"type": "keyword", "index": false},
 			},
 		},
 	}
 	err := s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index), body, nil)
 	var oe *store.Error
 	if errors.As(err, &oe) && oe.Status == 400 && strings.Contains(oe.Body, "resource_already_exists_exception") {
-		return nil
+		return s.upgrade(ctx, body["mappings"].(map[string]any)["properties"])
 	}
 	return err
+}
+
+// upgrade adds fields introduced since the index was created and fills
+// urgency on findings raised before it existed.
+func (s *OpenSearch) upgrade(ctx context.Context, props any) error {
+	idx := "/" + url.PathEscape(s.Index)
+	if err := s.Client.Do(ctx, http.MethodPut, idx+"/_mapping", map[string]any{"properties": props}, nil); err != nil {
+		return err
+	}
+	return s.Client.Do(ctx, http.MethodPost, idx+"/_update_by_query?conflicts=proceed&refresh=true", map[string]any{
+		"query":  map[string]any{"bool": map[string]any{"must_not": []any{map[string]any{"exists": map[string]any{"field": "urgency"}}}}},
+		"script": map[string]any{"lang": "painless", "source": "ctx._source.urgency = ctx._source.severity"},
+	}, nil)
 }
 
 type doc struct {
@@ -77,6 +91,9 @@ func entityValues(f *Finding) []string {
 }
 
 func (s *OpenSearch) put(ctx context.Context, f *Finding) error {
+	if f.Urgency == "" {
+		f.Urgency = f.Severity
+	}
 	return s.Client.Do(ctx, http.MethodPut,
 		"/"+url.PathEscape(s.Index)+"/_doc/"+url.PathEscape(f.ID)+"?refresh=wait_for",
 		doc{Finding: f, EntityValues: entityValues(f)}, nil)
@@ -111,6 +128,9 @@ func filterQuery(flt Filter) map[string]any {
 	}
 	if len(flt.Severity) > 0 {
 		fs = append(fs, map[string]any{"terms": map[string]any{"severity": flt.Severity}})
+	}
+	if len(flt.Urgency) > 0 {
+		fs = append(fs, map[string]any{"terms": map[string]any{"urgency": flt.Urgency}})
 	}
 	if flt.Owner != "" {
 		fs = append(fs, map[string]any{"term": map[string]any{"owner": flt.Owner}})
@@ -193,7 +213,10 @@ func (s *OpenSearch) Summary(ctx context.Context) (*Summary, error) {
 				"filter": map[string]any{"bool": map[string]any{"must_not": []any{
 					map[string]any{"terms": map[string]any{"status": []string{StatusResolved, StatusClosed}}},
 				}}},
-				"aggs": map[string]any{"severity": map[string]any{"terms": map[string]any{"field": "severity", "size": 20}}},
+				"aggs": map[string]any{
+					"severity": map[string]any{"terms": map[string]any{"field": "severity", "size": 20}},
+					"urgency":  map[string]any{"terms": map[string]any{"field": "urgency", "size": 20}},
+				},
 			},
 		},
 	}
@@ -213,18 +236,27 @@ func (s *OpenSearch) Summary(ctx context.Context) (*Summary, error) {
 						Count int    `json:"doc_count"`
 					} `json:"buckets"`
 				} `json:"severity"`
+				Urgency struct {
+					Buckets []struct {
+						Key   string `json:"key"`
+						Count int    `json:"doc_count"`
+					} `json:"buckets"`
+				} `json:"urgency"`
 			} `json:"open"`
 		} `json:"aggregations"`
 	}
 	if err := s.Client.Do(ctx, http.MethodPost, "/"+url.PathEscape(s.Index)+"/_search", body, &out); err != nil {
 		return nil, err
 	}
-	sm := &Summary{Open: out.Aggregations.Open.Count, ByStatus: map[string]int{}, BySeverity: map[string]int{}}
+	sm := &Summary{Open: out.Aggregations.Open.Count, ByStatus: map[string]int{}, BySeverity: map[string]int{}, ByUrgency: map[string]int{}}
 	for _, b := range out.Aggregations.Status.Buckets {
 		sm.ByStatus[b.Key] = b.Count
 	}
 	for _, b := range out.Aggregations.Open.Severity.Buckets {
 		sm.BySeverity[b.Key] = b.Count
+	}
+	for _, b := range out.Aggregations.Open.Urgency.Buckets {
+		sm.ByUrgency[b.Key] = b.Count
 	}
 	return sm, nil
 }

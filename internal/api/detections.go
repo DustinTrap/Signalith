@@ -283,6 +283,7 @@ func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request) {
 	flt := findings.Filter{
 		Status:      splitList(v.Get("status")),
 		Severity:    splitList(v.Get("severity")),
+		Urgency:     splitList(v.Get("urgency")),
 		Owner:       v.Get("owner"),
 		DetectionID: v.Get("detection"),
 		Text:        v.Get("q"),
@@ -454,6 +455,8 @@ func (s *Server) handleCreateFinding(w http.ResponseWriter, r *http.Request) {
 		Created: now, Updated: now,
 		History: []findings.Change{{Author: userOf(r), Field: "created", To: "manual", Time: now}},
 	}
+	f.Context = detect.EntityContext(s.Assets, f.Entities)
+	f.Urgency = detect.Urgency(f.Severity, f.Context)
 	if err := s.Findings.Create(r.Context(), f); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

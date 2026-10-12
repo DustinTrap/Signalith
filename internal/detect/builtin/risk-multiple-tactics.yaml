@@ -1,0 +1,17 @@
+id: risk-multiple-tactics
+title: $risk_object$ shows activity across $tactics$ ATT&CK tactics
+description: Detections across three or more ATT&CK tactics fired for one user or system within a week, which looks like an attack progressing rather than a single noisy rule.
+query: |
+  datamodel=Risk
+  | stats dc(mitre_tactic) as tactics, dc(detection_id) as detections, sum(risk_score) as risk_score by risk_object, risk_object_type
+  | where tactics >= 3 AND detections >= 3
+  | sort -risk_score
+schedule: 1h
+lookback: 7d
+severity: high
+throttle:
+  fields: [risk_object, risk_object_type]
+  window: 7d
+enabled: true
+tags: [risk-incident]
+guidance: Lay out the contributing detections on the Risk page in time order to see how the activity progressed.

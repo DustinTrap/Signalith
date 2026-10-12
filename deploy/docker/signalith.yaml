@@ -18,3 +18,5 @@ detections:
   dir: /var/lib/signalith/detections
   scheduler: true
   max_findings_per_run: 100
+lookups:
+  dir: /var/lib/signalith/lookups

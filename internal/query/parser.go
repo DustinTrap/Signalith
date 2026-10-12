@@ -6,7 +6,7 @@ import (
 )
 
 // Commands lists every pipe command, for autocomplete and error messages.
-var Commands = []string{"stats", "timechart", "top", "where", "sort", "head", "table", "rename"}
+var Commands = []string{"stats", "timechart", "top", "where", "sort", "head", "table", "rename", "enrich"}
 
 // AggFuncs lists the aggregation functions stats, timechart and top accept.
 var AggFuncs = []string{"count", "dc", "sum", "avg", "min", "max"}
@@ -407,6 +407,12 @@ func (p *parser) parseCommand() (Command, error) {
 			return nil, errorf(t.pos, "%s needs at least one field", t.text)
 		}
 		return &Table{Fields: fields}, p.endCommand()
+	case "enrich":
+		fields, err := p.fieldList(false)
+		if err != nil {
+			return nil, err
+		}
+		return &Enrich{Fields: fields}, p.endCommand()
 	case "rename":
 		r := &Rename{}
 		for {

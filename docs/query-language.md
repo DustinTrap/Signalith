@@ -16,7 +16,7 @@ datamodel=Authentication action=failure earliest=-24h
 
 | Syntax | Meaning |
 | --- | --- |
-| `datamodel=Authentication` | Events of one data model: Authentication, Endpoint, Network_Traffic, Change, Other |
+| `datamodel=Authentication` | Events of one data model: Authentication, Endpoint, Network_Traffic, Change, Other. `datamodel=Risk` searches risk events, which are left out otherwise |
 | `index=custom-*` | Search a different OpenSearch index pattern |
 | `field=value` | Exact match, case-insensitive |
 | `field=val*` | Wildcard match with `*` and `?` |
@@ -48,6 +48,7 @@ kept as typed, so Windows paths work without doubling.
 | `head` | `head 20` | Also `limit` |
 | `table` | `table _time, user, src` | Also `fields`; wildcards allowed |
 | `rename` | `rename src as source_ip` | |
+| `enrich` | `enrich` or `enrich user, dest` | Adds asset and identity context: `<field>_priority`, `_category`, `_bunit`, plus `_owner`, `_location` for assets and `_name`, `_email`, `_manager`, `_watchlist` for users. With no fields it enriches `user`, `src_user`, `src`, `dest`, `host`, `src_host`, `dest_host` and `risk_object` |
 
 Columns produced by `stats` are referenced by name in later commands, for example
 `sort -dc(user)` or `where avg(bytes) > 1000`.

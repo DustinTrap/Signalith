@@ -12,5 +12,10 @@ mitre: [T1566.001, T1204.002]
 throttle:
   fields: [dest, parent_process_name, process_name]
   window: 4h
+risk:
+  score: 60
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
 enabled: true
 tags: [initial-access, execution, windows]

@@ -12,6 +12,11 @@ mitre: [T1021]
 throttle:
   fields: [src, dest, dest_port, process_name]
   window: 24h
+risk:
+  score: 20
+  objects:
+    - {field: src, type: system}
+  only: true
 enabled: false
 tags: [lateral-movement]
 guidance: Disabled by default because it needs tuning; add your admin tools to the NOT list before enabling.
