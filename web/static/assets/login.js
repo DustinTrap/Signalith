@@ -19,12 +19,23 @@
   const params = new URLSearchParams(location.search);
   let lockTimer = null;
 
-  // Only same-site paths are allowed as the return address, so a crafted
-  // link cannot send someone to another site after signing in. Without
-  // ?next, a #page the browser kept through the redirect still applies.
+  // Only a path on this site is allowed as the return address, so a crafted
+  // link cannot send someone to another site after signing in. The check
+  // compares the resolved origin, because browsers drop tabs and newlines
+  // and read \ as /, which turns "/<tab>/evil.example" into another site.
+  // Without ?next, a #page the browser kept through the redirect applies.
   function nextPath() {
-    const next = params.get('next') || new URL('./', location.href).pathname + location.hash;
-    return next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') ? next : '/';
+    const home = new URL('./', location.href).pathname + location.hash;
+    const next = params.get('next');
+    if (!next || !next.startsWith('/')) return home;
+    try {
+      const u = new URL(next, location.href);
+      // The full URL, not the path: "/.//evil.example" resolves to the
+      // path "//evil.example", which on its own would leave the site.
+      return u.origin === location.origin ? u.href : home;
+    } catch (_) {
+      return home;
+    }
   }
 
   // setView shows one of the messages above the form: error, locked,

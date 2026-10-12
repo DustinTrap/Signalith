@@ -133,9 +133,13 @@ function setNavOpen(open) {
   $('nav-toggle').setAttribute('aria-expanded', String(open));
   syncDrawer();
 }
-// Off screen, the closed drawer must not take keyboard focus.
+// Off screen, the closed drawer must not take keyboard focus; while it is
+// open, the page behind the scrim must not either.
+const mainEl = document.querySelector('.main');
 function syncDrawer() {
-  $('sidebar').inert = narrow.matches && !appEl.hasAttribute('data-nav-open');
+  const open = appEl.hasAttribute('data-nav-open');
+  $('sidebar').inert = narrow.matches && !open;
+  mainEl.inert = narrow.matches && open;
 }
 narrow.addEventListener('change', () => { if (!narrow.matches) setNavOpen(false); syncDrawer(); });
 syncDrawer();
@@ -308,7 +312,7 @@ async function refreshHealthCard() {
   const pulse = $('health-pulse');
   if (state) pulse.dataset.state = state; else delete pulse.dataset.state;
   $('health-title').textContent = title;
-  const meta = [ing.last_seen ? 'Last event ' + ago(ing.last_seen) : 'No events yet'];
+  const meta = [ing.last_seen ? 'Last event ' + ago(ing.last_seen) : 'No events since start'];
   if (failed) meta.push(failed.toLocaleString() + ' failed');
   $('health-meta').textContent = meta.join(' · ');
   const card = $('health-card');
