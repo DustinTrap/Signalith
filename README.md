@@ -57,9 +57,9 @@ Desktop when you sign in".
 ### Send data
 
 Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
-Fluent Bit, paste the generated configuration, restart it. For network devices, pick
-Syslog (see [Syslog](#syslog)). The configuration already
-contains the server address and ingest token.
+Fluent Bit, paste the generated configuration, restart it. The configuration already
+contains the server address and ingest token. For firewalls, switches and other network
+devices, pick **Syslog** (see [Syslog](#syslog)).
 
 Agents on other machines must send to an address they can reach, such as
 `http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
@@ -89,6 +89,7 @@ publishes port 514 too.
 Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
 and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
 address filled in. Send the test message it shows and watch it arrive on the same page.
+When syslog is off, the page gives the steps to turn it on for this system.
 By hand, forwarding a Linux server's logs with rsyslog is one line in
 `/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
 

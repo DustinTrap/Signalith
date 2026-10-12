@@ -260,6 +260,10 @@ func TestAllowList(t *testing.T) {
 	if s.RejectedBy.NotAllowed != 2 || s.Rejected != 2 || s.Received != 0 || len(s.Senders) != 0 || bulk.count() != 0 {
 		t.Errorf("stats = %+v, events %d", s, bulk.count())
 	}
+	// The health page names the sender to add to syslog.allow.
+	if s.LastNotAllowed != "127.0.0.1" {
+		t.Errorf("last not allowed = %q", s.LastNotAllowed)
+	}
 
 	bulk2 := &capture{}
 	r2, _, _ := start(t, Config{UDP: "127.0.0.1:0", Allow: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}}, bulk2)

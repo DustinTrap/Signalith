@@ -2089,14 +2089,20 @@ $('agent-download').addEventListener('click', async () => {
 
 // ---------- add data: syslog ----------
 // Devices without an agent send syslog straight to Signalith. The panel
-// builds each vendor's setup from "Devices send to" (the host of "Agents
-// send to", so both stay one address) and the ports api/health reports:
-// the receiver gives the port devices use, which is syslog.public_port
-// when Docker or a firewall forwards 514 to 5514. While the panel is open
+// builds each vendor's setup from "Devices send to" and the ports
+// api/health reports: the receiver gives the port devices use, which is
+// syslog.public_port when Docker or a firewall forwards 514 to 5514. The
+// host starts as the one in "Agents send to" and is remembered on its own,
+// so changing it never changes where agents send. While the panel is open
 // it re-reads api/health every 3 seconds, so a test message shows up.
 const syslogHostEl = $('syslog-host');
 const syslogVendorKey = 'signalith.syslogVendor';
-const syslogState = { h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', base: null, seen: null, vendor: 'rsyslog', hostTimer: 0, tabsObserver: null };
+const syslogHostKey = 'signalith.syslogHost';
+const syslogState = {
+  h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', vendor: 'rsyslog', hostTimer: 0, tabsObserver: null,
+  // since the panel opened: when, the counts then, new senders announced, and what the live box says
+  opened: 0, base: null, announced: new Set(), liveKey: '',
+};
 try { syslogState.vendor = localStorage.getItem(syslogVendorKey) || 'rsyslog'; } catch (_) { /* storage may be blocked */ }
 
 // loadDataSource shows the setup for the chosen source.
@@ -2116,16 +2122,18 @@ function openSyslogSetup() {
 async function syslogOpen() {
   const st = syslogState;
   st.base = null;
-  st.seen = null;
+  st.opened = Date.now();
+  st.announced.clear();
+  st.liveKey = '';
   if (!st.ticker) st.ticker = setInterval(syslogTick, 1000);
   if (!st.h) syslogSkeleton();
   await syslogGuessHost();
   if (document.activeElement !== syslogHostEl) {
-    syslogHostEl.value = syslogAgentHost() || location.hostname;
+    syslogHostEl.value = syslogSavedHost() || syslogDefaultHost();
     syslogHostError('');
   }
   const h = syslogHostEl.value.trim();
-  st.host = syslogHostProblem(h) ? st.host || location.hostname : h;
+  st.host = syslogHostProblem(h) ? st.host || syslogDefaultHost() : h.replace(/^\[|\]$/g, '');
   await syslogPoll();
 }
 
@@ -2140,14 +2148,21 @@ async function syslogGuessHost() {
 const syslogAgentHost = () => {
   try { return new URL(agentServerValue()).hostname.replace(/^\[|\]$/g, ''); } catch (_) { return ''; }
 };
+const syslogDefaultHost = () => syslogAgentHost() || location.hostname;
+function syslogSavedHost() {
+  try { return localStorage.getItem(syslogHostKey) || ''; } catch (_) { return ''; }
+}
 const syslogIsIPv4 = (h) => /^\d{1,3}(\.\d{1,3}){3}$/.test(h) && h.split('.').every((o) => +o <= 255);
 const syslogIsIP = (h) => syslogIsIPv4(h) || (h.includes(':') && (() => { try { new URL('http://[' + h + ']/'); return true; } catch (_) { return false; } })());
 
-// syslogHostProblem checks a host the way the server checks agent
-// addresses: an IP address or a DNS name, nothing else.
-function syslogHostProblem(h) {
-  if (!h) return 'Enter this computer’s address, such as 192.168.1.20';
-  if (/[\s/@?#]/.test(h)) return 'Enter just the host name or IP address, such as 192.168.1.20';
+// syslogHostProblem checks a host as typed the way the server checks agent
+// addresses: an IP address or a DNS name, nothing else. A port is left
+// out, since each setup carries the port for its protocol.
+function syslogHostProblem(raw) {
+  if (!raw) return 'Enter this computer’s address, such as 192.168.1.20';
+  if (/^\[[^\]]*\]:\d*$/.test(raw) || /^[^:[\]\s]+:\d*$/.test(raw)) return 'Enter the address without a port; the steps below add the right one';
+  if (/[\s/@?#]/.test(raw)) return 'Enter just the host name or IP address, such as 192.168.1.20';
+  const h = raw.replace(/^\[|\]$/g, '');
   if (h.includes(':')) return syslogIsIP(h) ? '' : `“${h}” is not an IP address`;
   const labels = h.split('.');
   if (h.length > 253 || !labels.every((l) => /^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$/.test(l)) ||
@@ -2155,8 +2170,11 @@ function syslogHostProblem(h) {
   return '';
 }
 
+// syslogHostError shows what is wrong with the address and, meanwhile,
+// dims the setup below, which still has the last good address in it.
 function syslogHostError(msg) {
   const err = $('syslog-host-error');
+  const main = $('syslog-main');
   if (msg) {
     syslogHostEl.setAttribute('aria-invalid', 'true');
     err.replaceChildren(icon('circle-alert'), msg + '.');
@@ -2165,23 +2183,21 @@ function syslogHostError(msg) {
     err.replaceChildren();
   }
   err.classList.toggle('hidden', !msg);
+  main.classList.toggle('is-stale', !!msg);
+  main.inert = !!msg;
 }
 
-// A host typed here becomes the host of "Agents send to" too, keeping its
-// scheme and port, so agents and devices are pointed at the same machine.
 function syslogHostChanged() {
   clearTimeout(syslogState.hostTimer);
-  const h = syslogHostEl.value.trim().replace(/^\[|\]$/g, '');
-  const problem = syslogHostProblem(h);
+  const raw = syslogHostEl.value.trim();
+  const problem = syslogHostProblem(raw);
   syslogHostError(problem);
+  const h = raw.replace(/^\[|\]$/g, '');
   if (problem || h === syslogState.host) return;
   syslogState.host = h;
   try {
-    const u = new URL(agentServerValue() || location.origin);
-    u.hostname = h.includes(':') ? '[' + h + ']' : h;
-    agentServerEl.value = u.origin;
-    if (u.origin !== agentServerGuess) localStorage.setItem(agentServerKey, u.origin);
-    else localStorage.removeItem(agentServerKey);
+    if (h !== syslogDefaultHost()) localStorage.setItem(syslogHostKey, h);
+    else localStorage.removeItem(syslogHostKey);
   } catch (_) { /* storage may be blocked */ }
   syslogRender();
 }
@@ -2190,9 +2206,26 @@ syslogHostEl.addEventListener('input', () => {
   syslogState.hostTimer = setTimeout(syslogHostChanged, 400);
 });
 syslogHostEl.addEventListener('change', () => {
-  if (!syslogHostEl.value.trim()) syslogHostEl.value = syslogAgentHost() || location.hostname;
+  if (!syslogHostEl.value.trim()) syslogHostEl.value = syslogDefaultHost();
   syslogHostChanged();
 });
+
+// syslogUseAddress is a button that puts one of this computer's addresses
+// in "Devices send to". Used from the keyboard, focus returns to the field,
+// since the panel is rebuilt around the new address.
+function syslogUseAddress(ip) {
+  return el('button', { class: 'link-btn mono sl-ip', type: 'button', title: 'Use ' + ip, onclick: (e) => {
+    syslogHostEl.value = ip;
+    syslogHostChanged();
+    if (e.detail === 0) syslogHostEl.focus();
+  } }, ip);
+}
+// syslogAddresses lists this computer's addresses as buttons, "a or b".
+function syslogAddresses(list) {
+  const out = [];
+  list.forEach((ip, i) => out.push(i ? (i === list.length - 1 ? ' or ' : ', ') : '', syslogUseAddress(ip)));
+  return out;
+}
 
 async function syslogPoll() {
   const st = syslogState;
@@ -2225,7 +2258,7 @@ function syslogTick() {
 }
 
 // syslogDest is where devices send: the host and, per protocol, the port
-// they use (0 when that listener is off).
+// they use (0 when that listener is off) and the address listened on.
 function syslogDest(sl) {
   const d = { host: syslogState.host, udp: 0, tcp: 0, tls: 0, listen: {} };
   for (const l of sl.listeners || []) {
@@ -2236,36 +2269,50 @@ function syslogDest(sl) {
 }
 const syslogHostPort = (h, p) => (h.includes(':') ? '[' + h + ']' : h) + ':' + p;
 const syslogProto = { udp: 'UDP', tcp: 'TCP', tls: 'TLS' };
+// syslogNew lists the senders heard from since the panel opened that had
+// not sent before: the device being set up, not the ones already sending.
+const syslogNew = (sl) => (syslogState.base ? (sl.senders || []).filter((s) => !syslogState.base.senders.has(s.address)) : []);
+const syslogWho = (s) => [el('span', { class: 'mono' }, s.address), s.host && s.host !== s.address ? ' · ' + s.host : ''];
 
 // syslogRender rebuilds the panel when what it shows changed (syslog
 // turned on, other ports, another host), so the open tab, focus and copy
-// buttons survive the polling; the live line updates every time.
+// buttons survive the polling; the live box keeps itself current.
 function syslogRender() {
   const st = syslogState;
   if (!st.h) return;
   const sl = st.h.syslog || {};
   $('syslog-body').removeAttribute('aria-busy');
-  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file]);
+  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file, st.h.config_has_syslog, st.h.runtime]);
   if (shape !== st.shape) {
     st.shape = shape;
+    st.liveKey = '';
     syslogBuild(sl);
   }
-  // Counts since the panel opened; a restart sets them back to zero.
-  if (sl.enabled && (!st.base || (sl.received || 0) < st.base.received)) st.base = { received: sl.received || 0, rejected: { ...(sl.rejected_by || {}) } };
-  if (sl.enabled && st.seen !== null && sl.received > st.seen) {
-    const s = (sl.senders || [])[0];
-    $('agent-status').textContent = 'Syslog message received' + (s ? ' from ' + s.address : '') + '.';
+  // What had been sent when the panel opened; a restart sets the counts back to zero.
+  if (sl.enabled && (!st.base || (sl.received || 0) < st.base.received)) {
+    st.base = { received: sl.received || 0, rejected: { ...(sl.rejected_by || {}) }, senders: new Map((sl.senders || []).map((s) => [s.address, s.messages])) };
   }
-  st.seen = sl.enabled ? sl.received || 0 : null;
+  // Screen readers hear about each new sender once, not every poll.
+  for (const s of syslogNew(sl)) {
+    if (st.announced.has(s.address)) continue;
+    st.announced.add(s.address);
+    $('agent-status').textContent = 'Syslog arrived from a new sender, ' + s.address + (s.host && s.host !== s.address ? ' (' + s.host + ')' : '') + '.';
+  }
   syslogLive();
 }
 
 function syslogBuild(sl) {
+  const h = syslogState.h;
   const addr = $('syslog-addr');
   const main = $('syslog-main');
+  $('syslog-sub').textContent = sl.enabled ? 'Set up each device to send to this address. No agent needed.' : 'Receive logs from devices that can’t run an agent.';
   addr.classList.toggle('hidden', !sl.enabled);
-  if (!sl.enabled) return main.replaceChildren(syslogOff(syslogState.h.config_file));
+  if (!sl.enabled) {
+    syslogHostError('');
+    return main.replaceChildren(...syslogOff(h));
+  }
   const d = syslogDest(sl);
+  const ips = (h.runtime && h.runtime.addresses) || [];
   $('syslog-ports').replaceChildren(...['udp', 'tcp', 'tls'].map((p) => {
     const on = !!d[p];
     const b = el('span', { class: 'badge badge--mono' + (on ? '' : ' badge--outline sl-off') }, syslogProto[p] + ' ' + (on ? d[p] : 'off'));
@@ -2276,20 +2323,22 @@ function syslogBuild(sl) {
   if (agentLoopbackHost(d.host.includes(':') ? '[' + d.host + ']' : d.host)) {
     notes.push(el('div', { class: 'alert', 'data-tone': 'warning', role: 'status' }, icon('triangle-alert'), el('div', {},
       el('b', {}, 'Devices can’t reach ' + d.host + '.'),
-      el('p', {}, 'Enter this computer’s network address, such as ', el('code', {}, '192.168.1.20'),
-        ' (find it with ', el('code', {}, 'ipconfig'), ' on Windows or ', el('code', {}, 'ip addr'), ' on Linux).'))));
+      el('p', {}, ...(ips.length ? ['Use this computer’s network address: ', ...syslogAddresses(ips), '.']
+        : ['Enter this computer’s network address, such as ', el('code', {}, '192.168.1.20'), ' (find it with ', el('code', {}, 'ipconfig'),
+          ' on Windows or ', el('code', {}, 'ip addr'), ' on Linux).'])))));
   } else if (!syslogIsIP(d.host)) {
-    notes.push(el('p', { class: 'hint' }, icon('info'), 'Network devices often can’t look up names. If one can’t, use this computer’s IP address.'));
+    notes.push(el('p', { class: 'hint' }, icon('info'), el('span', {}, 'Network devices often can’t look up names. If one can’t, use this computer’s IP address',
+      ...(ips.length ? [': ', ...syslogAddresses(ips)] : []), '.')));
   }
   if ((sl.allow || []).length) {
     notes.push(el('p', { class: 'hint' }, icon('shield'), 'Only these senders are accepted (syslog.allow): ' + sl.allow.join(', ') + '.'));
   }
   $('syslog-host-note').replaceChildren(...notes);
   const step = (n, title, ...body) => el('li', { class: 'agent-step' }, el('span', { class: 'agent-step__num' }, n),
-    el('div', { class: 'agent-step__body' }, el('p', { class: 'agent-step__text' }, el('b', {}, title)), ...body));
+    el('div', { class: 'agent-step__body' }, el('p', { class: 'agent-step__text' }, title), ...body));
   const tabs = el('div', { class: 'tabs sl-tabs', role: 'tablist', 'aria-label': 'Device type' });
   const panel = el('div', { class: 'sl-panel', role: 'tabpanel', id: 'syslog-panel', tabindex: '0' });
-  const vendors = syslogVendors(d);
+  const vendors = syslogVendors(d, ips);
   if (!vendors.some((v) => v.id === syslogState.vendor)) syslogState.vendor = vendors[0].id;
   const pickTab = (id, focus) => {
     syslogState.vendor = id;
@@ -2305,11 +2354,11 @@ function syslogBuild(sl) {
       }
     });
     const v = vendors.find((x) => x.id === id);
-    panel.replaceChildren(...v.render(), ...(v.cef ? [el('p', { class: 'hint' }, icon('braces'), el('span', {}, ...[].concat(v.cef)))] : []));
+    panel.replaceChildren(...v.render().filter(Boolean), ...(v.cefNote ? [el('p', { class: 'hint' }, icon('braces'), el('span', {}, ...[].concat(v.cefNote)))] : []));
   };
   for (const v of vendors) {
     const t = el('button', { class: 'tab', type: 'button', role: 'tab', id: 'syslog-tab-' + v.id, 'data-vendor': v.id, 'aria-controls': 'syslog-panel', title: v.title || v.label },
-      v.label, v.cef ? el('span', { class: 'sl-cef' }, 'CEF') : null);
+      v.label, v.cef ? el('span', { class: 'sl-cef', title: 'Sends CEF' }, 'CEF') : null);
     t.addEventListener('click', () => pickTab(v.id));
     tabs.append(t);
   }
@@ -2357,15 +2406,62 @@ function syslogTabBar(tabs) {
   return bar;
 }
 
-// syslogOff says syslog is off and how to turn it on. The page keeps
-// polling, so it switches to the setup by itself after the restart.
-function syslogOff(path) {
-  return el('div', { class: 'alert sl-offbox', 'data-tone': 'warning', role: 'status' }, icon('triangle-alert'), el('div', { class: 'sl-offbox__body' },
-    el('b', {}, 'Syslog is off.'),
-    el('p', {}, 'Signalith isn’t listening for syslog. To turn it on, set this in ', path ? el('code', {}, path) : 'the config file', ':'),
-    agentSetupCommand('syslog:\n  udp: 0.0.0.0:514\n  tcp: 0.0.0.0:514', 'Copy settings'),
-    el('p', {}, 'Then restart Signalith: ', el('code', {}, 'sudo systemctl restart signalith'), ' on Linux, ', el('code', {}, 'Restart-Service Signalith'),
-      ' on Windows. This page updates once syslog is on.')));
+// Quoting for paths in commands: POSIX shell and PowerShell.
+const syslogSh = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+const syslogPs = (s) => `'${s.replace(/'/g, '\'\'')}'`;
+
+// syslogOff says syslog is off and how to turn it on, as steps for the
+// system the server runs on (api/health "runtime"): the values to change
+// in the syslog section, or the section to add when the file has none (a
+// second one would not load), what lets a Linux service open port 514, and
+// a check of the file before the restart, so a typo can't keep the server
+// down. The page keeps polling and shows the setup once syslog is on.
+function syslogOff(h) {
+  const rt = h.runtime || {};
+  const docker = !!rt.container;
+  const win = rt.os === 'windows';
+  const linux = !docker && !win;
+  // Ports below 1024 need root or the systemd unit's capability; a
+  // service can be given it, anything else gets a high port.
+  const port = docker ? 5514 : linux && rt.low_ports === false && !rt.systemd ? 1514 : 514;
+  const path = docker ? 'deploy/docker/signalith.yaml' : h.config_file || '';
+  const file = [path ? el('code', {}, path) : 'the config file', win ? ' (open Notepad as administrator)' : ''];
+  const code = (t) => el('code', {}, t);
+  const step = (n, title, ...body) => el('li', { class: 'agent-step' }, el('span', { class: 'agent-step__num' }, n),
+    el('div', { class: 'agent-step__body' }, el('p', { class: 'agent-step__text' }, ...[].concat(title)), ...body));
+  const steps = [];
+  if (h.config_has_syslog) {
+    // Values, not lines to paste: the file's own indentation must stay.
+    steps.push([['In ', ...file, ', under ', code('syslog:'), ', change ', code('udp'), ' and ', code('tcp'), ' to ', code(`0.0.0.0:${port}`),
+      ...(docker ? [', and ', code('public_port'), ' to ', code('514')] : []), '.']]);
+  } else {
+    const lines = [`udp: 0.0.0.0:${port}`, `tcp: 0.0.0.0:${port}`].concat(docker ? ['public_port: 514'] : []);
+    steps.push([['Add these lines to the end of ', ...file, ':'], agentSetupCommand('syslog:\n' + lines.map((l) => '  ' + l).join('\n'), 'Copy settings')]);
+  }
+  if (port === 1514) steps[0].push(el('p', { class: 'hint' }, icon('info'), el('span', {}, 'Ports below 1024 need root on Linux, so this uses 1514. Devices then send to port 1514.')));
+  const exe = rt.exe || 'signalith';
+  if (docker) {
+    steps.push([['In the Signalith folder, where you started it, run:'], agentSetupCommand('docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate signalith')]);
+  } else if (win) {
+    const fw = (p) => `New-NetFirewallRule -DisplayName 'Signalith syslog ${p} 514' -Direction Inbound -Protocol ${p} -LocalPort 514 -Action Allow`;
+    steps.push([['In PowerShell as administrator, check the file, restart Signalith and let syslog through Windows Firewall:'],
+      agentSetupCommand(`& ${syslogPs(exe)} validate -c ${syslogPs(path || 'signalith.yaml')}; if ($LASTEXITCODE -eq 0) { Restart-Service Signalith }\n${fw('UDP')}\n${fw('TCP')}`, 'Copy commands')]);
+  } else {
+    const cmd = /^\/(usr\/(local\/)?)?bin\/signalith$/.test(exe) ? 'signalith' : syslogSh(exe);
+    if (rt.low_ports === false && rt.systemd) {
+      steps.push([['Let the service open port 514:'], agentSetupCommand('sudo mkdir -p /etc/systemd/system/signalith.service.d\n' +
+        'printf \'[Service]\\nAmbientCapabilities=CAP_NET_BIND_SERVICE\\n\' | sudo tee /etc/systemd/system/signalith.service.d/syslog.conf\n' +
+        'sudo systemctl daemon-reload', 'Copy commands')]);
+    }
+    const check = `${rt.systemd ? 'sudo ' : ''}${cmd} validate -c ${syslogSh(path || 'signalith.yaml')}`;
+    steps.push(rt.systemd ? [['Check the file and restart Signalith:'], agentSetupCommand(`${check} && sudo systemctl restart signalith`)]
+      : [['Check the file, then restart Signalith:'], agentSetupCommand(check)]);
+  }
+  return [
+    el('div', { class: 'alert', 'data-tone': 'warning', role: 'status' }, icon('triangle-alert'), el('div', {},
+      el('b', {}, 'Syslog is off.'), el('p', {}, 'Turn it on with these steps. This page shows the device setup once it is on.'))),
+    el('ol', { class: 'agent-steps', role: 'list' }, ...steps.map(([title, ...body], i) => step(i + 1, title, ...body))),
+  ];
 }
 
 // syslogTest is a test message from Linux (logger) and from Windows
@@ -2387,38 +2483,88 @@ function syslogTest(d) {
   ];
 }
 
-// syslogLive is the "did it arrive?" line under step 3.
+// syslogSince says how long ago a time was, to the second under a minute.
+function syslogSince(t) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  return s < 5 ? 'just now' : s < 60 ? s + 's ago' : ago(t);
+}
+
+// syslogLive is the "did it arrive?" box under step 3. A sender that had
+// not sent before the panel opened is the device being set up: that is
+// the success. Senders already sending only show that syslog works. The
+// box is rebuilt only when what it says changes, so its link keeps focus;
+// times and counts in it update in place every second.
 function syslogLive() {
   const box = $('syslog-live');
   const st = syslogState;
   const sl = st.h && st.h.syslog;
-  if (!box || !sl || !sl.enabled) return;
-  const sender = (sl.senders || [])[0];
+  if (!box || !sl || !sl.enabled || !st.base) return;
+  const d = syslogDest(sl);
+  const news = syslogNew(sl);
+  const first = news[0];
+  const latest = (sl.senders || [])[0];
   const last = sl.last_message ? new Date(sl.last_message).getTime() : 0;
-  const s = Math.max(0, Math.round((Date.now() - last) / 1000));
-  const when = s < 5 ? 'just now' : s < 60 ? s + 's ago' : ago(last);
-  const fresh = st.base && sl.received > st.base.received;
-  const from = sender ? [' from ', el('span', { class: 'mono' }, sender.address), sender.host && sender.host !== sender.address ? ' · ' + sender.host : ''] : [];
+  const recent = last && Date.now() - last < 15 * 60 * 1000;
+  const rej = syslogRejectedSince(sl);
+  // Nothing new for half a minute: say what to check.
+  const stuck = !first && Date.now() - st.opened > 30000;
+  const dyn = {
+    when: syslogSince(first ? new Date(first.last_seen).getTime() : last),
+    count: first ? (first.messages === 1 ? '1 message' : `${healthPageNum(first.messages)} messages, the last`) : '',
+  };
+  const who = first || latest;
+  const key = JSON.stringify([first ? 'new' : last ? 'known' : 'none', who && who.address, who && who.host, news.length, rej, stuck, recent, d.host]);
+  if (key === st.liveKey) {
+    box.querySelectorAll('[data-live]').forEach((n) => { n.textContent = dyn[n.dataset.live]; });
+    return;
+  }
+  st.liveKey = key;
+  const live = (k) => el('span', { 'data-live': k }, dyn[k]);
   const pulse = el('span', { class: 'pulse', 'aria-hidden': 'true' });
   let head;
   let sub;
-  if (fresh) {
-    const n = sl.received - st.base.received;
-    head = [pulse, el('span', {}, el('b', {}, 'Receiving. '), 'Last message ' + when, ...from)];
-    sub = [`${healthPageNum(n)} ${n === 1 ? 'message' : 'messages'} since you opened this page. `,
-      sender ? el('button', { class: 'link-btn', type: 'button', onclick: () => openSearch('dvc=' + quoteValue(sender.address), '-1h') }, 'Find them in Search') : null];
+  if (first) {
+    const more = news.length - 1;
+    head = [el('b', {}, 'Receiving from '), ...syslogWho(first), more ? ` and ${more} more new ${more === 1 ? 'sender' : 'senders'}` : ''];
+    sub = [live('count'), ' ', live('when'), '. ',
+      el('button', { class: 'link-btn', type: 'button', onclick: () => openSearch('dvc=' + quoteValue(first.address), '-1h') }, 'Find them in Search')];
+  } else if (last) {
+    if (!recent) pulse.dataset.state = 'idle';
+    head = [recent ? el('b', {}, 'Syslog is working. ') : '', 'Last message ', live('when'), ...(latest ? [' from ', ...syslogWho(latest)] : [])];
+    sub = ['Send the test above to check this device. A device that hasn’t sent before shows here within seconds.'];
   } else {
-    if (!last || Date.now() - last > 15 * 60 * 1000) pulse.dataset.state = 'idle';
-    head = last ? [pulse, el('span', {}, 'Last message ' + when, ...from)] : [pulse, el('span', {}, el('b', {}, 'Waiting for the first message…'))];
-    const d = syslogDest(sl);
-    const ports = ['udp', 'tcp'].filter((p) => d[p]).map((p) => syslogProto[p] + ' ' + d[p]).join(' and ');
-    sub = [`Send the test above; it shows here within seconds. Nothing? Check the device can reach ${d.host}` + (ports ? ` and that ${ports} ${ports.includes(' and ') ? 'are' : 'is'} open in this computer’s firewall.` : '.')];
+    pulse.dataset.state = 'idle';
+    head = [el('b', {}, 'Waiting for the first message…')];
+    sub = ['Send the test above; it shows here within seconds.'];
   }
-  const rej = syslogRejectedSince(sl);
-  if (rej && !fresh) sub = ['Messages are reaching Signalith, but it turned them away.'];
-  box.dataset.tone = fresh ? 'success' : '';
-  box.replaceChildren(el('div', { class: 'sl-live__head' }, ...head), el('p', { class: 'sl-live__sub' }, ...sub),
-    ...(rej ? [el('p', { class: 'sl-live__warn' }, icon('triangle-alert', 'icon--sm'), rej)] : []));
+  if (rej && !first) {
+    pulse.dataset.state = 'warn';
+    head = [el('b', {}, 'Messages are reaching Signalith, but it turned them away.')];
+    sub = null;
+  }
+  const extra = [];
+  if (rej) extra.push(el('p', { class: 'sl-live__warn' }, icon('triangle-alert', 'icon--sm'), el('span', {}, rej)));
+  if (stuck && !rej) extra.push(...syslogTrouble(d));
+  box.dataset.tone = first ? 'success' : '';
+  box.replaceChildren(el('div', { class: 'sl-live__head' }, pulse, el('span', {}, ...head)), ...(sub ? [el('p', { class: 'sl-live__sub' }, ...sub)] : []), ...extra);
+}
+
+// syslogTrouble is what to check when nothing new arrives: the device
+// reaches this computer and the firewall lets syslog in. On Windows it
+// gives the rules install.ps1 would add.
+function syslogTrouble(d) {
+  const h = syslogState.h || {};
+  const rt = h.runtime || {};
+  const what = h.syslog && h.syslog.last_message ? 'Nothing new' : 'Nothing';
+  const on = ['udp', 'tcp'].filter((p) => d[p]);
+  const ports = on.map((p) => syslogProto[p] + ' ' + d[p]).join(' and ');
+  const out = [el('p', { class: 'sl-live__sub' }, `${what} after 30 seconds? Check the device can reach ${d.host}` +
+    (ports ? ` and that ${ports} ${on.length > 1 ? 'are' : 'is'} open in this computer’s firewall` : '') + (rt.os === 'windows' && on.length ? '. In PowerShell as administrator:' : '.'))];
+  if (rt.os === 'windows' && on.length) {
+    const listen = (p) => +String(d.listen[p] || '').split(':').pop() || d[p];
+    out.push(agentSetupCommand(on.map((p) => `New-NetFirewallRule -DisplayName 'Signalith syslog ${syslogProto[p]} ${listen(p)}' -Direction Inbound -Protocol ${syslogProto[p]} -LocalPort ${listen(p)} -Action Allow`).join('\n'), 'Copy commands'));
+  }
+  return out;
 }
 
 // syslogRejectedSince says why messages were turned away since the panel
@@ -2427,7 +2573,7 @@ function syslogRejectedSince(sl) {
   const base = (syslogState.base && syslogState.base.rejected) || {};
   const now = sl.rejected_by || {};
   const why = [
-    ['not_allowed', 'the sender isn’t in syslog.allow'], ['too_large', 'the message was over 64 KB'],
+    ['not_allowed', 'the sender isn’t in syslog.allow' + (sl.last_not_allowed ? ` (latest ${sl.last_not_allowed})` : '')], ['too_large', 'the message was over 64 KB'],
     ['bad_framing', 'the TCP stream was not syslog'], ['too_many_connections', 'too many connections were open'],
     ['too_many_from_sender', 'that sender had too many connections open'],
   ].map(([k, text]) => [(now[k] || 0) - (base[k] || 0), text]).filter(([n]) => n > 0);
@@ -2457,14 +2603,15 @@ function syslogFailed(e) {
 // ---- vendor setups ----
 // Each is the shortest setup that works, with this server's host and port
 // filled in. Servers send over TCP when it is on (no lost lines); network
-// devices use UDP, which every one of them supports.
+// devices use UDP, which every one of them supports. cef marks a setup
+// that sends CEF; cefNote says what CEF gives, or how to get it.
 const slText = (...parts) => el('p', { class: 'sl-text' }, ...parts);
 const slNote = (...parts) => el('p', { class: 'hint' }, icon('info'), el('span', {}, ...parts));
 const slSteps = (...items) => el('ol', { class: 'sl-ui-steps' }, ...items.map((i) => el('li', {}, ...[].concat(i))));
 const slMenu = (...segs) => el('b', {}, segs.join(' › '));
 const slCode = (t) => el('code', {}, String(t));
 
-function syslogVendors(d) {
+function syslogVendors(d, ips) {
   const pick = (...order) => order.find((p) => d[p]) || '';
   const hp = (p) => syslogHostPort(d.host, d[p]);
   const v6 = d.host.includes(':');
@@ -2495,26 +2642,32 @@ function syslogVendors(d) {
       const p = pick('udp', 'tcp');
       if (!p) return none();
       const host = `logging host inside ${d.host}` + (p === 'udp' && d.udp === 514 ? '' : ` ${p}/${d[p]}`);
-      return [slText('From privileged EXEC mode, paste:'),
-        agentSetupCommand(`configure terminal\nlogging enable\nlogging trap informational\nlogging device-id hostname\n${p === 'tcp' ? 'logging permit-hostdown\n' : ''}${host}\nend\nwrite memory`),
+      // The ASA takes an address here, not a name.
+      const name = !syslogIsIP(d.host) && slNote('The ASA needs an IP address, not a name. ',
+        ...(ips.length ? ['Use ', ...syslogAddresses(ips), '.'] : ['Enter this computer’s IP address in Devices send to.']));
+      return [name, slText('From privileged EXEC mode, paste:'),
+        agentSetupCommand(`configure terminal\nlogging enable\nlogging timestamp\nlogging device-id hostname\nlogging trap informational\n${p === 'tcp' ? 'logging permit-hostdown\n' : ''}${host}\nend\nwrite memory`),
         slNote('Replace ', slCode('inside'), ' with the name of the interface that reaches Signalith.' +
           (p === 'tcp' ? ' permit-hostdown keeps traffic flowing when Signalith can’t be reached.' : ''))];
     } },
-    { id: 'panos', label: 'Palo Alto', title: 'Palo Alto Networks PAN-OS', cef: 'For CEF, which Signalith maps to fields such as src, dest and user, paste Palo Alto’s CEF formats into the profile’s Custom Log Format tab.', render() {
+    { id: 'panos', label: 'Palo Alto', title: 'Palo Alto Networks PAN-OS',
+      cefNote: ['For CEF, which Signalith maps to fields such as src, dest and user, paste the formats from Palo Alto’s ', el('i', {}, 'CEF Configuration Guide'),
+        ' for your PAN-OS version into the profile’s Custom Log Format tab.'], render() {
+        const p = pick('udp', 'tcp');
+        if (!p) return none();
+        return [slText('In the PAN-OS web interface:'), slSteps(
+          [slMenu('Device', 'Server Profiles', 'Syslog'), ': Add a profile named Signalith with one server: Syslog Server ', slCode(d.host), ', Transport ', slCode(p.toUpperCase()), ', Port ', slCode(d[p]), ', Format ', slCode('BSD'), '.'],
+          [slMenu('Objects', 'Log Forwarding'), ': Add a profile with Traffic and Threat match lists that send to Signalith.'],
+          [slMenu('Policies', 'Security'), ': in each rule, set Actions › Log Forwarding to that profile.'],
+          [slMenu('Device', 'Log Settings'), ': add System and Configuration match lists that send to Signalith.'],
+          'Commit.')];
+      } },
+    { id: 'fortigate', label: 'FortiGate', title: 'Fortinet FortiGate', cef: true, cefNote: [slCode('set format cef'), ' sends CEF, which Signalith maps to fields such as src, dest and action.'], render() {
       const p = pick('udp', 'tcp');
       if (!p) return none();
-      return [slText('In the PAN-OS web interface:'), slSteps(
-        [slMenu('Device', 'Server Profiles', 'Syslog'), ': Add a profile named Signalith with one server: Syslog Server ', slCode(d.host), ', Transport ', slCode(p.toUpperCase()), ', Port ', slCode(d[p]), ', Format ', slCode('BSD'), '.'],
-        [slMenu('Objects', 'Log Forwarding'), ': Add a profile with Traffic and Threat match lists that send to Signalith.'],
-        [slMenu('Policies', 'Security'), ': in each rule, set Actions › Log Forwarding to that profile.'],
-        [slMenu('Device', 'Log Settings'), ': add System and Configuration match lists that send to Signalith.'],
-        'Commit.')];
-    } },
-    { id: 'fortigate', label: 'FortiGate', title: 'Fortinet FortiGate', cef: [slCode('set format cef'), ' sends CEF, which Signalith maps to fields such as src, dest and action.'], render() {
-      const p = pick('udp', 'tcp');
-      if (!p) return none();
+      // Reliable (TCP) mode first: turning it on resets the port to 601.
       return [slText('In the FortiGate CLI, paste:'),
-        agentSetupCommand(`config log syslogd setting\n    set status enable\n    set server "${d.host}"\n    set port ${d[p]}\n${p === 'tcp' ? '    set mode reliable\n' : ''}    set format cef\nend`)];
+        agentSetupCommand(`config log syslogd setting\n    set status enable\n    set server "${d.host}"\n${p === 'tcp' ? '    set mode reliable\n' : ''}    set port ${d[p]}\n    set format cef\nend`)];
     } },
     { id: 'pfsense', label: 'pfSense / OPNsense', render() {
       const p = pick('udp', 'tcp');
@@ -2528,7 +2681,7 @@ function syslogVendors(d) {
         ['Transport ', slCode(p.toUpperCase() + (v6 ? '(6)' : '(4)')), ', Hostname ', slCode(d.host), ', Port ', slCode(d[p]), '. Leave Applications empty to send everything.'],
         'Save, then Apply.')];
     } },
-    { id: 'unifi', label: 'UniFi', title: 'Ubiquiti UniFi Network', cef: 'SIEM Server sends CEF, which Signalith maps to fields such as src, dest and user.', render() {
+    { id: 'unifi', label: 'UniFi', title: 'Ubiquiti UniFi Network', cef: true, cefNote: 'SIEM Server sends CEF, which Signalith maps to fields such as src, dest and user.', render() {
       if (!d.udp) return udpOnly('UniFi');
       return [slText('In UniFi Network:'), slSteps(
         ['Open Settings and find Activity Logging (Syslog): under ', slMenu('CyberSecure', 'Traffic Logging'), ', or ', slMenu('Control Plane', 'Integrations'), ' in older versions.'],
@@ -2543,9 +2696,13 @@ function syslogVendors(d) {
       } }, 'Set up the Windows agent');
       const out = [slText('Windows has no built-in syslog sender. For Windows event logs the Fluent Bit agent is the better choice: it maps them to data models. ', agent)];
       if (!p) return out.concat(none());
+      // Over TCP, NXLog ends each event with a newline by default, and
+      // event fields hold line breaks; Syslog_TLS framing prefixes each
+      // event with its length instead, so events arrive whole.
       return out.concat([
         slText('To send syslog instead, install NXLog Community Edition and add this to the end of ', slCode('C:\\Program Files\\nxlog\\conf\\nxlog.conf'), ':'),
-        agentSetupCommand(`<Input eventlog>\n    Module  im_msvistalog\n</Input>\n<Output signalith>\n    Module  om_${p}\n    Host    ${d.host}\n    Port    ${d[p]}\n    Exec    to_syslog_ietf();\n</Output>\n<Route signalith>\n    Path    eventlog => signalith\n</Route>`, 'Copy settings'),
+        agentSetupCommand(`<Input eventlog>\n    Module  im_msvistalog\n</Input>\n<Output signalith>\n    Module  om_${p}\n    Host    ${d.host}\n    Port    ${d[p]}\n    Exec    to_syslog_ietf();\n${p === 'tcp' ? '    OutputType Syslog_TLS\n' : ''}</Output>\n<Route signalith>\n    Path    eventlog => signalith\n</Route>`, 'Copy settings'),
+        p === 'tcp' ? slNote(slCode('Syslog_TLS'), ' only frames each event with its length, so events with line breaks arrive whole. Nothing is encrypted.') : null,
         slText('Then, in PowerShell as administrator:'),
         agentSetupCommand('Restart-Service nxlog'),
       ]);
@@ -2703,7 +2860,8 @@ function healthSyslogCard(sl) {
   const senders = sl.senders || [];
   const last = sl.last_message ? new Date(sl.last_message) : null;
   const recent = last && Date.now() - last.getTime() < 15 * 60 * 1000;
-  const state = recent ? ['', 'Receiving'] : last ? ['idle', 'Quiet'] : ['idle', 'Waiting'];
+  // Messages arriving and all turned away is a problem, not a wait.
+  const state = recent ? ['', 'Receiving'] : last ? ['idle', 'Quiet'] : sl.rejected ? ['warn', 'Turning away'] : ['idle', 'Waiting'];
   const pulse = el('span', { class: 'pulse', 'aria-hidden': 'true' });
   if (state[0]) pulse.dataset.state = state[0];
 
@@ -2722,9 +2880,6 @@ function healthSyslogCard(sl) {
   }), el('li', { class: 'hp-sl-l hp-sl-allow' }, icon('shield', 'icon--sm'),
     el('span', {}, (sl.allow || []).length ? 'Accepts only ' + sl.allow.join(', ') : 'Accepts any sender')));
 
-  const rb = sl.rejected_by || {};
-  const why = [[rb.not_allowed, 'outside syslog.allow'], [rb.too_large, 'too large'], [rb.bad_framing, 'bad TCP framing'],
-    [(rb.too_many_connections || 0) + (rb.too_many_from_sender || 0), 'over the connection limit']].filter(([n]) => n > 0);
   const stat = (label, n, tone, tip) => {
     const attrs = { class: 'hp-sl-stat' };
     if (tone && n) attrs['data-tone'] = tone;
@@ -2734,11 +2889,14 @@ function healthSyslogCard(sl) {
   const stats = el('dl', { class: 'hp-sl-stats' },
     stat('Received', sl.received),
     stat('Dropped', sl.dropped, 'warning', 'Lost because OpenSearch could not keep up, or while stopping'),
-    stat('Rejected', sl.rejected, '', why.length ? why.map(([n, t]) => `${healthPageNum(n)} ${t}`).join(', ') : 'Turned away: senders outside syslog.allow, or messages too large'),
+    stat('Rejected', sl.rejected, 'warning', 'Turned away: senders outside syslog.allow, messages too large, or too many connections'),
     stat('Write failed', sl.write_failed, 'warning', 'OpenSearch did not store them'));
 
   let body;
-  if (!senders.length) {
+  const rejected = healthSyslogRejected(sl);
+  if (!senders.length && rejected) {
+    body = null; // the rejection note says what is wrong
+  } else if (!senders.length) {
     body = el('div', { class: 'empty empty--compact hp-sl-empty' },
       el('div', { class: 'empty__title' }, 'No messages yet'),
       el('p', { class: 'empty__text' }, 'Point a device at this server. Add data shows how, with a test message to try.'),
@@ -2768,10 +2926,37 @@ function healthSyslogCard(sl) {
     body = el('div', {}, el('div', { class: 'table-wrap' }, table), foot);
   }
   return el('div', { class: 'card hp-syslog' },
-    el('div', { class: 'card__head' }, el('div', {}, title, el('p', { class: 'card__sub' }, last ? 'Last message ' + ago(last) : 'Nothing received since the server started')),
+    el('div', { class: 'card__head' }, el('div', {}, title, el('p', { class: 'card__sub' }, last ? 'Last message ' + ago(last) : `Nothing ${sl.rejected ? 'accepted' : 'received'} since the server started`)),
       el('span', { class: 'hp-state' }, pulse, state[1])),
-    el('div', { class: 'hp-sl-top' }, listeners, stats),
+    el('div', { class: 'hp-sl-top' }, listeners, stats, rejected),
     body);
+}
+
+// healthSyslogRejected says, in words, why messages were turned away since
+// the server started and what to change, or is null when none were.
+function healthSyslogRejected(sl) {
+  const rb = sl.rejected_by || {};
+  if (!sl.rejected) return null;
+  const conns = (rb.too_many_connections || 0) + (rb.too_many_from_sender || 0);
+  const tcp = (n) => `TCP ${n === 1 ? 'connection' : 'connections'}`;
+  // [count, what, more]: one reason reads as a sentence, several as a list with counts.
+  const why = [
+    rb.not_allowed && [rb.not_allowed, 'from senders not in syslog.allow', [...(sl.last_not_allowed ? [' (latest ', el('span', { class: 'mono' }, sl.last_not_allowed), ')'] : []),
+      '. To accept one, add it to ', el('code', {}, 'syslog.allow'), ...syslogConfigIn(), ' and restart Signalith.']],
+    rb.too_large && [rb.too_large, 'over 64 KB, the most a message may be', ['.']],
+    rb.bad_framing && [rb.bad_framing, `from ${tcp(rb.bad_framing)} that did not send syslog`, ['.']],
+    conns && [conns, `${tcp(conns)} over the connection limit`, ['.']],
+  ].filter(Boolean);
+  const one = why.length === 1;
+  const line = ([n, what, more]) => [one ? what.charAt(0).toUpperCase() + what.slice(1) : `${healthPageNum(n)} ${what}`, ...more];
+  return el('div', { class: 'alert hp-sl-rejected', 'data-tone': 'warning' }, icon('triangle-alert'), el('div', {},
+    el('b', {}, `${healthPageNum(sl.rejected)} ${sl.rejected === 1 ? 'message was' : 'messages were'} turned away since the server started.`),
+    one ? el('p', {}, ...line(why[0])) : el('ul', { role: 'list' }, ...why.map((w) => el('li', {}, ...line(w))))));
+}
+// syslogConfigIn is " in <config file>" for the health page, or nothing.
+function syslogConfigIn() {
+  const f = healthPageState.data && healthPageState.data.config_file;
+  return f ? [' in ', el('code', {}, f)] : [];
 }
 
 

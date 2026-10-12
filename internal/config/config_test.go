@@ -220,6 +220,10 @@ func TestSyslogSettings(t *testing.T) {
 	if err != nil || c.Syslog.Enabled() {
 		t.Fatalf("absent syslog section: %v %+v", err, c.Syslog)
 	}
+	// Turning syslog on then means adding the section, not editing it.
+	if c.HasSection("syslog") || !c.HasSection("search") {
+		t.Errorf("sections: syslog %v, search %v", c.HasSection("syslog"), c.HasSection("search"))
+	}
 
 	os.WriteFile(path, []byte(`syslog:
   udp: 0.0.0.0:514
@@ -307,7 +311,16 @@ func TestSavedFileExplainsSyslog(t *testing.T) {
 		}
 	}
 	got, err := Load(path)
-	if err != nil || got.Syslog.UDP != "0.0.0.0:514" || got.Syslog.TCP != "0.0.0.0:514" {
+	if err != nil || got.Syslog.UDP != "0.0.0.0:514" || got.Syslog.TCP != "0.0.0.0:514" || !got.HasSection("syslog") {
 		t.Errorf("reload: %v %+v", err, got.Syslog)
+	}
+
+	// Off is written as empty settings, so the section is there to edit.
+	c.Syslog.UDP, c.Syslog.TCP = "", ""
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(path); err != nil || got.Syslog.Enabled() || !got.HasSection("syslog") {
+		t.Errorf("off: %v %+v, section %v", err, got.Syslog, got != nil && got.HasSection("syslog"))
 	}
 }

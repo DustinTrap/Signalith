@@ -70,6 +70,9 @@ type Server struct {
 
 	// Syslog is the syslog receiver, for its stats; nil when it is off.
 	Syslog *syslog.Receiver
+	// Runtime overrides what api/health says about the system the server
+	// runs on; nil looks it up.
+	Runtime *Runtime
 
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
 	Sessions *auth.Sessions
@@ -467,7 +470,9 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.Config.Path()}
+	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.Config.Path(),
+		// For the steps that turn syslog on: edit the section or add one.
+		"config_has_syslog": s.Config.HasSection("syslog"), "runtime": s.runtimeInfo()}
 	if status, err := s.Backend.Health(ctx); err != nil {
 		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": s.Config.OpenSearch.URL}
 	} else {

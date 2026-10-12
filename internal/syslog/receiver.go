@@ -146,6 +146,11 @@ type Receiver struct {
 
 	warnMu sync.Mutex
 	warned map[string]time.Time
+
+	// lastNotAllowed is the latest sender outside syslog.allow, so the
+	// health page can say whom to add.
+	rejMu          sync.Mutex
+	lastNotAllowed netip.Addr
 }
 
 type queued struct {
@@ -203,6 +208,9 @@ type Stats struct {
 	LastMessage time.Time `json:"last_message,omitzero"`
 	// Senders are the most recent senders, newest first.
 	Senders []Sender `json:"senders"`
+	// LastNotAllowed is the latest sender turned away because it is not
+	// in syslog.allow.
+	LastNotAllowed string `json:"last_not_allowed,omitempty"`
 }
 
 // New returns a receiver; Start opens its listeners.
@@ -653,6 +661,9 @@ func (r *Receiver) allowed(a netip.Addr) bool {
 // once a minute rather than per message.
 func (r *Receiver) rejectSender(a netip.Addr) {
 	r.notAllowed.Add(1)
+	r.rejMu.Lock()
+	r.lastNotAllowed = a
+	r.rejMu.Unlock()
 	r.warn("allow", "dropped syslog from a sender outside syslog.allow (logged once a minute)", "sender", a.String(), "dropped_so_far", r.notAllowed.Load())
 }
 
@@ -839,6 +850,11 @@ func (r *Receiver) Stats() Stats {
 			s.Allow = append(s.Allow, p.String())
 		}
 	}
+	r.rejMu.Lock()
+	if r.lastNotAllowed.IsValid() {
+		s.LastNotAllowed = r.lastNotAllowed.String()
+	}
+	r.rejMu.Unlock()
 	s.Rejected = s.RejectedBy.NotAllowed + s.RejectedBy.TooLarge + s.RejectedBy.BadFraming + s.RejectedBy.TooManyConnections + s.RejectedBy.TooManyFromSender
 	if ns := r.lastMessage.Load(); ns > 0 {
 		s.LastMessage = time.Unix(0, ns).UTC()

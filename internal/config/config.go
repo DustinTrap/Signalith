@@ -42,6 +42,8 @@ type Config struct {
 
 	// path is where the file was loaded from.
 	path string
+	// sections are the top-level keys in that file.
+	sections map[string]bool
 }
 
 // Server controls the web UI and API listener.
@@ -434,6 +436,11 @@ func Default() *Config {
 // Path returns the file the config was loaded from.
 func (c *Config) Path() string { return c.path }
 
+// HasSection reports whether the file the config was loaded from has the
+// top-level section, such as "syslog". Settings for one that is missing
+// are added at the end of the file; a second "syslog:" would not load.
+func (c *Config) HasSection(name string) bool { return c.sections[name] }
+
 // Load reads a config file, applies defaults and environment overrides,
 // and validates it.
 func Load(path string) (*Config, error) {
@@ -451,6 +458,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	var top map[string]any
+	if yaml.Unmarshal(data, &top) == nil {
+		c.sections = make(map[string]bool, len(top))
+		for k := range top {
+			c.sections[k] = true
+		}
+	}
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}

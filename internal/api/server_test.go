@@ -139,6 +139,7 @@ func TestHealthShowsSyslog(t *testing.T) {
 		}
 		t.Cleanup(func() { cancel(); rcv.Wait() })
 		s.Syslog = rcv
+		s.Runtime = &Runtime{OS: "linux", Systemd: true, Exe: "/usr/local/bin/signalith", Addresses: []string{"192.0.2.20"}}
 	})
 	addr := rcv.Stats().Listeners[0].Address
 	c, err := net.Dial("udp", addr)
@@ -164,6 +165,12 @@ func TestHealthShowsSyslog(t *testing.T) {
 	}
 	if allow, ok := sl["allow"].([]any); !ok || len(allow) != 0 {
 		t.Errorf("allow = %v, want [] (any sender)", sl["allow"])
+	}
+	// Add data words the steps for this system.
+	rt, _ := body["runtime"].(map[string]any)
+	if rt == nil || rt["os"] != "linux" || rt["systemd"] != true || rt["low_ports"] != false || rt["exe"] != "/usr/local/bin/signalith" ||
+		len(rt["addresses"].([]any)) != 1 || body["config_has_syslog"] != false {
+		t.Errorf("runtime = %v, config_has_syslog = %v", body["runtime"], body["config_has_syslog"])
 	}
 }
 

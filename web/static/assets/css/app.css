@@ -2166,20 +2166,21 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
    kind of device and a live "did it arrive" line. */
 #page-data .agent { display: grid; gap: var(--sp-4); max-width: 960px; }
 
-/* source: three selectable cards, the real radio drawn at the right */
+/* source: three selectable cards, the real radio drawn at the right. Top
+   aligned, so the titles line up when one description wraps. */
 #page-data .agent-os { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); min-width: 0; margin: 0; padding: 0; border: 0; }
-#page-data .agent-os__card { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; transition: box-shadow var(--t-fast); }
+#page-data .agent-os__card { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; cursor: pointer; transition: box-shadow var(--t-fast); }
 #page-data .agent-os__card:hover { box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-sm); }
 #page-data .agent-os__card:has(input:checked) { box-shadow: 0 0 0 1.5px var(--accent), var(--shadow-sm); }
 #page-data .agent-os__card:has(input:focus-visible) { box-shadow: 0 0 0 2px var(--sheet), 0 0 0 4px var(--accent); }
 #page-data .agent-os__icon { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: var(--r-md); color: var(--text-2); background: var(--hover); transition: background var(--t-fast), color var(--t-fast); }
 #page-data .agent-os__icon .icon { width: 20px; height: 20px; }
 #page-data .agent-os__card:has(input:checked) .agent-os__icon { color: var(--accent); background: var(--accent-soft-2); }
-#page-data .agent-os__text { display: grid; gap: 2px; flex: 1; min-width: 0; }
+#page-data .agent-os__text { display: grid; gap: 2px; flex: 1; min-width: 0; padding-top: 1px; }
 #page-data .agent-os__text b { font-size: var(--fs-md); font-weight: 600; color: var(--text); }
 #page-data .agent-os__text span { font-size: var(--fs-sm); color: var(--text-3); }
 #page-data .agent-os input {
-  appearance: none; -webkit-appearance: none; flex: none; width: 16px; height: 16px; margin: 0; border-radius: 50%; cursor: pointer;
+  appearance: none; -webkit-appearance: none; flex: none; width: 16px; height: 16px; margin: 12px 0 0; border-radius: 50%; cursor: pointer;
   background: var(--field); box-shadow: inset 0 0 0 1px var(--line-strong); transition: box-shadow var(--t-fast);
 }
 #page-data .agent-os input:checked { background: var(--text-on-accent); box-shadow: inset 0 0 0 5px var(--accent-fill); }
@@ -2244,7 +2245,10 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .agent-addr .hint, #page-data .sl-panel .hint { align-items: flex-start; line-height: 18px; overflow-wrap: anywhere; }
 #page-data .hint .icon { margin-top: 2px; }
 #page-data :is(.hint, .sl-text, .sl-ui-steps) code { padding: 1px 5px; border-radius: var(--r-xs); font-size: var(--fs-sm); color: var(--text); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
-#page-data .agent-step__text b { font-weight: 600; }
+#page-data .sl-ip { font-size: var(--fs-sm); }
+/* the address has an error: the setup below still has the last good one */
+#page-data #syslog-main { transition: opacity var(--t-fast); }
+#page-data #syslog-main.is-stale { opacity: .45; }
 
 /* device tabs: when they don't fit, the strip scrolls sideways and a faded
    arrow marks each end with more past it */
@@ -2275,12 +2279,11 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .sl-live__sub .link-btn { font-size: inherit; }
 #page-data .sl-live__warn { display: flex; align-items: flex-start; gap: 6px; padding-left: 18px; font-size: var(--fs-sm); color: var(--warning); line-height: 18px; }
 #page-data .sl-live__warn .icon { margin-top: 2px; }
+#page-data .sl-live .agent-cmd { margin: 4px 0 0 18px; background: var(--raised); }
 
-/* syslog off: the warning carries the settings to add */
-#page-data .sl-offbox__body { display: grid; gap: 8px; flex: 1; min-width: 0; }
-#page-data .sl-offbox code { font-size: var(--fs-sm); color: var(--text); }
-#page-data .sl-offbox p code { white-space: nowrap; }
-#page-data .sl-offbox .agent-cmd { background: var(--raised); }
+/* syslog off: the warning, then the steps that turn it on */
+#page-data #syslog-main > .alert { margin-bottom: 20px; }
+#page-data #syslog-main > .alert p { margin-top: 2px; }
 
 @media (max-width: 760px) {
   #page-data .agent-os { grid-template-columns: minmax(0, 1fr); }
@@ -2352,6 +2355,12 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-health .hp-sl-stat dt { font-size: var(--fs-sm); color: var(--text-3); }
 #page-health .hp-sl-stat dd { font-size: var(--fs-lg); font-weight: 600; color: var(--text); }
 #page-health .hp-sl-stat[data-tone="warning"] dd { color: var(--warning); }
+#page-health .hp-sl-rejected { overflow-wrap: anywhere; }
+#page-health .hp-sl-rejected > div { min-width: 0; }
+#page-health .hp-sl-rejected p, #page-health .hp-sl-rejected ul { margin: 2px 0 0; color: var(--text-2); }
+#page-health .hp-sl-rejected ul { padding-left: 18px; }
+#page-health .hp-sl-rejected code { font-size: var(--fs-sm); color: var(--text); }
+#page-health .hp-sl-rejected .mono { font-size: var(--fs-sm); color: var(--text); }
 #page-health .hp-syslog .table-wrap, #page-health .hp-sl-empty { border-top: 1px solid var(--line-subtle); }
 #page-health .hp-sl-table th { border-radius: 0; }
 #page-health .hp-sl-table :is(th, td):first-child { padding-left: 16px; }

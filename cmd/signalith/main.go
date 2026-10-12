@@ -185,8 +185,15 @@ func syslogSummary(c *config.Config) string {
 		}
 	}
 	s := strings.Join(parts, ", ")
-	if c.Syslog.PublicPort > 0 && (c.Syslog.UDP != "" || c.Syslog.TCP != "") {
-		s += fmt.Sprintf(" (devices send UDP and TCP to port %d)", c.Syslog.PublicPort)
+	// public_port applies to UDP and TCP, whichever are on.
+	var fwd []string
+	for _, l := range []struct{ name, addr string }{{"UDP", c.Syslog.UDP}, {"TCP", c.Syslog.TCP}} {
+		if l.addr != "" {
+			fwd = append(fwd, l.name)
+		}
+	}
+	if c.Syslog.PublicPort > 0 && len(fwd) > 0 {
+		s += fmt.Sprintf(" (devices send %s to port %d)", strings.Join(fwd, " and "), c.Syslog.PublicPort)
 	}
 	return s
 }
