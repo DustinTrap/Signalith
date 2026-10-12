@@ -18,11 +18,18 @@ func Explain(q *query.Query) []string {
 		src = "events in indexes matching " + q.Index
 	}
 	when := ""
+	// 0 is all time.
+	earliest := q.Earliest
+	if earliest == "0" {
+		earliest = ""
+	}
 	switch {
-	case q.Earliest != "" && q.Latest != "":
-		when = fmt.Sprintf(" between %s and %s", describeTime(q.Earliest), describeTime(q.Latest))
-	case q.Earliest != "":
-		when = " from " + describeTime(q.Earliest) + " until now"
+	case earliest != "" && q.Latest != "":
+		when = fmt.Sprintf(" between %s and %s", describeTime(earliest), describeTime(q.Latest))
+	case earliest != "":
+		when = " from " + describeTime(earliest) + " until now"
+	case q.Latest != "":
+		when = " until " + describeTime(q.Latest)
 	}
 	first := "Take " + src + when
 	if q.Search != nil {

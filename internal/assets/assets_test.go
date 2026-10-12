@@ -143,3 +143,24 @@ func TestCSVDownloadIsSafeInSpreadsheets(t *testing.T) {
 		t.Errorf("SafeCell changed a plain value: %q", got)
 	}
 }
+
+// A damaged list must not keep the server from starting: OpenStore gives
+// empty lists and the error, and picks the file up once it is fixed.
+func TestOpenStoreWithADamagedList(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, AssetsFile), []byte("host,priority\nweb01,urgent\n"), 0o600)
+	s, err := OpenStore(dir)
+	if s == nil || err == nil || !strings.Contains(err.Error(), "urgent") {
+		t.Fatalf("store %v, err %v", s, err)
+	}
+	if len(s.Assets()) != 0 {
+		t.Errorf("%d assets from a damaged file", len(s.Assets()))
+	}
+	if _, err := NewStore(dir); err == nil {
+		t.Error("NewStore accepted the damaged file")
+	}
+	os.WriteFile(filepath.Join(dir, AssetsFile), []byte(assetCSV), 0o600)
+	if changed, err := s.Reload(); !changed || err != nil || len(s.Assets()) != 4 {
+		t.Errorf("after the fix: %v %v, %d assets", changed, err, len(s.Assets()))
+	}
+}

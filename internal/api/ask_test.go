@@ -27,7 +27,7 @@ func TestAskWithoutAI(t *testing.T) {
 	if len(out["steps"].([]any)) != 4 || len(out["explanation"].([]any)) == 0 {
 		t.Errorf("steps %v explanation %v", out["steps"], out["explanation"])
 	}
-	if code, out := do(t, ts, "POST", "/api/ask", `{"question":"x","mode":"ai"}`, true); code != 400 || !strings.Contains(out["error"].(string), "assistant.provider") {
+	if code, out := do(t, ts, "POST", "/api/ask", `{"question":"x","mode":"ai"}`, true); code != 400 || !strings.Contains(out["error"].(string), "Settings page") {
 		t.Errorf("ai without model %d %v", code, out)
 	}
 	if code, _ := do(t, ts, "POST", "/api/ask", `{"question":"  "}`, true); code != 400 {

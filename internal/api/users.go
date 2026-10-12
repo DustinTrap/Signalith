@@ -56,7 +56,17 @@ func meView(p *principal) map[string]any {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, meView(principalOf(r)))
+	p := principalOf(r)
+	me := meView(p)
+	// The Search page starts with the default time range set on the
+	// Settings page, until someone picks another.
+	me["search_default_earliest"] = s.conf().Search.DefaultEarliest
+	// Every page asks this first: an admin who gets here at a new web
+	// address after a restart moved it confirms that it works.
+	if p.Role == users.Admin && !p.MustChangePassword {
+		s.confirmMove(r)
+	}
+	writeJSON(w, http.StatusOK, me)
 }
 
 // handleChangeOwnPassword lets local users change their own password. It
@@ -163,8 +173,8 @@ func (s *Server) viewUser(u users.User, me string) userView {
 }
 
 func (s *Server) builtinView(me string) userView {
-	return userView{Username: s.Config.Auth.AdminUser, Role: users.Admin, Source: users.SourceBuiltin,
-		LastSignIn: s.userStore().BuiltinLastSignIn(), You: strings.EqualFold(s.Config.Auth.AdminUser, me), Actions: []string{}}
+	return userView{Username: s.conf().Auth.AdminUser, Role: users.Admin, Source: users.SourceBuiltin,
+		LastSignIn: s.userStore().BuiltinLastSignIn(), You: strings.EqualFold(s.conf().Auth.AdminUser, me), Actions: []string{}}
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +216,7 @@ func writeUserError(w http.ResponseWriter, err error) {
 // builtinTarget refuses changes to the built-in admin, which lives in
 // signalith.yaml.
 func (s *Server) builtinTarget(w http.ResponseWriter, name string) bool {
-	if strings.EqualFold(name, s.Config.Auth.AdminUser) {
+	if strings.EqualFold(name, s.conf().Auth.AdminUser) {
 		writeError(w, http.StatusConflict, errors.New("the built-in admin is set in signalith.yaml and cannot be changed here; use signalith passwd on the server to change its password"))
 		return true
 	}
@@ -426,7 +436,7 @@ func (s *Server) directoryView() map[string]any {
 		"directory_users": s.userStore().Count()[users.SourceDirectory],
 	}
 	if d.FromConfig() {
-		view["config_file"] = s.Config.Path()
+		view["config_file"] = s.conf().Path()
 	}
 	return view
 }
@@ -646,7 +656,7 @@ func (s *Server) handleTestDirectoryUser(w http.ResponseWriter, r *http.Request)
 	}
 	warning := ""
 	login := users.LoginName(req.Username)
-	if strings.EqualFold(login, s.Config.Auth.AdminUser) {
+	if strings.EqualFold(login, s.conf().Auth.AdminUser) {
 		warning = "This is the built-in admin's name, so sign-in never asks the directory about it."
 	} else if u, ok := s.userStore().Get(login); ok && u.Source == users.SourceLocal {
 		warning = "A local Signalith user has this name, so sign-in uses the local password and never asks the directory."

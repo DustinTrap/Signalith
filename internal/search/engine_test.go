@@ -344,3 +344,23 @@ func TestCIDRValues(t *testing.T) {
 		}
 	}
 }
+
+// "All time" on the Search page sends earliest 0, which no default time
+// range replaces; only a search sent without one gets the default.
+func TestAllTimeIsNotTheDefault(t *testing.T) {
+	e := &Engine{Opt: Options{DefaultEarliest: "-15m"}}
+	for earliest, want := range map[string]bool{"0": false, "": true, "-1h": true} {
+		q, err := query.Parse("*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.Earliest = earliest
+		p, err := e.Compile(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(asJSON(p.Body["query"]), `"@timestamp"`); got != want {
+			t.Errorf("earliest %q: time range %v, want %v: %s", earliest, got, want, asJSON(p.Body["query"]))
+		}
+	}
+}

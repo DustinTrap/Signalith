@@ -187,7 +187,7 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 // returns nil if they may no longer sign in. Directory users are checked
 // with the directory again every few minutes (see recheckDirectoryUser).
 func (s *Server) principalFor(name string) *principal {
-	if strings.EqualFold(name, s.Config.Auth.AdminUser) {
+	if strings.EqualFold(name, s.conf().Auth.AdminUser) {
 		return s.builtinPrincipal()
 	}
 	u, ok := s.userStore().Get(name)
@@ -204,7 +204,7 @@ func (s *Server) principalFor(name string) *principal {
 }
 
 func (s *Server) builtinPrincipal() *principal {
-	return &principal{Username: s.Config.Auth.AdminUser, Role: users.Admin, Source: users.SourceBuiltin}
+	return &principal{Username: s.conf().Auth.AdminUser, Role: users.Admin, Source: users.SourceBuiltin}
 }
 
 func principalFromUser(u users.User) *principal {
@@ -319,8 +319,8 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		return nil, "empty username or password", errWrongCredentials
 	}
 	store := s.userStore()
-	if strings.EqualFold(name, s.Config.Auth.AdminUser) {
-		if !s.Config.CheckPassword(name, password) {
+	if strings.EqualFold(name, s.conf().Auth.AdminUser) {
+		if !s.conf().CheckPassword(name, password) {
 			return nil, "wrong password", errWrongCredentials
 		}
 		store.RecordBuiltinSignIn()
@@ -345,7 +345,7 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 	// domain in front is refused without asking the directory.
 	login := users.LoginName(name)
 	if !strings.EqualFold(login, name) {
-		if u, ok := store.Get(login); strings.EqualFold(login, s.Config.Auth.AdminUser) || (ok && u.Source == users.SourceLocal) {
+		if u, ok := store.Get(login); strings.EqualFold(login, s.conf().Auth.AdminUser) || (ok && u.Source == users.SourceLocal) {
 			users.WasteTime(password)
 			return nil, "a domain in front of a local user's or the built-in admin's name", errWrongCredentials
 		}
@@ -596,8 +596,8 @@ func (c *credCache) put(key [32]byte, user string, ttl time.Duration) {
 func (s *Server) credentialKey(user, pass string) ([32]byte, time.Duration) {
 	version, ttl := "", basicCacheLocal
 	switch {
-	case strings.EqualFold(strings.TrimSpace(user), s.Config.Auth.AdminUser):
-		version = "builtin:" + s.Config.Auth.AdminPasswordHash
+	case strings.EqualFold(strings.TrimSpace(user), s.conf().Auth.AdminUser):
+		version = "builtin:" + s.conf().Auth.AdminPasswordHash
 	case s.userStore().PasswordVersion(user) != "":
 		version = "local:" + s.userStore().PasswordVersion(user)
 	default:

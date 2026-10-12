@@ -204,6 +204,28 @@ var unitMap = map[string]string{
 	"y": "y", "yr": "y", "year": "y", "years": "y",
 }
 
+// ValidEarliest checks a default time range: a time in the past relative
+// to now, such as -24h, -7d@d or @d (today), or empty or 0 for all time.
+func ValidEarliest(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "0" {
+		return nil
+	}
+	m := relTime.FindStringSubmatch(v)
+	ok := m != nil
+	if ok && (m[2] != "" || m[3] != "") {
+		_, unit := unitMap[strings.ToLower(m[3])]
+		ok = unit && m[1] == "-"
+	}
+	if ok && m[4] != "" {
+		_, ok = unitMap[strings.ToLower(m[4])]
+	}
+	if !ok {
+		return fmt.Errorf("%q is not a time in the past; use one like -24h, -7d or @d (today)", v)
+	}
+	return nil
+}
+
 // toDateMath converts SPL-style relative times ("-24h", "-7d@d", "@w",
 // "now") to OpenSearch date math. Absolute times pass through unchanged.
 func toDateMath(v string) string {

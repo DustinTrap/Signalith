@@ -32,7 +32,10 @@
       const u = new URL(next, location.href);
       // The full URL, not the path: "/.//evil.example" resolves to the
       // path "//evil.example", which on its own would leave the site.
-      return u.origin === location.origin ? u.href : home;
+      if (u.origin !== location.origin) return home;
+      // A server redirect cannot see the #page; the browser kept it here.
+      if (!u.hash && location.hash) u.hash = location.hash;
+      return u.href;
     } catch (_) {
       return home;
     }

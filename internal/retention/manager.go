@@ -152,6 +152,36 @@ func (m *Manager) release() {
 	}()
 }
 
+// Job returns the job in progress: "run", "restore", or "" when none.
+func (m *Manager) Job() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != "" {
+		return m.current
+	}
+	for _, r := range m.restores {
+		if r.State == RestoreQueued || r.State == RestoreRunning {
+			return "restore"
+		}
+	}
+	if m.queued != nil {
+		return "run"
+	}
+	return ""
+}
+
+// Wait waits for a run or restore in progress to end, once the context
+// given to Start has ended, and drops a queued run. The server calls it
+// before it restarts, so two managers never work on the cluster at once.
+func (m *Manager) Wait() {
+	m.init()
+	m.mu.Lock()
+	m.queued = nil
+	m.mu.Unlock()
+	m.job.Lock()
+	m.job.Unlock()
+}
+
 func (m *Manager) busy() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
