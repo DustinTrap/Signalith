@@ -263,7 +263,9 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 		if e, ok := l.page[s.Key]; ok {
 			bound = e.SentTo
 		}
-		if now := s.SentTo(c); now != bound {
+		// A secret sent nowhere now (the assistant turned off) is kept
+		// for when the address it was saved with comes back.
+		if now := s.SentTo(c); now != "" && now != bound {
 			_ = c.SetValue(s.Key, "")
 			l.mismatch = append(l.mismatch, secretMismatch{Key: s.Key, Bound: bound, Now: now})
 			l.warnings = append(l.warnings, fmt.Sprintf("%s is not used: it is only sent to %s, and the address is now %s. Enter it again on the Settings page", s.Key, orNone(bound), orNone(now)))

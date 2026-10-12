@@ -549,8 +549,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.conf().Path(),
-		// For the steps that turn syslog on: edit the section or add one.
-		"config_has_syslog": s.conf().HasSection("syslog"), "runtime": s.runtimeInfo()}
+		// For the steps that turn syslog on.
+		"runtime": s.runtimeInfo()}
 	if status, err := s.Backend.Health(ctx); err != nil {
 		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": s.conf().OpenSearch.URL}
 	} else {

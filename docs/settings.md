@@ -9,6 +9,44 @@ whether it applies at once or after a restart, which the page does for you.
 Users, directory sign-in, agent tokens, threat intel feeds and data retention keep
 their own pages; the Settings page links to them.
 
+Only admins see the page (under **Configure**, or type "settings" in the
+**Jump to** box with Ctrl+K). Viewers and analysts do not see it, and its API
+answers them `403`.
+
+## Using the page
+
+The page has one card per section (General, Web server, OpenSearch, Search,
+Syslog, Detections, AI assistant, Threat intel) and **About this server**. On a
+wide screen a list of the sections stays on the left; on a phone the cards
+follow one another.
+
+Each setting has its name, what it does, and a quiet note on where its value
+comes from:
+
+- **From signalith.yaml**, or nothing for a built-in default (an empty box shows
+  what empty means, such as "When empty: 12h").
+- **Changed here by ann, 2h ago**, with **Reset** to take it off the page.
+- A lock and **Set by SIGNALITH_…** when an environment variable sets it. The box
+  cannot be changed; change the variable where Signalith's environment is set.
+
+Changes wait until you save them. A bar at the bottom says how many are not
+saved yet, with **Discard** and **Save changes**; leaving the page or closing the
+tab with unsaved changes asks first. When something cannot be saved, nothing is
+saved: each setting with a problem says what is wrong, and the cursor moves to
+the first one.
+
+Changes that are hard to undo ask before they are saved, and say what will happen:
+a new listen address, OpenSearch address or index prefix, skipping OpenSearch's
+certificate check, turning the detection scheduler off, and allowing threat intel
+feeds from this computer.
+
+The public address may be left empty: it is then worked out from the listen
+address, and the page shows what it works out to.
+
+Turning syslog on is two settings in the **Syslog** card (UDP and TCP address,
+such as `0.0.0.0:514`), then a restart. The **Add data** page's syslog steps send
+you there.
+
 ## Where changes are kept
 
 Changes made on the page are written to `settings.yaml` in the lookups folder
@@ -57,8 +95,12 @@ source time, the most findings per run, and the AI assistant. A new public addre
 waits for the restart when the listen address or the certificate also changes, so
 agents set up meanwhile are not sent to an address nothing answers yet.
 
-The others are saved and wait for a restart. The page lists what is waiting, with
-the value in use and the saved one, and has a **Restart** button. Signalith restarts
+The others are saved and wait for a restart. A banner at the top of the page
+names what is waiting (**What changes** lists the value in use and the saved
+one) and has a **Restart now** button. While Signalith restarts, the banner
+shows its progress; the page reloads when Signalith is back, or moves to the new
+address when the web address changed, and you stay signed in. If the new
+settings cannot work, the banner says why and what to change. Signalith restarts
 itself inside the same process: it stops its components (web handlers, OpenSearch
 client, syslog receiver, detection scheduler, feed downloader and the rest) and
 builds them again from the saved settings. This works the same under Docker,
@@ -108,8 +150,8 @@ or `docker compose restart signalith`). Passwords and keys are never printed.
 The OpenSearch password and the AI assistant's API key are never shown or sent back
 to the browser; the page only says whether one is set.
 
-- Leave the field empty to keep the saved one.
-- **Clear** removes it.
+- A saved one shows as **Saved, hidden**. **Replace** opens a box to type a new
+  one (**Keep saved** closes it again), and **Remove** removes it when you save.
 - A password is only ever sent to the address it was entered for (its scheme, host
   and port). To point Signalith at another OpenSearch or AI provider, enter the
   password or key again, or clear it; the page refuses to save otherwise. A password
@@ -120,13 +162,20 @@ to the browser; the page only says whether one is set.
 and says plainly what is wrong: nothing answers, wrong password, a certificate that
 is not trusted, HTTP on an HTTPS port, or not an OpenSearch at all. **Test** for the
 AI assistant asks the model one fixed question ("failed logins in the last 24
-hours") and shows the query it wrote.
+hours") and shows the query it wrote. A result is marked out of date as soon as
+one of the settings it used changes.
 
 ## Exporting settings
 
-**Export** downloads the page's settings in the format of `signalith.yaml`, for a
-second server or a backup. Passwords and keys are left out, and settings that belong
-to this server only (its addresses and certificate files) are marked.
+**Download settings as YAML**, in **About this server**, downloads the page's
+settings in the format of `signalith.yaml`, for a second server or a backup.
+Passwords and keys are left out, and settings that belong to this server only (its
+addresses and certificate files) are marked. A public address worked out from the
+listen address is left empty, so the other server works out its own.
+
+**About this server** also shows the version, platform and how long Signalith has
+been running, where its files and folders are, and **Reset all**, which takes every
+change off the page.
 
 ## Not on this page
 

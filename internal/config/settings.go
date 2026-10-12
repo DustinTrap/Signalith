@@ -90,6 +90,23 @@ type Setting struct {
 // Live reports whether a change applies as soon as it is saved.
 func (s *Setting) Live() bool { return !s.Restart }
 
+// Noun returns the label for use inside a sentence: "Password" becomes
+// "password", while "API key" and "OpenSearch address" keep their
+// capitals.
+func (s *Setting) Noun() string {
+	first, _, _ := strings.Cut(s.Label, " ")
+	r := []rune(first)
+	for _, c := range r[min(1, len(r)):] {
+		if unicode.IsUpper(c) {
+			return s.Label
+		}
+	}
+	if len(r) == 0 {
+		return s.Label
+	}
+	return string(unicode.ToLower(r[0])) + s.Label[len(string(r[0])):]
+}
+
 // SentTo returns where a secret setting is sent with c, as
 // scheme://host:port, or "" when it is not sent anywhere.
 func (s *Setting) SentTo(c *Config) string {
@@ -103,14 +120,14 @@ func intp(n int) *int { return &n }
 
 // Sections lists the page's sections in order.
 var Sections = []Section{
-	{ID: "general", Title: "General"},
+	{ID: "general", Title: "General", Help: "How people and agents reach this server, and how long a sign-in lasts."},
 	{ID: "web", Title: "Web server", Help: "Where the web page and the API listen."},
 	{ID: "opensearch", Title: "OpenSearch", Help: "Where events, findings and investigations are stored."},
-	{ID: "search", Title: "Search"},
+	{ID: "search", Title: "Search", Help: "What a new search starts with, and when a quiet data source is flagged."},
 	{ID: "syslog", Title: "Syslog", Help: "Receive syslog from firewalls, switches and servers that cannot run an agent."},
-	{ID: "detections", Title: "Detections"},
+	{ID: "detections", Title: "Detections", Help: "Whether detections run by themselves, and how many findings one run can raise."},
 	{ID: "assistant", Title: "AI assistant", Help: "An optional AI model for Ask questions the built-in translator does not fully understand. Only the question and field names are sent, never events."},
-	{ID: "intel", Title: "Threat intel"},
+	{ID: "intel", Title: "Threat intel", Help: "Where threat intel feeds may be downloaded from."},
 }
 
 // Registry lists every setting on the page, in page order.

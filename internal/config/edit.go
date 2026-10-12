@@ -180,7 +180,7 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		if !moved {
 			continue
 		}
-		what := strings.ToLower(s.Label)
+		what := s.Noun()
 		if env := after.layers.env[m.Key]; env != "" {
 			msg := fmt.Sprintf("The %s comes from the %s environment variable and is only sent to %s. To use another address, change it where that variable is set.", what, env, orNone(m.Bound))
 			for _, k := range s.SentWith {

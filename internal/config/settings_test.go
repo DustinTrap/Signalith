@@ -416,13 +416,29 @@ func TestAssistantKeyFollowsProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Fields["assistant.api_key"], "only sent to https://api.anthropic.com:443") {
+	if !strings.Contains(res.Fields["assistant.api_key"], "Enter the API key again") || !strings.Contains(res.Fields["assistant.api_key"], "only sent to https://api.anthropic.com:443") {
 		t.Errorf("fields %v", res.Fields)
+	}
+	// Turning the assistant off sends the key nowhere, so it is kept, and
+	// turning it back on with the same provider uses it again.
+	res, err = CheckEdit(path, Edit{Values: map[string]any{"assistant.provider": ""}})
+	if err != nil || !res.OK() {
+		t.Fatalf("turn off: %v %v %v", err, res.Fields, res.Problems)
+	}
+	if err := WritePageSettings(res.Config.SettingsFile(), res.Page); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(path); err != nil || c.Assistant.APIKey != "sk-from-file" || len(c.SettingsWarnings()) != 0 {
+		t.Fatalf("off: %v %v", err, c.SettingsWarnings())
+	}
+	res, _ = CheckEdit(path, Edit{Reset: []string{"assistant.provider"}})
+	if !res.OK() || res.Config.Assistant.APIKey != "sk-from-file" {
+		t.Errorf("back on: %v %q", res.Fields, res.Config.Assistant.APIKey)
 	}
 	// The environment's key cannot be typed again, so the page says where
 	// to change things.
 	t.Setenv("SIGNALITH_ASSISTANT_API_KEY", "sk-from-env")
-	res, _ = CheckEdit(path, Edit{Values: map[string]any{"assistant.url": "http://evil.example/v1"}})
+	res, _ = CheckEdit(path, Edit{Values: map[string]any{"assistant.provider": "anthropic", "assistant.url": "http://evil.example/v1"}})
 	if !strings.Contains(res.Fields["assistant.url"], "SIGNALITH_ASSISTANT_API_KEY") {
 		t.Errorf("env key fields %v", res.Fields)
 	}
@@ -536,6 +552,14 @@ func TestParseValue(t *testing.T) {
 		got, err := ParseValue(get(c.key), c.raw)
 		if (err != nil) != c.err || (!c.err && !reflect.DeepEqual(got, c.want)) {
 			t.Errorf("%s %v: %v %v", c.key, c.raw, got, err)
+		}
+	}
+}
+
+func TestNoun(t *testing.T) {
+	for label, want := range map[string]string{"API key": "API key", "Password": "password", "TLS address": "TLS address", "Index prefix": "index prefix", "OpenSearch address": "OpenSearch address", "": ""} {
+		if got := (&Setting{Label: label}).Noun(); got != want {
+			t.Errorf("%q: %q, want %q", label, got, want)
 		}
 	}
 }

@@ -260,6 +260,12 @@ func (s *Server) settingsView() (map[string]any, error) {
 				f.Apply = "restart"
 			}
 			f.Value, f.Set = fieldValue(saved.Config, set)
+			// A public address worked out from the listen address shows as
+			// empty, with what it works out to now.
+			if set.Key == "server.public_url" && f.Source.Kind == config.FromDefault {
+				f.EmptyMeans = fmt.Sprintf("%v, worked out from the listen address", f.Value)
+				f.Value = ""
+			}
 			if f.Set != nil && *f.Set {
 				f.SentTo = set.SentTo(saved.Config)
 			}
@@ -270,6 +276,9 @@ func (s *Server) settingsView() (map[string]any, error) {
 				base := saved.Base()
 				rt := &resetTo{Source: base.Source(set.Key).Kind}
 				rt.Value, rt.Set = fieldValue(base, set)
+				if set.Key == "server.public_url" && rt.Source == config.FromDefault {
+					rt.Value = ""
+				}
 				f.ResetTo = rt
 			}
 			out.Fields = append(out.Fields, f)
@@ -609,8 +618,8 @@ func (s *Server) testValues(r *http.Request, keys ...string) (*config.Config, ma
 			continue
 		}
 		bound := set.SentTo(saved.Config)
-		if now := set.SentTo(&test); now != bound {
-			what := strings.ToLower(set.Label)
+		if now := set.SentTo(&test); now != "" && now != bound {
+			what := set.Noun()
 			if env := saved.Source(key).Env; env != "" {
 				for _, k := range set.SentWith {
 					fields[k] = fmt.Sprintf("The %s comes from the %s environment variable and is only sent to %s.", what, env, bound)
@@ -894,8 +903,14 @@ func exportSection(b *strings.Builder, c *config.Config, settings []*config.Sett
 			fmt.Fprintf(b, "  # %s: left out; %s\n", name, hint)
 			continue
 		}
+		val := c.Value(set.Key)
+		// A public address worked out from the listen address is left
+		// empty, so the other server works out its own.
+		if set.Key == "server.public_url" && c.Source(set.Key).Kind == config.FromDefault {
+			val = ""
+		}
 		v := &yaml.Node{}
-		if err := v.Encode(c.Value(set.Key)); err != nil {
+		if err := v.Encode(val); err != nil {
 			return err
 		}
 		if v.Kind == yaml.SequenceNode {

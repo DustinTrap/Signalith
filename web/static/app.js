@@ -152,6 +152,12 @@ function selectPage(name) {
   document.title = title + ' · Signalith';
 }
 
+// leaveGuards can keep the current page open, as the Settings page does
+// while it has unsaved changes: a guard that returns false has stopped
+// the switch, and opens the page itself (with opts.force) if the person
+// still wants to leave.
+const leaveGuards = [];
+
 // showPage opens a page and loads its data. opts.replace keeps the
 // current history entry instead of adding one.
 function showPage(name, opts = {}) {
@@ -161,6 +167,13 @@ function showPage(name, opts = {}) {
     if (me && typeof toast === 'function') toast(`${pageInfo(name).title} is only for ${who}.`, null, { tone: 'danger' });
     name = 'search';
     opts = { ...opts, replace: true };
+  }
+  if (currentPage && name !== currentPage && !opts.force && leaveGuards.some((g) => g(currentPage, name, opts) === false)) {
+    // Back or a link may already have changed the address: put it back.
+    if (location.hash !== '#' + currentPage) {
+      try { history.replaceState(null, '', '#' + currentPage); } catch (_) { /* sandboxed */ }
+    }
+    return;
   }
   const switching = name !== currentPage;
   // A dialog left open on the page being hidden would keep the whole app
@@ -268,6 +281,7 @@ const JUMP_WORDS = {
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
   data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', health: 'status opensearch ingest', help: 'help syntax language commands',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
+  settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
 };
 const jump = $('jump');
 $('jump-key').textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? '\u2318K' : 'Ctrl K';
@@ -2354,7 +2368,7 @@ function syslogRender() {
   if (!st.h) return;
   const sl = st.h.syslog || {};
   $('syslog-body').removeAttribute('aria-busy');
-  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file, st.h.config_has_syslog, st.h.runtime]);
+  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.runtime]);
   if (shape !== st.shape) {
     st.shape = shape;
     st.liveKey = '';
@@ -2483,11 +2497,11 @@ const syslogSh = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'
 const syslogPs = (s) => `'${s.replace(/'/g, '\'\'')}'`;
 
 // syslogOff says syslog is off and how to turn it on, as steps for the
-// system the server runs on (api/health "runtime"): the values to change
-// in the syslog section, or the section to add when the file has none (a
-// second one would not load), what lets a Linux service open port 514, and
-// a check of the file before the restart, so a typo can't keep the server
-// down. The page keeps polling and shows the setup once syslog is on.
+// system the server runs on (api/health "runtime"): what lets a Linux
+// service open port 514 (before the restart that needs it), the values to
+// set on the Settings page, which checks them and restarts Signalith, and
+// the Windows firewall rules. The page keeps polling and shows the setup
+// once syslog is on.
 function syslogOff(h) {
   const rt = h.runtime || {};
   const docker = !!rt.container;
@@ -2496,38 +2510,26 @@ function syslogOff(h) {
   // Ports below 1024 need root or the systemd unit's capability; a
   // service can be given it, anything else gets a high port.
   const port = docker ? 5514 : linux && rt.low_ports === false && !rt.systemd ? 1514 : 514;
-  const path = docker ? 'deploy/docker/signalith.yaml' : h.config_file || '';
-  const file = [path ? el('code', {}, path) : 'the config file', win ? ' (open Notepad as administrator)' : ''];
   const code = (t) => el('code', {}, t);
   const step = (n, title, ...body) => el('li', { class: 'agent-step' }, el('span', { class: 'agent-step__num' }, n),
     el('div', { class: 'agent-step__body' }, el('p', { class: 'agent-step__text' }, ...[].concat(title)), ...body));
   const steps = [];
-  if (h.config_has_syslog) {
-    // Values, not lines to paste: the file's own indentation must stay.
-    steps.push([['In ', ...file, ', under ', code('syslog:'), ', change ', code('udp'), ' and ', code('tcp'), ' to ', code(`0.0.0.0:${port}`),
-      ...(docker ? [', and ', code('public_port'), ' to ', code('514')] : []), '.']]);
-  } else {
-    const lines = [`udp: 0.0.0.0:${port}`, `tcp: 0.0.0.0:${port}`].concat(docker ? ['public_port: 514'] : []);
-    steps.push([['Add these lines to the end of ', ...file, ':'], agentSetupCommand('syslog:\n' + lines.map((l) => '  ' + l).join('\n'), 'Copy settings')]);
+  if (linux && rt.low_ports === false && rt.systemd) {
+    steps.push([['Let the service open port 514, then restart it so it can:'], agentSetupCommand('sudo mkdir -p /etc/systemd/system/signalith.service.d\n' +
+      'printf \'[Service]\\nAmbientCapabilities=CAP_NET_BIND_SERVICE\\n\' | sudo tee /etc/systemd/system/signalith.service.d/syslog.conf\n' +
+      'sudo systemctl daemon-reload && sudo systemctl restart signalith', 'Copy commands')]);
   }
-  if (port === 1514) steps[0].push(el('p', { class: 'hint' }, icon('info'), el('span', {}, 'Ports below 1024 need root on Linux, so this uses 1514. Devices then send to port 1514.')));
-  const exe = rt.exe || 'signalith';
-  if (docker) {
-    steps.push([['In the Signalith folder, where you started it, run:'], agentSetupCommand('docker compose -f deploy/docker/docker-compose.yml up -d --force-recreate signalith')]);
-  } else if (win) {
+  const set = [['On the Settings page, under Syslog, set ', el('b', {}, 'UDP address'), ' and ', el('b', {}, 'TCP address'), ' to ', code(`0.0.0.0:${port}`),
+    ...(docker ? [', and ', el('b', {}, 'Port devices send to'), ' to ', code('514')] : []),
+    '. Save, then choose ', el('b', {}, 'Restart now'), ' at the top of that page.'],
+  el('div', {}, el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: () => openSetting('syslog.udp') },
+    icon('settings'), 'Open syslog settings'))];
+  if (port === 1514) set.push(el('p', { class: 'hint' }, icon('info'), el('span', {}, 'Ports below 1024 need root on Linux, so this uses 1514. Devices then send to port 1514.')));
+  if (docker) set.push(el('p', { class: 'hint' }, icon('info'), el('span', {}, 'In the Docker quick start, port 514 on this machine reaches 5514 inside the container.')));
+  steps.push(set);
+  if (win) {
     const fw = (p) => `New-NetFirewallRule -DisplayName 'Signalith syslog ${p} 514' -Direction Inbound -Protocol ${p} -LocalPort 514 -Action Allow`;
-    steps.push([['In PowerShell as administrator, check the file, restart Signalith and let syslog through Windows Firewall:'],
-      agentSetupCommand(`& ${syslogPs(exe)} validate -c ${syslogPs(path || 'signalith.yaml')}; if ($LASTEXITCODE -eq 0) { Restart-Service Signalith }\n${fw('UDP')}\n${fw('TCP')}`, 'Copy commands')]);
-  } else {
-    const cmd = /^\/(usr\/(local\/)?)?bin\/signalith$/.test(exe) ? 'signalith' : syslogSh(exe);
-    if (rt.low_ports === false && rt.systemd) {
-      steps.push([['Let the service open port 514:'], agentSetupCommand('sudo mkdir -p /etc/systemd/system/signalith.service.d\n' +
-        'printf \'[Service]\\nAmbientCapabilities=CAP_NET_BIND_SERVICE\\n\' | sudo tee /etc/systemd/system/signalith.service.d/syslog.conf\n' +
-        'sudo systemctl daemon-reload', 'Copy commands')]);
-    }
-    const check = `${rt.systemd ? 'sudo ' : ''}${cmd} validate -c ${syslogSh(path || 'signalith.yaml')}`;
-    steps.push(rt.systemd ? [['Check the file and restart Signalith:'], agentSetupCommand(`${check} && sudo systemctl restart signalith`)]
-      : [['Check the file, then restart Signalith:'], agentSetupCommand(check)]);
+    steps.push([['In PowerShell as administrator, let syslog through Windows Firewall:'], agentSetupCommand(`${fw('UDP')}\n${fw('TCP')}`, 'Copy commands')]);
   }
   return [
     el('div', { class: 'alert', 'data-tone': 'warning', role: 'status' }, icon('triangle-alert'), el('div', {},
@@ -3013,8 +3015,8 @@ function healthSyslogRejected(sl) {
   const tcp = (n) => `TCP ${n === 1 ? 'connection' : 'connections'}`;
   // [count, what, more]: one reason reads as a sentence, several as a list with counts.
   const why = [
-    rb.not_allowed && [rb.not_allowed, 'from senders not in syslog.allow', [...(sl.last_not_allowed ? [' (latest ', el('span', { class: 'mono' }, sl.last_not_allowed), ')'] : []),
-      '. To accept one, add it to ', el('code', {}, 'syslog.allow'), ...syslogConfigIn(), ' and restart Signalith.']],
+    rb.not_allowed && [rb.not_allowed, 'from senders that are not allowed', [...(sl.last_not_allowed ? [' (latest ', el('span', { class: 'mono' }, sl.last_not_allowed), ')'] : []),
+      '. To accept one, ', ...syslogAllowWhere()]],
     rb.too_large && [rb.too_large, 'over 64 KB, the most a message may be', ['.']],
     rb.bad_framing && [rb.bad_framing, `from ${tcp(rb.bad_framing)} that did not send syslog`, ['.']],
     conns && [conns, `${tcp(conns)} over the connection limit`, ['.']],
@@ -3025,12 +3027,13 @@ function healthSyslogRejected(sl) {
     el('b', {}, `${healthPageNum(sl.rejected)} ${sl.rejected === 1 ? 'message was' : 'messages were'} turned away since the server started.`),
     one ? el('p', {}, ...line(why[0])) : el('ul', { role: 'list' }, ...why.map((w) => el('li', {}, ...line(w))))));
 }
-// syslogConfigIn is " in <config file>" for the health page, or nothing.
-function syslogConfigIn() {
-  const f = healthPageState.data && healthPageState.data.config_file;
-  return f ? [' in ', el('code', {}, f)] : [];
+// syslogAllowWhere says where a sender is added to the allowed ones: a
+// link to the Settings page for admins, who can open it.
+function syslogAllowWhere() {
+  const where = ' on the Settings page, under Syslog.';
+  if (!can('admin')) return ['ask an admin to add it to ', el('b', {}, 'Allowed senders'), where];
+  return ['add it to ', el('button', { type: 'button', class: 'link-btn', onclick: () => openSetting('syslog.allow') }, 'Allowed senders'), where];
 }
-
 
 // healthPageFoot says when the numbers were last read.
 function healthPageFoot() {

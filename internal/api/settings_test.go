@@ -257,9 +257,13 @@ func TestSaveSettings(t *testing.T) {
 	}
 	// The public address worked out from the listen address waits for the
 	// restart that moves the listener.
-	put(`{"reset":["server.public_url"],"values":{"server.listen":"127.0.0.1:9191"}}`)
+	_, out = put(`{"reset":["server.public_url"],"values":{"server.listen":"127.0.0.1:9191"}}`)
 	if srv.conf().Server.PublicURL != "https://siem.example.com:8443" {
 		t.Errorf("public url changed before the restart: %s", srv.conf().Server.PublicURL)
+	}
+	// The page shows it empty, with what it works out to.
+	if f := field(t, out, "server.public_url"); f["value"] != "" || f["empty_means"] != "http://127.0.0.1:9191, worked out from the listen address" {
+		t.Errorf("worked-out public url %v", f)
 	}
 	// Reset all removes the file.
 	if code, _ := put(`{"reset_all":true}`); code != 200 {
@@ -458,7 +462,8 @@ func TestExportSettings(t *testing.T) {
 		t.Fatalf("%d %s", code, raw)
 	}
 	text := out["yaml"].(string)
-	for _, want := range []string{"syslog:\n", "  udp: 0.0.0.0:514\n", "  allow: [10.0.0.0/8]\n", "  # password: left out; set it here or with SIGNALITH_OPENSEARCH_PASSWORD\n", "  listen: 127.0.0.1:8080  # this server's own address\n"} {
+	for _, want := range []string{"syslog:\n", "  udp: 0.0.0.0:514\n", "  allow: [10.0.0.0/8]\n", "  # password: left out; set it here or with SIGNALITH_OPENSEARCH_PASSWORD\n", "  listen: 127.0.0.1:8080  # this server's own address\n",
+		"  public_url: \"\"  # this server's own address\n"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("export lacks %q:\n%s", want, text)
 		}

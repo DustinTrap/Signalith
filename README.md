@@ -89,7 +89,9 @@ publishes port 514 too.
 Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
 and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
 address filled in. Send the test message it shows and watch it arrive on the same page.
-When syslog is off, the page gives the steps to turn it on for this system.
+When syslog is off, the page gives the steps to turn it on for this system: the
+UDP and TCP address on the **Settings** page, then **Restart now**, plus the port
+permission for a Linux service or the Windows Firewall rules.
 By hand, forwarding a Linux server's logs with rsyslog is one line in
 `/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
 
@@ -108,7 +110,8 @@ unless it is more than a week old (or older than `retention.days`) or more than 
 ahead; then it is the time Signalith received the message, and the device's own time is
 kept in `device_time`.
 
-To accept syslog only from known senders, list them under `syslog.allow`:
+To accept syslog only from known senders, list them in **Allowed senders** on the
+Settings page, or under `syslog.allow`:
 
 ```yaml
 syslog:
