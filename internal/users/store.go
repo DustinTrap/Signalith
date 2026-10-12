@@ -44,7 +44,12 @@ type User struct {
 	// after signing in, and refuses everything else until they do.
 	MustChangePassword bool `json:"must_change_password,omitempty"`
 	// DN is a directory user's entry, as found at their last sign-in.
-	DN         string     `json:"dn,omitempty"`
+	DN string `json:"dn,omitempty"`
+	// Refused says why a directory user has no access since the directory
+	// was last asked about them: not found there (deleted, or disabled in
+	// Active Directory), disabled or expired there, or in no mapped group.
+	// It clears when they next sign in successfully.
+	Refused    string     `json:"refused,omitempty"`
 	Created    time.Time  `json:"created"`
 	Updated    time.Time  `json:"updated"`
 	LastSignIn *time.Time `json:"last_sign_in,omitempty"`
@@ -613,8 +618,8 @@ func (s *Store) SeeDirectoryUser(d DirectoryUser) (User, error) {
 	if ok {
 		u = *cur
 	}
-	changed := !ok || u.Name != d.Name || u.Email != d.Email || u.Role != d.Role || u.DN != d.DN
-	u.Name, u.Email, u.Role, u.DN = d.Name, d.Email, d.Role, d.DN
+	changed := !ok || u.Name != d.Name || u.Email != d.Email || u.Role != d.Role || u.DN != d.DN || u.Refused != ""
+	u.Name, u.Email, u.Role, u.DN, u.Refused = d.Name, d.Email, d.Role, d.DN, ""
 	if changed {
 		u.Updated = now
 	}
@@ -632,6 +637,58 @@ func (s *Store) SeeDirectoryUser(d DirectoryUser) (User, error) {
 		return User{}, err
 	}
 	return u, nil
+}
+
+// RefreshDirectoryUser updates a directory user from a new look at the
+// directory (without their password): name, email, DN and role, and it
+// clears Refused. It reports whether anything changed.
+func (s *Store) RefreshDirectoryUser(name string, d DirectoryUser) (User, bool, error) {
+	name = NormalizeUsername(name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.users[name]
+	if !ok || cur.Source != SourceDirectory {
+		return User{}, false, ErrNotFound
+	}
+	u := *cur
+	u.Name, u.Email, u.Role, u.DN, u.Refused = d.Name, d.Email, d.Role, d.DN, ""
+	if u == *cur {
+		return u, false, nil
+	}
+	u.Updated = s.now()
+	s.users[name] = &u
+	if err := s.saveLocked(); err != nil {
+		s.users[name] = cur
+		return User{}, false, err
+	}
+	return u, true, nil
+}
+
+// RefuseDirectoryUser records that the directory no longer lets a
+// directory user in, and why. It reports whether that is news.
+func (s *Store) RefuseDirectoryUser(name, reason string) (User, bool, error) {
+	name = NormalizeUsername(name)
+	if reason == "" {
+		reason = "refused by the directory"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.users[name]
+	if !ok || cur.Source != SourceDirectory {
+		return User{}, false, ErrNotFound
+	}
+	if cur.Refused == reason {
+		return *cur, false, nil
+	}
+	u := *cur
+	u.Refused = reason
+	u.Updated = s.now()
+	s.users[name] = &u
+	if err := s.saveLocked(); err != nil {
+		s.users[name] = cur
+		return User{}, false, err
+	}
+	return u, true, nil
 }
 
 // Count returns how many users come from each source.

@@ -213,6 +213,7 @@
 
   function statusOf(u) {
     if (u.disabled) return ['off', 'Disabled', 'Cannot sign in until an admin enables them.'];
+    if (u.refused) return ['off', 'No access', `Refused by the directory: ${u.refused}. Access comes back if a later sign-in is accepted.`];
     if (u.must_change_password) return ['temp', 'Temporary password', 'Must choose a new password at their next sign-in.'];
     return ['ok', 'Active', ''];
   }
@@ -229,7 +230,9 @@
         Object.assign(caseAvatar(u.username), { className: 'avatar u-avatar' + (u.disabled ? ' avatar--none' : '') }),
         el('div', { class: 'u-user__text' },
           el('div', nameAttrs, el('span', {}, displayName(u)), u.you ? el('span', { class: 'badge badge--outline' }, 'You') : null),
-          sub.length ? el('div', { class: 'u-user__sub' }, sub.join(' · ')) : null))),
+          el('div', { class: 'u-user__sub' + (sub.length ? '' : ' u-user__sub--src') }, sub.join(' · '),
+            // The Source column is hidden on phones; say it here instead.
+            el('span', { class: 'u-user__src' }, (sub.length ? ' · ' : '') + (SOURCE_LABEL[u.source] || u.source)))))),
       el('td', { 'data-col': 'role' }, roleBadge),
       el('td', { 'data-col': 'source' }, el('span', { class: 'u-source' }, SOURCE_LABEL[u.source] || u.source)),
       el('td', { 'data-col': 'status' }, el('span', { class: 'u-status', 'data-state': state, title: stateTitle }, stateLabel)),
@@ -254,8 +257,18 @@
     return m;
   }
 
+  // focusRow puts keyboard focus back on a user's actions button after a
+  // dialog closes or the list is redrawn, or on Add user if the row is gone.
+  function focusRow(name) {
+    const row = name ? document.querySelector(`#u-list tr[data-user="${CSS.escape(name)}"]`) : null;
+    const target = (row && row.querySelector('[data-col=act] summary')) || $('u-add');
+    if (target && !target.closest('.hidden')) target.focus();
+  }
+
   function renderUsers() {
     const { users, directory } = U.data;
+    // Redrawing replaces the rows, so note which row had focus.
+    const had = document.activeElement && $('u-list').contains(document.activeElement) ? document.activeElement.closest('tr[data-user]') : null;
     const term = $('u-find').value.trim().toLowerCase();
     $('u-list').setAttribute('aria-busy', 'false');
     $('u-count').textContent = String(users.length);
@@ -268,6 +281,7 @@
     } else {
       fill($('u-list'), usersTable(shown.map(userRow)));
     }
+    if (had) focusRow(had.dataset.user);
     const local = users.filter((u) => u.source === 'local').length;
     const dirUsers = users.filter((u) => u.source === 'directory').length;
     const foot = $('u-foot');
@@ -292,6 +306,8 @@
   function openAddUser() {
     const d = userDialog();
     const close = () => d.close();
+    let added = '';
+    d.onclose = () => focusRow(added);
     const err = formAlert();
     const username = input('u-f-username', { autocapitalize: 'none', required: '' });
     const name = input('u-f-name', { spellcheck: 'true' });
@@ -329,8 +345,9 @@
         }
         return;
       }
-      loadUsers({ quiet: true });
       const who = res.user.username;
+      added = who;
+      loadUsers({ quiet: true }).then(() => { if (!d.open) focusRow(who); });
       if (res.temporary_password) {
         showSecret(d, { title: `${who} is added`, who, password: res.temporary_password });
       } else {
@@ -358,6 +375,7 @@
     const fields = { name, email, role };
     [name, email].forEach((n) => n.addEventListener('input', () => clearField(n)));
     const submit = el('button', { type: 'submit', class: 'btn btn--primary' }, 'Save');
+    d.onclose = () => focusRow(u.username);
     const form = el('form', { novalidate: '' },
       modalHead('u-dialog', 'Edit ' + displayName(u), `Signs in as ${u.username}.`, close),
       el('div', { class: 'modal__body' }, err,
@@ -384,7 +402,7 @@
         return;
       }
       close();
-      loadUsers({ quiet: true });
+      loadUsers({ quiet: true }).then(() => focusRow(u.username));
       if (body.role) toast(`${displayName(res.user)} is now ${roleLabel(res.user.role)}. It applies right away.`, null, { title: 'Role changed' });
       else toast('Saved.');
       if (u.you) meReady.then(() => api('api/me').then(showUser).catch(() => {}));
@@ -400,6 +418,7 @@
     const err = formAlert();
     const pw = passwordChoice('u-r', false);
     const submit = el('button', { type: 'submit', class: 'btn btn--primary' }, 'Reset password');
+    d.onclose = () => focusRow(u.username);
     const form = el('form', { novalidate: '' },
       modalHead('u-dialog', `Reset ${u.username}’s password`, 'They are signed out everywhere and must choose a new password at their next sign-in.', close),
       el('div', { class: 'modal__body' }, err, pw.node),
@@ -419,7 +438,7 @@
         else showAlert(err, 'The password was not changed.', sentence(e.message));
         return;
       }
-      loadUsers({ quiet: true });
+      loadUsers({ quiet: true }).then(() => { if (!d.open) focusRow(u.username); });
       if (res.temporary_password) {
         showSecret(d, { title: `New password for ${u.username}`, who: u.username, password: res.temporary_password });
       } else {
@@ -442,16 +461,18 @@
           : 'They are signed out now and cannot sign in until you enable them.',
         confirm: 'Disable',
       });
-      if (!ok) return;
+      if (!ok) { focusRow(u.username); return; }
     }
     try {
       await api('api/users/' + encodeURIComponent(u.username), { disabled: off }, 'PUT');
     } catch (e) {
       if (e.code !== 'forbidden') toastError(off ? 'Couldn’t disable ' + u.username : 'Couldn’t enable ' + u.username, e);
+      focusRow(u.username);
       return;
     }
     toast(off ? `${u.username} is signed out and cannot sign in.` : `${u.username} can sign in again.`, null, { title: off ? 'User disabled' : 'User enabled' });
-    loadUsers({ quiet: true });
+    focusRow(u.username);
+    loadUsers({ quiet: true }).then(() => focusRow(u.username));
   }
 
   async function deleteUser(u) {
@@ -462,15 +483,16 @@
         : 'They are signed out and can no longer sign in. Findings and notes keep their name. This cannot be undone.',
       confirm: 'Delete user',
     });
-    if (!ok) return;
+    if (!ok) { focusRow(u.username); return; }
     try {
       await api('api/users/' + encodeURIComponent(u.username), undefined, 'DELETE');
     } catch (e) {
       if (e.code !== 'forbidden') toastError('Couldn’t delete ' + u.username, e);
+      focusRow(u.username);
       return;
     }
     toast(`${u.username} was deleted.`);
-    loadUsers({ quiet: true });
+    loadUsers({ quiet: true }).then(() => focusRow(''));
   }
 
   // ---------- tabs ----------
@@ -502,18 +524,27 @@
   // D.view is the last api/auth/directory reply; D.form the settings being
   // edited (with bind_password, empty to keep the saved one); D.base the
   // form as saved, to tell when there are unsaved changes.
-  const D = { view: null, form: null, base: '', setup: false, seq: 0, inputs: {}, conn: null, user: null, problems: null };
+  const D = { view: null, form: null, base: '', setup: false, seq: 0, inputs: {}, conn: null, user: null, problems: null, connSnap: '', userSnap: '' };
   const PRESET_KEYS = ['type', 'user_filter', 'username_attribute', 'name_attribute', 'email_attribute', 'group_search', 'nested_groups', 'group_filter'];
+  // Examples shown in empty fields while setting up; never in the
+  // read-only view, where an empty field shows "Not set".
   const EXAMPLE = {
     ad: {
-      url: 'ldaps://dc1.corp.example.com', failover: 'ldaps://dc2.corp.example.com', bind: 'CN=svc-signalith,OU=Service Accounts,DC=corp,DC=example,DC=com',
-      base: 'DC=corp,DC=example,DC=com', group: 'CN=SOC Analysts,OU=Groups,DC=corp,DC=example,DC=com', groupBase: 'OU=Groups,DC=corp,DC=example,DC=com',
+      url: 'e.g. ldaps://dc1.example.com', failover: 'e.g. ldaps://dc2.example.com', bind: 'e.g. CN=svc-signalith,OU=Service Accounts,DC=…',
+      base: 'e.g. DC=example,DC=com', group: 'e.g. CN=SOC Analysts,OU=Groups,DC=…', groupBase: 'e.g. OU=Groups,DC=example,DC=com',
     },
     openldap: {
-      url: 'ldaps://ldap.example.com', failover: 'ldaps://ldap2.example.com', bind: 'cn=signalith,ou=services,dc=example,dc=com',
-      base: 'ou=people,dc=example,dc=com', group: 'cn=soc-analysts,ou=groups,dc=example,dc=com', groupBase: 'ou=groups,dc=example,dc=com',
+      url: 'e.g. ldaps://ldap.example.com', failover: 'e.g. ldaps://ldap2.example.com', bind: 'e.g. cn=signalith,ou=services,dc=…',
+      base: 'e.g. ou=people,dc=example,dc=com', group: 'e.g. cn=soc,ou=groups,dc=…', groupBase: 'e.g. ou=groups,dc=example,dc=com',
     },
   };
+  // The saved bind password is only used with the saved servers, bind DN
+  // and TLS settings (the server enforces this too).
+  const CONN_KEYS = ['url', 'failover_url', 'bind_dn', 'start_tls', 'tls_skip_verify', 'ca_cert'];
+  // Test connection reads only these settings, so only they make its
+  // result out of date.
+  const CONN_TEST_KEYS = CONN_KEYS.concat(['bind_password', 'user_base_dn', 'group_base_dn', 'connect_timeout_seconds', 'timeout_seconds']);
+  const connSnapshot = () => JSON.stringify(CONN_TEST_KEYS.map((k) => D.form[k]));
   const ROLE_GROUP_HINT = {
     admin: 'Everything, including detections, intel feeds, data collection and users.',
     analyst: 'Triage, investigations and dashboards.',
@@ -528,6 +559,12 @@
 
   const dirty = () => !!D.form && JSON.stringify(D.form) !== D.base;
   const readOnly = () => !!(D.view && D.view.from_config);
+  // connChanged reports whether the form talks to other servers, as
+  // another account or with other TLS settings than the saved ones; then
+  // the saved bind password must be typed again.
+  const connValue = (k, v) => (k === 'start_tls' || k === 'tls_skip_verify' ? !!v : k === 'bind_dn' ? normDN(v) : String(v || '').trim().toLowerCase());
+  const connChanged = () => !!D.view && CONN_KEYS.some((k) => connValue(k, D.form[k]) !== connValue(k, D.view.settings[k]));
+  const reuseSaved = () => !readOnly() && D.view.settings.bind_password_set && !connChanged();
 
   function formFromView(v) {
     const s = Object.assign({}, v.settings);
@@ -588,6 +625,7 @@
     fill(box, el('div', { class: 'u-dir' },
       el('div', { class: 'u-dir__main' }, ...directoryForm()), side));
     keepSideInView(side);
+    syncBindPassword();
     syncDirty();
     window.scrollTo(0, scrollY);
     if (focusId && $(focusId)) $(focusId).focus({ preventScroll: true });
@@ -622,7 +660,28 @@
   }
   function changed(key) {
     clearField(D.inputs[key]);
+    if (CONN_KEYS.includes(key)) syncBindPassword();
     syncDirty();
+  }
+
+  // syncBindPassword says whether the saved bind password still applies.
+  function syncBindPassword() {
+    const pw = D.inputs.bind_password;
+    if (!pw) return;
+    const hintEl = $('ud-bind_password-hint');
+    const set = D.view.settings.bind_password_set;
+    if (readOnly()) {
+      pw.placeholder = set ? 'Saved' : 'Not set';
+      return;
+    }
+    const keep = reuseSaved();
+    pw.placeholder = keep ? 'Saved. Type a new one to replace it.' : '';
+    if (hintEl) {
+      hintEl.textContent = keep ? 'Leave empty to keep the saved password.'
+        : set && D.form.bind_dn ? 'Enter it again. The saved password is only sent to the saved server, with the saved bind DN and TLS settings.' : '';
+      hintEl.classList.toggle('hidden', !hintEl.textContent);
+      hintEl.classList.toggle('u-hint-warn', !keep && !!hintEl.textContent);
+    }
   }
   const text = (id, attrs) => input('ud-' + id, Object.assign({ class: 'input mono' }, attrs || {}));
   const area = (id, rows, attrs) => el('textarea', Object.assign({ id: 'ud-' + id, class: 'textarea mono', rows: String(rows), spellcheck: 'false' }, attrs || {}));
@@ -668,29 +727,32 @@
       el('div', { class: 'u-dir-head__type' }, typeSeg,
         ro ? null : el('p', { class: 'u-dir-head__note' }, 'Fills in the usual filters and attributes.')));
 
-    const url = bind('url', text('url', { placeholder: ex.url, inputmode: 'url' }));
-    const failover = bind('failover_url', text('failover_url', { placeholder: ex.failover, inputmode: 'url' }));
+    // Read-only: no examples or editing hints, just the values.
+    const ph = (example) => (ro ? 'Not set' : example);
+    const hint = (h) => (ro ? null : h);
+    const url = bind('url', text('url', { placeholder: ph(ex.url), inputmode: 'url' }));
+    const failover = bind('failover_url', text('failover_url', { placeholder: ph(ex.failover), inputmode: 'url' }));
     const startTLS = bind('start_tls', el('input', { type: 'checkbox', id: 'ud-start_tls' }));
-    const ca = bind('ca_cert', area('ca_cert', 3, { placeholder: '-----BEGIN CERTIFICATE-----' }));
-    const bindDN = bind('bind_dn', text('bind_dn', { placeholder: ex.bind }));
-    const bindPw = bind('bind_password', input('ud-bind_password', { type: 'password', autocomplete: 'new-password', placeholder: v.settings.bind_password_set ? 'Saved. Type a new one to replace it.' : '' }));
-    const base = bind('user_base_dn', text('user_base_dn', { placeholder: ex.base }));
-    const groupBase = bind('group_base_dn', text('group_base_dn', { placeholder: ex.groupBase }));
+    const ca = bind('ca_cert', area('ca_cert', 3, { placeholder: ph('-----BEGIN CERTIFICATE-----') }));
+    const bindDN = bind('bind_dn', text('bind_dn', { placeholder: ph(ex.bind) }));
+    const bindPw = bind('bind_password', input('ud-bind_password', { type: 'password', autocomplete: 'new-password' }));
+    const base = bind('user_base_dn', text('user_base_dn', { placeholder: ph(ex.base) }));
+    const groupBase = bind('group_base_dn', text('group_base_dn', { placeholder: ph(ex.groupBase) }));
 
     const server = section('Server', 'Where your directory is.',
-      field('Server address', url, 'ldaps:// uses port 636. For ldap:// on port 389, also turn on StartTLS.'),
-      field('Second server', failover, 'Used only when the first cannot be reached.', { optional: true }),
+      field('Server address', url, hint('ldaps:// uses port 636. For ldap:// on port 389, also turn on StartTLS.')),
+      field('Second server', failover, hint('Used only when the first cannot be reached.'), { optional: !ro }),
       el('div', { class: 'field' }, el('label', { class: 'check' }, startTLS, 'Use StartTLS'),
         el('div', { class: 'hint u-indent', id: 'ud-start_tls-hint' }, 'Encrypts an ldap:// connection before the password is sent.')),
-      field('CA certificate', ca, 'Paste it (PEM) if your own CA signed the directory’s certificate.', { optional: true }));
+      field('CA certificate', ca, hint('Paste it (PEM) if your own CA signed the directory’s certificate.'), { optional: !ro }));
     startTLS.setAttribute('aria-describedby', 'ud-start_tls-hint');
 
     const account = section('Service account', 'Searches for users when they sign in. Read access is enough.',
-      field('Bind DN', bindDN, 'Leave the bind DN and password empty to search anonymously.'),
-      field('Password', bindPw, v.settings.bind_password_set ? 'Leave empty to keep the saved password.' : null));
+      field('Bind DN', bindDN, hint('Leave the bind DN and password empty to search anonymously.')),
+      field('Password', bindPw, ro ? null : ' '));
 
     const usersSec = section('Users', 'Where to look for people.',
-      field('User base DN', base, 'Signalith searches here and everything under it.'));
+      field('User base DN', base, hint('Signalith searches here and everything under it.')));
 
     const noGroup = el('fieldset', { class: 'u-radio-row', id: 'ud-default_role' }, el('legend', { class: 'label' }, 'People in none of these groups'));
     for (const [val, label] of [['none', 'Can’t sign in'], ['viewer', 'Sign in as Viewer']]) {
@@ -701,11 +763,12 @@
       noGroup.append(el('label', { class: 'check' }, r, label));
     }
     D.inputs.default_role = noGroup;
+    const searchesGroups = f.group_search === 'search' || !!f.nested_groups;
     const groupsSec = section('Groups and roles', 'People get the highest role of any group they are in, nested groups included.',
-      f.group_search === 'search' ? field('Group base DN', groupBase, 'Where to look for groups. Empty uses the user base DN.', { optional: true }) : null,
+      searchesGroups ? field('Group base DN', groupBase, hint('Where to look for groups. Empty searches the whole domain.'), { optional: !ro }) : null,
       ...ROLE_ORDER.map((r) => groupBlock(r, ex.group)),
       noGroup);
-    if (f.group_search === 'search' || f.type !== 'ad') groupsSec.querySelector('.u-sec__desc').textContent = 'People get the highest role of any group they are in.';
+    if (f.group_search === 'search' || !f.nested_groups) groupsSec.querySelector('.u-sec__desc').textContent = 'People get the highest role of any group they are in.';
 
     out.push(el('div', { class: 'card u-dir-form' }, head, server, account, usersSec, groupsSec, moreSettings(), ro ? null : saveBar()));
     return out;
@@ -721,7 +784,7 @@
       changed(key);
     };
     const addRow = (value, focus) => {
-      const inp = el('input', { class: 'input mono', type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: example, 'aria-label': `${ROLE_LABEL[role]} group DN` });
+      const inp = el('input', { class: 'input mono', type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: ro ? '' : example, 'aria-label': `${ROLE_LABEL[role]} group DN` });
       inp.value = value;
       if (ro) inp.disabled = true;
       inp.addEventListener('input', sync);
@@ -741,10 +804,12 @@
     const add = el('button', { type: 'button', class: 'btn btn--ghost btn--sm u-groups__add' }, icon('plus'), 'Add group');
     add.addEventListener('click', () => { addRow('', true); sync(); });
     (D.form[key] || []).forEach((g) => addRow(g));
-    block.append(
+    const none = !(D.form[key] || []).length;
+    block.append(...[
       el('div', { class: 'u-groups__head' }, el('span', { class: 'badge u-role', 'data-role': role }, ROLE_LABEL[role]), el('span', { class: 'u-groups__desc' }, ROLE_GROUP_HINT[role])),
       list,
-      ro ? (D.form[key] || []).length ? null : el('p', { class: 'u-groups__none' }, 'No groups.') : add);
+      ro ? (none ? el('p', { class: 'u-groups__none' }, 'No groups.') : null) : add,
+    ].filter(Boolean));
     D.inputs[key] = block;
     return block;
   }
@@ -760,6 +825,7 @@
       el('option', { value: 'search' }, 'A search for groups that list the user')));
     how.addEventListener('change', () => renderDirectory());
     const nested = bind('nested_groups', el('input', { type: 'checkbox', id: 'ud-nested_groups' }));
+    nested.addEventListener('change', () => renderDirectory());
     const gfilter = bind('group_filter', area('group_filter', 3));
     const connect = bind('connect_timeout_seconds', input('ud-connect_timeout_seconds', { type: 'number', min: '1', max: '120', inputmode: 'numeric' }));
     const timeout = bind('timeout_seconds', input('ud-timeout_seconds', { type: 'number', min: '1', max: '300', inputmode: 'numeric' }));
@@ -795,6 +861,9 @@
       D.base = JSON.stringify(D.form);
       D.problems = null;
       D.setup = false;
+      // Results of tests on the discarded settings no longer apply.
+      D.conn = D.user = null;
+      D.connSnap = D.userSnap = '';
       renderDirectory();
       toast('Changes discarded.');
     });
@@ -813,8 +882,16 @@
     if (discard) discard.classList.toggle('hidden', !d);
     const status = $('ud-status');
     if (status) {
-      status.textContent = d ? 'Unsaved changes' : 'Saved';
+      status.textContent = d ? 'Unsaved changes' : D.view.saved ? 'Saved' : 'Not saved yet';
       status.closest('.u-savebar').classList.toggle('is-dirty', d || !!D.problems);
+    }
+    syncStale();
+  }
+  // A test result says when the settings changed since the test.
+  function syncStale() {
+    for (const [id, snap, now] of [['ud-test-out', D.connSnap, connSnapshot()], ['ud-test-user-out', D.userSnap, JSON.stringify(D.form)]]) {
+      const out = $(id);
+      if (out) out.classList.toggle('is-stale', !!snap && snap !== now && !readOnly());
     }
   }
   window.addEventListener('beforeunload', (ev) => { if (dirty() && !readOnly()) { ev.preventDefault(); ev.returnValue = ''; } });
@@ -868,7 +945,10 @@
     D.form = formFromView(v);
     D.base = JSON.stringify(D.form);
     $('u-dir-on').classList.toggle('hidden', !v.settings.enabled);
+    const remap = D.user && D.user.mapped && D.user.user ? D.user.user.username : '';
     renderDirectory();
+    // A result read with an unsaved mapping is checked again, now saved.
+    if (remap) lookupUser(remap, '');
     const on = !!v.settings.enabled;
     toast(on === wasOn ? 'Directory settings saved.' : on ? 'People in mapped groups can now sign in with their directory account.' : 'Directory users can no longer sign in.',
       null, { title: on === wasOn ? 'Saved' : on ? 'Directory sign-in is on' : 'Directory sign-in is off' });
@@ -883,16 +963,21 @@
     connBtn.addEventListener('click', async () => {
       const restore = busy(connBtn, 'Testing…');
       fill(connOut, el('p', { class: 'u-test__busy' }, 'Connecting…'));
+      const snap = connSnapshot();
       try {
         D.conn = await api('api/auth/directory/test', ro ? {} : { settings: D.form });
       } catch (e) {
         D.conn = e.problems ? { ok: false, problems: e.problems, fields: e.fields } : { ok: false, message: sentence(e.message), servers: [] };
       }
+      D.connSnap = snap;
       restore();
       fill(connOut, connResult(D.conn));
+      syncStale();
     });
 
-    const who = input('ud-test-user', { autocapitalize: 'none', placeholder: 'jane or jane@corp.example.com' });
+    const who = input('ud-test-user', { autocapitalize: 'none', placeholder: 'jane or jane@example.com' });
+    who.value = D.testWho || '';
+    who.addEventListener('input', () => { D.testWho = who.value; });
     const pw = input('ud-test-password', { type: 'password', autocomplete: 'new-password', placeholder: 'Optional' });
     const userBtn = el('button', { type: 'submit', class: 'btn btn--secondary' }, icon('search'), 'Look up');
     const userOut = el('div', { class: 'u-test__out', id: 'ud-test-user-out', 'aria-live': 'polite' }, D.user ? userResult(D.user) : null);
@@ -905,17 +990,10 @@
       ev.preventDefault();
       if (!who.value.trim()) { markField(who, 'enter a username to look up'); who.focus(); return; }
       const restore = busy(userBtn, 'Looking up…');
-      fill(userOut, el('p', { class: 'u-test__busy' }, 'Looking up ' + who.value.trim() + '…'));
-      const body = { username: who.value.trim(), password: pw.value };
-      if (!ro) body.settings = D.form;
-      try {
-        D.user = await api('api/auth/directory/test-user', body);
-      } catch (e) {
-        D.user = e.problems ? { ok: false, problems: e.problems, fields: e.fields } : { ok: false, message: sentence(e.message) };
-      }
+      const password = pw.value;
       pw.value = '';
+      await lookupUser(who.value.trim(), password);
       restore();
-      fill(userOut, userResult(D.user));
     });
 
     return el('div', { class: 'card u-test' },
@@ -927,6 +1005,26 @@
           el('p', { class: 'u-test__lead' }, 'Find someone as sign-in would, and see the role they would get.'), form, userOut)));
   }
 
+  // lookupUser runs Test a user and shows the result.
+  async function lookupUser(username, password) {
+    const out = () => $('ud-test-user-out');
+    if (out()) fill(out(), el('p', { class: 'u-test__busy' }, 'Looking up ' + username + '…'));
+    const body = { username, password: password || '' };
+    if (!readOnly()) body.settings = D.form;
+    const snap = JSON.stringify(D.form);
+    try {
+      D.user = await api('api/auth/directory/test-user', body);
+    } catch (e) {
+      D.user = e.problems ? { ok: false, problems: e.problems, fields: e.fields } : { ok: false, message: sentence(e.message) };
+    }
+    D.userSnap = snap;
+    if (out()) fill(out(), userResult(D.user));
+    syncStale();
+  }
+
+  // staleNote shows (through CSS) when the settings changed since a test.
+  const staleNote = () => el('p', { class: 'u-stale' }, icon('info'), 'The settings changed since this test. Test again to check them.');
+
   // settingLink goes to the setting a failed test points at.
   const settingLink = (key) => (key && D.inputs[key] && !readOnly()
     ? el('button', { type: 'button', class: 'link-btn u-goto', onclick: () => focusSetting(key) }, 'Show the setting', icon('arrow-right', 'icon--xs')) : null);
@@ -934,8 +1032,8 @@
 
   function problemsResult(r) {
     const first = Object.keys(D.inputs).find((k) => k in (r.fields || {}));
-    return dxAlert('danger', 'Fill in these settings first.', null, el('div', {},
-      el('ul', { class: 'u-problems' }, ...r.problems.map((p) => el('li', {}, sentence(p)))), withLink(settingLink(first))));
+    return el('div', { class: 'u-result' }, staleNote(), dxAlert('danger', 'Fill in these settings first.', null, el('div', {},
+      el('ul', { class: 'u-problems' }, ...r.problems.map((p) => el('li', {}, sentence(p)))), withLink(settingLink(first)))));
   }
 
   function connResult(r) {
@@ -950,7 +1048,7 @@
         !s.ok ? withLink(showSettingLink(s.code)) : null,
         s.detail ? el('details', { class: 'u-detail' }, el('summary', {}, 'Technical detail'), el('code', {}, s.detail)) : null));
     }
-    return el('div', { class: 'u-result' }, ...kids);
+    return el('div', { class: 'u-result' }, staleNote(), ...kids);
   }
 
   // Groups are compared the way the server does, roughly: case and the
@@ -959,6 +1057,11 @@
   function mappedRole(dn) {
     for (const r of ROLE_ORDER) if ((D.form[r + '_groups'] || []).some((g) => normDN(g) === normDN(dn))) return r;
     return '';
+  }
+  // formRole is the role groups give with the mappings in the form.
+  function formRole(groups) {
+    for (const r of ROLE_ORDER) if (groups.some((g) => mappedRole(g) === r)) return r;
+    return D.form.default_role === 'viewer' ? 'viewer' : '';
   }
   const cnOf = (dn) => { const m = /^\s*[a-z]+=((?:\\.|[^,])+)/i.exec(dn || ''); return m ? m[1].replace(/\\(.)/g, '$1') : dn; };
 
@@ -971,23 +1074,31 @@
 
   function userResult(r) {
     if (r.problems) return problemsResult(r);
+    const u = r.user;
+    // After "Add to <role>" here, the result shows what the unsaved
+    // mapping gives rather than what the test found.
+    const pending = r.mapped && u && (r.ok || r.code === 'no_role') ? formRole(u.groups || []) : null;
     const tone = r.ok ? 'success' : r.code === 'no_role' ? 'warning' : 'danger';
     const [title, rest] = splitMessage(r.message);
-    const kids = [dxAlert(tone, title, rest, r.ok ? null : withLink(showSettingLink(r.code)))];
+    const kids = [pending != null && pending !== (u.role || '')
+      ? dxAlert(pending ? 'info' : 'warning', pending ? `${u.username} signs in as ${roleLabel(pending)} once you save.` : `${u.username} still can’t sign in.`,
+        pending ? 'Save the settings, then test again to check.' : 'None of their groups is mapped to a role.')
+      : dxAlert(tone, title, rest, r.ok ? null : withLink(showSettingLink(r.code)))];
     if (r.warning) kids.push(dxAlert('info', r.warning));
-    const u = r.user;
     if (u) {
       const groups = u.groups || [];
+      const role = pending != null ? pending : u.role;
+      const roleNode = role ? el('span', { class: 'badge u-role', 'data-role': role }, roleLabel(role)) : el('span', { class: 'muted' }, 'None');
       const rows = [
         ['Found', el('span', { class: 'mono u-dn' }, u.dn)],
         u.name ? ['Name', u.name] : null,
         u.email ? ['Email', u.email] : null,
-        ['Role', u.role ? el('span', { class: 'badge u-role', 'data-role': u.role }, roleLabel(u.role)) : el('span', { class: 'muted' }, 'None')],
+        ['Role', pending != null && pending !== (u.role || '') ? el('span', {}, roleNode, el('span', { class: 'muted u-after-save' }, ' after you save')) : roleNode],
       ].filter(Boolean);
       kids.push(el('dl', { class: 'kv u-kv' }, ...rows.flatMap(([k, val]) => [el('dt', {}, k), el('dd', {}, val)])));
       kids.push(groupList(groups));
     }
-    return el('div', { class: 'u-result' }, ...kids);
+    return el('div', { class: 'u-result' }, staleNote(), ...kids);
   }
 
   function groupList(groups) {
@@ -1000,12 +1111,16 @@
       const addTo = !role && !readOnly() ? dxMenu('Map ' + cnOf(dn) + ' to a role', ROLE_ORDER.map((rr) => ({
         icon: 'plus', label: 'Add to ' + ROLE_LABEL[rr], run: () => {
           D.form[rr + '_groups'] = (D.form[rr + '_groups'] || []).filter((g) => g.trim()).concat(dn);
+          // The result now reads with this mapping, so it is not out of date.
+          if (D.user) { D.user.mapped = true; D.userSnap = JSON.stringify(D.form); }
           renderDirectory();
+          const li = [...document.querySelectorAll('#ud-test-user-out li[data-dn]')].find((n) => n.dataset.dn === dn);
+          if (li) li.focus();
           toast(`${cnOf(dn)} gives the ${ROLE_LABEL[rr]} role once you save.`);
         },
       }))) : null;
       if (addTo) addTo.classList.add('u-glist__menu');
-      return el('li', {}, el('div', { class: 'u-glist__text' }, el('b', {}, cnOf(dn)), el('span', { class: 'mono', title: dn }, dn)),
+      return el('li', { 'data-dn': dn, tabindex: '-1' }, el('div', { class: 'u-glist__text' }, el('b', {}, cnOf(dn)), el('span', { class: 'mono', title: dn }, dn)),
         role ? el('span', { class: 'badge u-role', 'data-role': role }, ROLE_LABEL[role]) : null, addTo);
     };
     const ul = el('ul', { class: 'u-glist__list', role: 'list' }, ...sorted.slice(0, LIMIT).map(item));

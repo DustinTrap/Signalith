@@ -39,18 +39,22 @@
   }
 
   // setView shows one of the messages above the form: error, locked,
-  // signedout, or none.
-  function setView(view) {
+  // signedout, or none. invalid is the field the error is about, if any:
+  // only a wrong or missing value marks a field, so a refusal for another
+  // reason (a disabled account, say) does not look like a wrong password.
+  function setView(view, invalid) {
     auth.dataset.view = view || '';
-    if (view === 'error') pass.setAttribute('aria-invalid', 'true');
-    else pass.removeAttribute('aria-invalid');
+    for (const f of [user, pass]) {
+      if (f === invalid) f.setAttribute('aria-invalid', 'true');
+      else f.removeAttribute('aria-invalid');
+    }
   }
 
-  function showError(title, text) {
+  function showError(title, text, invalid) {
     $('login-error-title').textContent = title;
     $('login-error-text').textContent = text || '';
     $('login-error-text').hidden = !text;
-    setView('error');
+    setView('error', invalid);
   }
 
   function sentence(s) {
@@ -67,7 +71,7 @@
 
   // locked pauses the form until the server's Retry-After has passed.
   function locked(message, seconds) {
-    $('login-locked-text').textContent = sentence(message) || 'Too many failed sign-ins from this address. Try again later.';
+    $('login-locked-text').textContent = sentence(message) || 'Too many failed sign-ins. Try again later.';
     setView('locked');
     submit.disabled = true;
     clearTimeout(lockTimer);
@@ -126,8 +130,9 @@
     ev.preventDefault();
     if (submit.disabled) return;
     if (!user.value.trim() || !pass.value) {
-      showError('Enter your username and password.', '');
-      (user.value.trim() ? pass : user).focus();
+      const missing = user.value.trim() ? pass : user;
+      showError('Enter your username and password.', '', missing);
+      missing.focus();
       return;
     }
     setBusy(true);
@@ -158,10 +163,15 @@
       locked(data.error, resp.headers.get('Retry-After'));
       return;
     }
-    const known = REFUSED[data.code] || (resp.status === 401 ? REFUSED.wrong_credentials : null);
-    if (known) showError(known[0], known[1]);
+    const wrong = resp.status === 401 || data.code === 'wrong_credentials';
+    const known = REFUSED[data.code] || (wrong ? REFUSED.wrong_credentials : null);
+    if (known) showError(known[0], known[1], wrong ? pass : null);
     else showError('Sign-in failed.', sentence(data.error) || 'Try again.');
-    pass.select();
+    // Only a wrong password is worth retyping; the other refusals would be
+    // refused again (and retries count toward the lockout). Focus stays on
+    // the button, which was disabled while signing in.
+    if (wrong) pass.select();
+    else submit.focus();
   });
 
   // ---- Choose a new password -------------------------------------------

@@ -213,11 +213,11 @@ func TestUsersAndDirectorySettings(t *testing.T) {
 			t.Errorf("error missing %q:\n%v", want, err)
 		}
 	}
-	// A complete block: on by default, preset defaults filled in, the
-	// password from the environment and never written back to the file.
+	// A complete block: on by default, Active Directory unless type says
+	// otherwise, preset defaults filled in, the password from the
+	// environment and never written back to the file.
 	os.WriteFile(path, []byte(`auth:
   ldap:
-    type: ad
     url: ldaps://dc1.corp.example.com
     bind_dn: CN=svc,DC=corp,DC=example,DC=com
     user_base_dn: DC=corp,DC=example,DC=com
@@ -230,7 +230,7 @@ func TestUsersAndDirectorySettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, err := c.LDAP()
-	if err != nil || !s.IsEnabled() || s.BindPassword != "bind-secret" || s.UsernameAttribute != "sAMAccountName" || !s.Nested() {
+	if err != nil || !s.IsEnabled() || s.Type != "ad" || s.BindPassword != "bind-secret" || s.UsernameAttribute != "sAMAccountName" || !s.Nested() {
 		t.Errorf("ldap = %+v %v", s, err)
 	}
 	if err := c.Save(path); err != nil {

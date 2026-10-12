@@ -56,6 +56,12 @@ var (
 type SignInError struct {
 	Err    error
 	Reason string
+	// Revoke, when set, says in plain words why the directory no longer
+	// lets this person use Signalith: not found (deleted, or disabled in
+	// Active Directory), disabled or expired there, or in no mapped group.
+	// It is only set when a wrong password cannot be the cause, so a
+	// stranger typing someone's name cannot take their access away.
+	Revoke string
 }
 
 func (e *SignInError) Error() string { return e.Err.Error() }
@@ -104,6 +110,7 @@ type Directory struct {
 	mu         sync.RWMutex
 	settings   LDAPSettings
 	rev        uint64
+	saved      bool
 }
 
 // directoryFile is directory.json. It holds the service account password,
@@ -147,6 +154,7 @@ func OpenDirectory(path string, fromConfig *LDAPSettings) (*Directory, error) {
 	f.Settings.BindPassword = f.BindPassword
 	f.Settings.Normalize()
 	d.settings = f.Settings
+	d.saved = true
 	return d, nil
 }
 
@@ -155,6 +163,14 @@ func (d *Directory) Settings() LDAPSettings {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.settings.Clone()
+}
+
+// Saved reports whether settings were ever saved, or come from
+// signalith.yaml, rather than being the untouched defaults.
+func (d *Directory) Saved() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.saved || d.fromConfig
 }
 
 // FromConfig reports whether the settings come from signalith.yaml.
@@ -205,6 +221,7 @@ func (d *Directory) Save(s LDAPSettings) error {
 	}
 	d.settings = s
 	d.rev++
+	d.saved = true
 	return nil
 }
 
@@ -216,6 +233,17 @@ func (d *Directory) Authenticate(ctx context.Context, login, password string) (*
 		return nil, ErrDirectoryOff
 	}
 	return lookup(ctx, &s, login, password, true)
+}
+
+// Lookup finds a user with the service account, without their password,
+// and returns who they are and the role their groups give now. It is how
+// signed-in directory users are checked again while they use Signalith.
+func (d *Directory) Lookup(ctx context.Context, login string) (*DirectoryUser, error) {
+	s := d.Settings()
+	if !s.IsEnabled() {
+		return nil, ErrDirectoryOff
+	}
+	return lookup(ctx, &s, login, "", false)
 }
 
 // LoginName strips a DOMAIN\ prefix, which Windows users often type.
@@ -254,7 +282,11 @@ func lookup(ctx context.Context, s *LDAPSettings, login, password string, checkP
 	}
 	e, err := c.findUser(s, login)
 	if errors.Is(err, errNoMatch) || errors.Is(err, errManyMatches) {
-		return nil, &SignInError{Err: ErrBadCredentials, Reason: err.Error()}
+		why := "not found in the directory"
+		if errors.Is(err, errManyMatches) {
+			why = "more than one directory entry has this name"
+		}
+		return nil, &SignInError{Err: ErrBadCredentials, Reason: err.Error(), Revoke: why}
 	}
 	if err != nil {
 		return nil, err
@@ -288,7 +320,12 @@ func lookup(ctx context.Context, s *LDAPSettings, login, password string, checkP
 				if why != "" && why != reason {
 					reason += " (" + why + ")"
 				}
-				return u, &SignInError{Err: ErrBadCredentials, Reason: reason}
+				// Active Directory only names these when the password was right.
+				gone := ""
+				if why == "account disabled" || why == "account expired" {
+					gone = strings.TrimPrefix(why, "account ") + " in the directory"
+				}
+				return u, &SignInError{Err: ErrBadCredentials, Reason: reason, Revoke: gone}
 			}
 			return u, explain("userbind", c.server, err, s)
 		}
@@ -297,7 +334,7 @@ func lookup(ctx context.Context, s *LDAPSettings, login, password string, checkP
 		return u, &SignInError{Err: ErrBadCredentials, Reason: fmt.Sprintf("directory username %q has characters Signalith cannot use", u.Username)}
 	}
 	if u.Role == "" {
-		return u, &SignInError{Err: ErrNoRole, Reason: "in no group mapped to a role"}
+		return u, &SignInError{Err: ErrNoRole, Reason: "in no group mapped to a role", Revoke: "not in a group mapped to a role"}
 	}
 	return u, nil
 }
@@ -490,10 +527,7 @@ func (c *conn) findUser(s *LDAPSettings, login string) (*ldap.Entry, error) {
 // groups returns the DNs of the groups a user is in.
 func (c *conn) groups(s *LDAPSettings, e *ldap.Entry, username string) ([]string, error) {
 	var out []string
-	base := s.GroupBaseDN
-	if base == "" {
-		base = s.UserBaseDN
-	}
+	base := s.groupBase(e.DN)
 	filter := ""
 	switch s.GroupSearch {
 	case GroupsMemberOf:
@@ -632,9 +666,7 @@ func explain(step, server string, err error, s *LDAPSettings) *DirectoryError {
 	base, what := s.UserBaseDN, "user base DN"
 	if step == "groups" {
 		what = "group base DN"
-		if s.GroupBaseDN != "" {
-			base = s.GroupBaseDN
-		}
+		base = s.groupBase("")
 	}
 	switch code {
 	case ldap.LDAPResultNoSuchObject:

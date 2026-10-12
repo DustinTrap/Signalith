@@ -750,7 +750,10 @@ function tlItem({ kind, icon: ic, time, timeTitle, text, body, remove, change })
 }
 
 function removeEntryButton(c, e, what) {
-  if (!can('analyst')) return null;
+  // Notes, events and searches are evidence: analysts remove only their
+  // own, admins anyone's (the server checks too).
+  const mine = me && String(e.author || '').toLowerCase() === String(me.username || '').toLowerCase();
+  if (!can('admin') && !(can('analyst') && mine)) return null;
   return el('button', { type: 'button', class: 'btn btn--ghost btn--icon btn--sm c-entry__remove', 'aria-label': `Remove this ${what} from the timeline`, title: 'Remove', onclick: async () => {
     if (await caseConfirm({ title: `Remove this ${what}?`, text: 'It comes off the timeline for everyone. The case history keeps a record that it was removed.', confirm: 'Remove' })) {
       if (await caseCall(c.id, '/entries/' + encodeURIComponent(e.id), undefined, 'DELETE', `Couldn’t remove the ${what}`)) toast(`The ${what} was removed.`);

@@ -63,9 +63,10 @@ async function api(path, body, method) {
   // A temporary password must be replaced first; the sign-in page asks for it.
   if (resp.status === 403 && data.code === 'password_change_required') toSignIn(true);
   if (resp.status === 403 && data.code === 'forbidden') {
-    // The role may have changed since the page loaded: hide what it cannot use.
-    if (data.role) setRole(data.role);
-    if (typeof toast === 'function') toast(data.error, null, { tone: 'danger', title: 'Your role can’t do that' });
+    // An admin changed this user's role since the page loaded: reload, so
+    // every page, menu and button matches the new role at once.
+    if (data.role && me && data.role !== me.role) roleChanged(data.role);
+    else if (typeof toast === 'function') toast(data.error, null, { tone: 'danger', title: 'Your role can’t do that' });
   }
   if (!resp.ok) {
     const err = new Error(data.error || resp.statusText);
@@ -93,12 +94,26 @@ function setRole(role) {
   if (me) me.role = role;
   document.body.dataset.role = role;
 }
+// roleChanged reloads the app for a new role, and says why once it has.
+const ROLE_NOTE_KEY = 'signalith.roleChanged';
+let reloading = false;
+function roleChanged(role) {
+  if (reloading) return;
+  reloading = true;
+  try { sessionStorage.setItem(ROLE_NOTE_KEY, role); } catch (_) { /* storage may be blocked */ }
+  location.reload();
+}
 // meReady resolves once api/me has answered (to null if it failed).
 const meReady = api('api/me').then((m) => {
   if (m.must_change_password) { toSignIn(true); return m; }
   me = m;
   setRole(m.role);
   showUser(m);
+  let note = null;
+  try { note = sessionStorage.getItem(ROLE_NOTE_KEY); sessionStorage.removeItem(ROLE_NOTE_KEY); } catch (_) { /* ignore */ }
+  if (note && typeof toast === 'function') {
+    toast(`An admin changed your role to ${m.role_label || m.role}. The page reloaded to match.`, null, { title: 'Your role changed' });
+  }
   return m;
 }).catch(() => null);
 

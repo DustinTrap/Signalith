@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -77,10 +78,19 @@ type Server struct {
 	Users     *users.Store
 	Directory *users.Directory
 
-	authOnce sync.Once
-	creds    credCache  // recently checked Basic credentials
-	routes   []route    // every API route and its role, from Handler
-	caseMu   sync.Mutex // serializes case changes
+	// DirectoryRecheck is how often signed-in directory users are looked
+	// up again; 0 means every 5 minutes.
+	DirectoryRecheck time.Duration
+
+	authOnce     sync.Once
+	creds        credCache  // recently checked Basic credentials
+	routes       []route    // every API route and its role, from Handler
+	caseMu       sync.Mutex // serializes case changes
+	checksMu     sync.Mutex
+	dirChecks    map[string]dirCheck // when each directory user was last checked
+	dirSlotsOnce sync.Once
+	dirSlots     chan struct{}  // limits directory connections at once
+	background   sync.WaitGroup // directory checks still running
 }
 
 // Handler returns the HTTP handler. Every API route is registered with
@@ -117,7 +127,23 @@ func (s *Server) Handler() http.Handler {
 	s.routes = api.routes
 	s.routeLogin(mux)
 	mux.Handle("/", s.requireUser(api.mux))
-	return securityHeaders(mux)
+	return securityHeaders(s.guardAPI(mux))
+}
+
+// guardAPI makes sure no /api/ route escapes sign-in: a route registered
+// straight on the outer mux, rather than with a role on the router, is
+// admin-only unless it is one of publicRoutes.
+func (s *Server) guardAPI(mux *http.ServeMux) http.Handler {
+	guarded := s.requireUser(s.allow(route{Pattern: "(outer mux)", Role: users.Admin, Unclassified: true}, mux))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if _, pattern := mux.Handler(r); pattern != "" && pattern != "/" && !slices.Contains(publicRoutes, pattern) {
+				guarded.ServeHTTP(w, r)
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // revalidate makes browsers check with the server before reusing a cached

@@ -74,9 +74,10 @@ Supported sources in Phase 1:
 
 The web UI has its own sign-in page. Sessions end after `auth.session_timeout` without
 activity (12 hours by default) or when you sign out; tick **Keep me signed in** to stay
-signed in for up to 7 days. Ten wrong passwords from one address within 15 minutes lock
-that address out for 15 minutes. Scripts and API clients can keep using HTTP Basic auth
-with the same username and password.
+signed in for up to 7 days. Ten wrong passwords for one account from one address within
+15 minutes lock that account out for that address for 15 minutes (with wider limits per
+address and per account; see [docs/users.md](docs/users.md#signing-in)). Scripts and API
+clients can keep using HTTP Basic auth with the same username and password.
 
 Admins add people on the **Users** page and give each one a role: **Viewer** (look,
 search, change nothing), **Analyst** (also triage findings, work investigations, build
@@ -126,7 +127,8 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `assistant.url`, `assistant.model`, `assistant.api_key` | per provider | Endpoint, model name and key; `anthropic` defaults to `claude-sonnet-5-5` |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
-`SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (also
+`SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (for
+`auth.ldap` in this file only; directory sign-in set up on the Users page keeps its own) (also
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
 `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`).
 

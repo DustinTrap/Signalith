@@ -31,6 +31,7 @@ By area:
 | Findings: status, owner, comments, bulk changes, create | No | Yes | Yes |
 | Investigations: view | Yes | Yes | Yes |
 | Investigations: create, edit, add findings, notes, entities | No | Yes | Yes |
+| Investigations: remove someone else's note, pinned event or search | No | No | Yes |
 | Detections and ATT&CK coverage: view | Yes | Yes | Yes |
 | Detections: create, edit, delete, test, run, Sigma import | No | No | Yes |
 | Risk, asset and identity context: view | Yes | Yes | Yes |
@@ -43,6 +44,8 @@ By area:
 | Change your own password (local users) | Yes | Yes | Yes |
 
 Dashboards have no owner: any analyst can change or delete any custom dashboard.
+Investigation notes, pinned events and saved searches are evidence: an analyst can
+remove only the ones they added, and an admin any of them.
 
 When someone tries something their role does not allow, Signalith answers
 `403` and says what is needed, for example *"This needs the Analyst role, and your
@@ -51,7 +54,8 @@ the role of every route.
 
 A role change, disabling or deleting a user takes effect on that user's next
 request: Signalith looks up the role every time instead of remembering it in the
-session.
+session. If they have Signalith open and try something their new role does not
+allow, the page reloads to match the new role and says why.
 
 ## The built-in admin
 
@@ -122,8 +126,27 @@ they do not reveal which usernames exist. Other answers are:
 | `disabled` (403) | The account is disabled in Signalith |
 | `not_in_group` (403) | A directory user in no group mapped to a role: *"Your directory account is not in a group that can use Signalith."* |
 | `password_expired` (403) | Active Directory says the password expired or must be changed |
-| `directory_unavailable` (503) | The directory server could not be reached |
-| `locked_out` (429) | Ten wrong passwords from one address within 15 minutes lock that address out for 15 minutes. Wrong directory passwords count too; an unreachable directory does not |
+| `directory_unavailable` (503) | The directory server could not be reached, or too many directory sign-ins are being checked at once |
+| `locked_out` (429) | Too many wrong passwords; see below |
+
+**Failed sign-in limits.** Wrong passwords are counted three ways, each over 15
+minutes, and a count that reaches its limit refuses further sign-ins for 15
+minutes, even with the right password:
+
+| Counted | Limit | Locks |
+| --- | --- | --- |
+| One address, one account | 10 | That account, from that address |
+| One address, any accounts | 30 | That address |
+| One account, any addresses | 30 | That account, from everywhere |
+
+A successful sign-in clears only the count for its own address and account, so
+signing in to one account never helps someone guess another's password. Sign-ins
+still being checked count too, so a burst of parallel guesses cannot get past the
+limit. Wrong directory passwords count; an unreachable directory does not. Basic
+auth, **Test a user** with a password, and **Change password** share these limits.
+Because one address alone stops at 10 tries per account, it cannot lock someone
+else out; guessing from many addresses can lock an account (the built-in admin
+included) for 15 minutes at a time.
 
 The web UI keeps you signed in with a session cookie. Sessions end after
 `auth.session_timeout` without activity (12 hours by default), after 7 days with
@@ -135,7 +158,9 @@ Signalith remembers a correct username and password briefly so it does not check
 the hash or ask the directory on every request: for 10 minutes for local users and
 the built-in admin, and 2 minutes for directory users. Changing or resetting a local
 password, or changing the directory settings, ends that at once. A password changed
-in the directory keeps working for Basic auth for up to 2 minutes.
+in the directory keeps working for Basic auth for up to 2 minutes. Group changes and
+accounts disabled in the directory are picked up as described in
+[Directory users who change or leave](#directory-users-who-change-or-leave).
 
 **Temporary passwords.** Signing in with a temporary password works, but the reply
 says `"must_change_password": true` and the sign-in page asks for a new password.
@@ -165,13 +190,31 @@ When someone signs in with a name that is not the built-in admin or a local user
    groups gets the highest role. A user in none is refused, unless you choose to let
    such users in as viewers.
 6. The user appears on the Users page as a directory user, with their name, email
-   and DN from the directory. Their role is updated at every sign-in, so a change of
-   groups applies the next time they sign in.
+   and DN from the directory. Their role is updated at every sign-in, and checked
+   again every few minutes while they use Signalith (see below).
 
 Directory users who have never signed in are not listed. You can disable a directory
 user in Signalith (they stay out whatever the directory says), or delete their record
 (it comes back at their next sign-in). Turning directory sign-in off signs out every
 directory user at their next request.
+
+### Directory users who change or leave
+
+While a directory user is signed in, Signalith looks them up again with the service
+account (without their password) every 5 minutes, and right away when the directory
+settings are saved:
+
+- **Groups changed.** Their role follows their groups from their next request.
+- **No longer in a mapped group, disabled or deleted in the directory.** Their
+  sessions end, and the Users page shows them with no role and the reason. With the
+  Active Directory preset, disabled accounts are not found, so they count as
+  deleted. A refused sign-in does the same at once.
+- **The directory cannot be reached.** They keep the access they had and are checked
+  again 5 minutes later. If the settings were changed since their role was last
+  checked, their sessions end instead.
+
+So someone who leaves keeps access for at most about 5 minutes. To stop someone at
+once, disable them on the Users page.
 
 ### Set it up
 
@@ -180,8 +223,12 @@ On the **Users** page, open **Directory sign-in** and click **Set up directory s
 1. Pick **Active Directory** or **OpenLDAP**. This fills in the filter and attribute
    defaults below; change any of them if your directory differs.
 2. Enter the server address and, if you have one, a failover server.
-3. Enter the service account's DN and password.
-4. Enter the user base DN, and the group base DN for OpenLDAP.
+3. Enter the service account's DN and password. The saved password is only used
+   with the saved servers, bind DN and TLS settings: change any of those and you
+   type the password again, so it can never be sent to a server someone else chose.
+4. Enter the user base DN. A group base DN is optional: when it is empty,
+   Signalith searches for groups in the whole domain (the `DC=` part of the user's
+   DN).
 5. Map groups to roles by their full DN.
 6. Click **Test connection**, then **Test a user** with your own account, then turn
    directory sign-in on and save.
@@ -291,9 +338,16 @@ auth:
 ```
 
 Directory sign-in is on whenever `auth.ldap` is present, unless it says
-`enabled: false`. Keep the service account's password out of the file with the
-`SIGNALITH_LDAP_BIND_PASSWORD` environment variable. `signalith validate` checks the
-settings.
+`enabled: false`. `type` defaults to `ad`. Keep the service account's password out
+of the file with the `SIGNALITH_LDAP_BIND_PASSWORD` environment variable (for example
+in the systemd unit's `EnvironmentFile`, or the container's environment). That
+variable only applies to `auth.ldap` in `signalith.yaml`: settings made on the Users
+page keep their own password in `directory.json`, and Signalith logs a warning at
+start-up when the variable is set without `auth.ldap`.
+
+`signalith validate` checks the settings, so run it with the same environment as the
+service. `signalith passwd` works without the variable, so the built-in admin's
+password can always be reset from a shell.
 
 ### Settings reference
 
@@ -312,14 +366,14 @@ The keys are the same in `signalith.yaml` and the API.
 | `connect_timeout_seconds` | `5` | How long to wait for a server to answer a connection (1-120) |
 | `timeout_seconds` | `10` | How long to wait for each request (1-300) |
 | `bind_dn` | none (anonymous) | The service account that searches for users |
-| `bind_password` | none | Its password. The API never returns it, only `bind_password_set`; leave it empty to keep the saved one. Or set `SIGNALITH_LDAP_BIND_PASSWORD` |
+| `bind_password` | none | Its password. The API never returns it, only `bind_password_set`. Leave it empty to keep the saved one, which only works while `url`, `failover_url`, `bind_dn`, `start_tls`, `tls_skip_verify` and `ca_cert` are unchanged. In `signalith.yaml`, `SIGNALITH_LDAP_BIND_PASSWORD` can provide it instead |
 | `user_base_dn` | required | Where to search for users |
 | `user_filter` | preset | LDAP filter with `{username}` for the typed name (escaped, so `*` and `(` match only themselves) |
 | `username_attribute` | preset | Attribute holding the username: `sAMAccountName`, `uid` |
 | `name_attribute`, `email_attribute` | preset | `displayName` or `cn`; `mail` |
 | `group_search` | preset | `memberof` (read the user's `memberOf`) or `search` (search with `group_filter`) |
 | `nested_groups` | `true` for `ad` | Count groups inside groups (Active Directory only) |
-| `group_base_dn` | `user_base_dn` | Where to search for groups |
+| `group_base_dn` | the whole domain | Where to search for groups (nested groups and `search`). Empty uses the `DC=` part of the user's DN, such as `DC=corp,DC=example,DC=com` |
 | `group_filter` | preset | Filter for `search`, with `{dn}` and/or `{username}` |
 | `admin_groups`, `analyst_groups`, `viewer_groups` | none | Group DNs whose members get each role; the highest wins. Compared the way the directory compares DNs (case and spacing do not matter) |
 | `default_role` | `none` | Role for users in no mapped group: `none` refuses them, `viewer` lets them in as viewers |
@@ -362,10 +416,20 @@ with the same `uid` in different branches. Narrow the base DN or the filter.
 **A user is refused with "Your account can’t use Signalith yet".** **Test a user**
 lists every group found. Map one of them to a role, or set `default_role: viewer`.
 Check that the DN in the mapping is the group's full DN. Group changes in the
-directory apply at the user's next sign-in.
+directory apply within about 5 minutes, or at the user's next sign-in.
 
 **Nested groups are not counted.** Nested groups only work on Active Directory with
-**Nested groups** on. For OpenLDAP, map each group directly.
+**Nested groups** on. The groups must be under the group base DN; leave it empty to
+search the whole domain. For OpenLDAP, map each group directly.
+
+**"Enter the service account's password again."** You changed the server address,
+the failover server, the bind DN or a TLS setting. The saved password is only sent
+to the saved servers, so type it again.
+
+**"Too many failed sign-ins."** See [failed sign-in limits](#signing-in). Wait 15
+minutes, or sign in as another admin, from another address, or as the built-in
+admin if it is not the account being guessed. The log shows which address and
+account failed.
 
 **"Your directory password has expired or must be changed."** Active Directory
 accepted the password but requires a new one first. The user changes it (for example
@@ -374,9 +438,16 @@ by signing in to Windows) and signs in again.
 **"Signalith could not reach the directory server."** Sign-in with the built-in admin
 and local users still works. Fix the connection, or add a failover server.
 
-**A directory user who left still has access through a script.** Directory users are
-checked against the directory at every sign-in, and Basic auth credentials for
-at most 2 minutes. Disable them on the Users page to stop them at once.
+**A directory user who left still has access.** Signed-in directory users are looked
+up again every 5 minutes (see
+[Directory users who change or leave](#directory-users-who-change-or-leave)), and Basic
+auth credentials are checked with the directory again after at most 2 minutes. If the
+directory cannot be reached, they keep their access until it can. Disable them on
+the Users page to stop them at once.
+
+**`signalith validate` says to set `SIGNALITH_LDAP_BIND_PASSWORD`.** Your shell does
+not have the service's environment. Load the service's environment file first, for
+example `sudo sh -c 'set -a; . /etc/signalith/signalith.env; signalith validate -c /etc/signalith/signalith.yaml'`.
 
 ## Where user data is stored
 
@@ -420,8 +491,11 @@ its log (journald, the Windows event log, or the container's output), with
 | `password reset` | `by`, `user`, `sessions_ended` |
 | `password changed` | `by`, `user`, `other_sessions_ended` |
 | `password change refused` | `user`, `client`, `reason` |
-| `directory settings changed` | `by`, `enabled`, `fields` (names only) |
-| `directory connection tested`, `directory user looked up` | `by`, results |
+| `directory settings changed` | `by`, `enabled`, `servers`, `fields` (names only) |
+| `directory connection tested` | `by`, `servers`, `bind_dn`, `ok` |
+| `directory user looked up` | `by`, `user`, `servers`, `ok`, `code`, `password_checked` |
+| `directory user lost access` | `by=directory`, `user`, `reason`, `sessions_ended` |
+| `directory user's role changed` | `by=directory`, `user`, `from`, `to` |
 
 For example:
 
@@ -469,7 +543,9 @@ page itself.
 `POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/upload`, and every
 `/api/users` and `/api/auth/directory` route below.
 
-A route added without a role is admin-only, and a test fails until it gets one.
+A route added without a role is admin-only, and a test fails until it gets one. That
+includes routes registered outside the role table, straight on the server's outer
+router: any `/api/` route there other than the three public ones is admin-only.
 
 A refused request:
 
@@ -517,7 +593,9 @@ returns the same object. Errors are `400` with a `code`: `wrong_password` (field
 ```
 
 `actions` lists what the signed-in admin may do to that user: `edit` (name and
-email), `role`, `reset_password`, `disable` or `enable`, and `delete`.
+email), `role`, `reset_password`, `disable` or `enable`, and `delete`. A directory
+user the directory no longer lets in has `"role": ""` and `"refused"` saying why, for
+example `"in no group mapped to a role"`.
 
 | Route | Body | Reply |
 | --- | --- | --- |

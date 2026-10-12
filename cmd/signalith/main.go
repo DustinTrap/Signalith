@@ -277,7 +277,10 @@ func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
 }
 
 // loadForEdit loads a config without failing on a missing password hash,
-// which is exactly what passwd fixes.
+// which is exactly what passwd fixes, or on a missing directory bind
+// password, which usually comes from the service's environment
+// (SIGNALITH_LDAP_BIND_PASSWORD) rather than the operator's shell. The
+// placeholders are never written to the file.
 func loadForEdit(path string) (*config.Config, error) {
 	c, err := config.Load(path)
 	if err == nil {
@@ -287,8 +290,12 @@ func loadForEdit(path string) (*config.Config, error) {
 	if !errors.As(err, &ve) {
 		return nil, err
 	}
-	os.Setenv("SIGNALITH_ADMIN_PASSWORD", "placeholder-to-load")
-	defer os.Unsetenv("SIGNALITH_ADMIN_PASSWORD")
+	for _, name := range []string{"SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_LDAP_BIND_PASSWORD"} {
+		if os.Getenv(name) == "" {
+			os.Setenv(name, "placeholder-to-load")
+			defer os.Unsetenv(name)
+		}
+	}
 	return config.Load(path)
 }
 
@@ -480,6 +487,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	n := people.Count()
 	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
+	if os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" && c.Auth.LDAP == nil {
+		log.Warn("SIGNALITH_LDAP_BIND_PASSWORD is set but signalith.yaml has no auth.ldap, so it is not used; directory sign-in set up on the Users page keeps its own bind password")
+	}
 	if s := dir.Settings(); s.IsEnabled() {
 		log.Info("directory sign-in is on", "server", s.URL, "from_config_file", dir.FromConfig())
 		for _, w := range s.Warnings() {

@@ -19,8 +19,9 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
-// routePattern matches a route pattern written in the source.
-var routePattern = regexp.MustCompile(`^(GET|POST|PUT|PATCH|DELETE|HEAD) /api/`)
+// routePattern matches a route pattern written in the source, with or
+// without a method.
+var routePattern = regexp.MustCompile(`^([A-Z]+ )?/api/.`)
 
 // TestEveryRouteHasARole fails when an API route has no explicit role.
 // It checks the routes Handler registered, and every route pattern in

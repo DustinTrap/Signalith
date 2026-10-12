@@ -2296,7 +2296,7 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-users .u-table td { height: 60px; }
 #page-users .u-table [data-col="role"] { width: 110px; }
 #page-users .u-table [data-col="source"] { width: 110px; }
-#page-users .u-table [data-col="status"] { width: 190px; }
+#page-users .u-table [data-col="status"] { width: 170px; }
 #page-users .u-table [data-col="last"] { width: 120px; }
 #page-users .u-table [data-col="act"] { width: 48px; padding-left: 0; text-align: right; }
 #page-users .u-table td[data-col="user"] { max-width: 0; }
@@ -2308,6 +2308,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-users .u-user__name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #page-users .u-user__name .badge { height: 18px; flex: none; }
 #page-users .u-user__sub { margin-top: 2px; font-size: var(--fs-sm); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the source shows in the sub line only where its column is hidden */
+#page-users .u-user__src, #page-users .u-user__sub--src { display: none; }
 #page-users .u-skel-gap { height: 8px; }
 #page-users .u-source { color: var(--text-2); }
 #page-users .u-never { color: var(--text-3); }
@@ -2325,7 +2327,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 :is(#page-users, .u-dialog) .u-role { color: var(--text-2); background: var(--active); }
 :is(#page-users, .u-dialog) .u-role[data-role="admin"] { color: var(--accent); background: var(--accent-soft); }
 
-/* dialogs */
+/* dialogs: the close button sits in the top-right corner, as elsewhere */
+:is(.u-dialog, #u-pw-dialog) .modal__close { margin: -4px -8px 0 auto; flex: none; }
 .u-dialog .u-optional, #page-users .u-optional, #u-pw-dialog .u-optional { margin-left: 6px; font-weight: 400; color: var(--text-3); }
 .u-dialog .u-roles { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
 .u-dialog .u-roles legend { padding: 0; margin-bottom: 6px; }
@@ -2449,6 +2452,14 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-users .u-glist__text b { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #page-users .u-glist__text .mono { font-size: var(--fs-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #page-users .u-glist__menu .menu__panel { min-width: 180px; }
+#page-users .u-glist__list li:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
+#page-users .u-after-save { font-size: var(--fs-xs); }
+/* a test result whose settings were changed since: a note, the rest dimmed */
+#page-users .u-stale { display: none; align-items: flex-start; gap: 8px; color: var(--text-2); font-size: var(--fs-sm); line-height: 1.45; }
+#page-users .u-stale .icon { margin-top: 1px; color: var(--text-3); flex: none; }
+#page-users .is-stale .u-stale { display: flex; }
+#page-users .is-stale .u-result > :not(.u-stale) { opacity: .55; }
+#page-users .hint.u-hint-warn { color: var(--warning); }
 #page-users .u-glist .link-btn { justify-self: start; font-size: var(--fs-sm); }
 
 @media (max-width: 1359px) {
@@ -2459,7 +2470,7 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
   #page-users .u-sec { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   #page-users .u-sec__body { max-width: none; }
   #page-users .u-more__body { padding-left: 20px; max-width: none; }
-  #page-users .u-table [data-col="source"] { display: none; }
+  #page-users .u-table [data-col="status"] { width: 140px; }
 }
 @media (max-width: 720px) {
   #page-users .u-dir-head__type { justify-items: start; }
@@ -2481,6 +2492,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
   #page-users .u-table td[data-col="last"] { order: 4; color: var(--text-3); }
   #page-users .u-table td[data-col="last"]::before { content: "Last sign-in: "; }
   #page-users .u-table td[data-col="source"] { display: none; }
+  #page-users .u-user__src { display: inline; }
+  #page-users .u-user__sub--src { display: block; }
   .u-dialog .u-secret { flex-direction: column; }
 }
 /* ==== end page:users ==== */

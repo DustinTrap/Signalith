@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -182,7 +183,8 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 }
 
 // principalFor looks up a signed-in user's current role and state, or
-// returns nil if they may no longer sign in.
+// returns nil if they may no longer sign in. Directory users are checked
+// with the directory again every few minutes (see recheckDirectoryUser).
 func (s *Server) principalFor(name string) *principal {
 	if strings.EqualFold(name, s.Config.Auth.AdminUser) {
 		return s.builtinPrincipal()
@@ -191,8 +193,11 @@ func (s *Server) principalFor(name string) *principal {
 	if !ok || u.Disabled {
 		return nil
 	}
-	if u.Source == users.SourceDirectory && !s.dir().Enabled() {
-		return nil
+	if u.Source == users.SourceDirectory {
+		if !s.dir().Enabled() || u.Refused != "" {
+			return nil
+		}
+		s.recheckDirectoryUser(u.Username)
 	}
 	return principalFromUser(u)
 }
@@ -227,6 +232,8 @@ var (
 		msg: "Your directory account is not in a group that can use Signalith. Ask an admin to add you to one."}
 	errDirectoryDown = &signInError{status: http.StatusServiceUnavailable, code: "directory_unavailable",
 		msg: "Signalith could not reach the directory server to check your password. Try again in a minute, or ask an admin."}
+	errDirectoryBusy = &signInError{status: http.StatusServiceUnavailable, code: "directory_unavailable", retryAfter: 30 * time.Second,
+		msg: "Signalith is checking many directory sign-ins right now. Try again in a minute."}
 )
 
 func writeSignInError(w http.ResponseWriter, err error) {
@@ -242,32 +249,53 @@ func writeSignInError(w http.ResponseWriter, err error) {
 }
 
 func lockedOut(wait time.Duration) error {
-	return &signInError{status: http.StatusTooManyRequests, code: "locked_out", retryAfter: wait,
-		msg: fmt.Sprintf("Too many failed sign-ins from this address. Try again in %d minutes.", int(math.Ceil(wait.Minutes())))}
+	msg := "Too many sign-in attempts at the same time. Wait a few seconds, then try again."
+	if wait > auth.Busy {
+		n := int(math.Ceil(wait.Minutes()))
+		msg = fmt.Sprintf("Too many failed sign-ins. Try again in %d minutes.", n)
+		if n == 1 {
+			msg = "Too many failed sign-ins. Try again in a minute."
+		}
+	}
+	return &signInError{status: http.StatusTooManyRequests, code: "locked_out", retryAfter: wait, msg: msg}
+}
+
+// beginAttempt starts a password check that counts toward the sign-in
+// limits (see auth.Limiter), or returns the locked-out error.
+func (s *Server) beginAttempt(r *http.Request, account string) (*auth.Attempt, error) {
+	a, ok, wait := s.limiter().Begin(clientIP(r), users.LoginName(account))
+	if !ok {
+		return nil, lockedOut(wait)
+	}
+	return a, nil
 }
 
 // signIn checks a username and password for the sign-in page or Basic
 // auth: the built-in admin first, then local users, then the directory.
 // A local username is never looked up in the directory. Wrong passwords
-// count toward the per-address limit, and every attempt is logged
-// without the password.
+// count toward the limits per address and account, and every attempt is
+// logged without the password.
 func (s *Server) signIn(r *http.Request, name, password, method string) (*principal, error) {
 	client := clientIP(r)
-	lim := s.limiter()
-	if ok, wait := lim.Allow(client); !ok {
-		return nil, lockedOut(wait)
-	}
 	name = strings.TrimSpace(name)
+	attempt, err := s.beginAttempt(r, name)
+	if err != nil {
+		return nil, err
+	}
 	p, reason, err := s.checkCredentials(r.Context(), name, password)
 	if err != nil {
 		locked := false
 		if errors.Is(err, errWrongCredentials) {
-			locked = lim.Fail(client)
+			locked = attempt.Fail()
+		} else {
+			// Unreachable directory, or a right password for an account
+			// that may not sign in: no guess was refused.
+			attempt.Done()
 		}
 		s.Log.Warn("sign-in failed", "audit", true, "user", name, "client", client, "method", method, "reason", reason, "locked_out", locked)
 		return nil, err
 	}
-	lim.Succeed(client)
+	attempt.Succeed()
 	s.Log.Info("signed in", "audit", true, "user", p.Username, "role", p.Role, "source", p.Source, "client", client, "method", method)
 	return p, nil
 }
@@ -303,17 +331,41 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 	}
 	// DOMAIN\name is looked up as name, so a local or built-in name with a
 	// domain in front is refused without asking the directory.
-	if login := users.LoginName(name); !strings.EqualFold(login, name) {
+	login := users.LoginName(name)
+	if !strings.EqualFold(login, name) {
 		if u, ok := store.Get(login); strings.EqualFold(login, s.Config.Auth.AdminUser) || (ok && u.Source == users.SourceLocal) {
 			users.WasteTime(password)
 			return nil, "a domain in front of a local user's or the built-in admin's name", errWrongCredentials
 		}
 	}
+	// A local name costs a password hash check. Do the same work for every
+	// other name, alongside the directory lookup, so the time a refusal
+	// takes does not tell which names are local users.
+	hashed := make(chan struct{})
+	go func() {
+		defer close(hashed)
+		users.WasteTime(password)
+	}()
+	defer func() { <-hashed }()
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	release, err := s.directorySlot(ctx)
+	if err != nil {
+		return nil, "too many directory sign-ins at once", errDirectoryBusy
+	}
 	du, err := d.Authenticate(ctx, name, password)
+	release()
 	var sie *users.SignInError
 	var de *users.DirectoryError
+	if errors.As(err, &sie) && sie.Revoke != "" {
+		// The directory has taken this person's access away: end it here
+		// too, sessions included.
+		who := login
+		if du != nil && du.Username != "" {
+			who = du.Username
+		}
+		s.revokeDirectoryUser(who, sie.Revoke)
+	}
 	switch {
 	case errors.As(err, &sie) && errors.Is(err, users.ErrNoRole):
 		return nil, "directory: " + sie.Reason, errNoRole
@@ -337,7 +389,137 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 	if u.Disabled {
 		return nil, "account disabled in Signalith", errDisabled
 	}
+	s.directoryChecked(u.Username, d.Revision())
 	return principalFromUser(u), "", nil
+}
+
+// ---- checking directory users again ----
+
+// directoryRecheck is how often a signed-in directory user is looked up
+// again with the service account. Someone removed from their groups, or
+// disabled or deleted in the directory, loses access within about this
+// long; a change to the directory settings is checked at their next
+// request.
+const directoryRecheck = 5 * time.Minute
+
+// maxDirectoryChecks bounds how many directory sign-ins and checks run at
+// once, so a burst of sign-ins cannot tie up every connection.
+const maxDirectoryChecks = 32
+
+type dirCheck struct {
+	at      time.Time
+	rev     uint64
+	running bool
+}
+
+// directorySlot waits for a free directory connection, for at most 10
+// seconds, and returns a function that frees it.
+func (s *Server) directorySlot(ctx context.Context) (func(), error) {
+	s.dirSlotsOnce.Do(func() { s.dirSlots = make(chan struct{}, maxDirectoryChecks) })
+	t := time.NewTimer(10 * time.Second)
+	defer t.Stop()
+	select {
+	case s.dirSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-s.dirSlots }) }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-t.C:
+		return nil, errors.New("too many directory connections")
+	}
+}
+
+// directoryChecked notes that the directory was just asked about a user,
+// with the settings of revision rev, so the next check waits.
+func (s *Server) directoryChecked(name string, rev uint64) {
+	s.checksMu.Lock()
+	defer s.checksMu.Unlock()
+	if s.dirChecks == nil {
+		s.dirChecks = map[string]dirCheck{}
+	}
+	s.dirChecks[name] = dirCheck{at: time.Now(), rev: rev}
+}
+
+// recheckDirectoryUser starts a look at the directory for a signed-in
+// directory user, in the background, when the last one is older than
+// directoryRecheck or the directory settings have changed since. The
+// result applies from their next request: a new role, or their sessions
+// end when the directory no longer lets them in.
+func (s *Server) recheckDirectoryUser(name string) {
+	every := s.DirectoryRecheck
+	if every <= 0 {
+		every = directoryRecheck
+	}
+	rev := s.dir().Revision()
+	s.checksMu.Lock()
+	if s.dirChecks == nil {
+		s.dirChecks = map[string]dirCheck{}
+	}
+	c, seen := s.dirChecks[name]
+	if c.running || (seen && c.rev == rev && time.Since(c.at) < every) {
+		s.checksMu.Unlock()
+		return
+	}
+	settingsChanged := seen && c.rev != rev
+	c.running = true
+	s.dirChecks[name] = c
+	s.checksMu.Unlock()
+	s.background.Add(1)
+	go func() {
+		defer s.background.Done()
+		s.runDirectoryRecheck(name, rev, settingsChanged)
+	}()
+}
+
+func (s *Server) runDirectoryRecheck(name string, rev uint64, settingsChanged bool) {
+	defer s.directoryChecked(name, rev)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	release, err := s.directorySlot(ctx)
+	var du *users.DirectoryUser
+	if err == nil {
+		du, err = s.dir().Lookup(ctx, name)
+		release()
+	}
+	var sie *users.SignInError
+	switch {
+	case err == nil && users.NormalizeUsername(du.Username) != name:
+		s.revokeDirectoryUser(name, "renamed in the directory to "+du.Username)
+	case err == nil:
+		before, _ := s.userStore().Get(name)
+		u, changed, err := s.userStore().RefreshDirectoryUser(name, *du)
+		if err == nil && changed && u.Role != before.Role {
+			s.Log.Info("directory user's role changed", "audit", true, "user", name, "from", before.Role, "to", u.Role, "by", "directory")
+		}
+	case errors.As(err, &sie) && sie.Revoke != "":
+		s.revokeDirectoryUser(name, sie.Revoke)
+	case errors.Is(err, users.ErrDirectoryOff):
+		// Directory users cannot use Signalith while it is off.
+	default:
+		// The directory could not be asked. Access stays as it was and is
+		// checked again after the usual wait; but a role given under
+		// settings that have changed since is not trusted, so those
+		// sessions end.
+		ended := 0
+		if settingsChanged {
+			ended = s.sessions().EndUser(name, "")
+		}
+		s.Log.Warn("could not check a directory user with the directory", "user", name, "err", err, "sessions_ended", ended)
+	}
+}
+
+// revokeDirectoryUser takes away a directory user's access after the
+// directory refused them, and ends their sessions. Names that are not
+// directory users are ignored.
+func (s *Server) revokeDirectoryUser(name, reason string) {
+	u, changed, err := s.userStore().RefuseDirectoryUser(name, reason)
+	if err != nil {
+		return
+	}
+	ended := s.sessions().EndUser(u.Username, "")
+	if changed || ended > 0 {
+		s.Log.Warn("directory user lost access", "audit", true, "user", u.Username, "reason", reason, "sessions_ended", ended, "by", "directory")
+	}
 }
 
 // How long checked Basic credentials are remembered. Keys include the

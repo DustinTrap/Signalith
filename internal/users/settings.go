@@ -77,7 +77,8 @@ type LDAPSettings struct {
 	// NestedGroups also counts groups inside groups, for memberof on
 	// Active Directory. Defaults to true for ad.
 	NestedGroups *bool `yaml:"nested_groups,omitempty" json:"nested_groups"`
-	// GroupBaseDN is where groups are searched for; empty uses UserBaseDN.
+	// GroupBaseDN is where groups are searched for; empty searches the
+	// whole directory (the DC= part of the user's DN, or of UserBaseDN).
 	GroupBaseDN string `yaml:"group_base_dn,omitempty" json:"group_base_dn"`
 	// GroupFilter finds a user's groups for group_search: search.
 	GroupFilter string `yaml:"group_filter,omitempty" json:"group_filter"`
@@ -130,6 +131,63 @@ func Preset(typ string) LDAPSettings {
 	return LDAPSettings{}
 }
 
+// groupBase is where to search for groups: GroupBaseDN, or else the
+// domain the user is in (the DC= part of their DN or of the user base DN),
+// so groups kept in another branch than the users, as in most Active
+// Directories, are found.
+func (s *LDAPSettings) groupBase(userDN string) string {
+	if s.GroupBaseDN != "" {
+		return s.GroupBaseDN
+	}
+	for _, dn := range []string{userDN, s.UserBaseDN} {
+		if root := namingContext(dn); root != "" {
+			return root
+		}
+	}
+	return s.UserBaseDN
+}
+
+// namingContext returns the trailing DC= parts of a DN, such as
+// DC=corp,DC=example,DC=com, or "" if it has none.
+func namingContext(dn string) string {
+	parsed, err := ldap.ParseDN(dn)
+	if err != nil || parsed == nil {
+		return ""
+	}
+	start := len(parsed.RDNs)
+	for start > 0 {
+		rdn := parsed.RDNs[start-1]
+		if len(rdn.Attributes) != 1 || !strings.EqualFold(rdn.Attributes[0].Type, "dc") {
+			break
+		}
+		start--
+	}
+	if start == len(parsed.RDNs) {
+		return ""
+	}
+	// Rebuilt from the parsed values, so escaped commas cannot confuse it.
+	out := make([]string, 0, len(parsed.RDNs)-start)
+	for _, rdn := range parsed.RDNs[start:] {
+		a := rdn.Attributes[0]
+		out = append(out, a.Type+"="+ldap.EscapeDN(a.Value))
+	}
+	return strings.Join(out, ",")
+}
+
+// SameConnection reports whether two settings talk to the same servers as
+// the same service account with the same TLS protection. The saved bind
+// password is only reused when they do; otherwise it must be typed again,
+// or anyone who can change the settings could have it sent to a server
+// they choose.
+func SameConnection(a, b LDAPSettings) bool {
+	a, b = a.Clone(), b.Clone()
+	a.Normalize()
+	b.Normalize()
+	return strings.EqualFold(a.URL, b.URL) && strings.EqualFold(a.FailoverURL, b.FailoverURL) &&
+		sameDN(a.BindDN, b.BindDN) && a.StartTLS == b.StartTLS && a.TLSSkipVerify == b.TLSSkipVerify &&
+		a.CACert == b.CACert
+}
+
 // IsEnabled reports whether directory sign-in is on.
 func (s *LDAPSettings) IsEnabled() bool { return s.Enabled != nil && *s.Enabled }
 
@@ -162,6 +220,9 @@ func (s *LDAPSettings) Normalize() {
 		*p = strings.TrimSpace(*p)
 	}
 	s.Type = strings.ToLower(s.Type)
+	if s.Type == "" {
+		s.Type = TypeActiveDirectory
+	}
 	s.GroupSearch = strings.ToLower(s.GroupSearch)
 	s.DefaultRole = strings.ToLower(s.DefaultRole)
 	s.CACert = strings.TrimSpace(s.CACert)

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -80,17 +82,19 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	client := clientIP(r)
-	if ok, wait := s.limiter().Allow(client); !ok {
-		writeSignInError(w, lockedOut(wait))
+	attempt, err := s.beginAttempt(r, p.Username)
+	if err != nil {
+		writeSignInError(w, err)
 		return
 	}
 	if !s.userStore().CheckPassword(p.Username, req.Current) {
-		s.limiter().Fail(client)
+		attempt.Fail()
 		s.Log.Warn("password change refused", "audit", true, "user", p.Username, "client", client, "reason", "wrong current password")
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": "wrong_password", "field": "current_password",
 			"error": "Your current password is not right."})
 		return
 	}
+	attempt.Succeed()
 	if req.New == req.Current {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": "same_password", "field": "new_password",
 			"error": "Choose a new password that is different from the current one."})
@@ -123,18 +127,24 @@ type userView struct {
 	Disabled           bool       `json:"disabled"`
 	MustChangePassword bool       `json:"must_change_password"`
 	DN                 string     `json:"dn,omitempty"`
-	Created            *time.Time `json:"created"`
-	Updated            *time.Time `json:"updated"`
-	LastSignIn         *time.Time `json:"last_sign_in"`
-	You                bool       `json:"you"`
-	Actions            []string   `json:"actions"`
+	// Refused says why the directory no longer lets a directory user in;
+	// their role is then empty.
+	Refused    string     `json:"refused,omitempty"`
+	Created    *time.Time `json:"created"`
+	Updated    *time.Time `json:"updated"`
+	LastSignIn *time.Time `json:"last_sign_in"`
+	You        bool       `json:"you"`
+	Actions    []string   `json:"actions"`
 }
 
 func (s *Server) viewUser(u users.User, me string) userView {
 	created, updated := u.Created, u.Updated
 	v := userView{Username: u.Username, Name: u.Name, Email: u.Email, Role: u.Role, Source: u.Source,
 		Disabled: u.Disabled, MustChangePassword: u.MustChangePassword, DN: u.DN,
-		Created: &created, Updated: &updated, LastSignIn: u.LastSignIn, You: strings.EqualFold(u.Username, me)}
+		Refused: u.Refused, Created: &created, Updated: &updated, LastSignIn: u.LastSignIn, You: strings.EqualFold(u.Username, me)}
+	if u.Refused != "" {
+		v.Role = ""
+	}
 	toggle := "disable"
 	if u.Disabled {
 		toggle = "enable"
@@ -245,8 +255,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
+// targetName is the user a /api/users/{username} request is about, in
+// the form the store keeps, so the checks below compare like with like.
+func targetName(r *http.Request) string { return users.NormalizeUsername(r.PathValue("username")) }
+
 func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("username")
+	name := targetName(r)
 	var req struct {
 		Name     *string     `json:"name"`
 		Email    *string     `json:"email"`
@@ -305,15 +319,20 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("username")
+	name := targetName(r)
 	if s.builtinTarget(w, name) {
 		return
 	}
-	if strings.EqualFold(name, userOf(r)) {
+	cur, ok := s.userStore().Get(name)
+	if !ok {
+		writeUserError(w, users.ErrNotFound)
+		return
+	}
+	if strings.EqualFold(cur.Username, userOf(r)) {
 		writeError(w, http.StatusConflict, errors.New("you cannot delete your own account; ask another admin"))
 		return
 	}
-	u, err := s.userStore().Delete(name)
+	u, err := s.userStore().Delete(cur.Username)
 	if err != nil {
 		writeUserError(w, err)
 		return
@@ -326,7 +345,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 // handleResetPassword gives a local user a temporary password, which they
 // replace at their next sign-in. Their sessions end.
 func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("username")
+	name := targetName(r)
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -339,10 +358,16 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	if s.builtinTarget(w, name) {
 		return
 	}
-	if strings.EqualFold(name, userOf(r)) {
+	cur, ok := s.userStore().Get(name)
+	if !ok {
+		writeUserError(w, users.ErrNotFound)
+		return
+	}
+	if strings.EqualFold(cur.Username, userOf(r)) {
 		writeError(w, http.StatusConflict, errors.New("to change your own password, use Change password in your user menu"))
 		return
 	}
+	name = cur.Username
 	generated := ""
 	if req.Password == "" {
 		generated = users.GeneratePassword()
@@ -395,6 +420,7 @@ func (s *Server) directoryView() map[string]any {
 	view := map[string]any{
 		"settings":        settingsView{LDAPSettings: cur, BindPasswordSet: cur.BindPassword != ""},
 		"from_config":     d.FromConfig(),
+		"saved":           d.Saved(),
 		"warnings":        warnings,
 		"presets":         presets,
 		"directory_users": s.userStore().Count()[users.SourceDirectory],
@@ -409,19 +435,48 @@ func (s *Server) handleGetDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.directoryView())
 }
 
-// mergeSettings turns input into settings, keeping the saved bind
-// password when none was typed. Clearing the bind DN drops it.
-func (s *Server) mergeSettings(in *settingsInput) users.LDAPSettings {
+// mergeSettings turns input into settings. When no bind password was
+// typed, the saved one is kept, but only while the servers, the service
+// account and the TLS settings are the saved ones: otherwise anyone who can
+// edit the settings could have the saved password sent to a server of
+// their choosing. Then again is true and the password must be typed again.
+func (s *Server) mergeSettings(in *settingsInput) (set users.LDAPSettings, again bool) {
 	cur := s.dir().Settings()
 	if in == nil {
-		return cur
+		return cur, false
 	}
 	next := in.LDAPSettings.Clone()
 	next.BindPassword = in.BindPassword
-	if next.BindPassword == "" && strings.TrimSpace(next.BindDN) != "" {
-		next.BindPassword = cur.BindPassword
+	if next.BindPassword == "" && strings.TrimSpace(next.BindDN) != "" && cur.BindPassword != "" {
+		if users.SameConnection(cur, next) {
+			next.BindPassword = cur.BindPassword
+		} else {
+			again = true
+		}
 	}
-	return next
+	return next, again
+}
+
+// bindPasswordAgain says why the saved bind password was not used.
+const bindPasswordAgain = "enter the service account's password again: the saved one is only used with the saved servers, bind DN and TLS settings"
+
+// explainAgain rewords the missing bind password problem when the saved
+// one was held back by mergeSettings.
+func explainAgain(problems []users.Problem, again bool) []users.Problem {
+	if !again {
+		return problems
+	}
+	for i, p := range problems {
+		if p.Field == "bind_password" {
+			problems[i].Message = bindPasswordAgain
+		}
+	}
+	return problems
+}
+
+// serversOf lists the servers settings point at, for the audit log.
+func serversOf(set users.LDAPSettings) string {
+	return strings.Join(slices.DeleteFunc([]string{set.URL, set.FailoverURL}, func(v string) bool { return v == "" }), " ")
 }
 
 // writeProblems reports settings that need fixing, as a list and by field
@@ -454,19 +509,27 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := d.Settings()
-	next := s.mergeSettings(&in)
+	next, again := s.mergeSettings(&in)
 	err := d.Save(next)
 	var se *users.SettingsError
 	switch {
 	case errors.As(err, &se):
-		writeProblems(w, se.Problems)
+		writeProblems(w, explainAgain(se.Problems, again))
 		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("could not save the directory settings: %w", err))
 		return
 	}
 	after := d.Settings()
-	s.audit(r, "directory settings changed", "enabled", after.IsEnabled(), "fields", strings.Join(changedSettings(before, after), ","))
+	// Check signed-in directory users against the new settings now, rather
+	// than at their next request.
+	for _, name := range s.sessions().Users() {
+		if u, ok := s.userStore().Get(name); ok && u.Source == users.SourceDirectory && !u.Disabled && u.Refused == "" && after.IsEnabled() {
+			s.recheckDirectoryUser(u.Username)
+		}
+	}
+	s.audit(r, "directory settings changed", "enabled", after.IsEnabled(), "servers", serversOf(after),
+		"fields", strings.Join(changedSettings(before, after), ","))
 	writeJSON(w, http.StatusOK, s.directoryView())
 }
 
@@ -524,15 +587,15 @@ func (s *Server) handleTestDirectory(w http.ResponseWriter, r *http.Request) {
 	if s.dir().FromConfig() {
 		req.Settings = nil
 	}
-	set := s.mergeSettings(req.Settings)
+	set, again := s.mergeSettings(req.Settings)
 	if p := testSettings(set, false); len(p) > 0 {
-		writeProblems(w, p)
+		writeProblems(w, explainAgain(p, again))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	rep := users.TestConnection(ctx, set)
-	s.audit(r, "directory connection tested", "ok", rep.OK)
+	s.audit(r, "directory connection tested", "servers", serversOf(set), "bind_dn", set.BindDN, "ok", rep.OK)
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -555,24 +618,31 @@ func (s *Server) handleTestDirectoryUser(w http.ResponseWriter, r *http.Request)
 	if s.dir().FromConfig() {
 		req.Settings = nil
 	}
-	set := s.mergeSettings(req.Settings)
+	set, again := s.mergeSettings(req.Settings)
 	if p := testSettings(set, true); len(p) > 0 {
-		writeProblems(w, p)
+		writeProblems(w, explainAgain(p, again))
 		return
 	}
-	client := clientIP(r)
+	var attempt *auth.Attempt
 	if req.Password != "" {
-		if ok, wait := s.limiter().Allow(client); !ok {
-			writeSignInError(w, lockedOut(wait))
+		// Testing passwords counts toward the limits, like signing in.
+		var err error
+		if attempt, err = s.beginAttempt(r, req.Username); err != nil {
+			writeSignInError(w, err)
 			return
 		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	rep := users.LookupUser(ctx, set, req.Username, req.Password)
-	if rep.Code == "wrong_password" {
-		// Testing passwords counts toward the limit, like signing in.
-		s.limiter().Fail(client)
+	switch {
+	case attempt == nil:
+	case rep.Code == "wrong_password":
+		attempt.Fail()
+	case rep.OK:
+		attempt.Succeed()
+	default:
+		attempt.Done()
 	}
 	warning := ""
 	login := users.LoginName(req.Username)
@@ -581,7 +651,7 @@ func (s *Server) handleTestDirectoryUser(w http.ResponseWriter, r *http.Request)
 	} else if u, ok := s.userStore().Get(login); ok && u.Source == users.SourceLocal {
 		warning = "A local Signalith user has this name, so sign-in uses the local password and never asks the directory."
 	}
-	s.audit(r, "directory user looked up", "user", login, "ok", rep.OK, "code", rep.Code, "password_checked", rep.PasswordChecked)
+	s.audit(r, "directory user looked up", "user", login, "servers", serversOf(set), "ok", rep.OK, "code", rep.Code, "password_checked", rep.PasswordChecked)
 	writeJSON(w, http.StatusOK, struct {
 		users.UserReport
 		Warning string `json:"warning,omitempty"`
