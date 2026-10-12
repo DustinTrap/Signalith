@@ -218,99 +218,129 @@
 </header>
 <main class="content" id="content">
   <!-- Search -->
-  <section id="page-search" class="page active" data-legacy>
+  <section id="page-search" class="page active">
     <div class="search-layout">
-      <aside class="card fields" aria-label="Fields">
-        <h3>Fields</h3>
-        <input id="field-filter" type="search" placeholder="Filter fields">
-        <ul id="field-list" class="field-list"></ul>
-        <div id="field-values" class="field-values hidden"></div>
-      </aside>
-
       <div class="workspace">
-        <form id="ask-form" class="ask-row" autocomplete="off">
-          <input id="ask" type="search" placeholder="Ask in plain English, for example: top 10 users with failed logins today" aria-label="Ask in plain English">
-          <button id="ask-go" type="submit">Write query</button>
-          <label id="ask-ai-wrap" class="inline hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"> Use AI</label>
-        </form>
-        <div id="ask-result" class="ask-result hidden"></div>
-        <div class="editor-row">
-          <div class="editor-wrap">
-            <textarea id="query" spellcheck="false" rows="4" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
-            <ul id="suggest" class="suggest hidden"></ul>
+        <div class="card query">
+          <form id="ask-form" class="ask" role="search" autocomplete="off">
+            <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
+            <input id="ask" type="search" placeholder="Ask in plain English, e.g. top 10 users with failed logins today" aria-label="Ask in plain English" enterkeyhint="go">
+            <label id="ask-ai-wrap" class="switch hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"><span>Use AI</span></label>
+            <button id="ask-go" class="btn btn--ghost btn--sm hide-sm" type="submit">Write query<kbd aria-hidden="true">↵</kbd></button>
+          </form>
+          <div id="ask-try" class="try hidden"><span>Try</span><span id="ask-examples" class="try__list"></span></div>
+          <div id="ask-result" class="ask-read hidden" aria-live="polite"></div>
+          <div class="editor" id="editor">
+            <div class="editor__hl" id="query-hl" aria-hidden="true"></div>
+            <textarea id="query" class="editor__input" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Query" aria-describedby="query-error" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
+            <ul id="suggest" class="suggest hidden" role="listbox" aria-label="Suggestions"></ul>
           </div>
-          <div class="editor-controls">
-            <select id="time" title="Time range">
-              <option value="-15m">Last 15 minutes</option>
-              <option value="-1h">Last hour</option>
-              <option value="-4h">Last 4 hours</option>
-              <option value="-24h" selected>Last 24 hours</option>
-              <option value="-7d">Last 7 days</option>
-              <option value="-30d">Last 30 days</option>
-              <option value="0">All time</option>
-            </select>
-            <button id="run" class="primary" title="Ctrl+Enter">Search</button>
-            <button id="explain">Explain</button>
-            <button id="save-detection" title="Run this query on a schedule and raise findings">Save as detection</button>
-            <button id="add-to-dashboard" title="Show this query as a panel on a dashboard">Add to dashboard</button>
-            <button id="search-to-case" title="Save this search and a snapshot of its results to an investigation">Add to case</button>
-          </div>
-        </div>
-        <div id="query-error" class="error hidden"></div>
-
-        <details id="builder" open>
-          <summary>Query builder <span id="builder-note" class="muted"></span></summary>
-          <div class="builder">
-            <label>Data
-              <select id="b-datamodel"><option value="">All data</option></select>
-            </label>
-            <label>Contains text
-              <input id="b-text" type="text" placeholder="optional, e.g. powershell">
-            </label>
-            <div class="b-filters">
-              <div class="b-label">Where</div>
-              <div id="b-filter-rows"></div>
-              <button id="b-add-filter" class="link">+ Add condition</button>
+          <div id="query-error" class="alert query-error hidden" data-tone="danger" role="alert"></div>
+          <div class="query__bar">
+            <button id="explain" class="btn btn--ghost btn--sm" type="button" title="Explain this query in plain English" aria-pressed="false" aria-controls="explanation"><svg class="icon" aria-hidden="true"><use href="#i-book-open"/></svg><span>Explain</span></button>
+            <button id="save-detection" class="btn btn--ghost btn--sm" type="button" title="Run this query on a schedule and raise findings"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Save as detection</span></button>
+            <button id="add-to-dashboard" class="btn btn--ghost btn--sm" type="button" title="Show this query as a panel on a dashboard"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Add to dashboard</span></button>
+            <button id="search-to-case" class="btn btn--ghost btn--sm" type="button" title="Save this search and a snapshot of its results to an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Add to case</span></button>
+            <div class="run">
+              <span class="hint" aria-hidden="true"><kbd class="mod-key">Ctrl</kbd><kbd>↵</kbd></span>
+              <select id="time" class="select" aria-label="Time range">
+                <option value="-15m">Last 15 minutes</option>
+                <option value="-1h">Last hour</option>
+                <option value="-4h">Last 4 hours</option>
+                <option value="-24h" selected>Last 24 hours</option>
+                <option value="-7d">Last 7 days</option>
+                <option value="-30d">Last 30 days</option>
+                <option value="0">All time</option>
+              </select>
+              <button id="run" class="btn btn--primary" type="button" title="Search (Ctrl+Enter)"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Search</button>
             </div>
-            <label>Show
-              <select id="b-mode">
-                <option value="events">Matching events</option>
-                <option value="stats">A table of</option>
-                <option value="timechart">A chart over time of</option>
-              </select>
-            </label>
-            <span id="b-agg-group" class="b-inline hidden">
-              <select id="b-agg">
-                <option value="count">count</option>
-                <option value="dc">distinct count of</option>
-                <option value="sum">sum of</option>
-                <option value="avg">average of</option>
-                <option value="min">minimum of</option>
-                <option value="max">maximum of</option>
-              </select>
-              <input id="b-agg-field" type="text" list="field-names" placeholder="field" class="hidden">
-              <label class="inline">split by <input id="b-by" type="text" list="field-names" placeholder="e.g. src, user"></label>
-            </span>
-            <label>Sort by <input id="b-sort" type="text" placeholder="e.g. -count"></label>
-            <label>Limit <input id="b-limit" type="number" min="0" placeholder="none"></label>
+          </div>
+          <div id="explanation" class="explain hidden" aria-live="polite"></div>
+        </div>
+
+        <details id="builder" class="disclosure">
+          <summary><svg class="icon" aria-hidden="true"><use href="#i-wand-sparkles"/></svg>Query builder<span id="builder-note" class="builder-note"></span><span class="subtle builder-sub hide-sm">Pick data, filters and a summary without writing a query</span><svg class="icon chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+          <div class="disclosure__body">
+            <div class="builder">
+              <div class="field">
+                <label class="label" for="b-datamodel">Data</label>
+                <select id="b-datamodel" class="select select--block"><option value="">All data</option></select>
+              </div>
+              <div class="field">
+                <label class="label" for="b-text">Contains text</label>
+                <input id="b-text" class="input" type="text" placeholder="Optional, e.g. powershell">
+              </div>
+              <div class="field">
+                <label class="label" for="b-sort">Sort by</label>
+                <input id="b-sort" class="input" type="text" placeholder="e.g. -count">
+              </div>
+              <div class="field">
+                <label class="label" for="b-limit">Limit</label>
+                <input id="b-limit" class="input" type="number" min="0" placeholder="None">
+              </div>
+              <div class="field b-where">
+                <span class="label" id="b-where-label">Where</span>
+                <div id="b-filter-rows" class="b-rows" role="group" aria-labelledby="b-where-label"></div>
+                <div><button id="b-add-filter" class="btn btn--ghost btn--sm" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add condition</button></div>
+              </div>
+              <div class="field">
+                <label class="label" for="b-mode">Show</label>
+                <select id="b-mode" class="select select--block">
+                  <option value="events">Matching events</option>
+                  <option value="stats">A table of</option>
+                  <option value="timechart">A chart over time of</option>
+                </select>
+              </div>
+              <div id="b-agg-group" class="b-agg hidden">
+                <div class="field">
+                  <label class="label" for="b-agg">Calculate</label>
+                  <select id="b-agg" class="select select--block">
+                    <option value="count">count</option>
+                    <option value="dc">distinct count of</option>
+                    <option value="sum">sum of</option>
+                    <option value="avg">average of</option>
+                    <option value="min">minimum of</option>
+                    <option value="max">maximum of</option>
+                  </select>
+                </div>
+                <div class="field hidden" id="b-agg-field-wrap">
+                  <label class="label" for="b-agg-field">Of field</label>
+                  <input id="b-agg-field" class="input" type="text" list="field-names" placeholder="field">
+                </div>
+                <div class="field">
+                  <label class="label" for="b-by">Split by</label>
+                  <input id="b-by" class="input" type="text" list="field-names" placeholder="e.g. src, user">
+                </div>
+              </div>
+            </div>
           </div>
         </details>
         <datalist id="field-names"></datalist>
 
-        <div id="explanation" class="explanation hidden"></div>
+        <div id="results-card" class="card results-card hidden">
+          <div class="results-head">
+            <div class="tabs" role="tablist" aria-label="Results" id="result-tabs"></div>
+            <div class="stats" id="status"></div>
+          </div>
+          <div id="histogram" class="histogram hidden"></div>
+          <div id="chart" class="results-chart hidden" role="tabpanel"></div>
+          <div id="results" role="tabpanel"></div>
+        </div>
 
-        <div id="status" class="search-status muted"></div>
-        <div id="chart"></div>
-        <div id="results" class="results"></div>
-        <div id="starter" class="starter">
-          <h3>Ask a question</h3>
-          <ul id="ask-examples"></ul>
-          <h3>Start with a common hunt</h3>
-          <ul id="starter-list"></ul>
+        <div id="starter" class="card starter">
+          <div class="card__head"><div><div class="card__title">Start with a common hunt</div><div class="card__sub">Pick one to fill in the query and run it.</div></div></div>
+          <ul id="starter-list" class="hunts" role="list"></ul>
         </div>
       </div>
+
+      <aside class="card fields" aria-label="Fields">
+        <div class="fields__head"><b>Fields</b><span class="count hidden" id="field-count"></span></div>
+        <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="field-filter" class="input input--sm" type="search" placeholder="Filter fields" aria-label="Filter fields"></div>
+        <div id="field-list" class="fields__list"></div>
+        <div id="field-values" class="field-values hidden"></div>
+      </aside>
     </div>
-    <div id="cell-menu" class="cell-menu hidden"></div>
+    <div id="cell-menu" class="cell-menu hidden" role="menu" aria-label="Cell actions"></div>
   </section>
 
   <!-- Dashboards -->
@@ -662,41 +692,50 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
   </section>
 
   <!-- Help -->
-  <section id="page-help" class="page help" data-legacy>
-    <h2>Query guide</h2>
-    <p>A query is a search followed by commands joined with <code>|</code>. The search picks events; each command reshapes the results.</p>
-    <h3>Search</h3>
-    <table class="ref">
-      <tr><td><code>datamodel=Authentication</code></td><td>Only events of one data model (Authentication, Endpoint, Network_Traffic, Change, Other, Risk)</td></tr>
-      <tr><td><code>user=admin</code></td><td>Field equals a value (case-insensitive)</td></tr>
-      <tr><td><code>user=adm*</code></td><td>Wildcards with <code>*</code></td></tr>
-      <tr><td><code>dest_port&gt;=1024</code></td><td>Comparisons: <code>= != &lt; &lt;= &gt; &gt;=</code></td></tr>
-      <tr><td><code>src IN (10.0.0.1, 10.0.0.2)</code></td><td>Any of several values</td></tr>
-      <tr><td><code>"failed password"</code></td><td>Text anywhere in the raw event</td></tr>
-      <tr><td><code>a=1 b=2 OR c=3</code></td><td>Terms are ANDed; OR binds tighter, as in SPL; use NOT and parentheses as needed</td></tr>
-      <tr><td><code>earliest=-7d@d latest=now</code></td><td>Time range; overrides the time picker</td></tr>
-    </table>
-    <h3>Commands</h3>
-    <table class="ref">
-      <tr><td><code>| stats count, dc(user) as users by src</code></td><td>Aggregate: count, dc, sum, avg, min, max</td></tr>
-      <tr><td><code>| timechart span=1h count by action</code></td><td>Series over time</td></tr>
-      <tr><td><code>| top limit=10 process_name</code></td><td>Most common values with percentages</td></tr>
-      <tr><td><code>| where count &gt; 20</code></td><td>Filter rows; uses AND/OR like most languages</td></tr>
-      <tr><td><code>| sort -count, src</code></td><td>Sort; <code>-</code> for descending</td></tr>
-      <tr><td><code>| head 10</code></td><td>Keep the first N rows</td></tr>
-      <tr><td><code>| table _time, user, src</code></td><td>Choose columns</td></tr>
-      <tr><td><code>| rename src as source_ip</code></td><td>Rename columns</td></tr>
-      <tr><td><code>| enrich</code></td><td>Add owner, priority and category from the asset and identity lists, as <code>dest_owner</code>, <code>user_priority</code> and so on</td></tr>
-      <tr><td><code>| threatmatch</code></td><td>Keep only events whose IP, domain, URL, hash or email fields match threat intel, with <code>threat_match_value</code>, <code>threat_source</code> and <code>threat_weight</code> columns. Name fields to check only those: <code>| threatmatch src, dest</code>. Put it right after the search</td></tr>
-      <tr><td><code>| intel src, dest</code></td><td>Check any result against threat intel: adds <code>src_intel_source</code>, <code>src_intel_type</code>, <code>src_intel_weight</code> and <code>src_intel_description</code> where a value is a known indicator</td></tr>
-    </table>
-    <h3>Tips</h3>
-    <ul>
-      <li>Click a field on the left to see its top values; click a value to filter on it.</li>
-      <li>Click any cell in the results to filter, exclude, or count by that value.</li>
-      <li>Use the builder to write a query, then edit the text; the builder follows along when it can.</li>
-      <li>Explain turns any query into plain English and shows the OpenSearch request it runs.</li>
-    </ul>
+  <section id="page-help" class="page">
+    <article class="card guide">
+      <p class="guide__lead">A query is a search followed by commands joined with <code>|</code>. The search picks events; each command reshapes the results.</p>
+      <figure class="guide__example">
+        <div class="editor" data-query="datamodel=Authentication action=failure&#10;| stats count, dc(user) as users by src&#10;| where count &gt; 10&#10;| sort -count"></div>
+        <figcaption><span>Sources with more than 10 failed sign-ins, busiest first.</span><button class="btn btn--ghost btn--sm" type="button" id="guide-try"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Run in Search</button></figcaption>
+      </figure>
+
+      <h2>Search</h2>
+      <dl class="guide__ref">
+        <div><dt data-query="datamodel=Authentication"></dt><dd>Only events of one data model: Authentication, Endpoint, Network_Traffic, Change, Other or Risk.</dd></div>
+        <div><dt data-query="user=admin"></dt><dd>A field equals a value. Matching ignores case.</dd></div>
+        <div><dt data-query="user=adm*"></dt><dd>Wildcards with <code>*</code>.</dd></div>
+        <div><dt data-query="dest_port&gt;=1024"></dt><dd>Comparisons: <code>= != &lt; &lt;= &gt; &gt;=</code>.</dd></div>
+        <div><dt data-query="src IN (10.0.0.1, 10.0.0.2)"></dt><dd>Any of several values.</dd></div>
+        <div><dt data-query="&quot;failed password&quot;"></dt><dd>Text anywhere in the raw event.</dd></div>
+        <div><dt data-query="a=1 b=2 OR c=3"></dt><dd>Terms are ANDed. OR binds tighter, as in SPL. Use NOT and parentheses as needed.</dd></div>
+        <div><dt data-query="earliest=-7d@d latest=now"></dt><dd>Time range. It overrides the time picker.</dd></div>
+      </dl>
+
+      <h2>Commands</h2>
+      <dl class="guide__ref">
+        <div><dt data-query="| stats count, dc(user) as users by src"></dt><dd>Aggregate with count, dc, sum, avg, min and max.</dd></div>
+        <div><dt data-query="| timechart span=1h count by action"></dt><dd>A series over time.</dd></div>
+        <div><dt data-query="| top limit=10 process_name"></dt><dd>The most common values, with percentages.</dd></div>
+        <div><dt data-query="| where count &gt; 20"></dt><dd>Filter rows. Uses AND and OR like most languages.</dd></div>
+        <div><dt data-query="| sort -count, src"></dt><dd>Sort. Put <code>-</code> before a field for descending.</dd></div>
+        <div><dt data-query="| head 10"></dt><dd>Keep the first N rows.</dd></div>
+        <div><dt data-query="| table _time, user, src"></dt><dd>Choose the columns.</dd></div>
+        <div><dt data-query="| rename src as source_ip"></dt><dd>Rename columns.</dd></div>
+        <div><dt data-query="| enrich"></dt><dd>Add owner, priority and category from the asset and identity lists, as <code>dest_owner</code>, <code>user_priority</code> and so on.</dd></div>
+        <div><dt data-query="| threatmatch"></dt><dd>Keep only events whose IP, domain, URL, hash or email fields match threat intel, with <code>threat_match_value</code>, <code>threat_source</code> and <code>threat_weight</code> columns. Name fields to check only those, as in <code>| threatmatch src, dest</code>. Put it right after the search.</dd></div>
+        <div><dt data-query="| intel src, dest"></dt><dd>Check any result against threat intel. Adds <code>src_intel_source</code>, <code>src_intel_type</code>, <code>src_intel_weight</code> and <code>src_intel_description</code> where a value is a known indicator.</dd></div>
+      </dl>
+
+      <h2>Tips</h2>
+      <ul class="guide__tips">
+        <li>Click a field in the Fields list to see its top values, then click a value to filter on it.</li>
+        <li>Click any cell in the results to filter, exclude, or count by that value.</li>
+        <li>Use the query builder to write a query, then edit the text. The builder follows along when it can.</li>
+        <li>Explain turns any query into plain English and shows the OpenSearch request it runs.</li>
+        <li>Press <kbd class="mod-key">Ctrl</kbd> <kbd>Enter</kbd> in the query box to run the search.</li>
+      </ul>
+    </article>
   </section>
 </main>
 </div>
