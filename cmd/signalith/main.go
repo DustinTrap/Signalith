@@ -33,6 +33,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
 )
 
@@ -186,6 +187,19 @@ func cmdValidate(args []string) error {
 		return err
 	}
 	fmt.Printf("%d assets and %d identities loaded from %s.\n", len(lists.Assets()), len(lists.Identities()), c.LookupsDir())
+	people, dir, err := openUsers(c)
+	if err != nil {
+		return err
+	}
+	n := people.Count()
+	fmt.Printf("%d local users and %d directory users in %s, plus the built-in admin %q.\n", n[users.SourceLocal], n[users.SourceDirectory], c.UsersFile(), c.Auth.AdminUser)
+	if s := dir.Settings(); s.IsEnabled() {
+		from := "the Users page"
+		if dir.FromConfig() {
+			from = "auth.ldap in this file"
+		}
+		fmt.Printf("Directory sign-in is on (%s), set up in %s. Test it on the Users page.\n", s.URL, from)
+	}
 	if feeds := intelFeeds(c); len(feeds) > 0 {
 		on := 0
 		for _, f := range feeds {
@@ -242,6 +256,24 @@ func cmdPasswd(args []string) error {
 	}
 	fmt.Println("Password updated. Restart the server to apply it.")
 	return nil
+}
+
+// openUsers opens the users file and the directory sign-in settings.
+func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
+	people, err := users.Open(c.UsersFile())
+	if err != nil {
+		return nil, nil, err
+	}
+	people.BuiltinAdmin = c.Auth.AdminUser
+	fromFile, err := c.LDAP()
+	if err != nil {
+		return nil, nil, err
+	}
+	dir, err := users.OpenDirectory(c.DirectoryFile(), fromFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	return people, dir, nil
 }
 
 // loadForEdit loads a config without failing on a missing password hash,
@@ -439,6 +471,21 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
 		}
 	}
+	people, dir, err := openUsers(c)
+	if err != nil {
+		return err
+	}
+	if _, clash := people.Get(c.Auth.AdminUser); clash {
+		log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
+	}
+	n := people.Count()
+	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
+	if s := dir.Settings(); s.IsEnabled() {
+		log.Info("directory sign-in is on", "server", s.URL, "from_config_file", dir.FromConfig())
+		for _, w := range s.Warnings() {
+			log.Warn("directory sign-in: " + w)
+		}
+	}
 	fstore := findings.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	cstore := cases.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	sched := &detect.Scheduler{
@@ -460,6 +507,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Dashboards: boards,
 		Cases:      cstore,
 		Assistant:  newAssistant(c),
+		Users:      people,
+		Directory:  dir,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,

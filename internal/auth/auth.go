@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -91,6 +92,22 @@ func (s *Sessions) Delete(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.byID, hash(token))
+}
+
+// EndUser ends every session of a user except the one with token keep
+// ("" keeps none), and reports how many ended. Usernames ignore case.
+func (s *Sessions) EndUser(user, keep string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keepID := hash(keep)
+	n := 0
+	for id, ss := range s.byID {
+		if strings.EqualFold(ss.User, user) && (keep == "" || id != keepID) {
+			delete(s.byID, id)
+			n++
+		}
+	}
+	return n
 }
 
 // Len reports how many sessions are stored.

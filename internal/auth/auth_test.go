@@ -107,3 +107,24 @@ func TestLimiter(t *testing.T) {
 		t.Error("success did not clear failures")
 	}
 }
+
+func TestEndUser(t *testing.T) {
+	s := NewSessions(time.Hour)
+	a1, a2 := s.Create("ann", false), s.Create("ann", true)
+	b := s.Create("ben", false)
+	if n := s.EndUser("ANN", a2); n != 1 {
+		t.Errorf("ended %d", n)
+	}
+	if _, ok := s.Lookup(a1); ok {
+		t.Error("other session of ann survived")
+	}
+	if _, ok := s.Lookup(a2); !ok {
+		t.Error("kept session ended")
+	}
+	if n := s.EndUser("ann", ""); n != 1 {
+		t.Errorf("ended %d", n)
+	}
+	if _, ok := s.Lookup(b); !ok {
+		t.Error("ben's session ended")
+	}
+}

@@ -11,14 +11,16 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 )
 
-func (s *Server) routeIntel(api *http.ServeMux) {
-	api.HandleFunc("GET /api/intel", s.handleIntelOverview)
-	api.HandleFunc("POST /api/intel/feeds/{name}/refresh", s.handleIntelRefresh)
-	api.HandleFunc("GET /api/intel/indicators", s.handleIntelList)
-	api.HandleFunc("POST /api/intel/indicators", s.handleIntelAdd)
-	api.HandleFunc("DELETE /api/intel/indicators/{id}", s.handleIntelDelete)
-	api.HandleFunc("POST /api/intel/upload", s.handleIntelUpload)
-	api.HandleFunc("GET /api/intel/lookup", s.handleIntelLookup)
+func (s *Server) routeIntel(api *router) {
+	api.viewer("GET /api/intel", s.handleIntelOverview)
+	api.viewer("GET /api/intel/indicators", s.handleIntelList)
+	api.viewer("GET /api/intel/lookup", s.handleIntelLookup)
+	// Analysts add and remove indicators by hand; feeds and bulk uploads
+	// are admin work.
+	api.analyst("POST /api/intel/indicators", s.handleIntelAdd)
+	api.analyst("DELETE /api/intel/indicators/{id}", s.handleIntelDelete)
+	api.admin("POST /api/intel/feeds/{name}/refresh", s.handleIntelRefresh)
+	api.admin("POST /api/intel/upload", s.handleIntelUpload)
 }
 
 var errIntelOff = errors.New("threat intel is not available on this server")

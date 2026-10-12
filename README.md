@@ -70,13 +70,22 @@ Supported sources in Phase 1:
 | Linux useradd, userdel, usermod, gpasswd | Change |
 | Anything else | Other (searchable by text and fields) |
 
-### Sign in
+### Sign in and users
 
 The web UI has its own sign-in page. Sessions end after `auth.session_timeout` without
 activity (12 hours by default) or when you sign out; tick **Keep me signed in** to stay
 signed in for up to 7 days. Ten wrong passwords from one address within 15 minutes lock
 that address out for 15 minutes. Scripts and API clients can keep using HTTP Basic auth
 with the same username and password.
+
+Admins add people on the **Users** page and give each one a role: **Viewer** (look,
+search, change nothing), **Analyst** (also triage findings, work investigations, build
+dashboards) or **Admin** (also detections, feeds, lists, data collection and users).
+New users get a temporary password they replace at their first sign-in. People can
+also sign in with their **Active Directory or LDAP** account, with their role coming
+from their groups; set it up and test it on the same page. The `admin` account from
+`signalith.yaml` stays as a break-glass account that always works. See
+[docs/users.md](docs/users.md).
 
 ## Configuration
 
@@ -95,8 +104,10 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `opensearch.index_prefix` | `signalith` | Indices are `<prefix>-<datamodel>-YYYY.MM.DD` |
 | `search.default_earliest` | `-24h` | Time range when a query sets none |
 | `retention.days` | `90` | Days of events to keep; `0` keeps everything |
-| `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` |
+| `auth.admin_user`, `auth.admin_password_hash` | `admin` | The built-in admin, a break-glass account; change its password with `signalith passwd` |
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
+| `auth.users_file` | `users.json` in `lookups.dir` | Where users added on the Users page are kept; directory settings go in `directory.json` next to it |
+| `auth.ldap` | none | Active Directory or LDAP sign-in, when you would rather not set it up on the Users page; see [docs/users.md](docs/users.md#setting-it-in-signalithyaml) |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
@@ -115,9 +126,9 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `assistant.url`, `assistant.model`, `assistant.api_key` | per provider | Endpoint, model name and key; `anthropic` defaults to `claude-sonnet-5-5` |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
-`SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
-`SIGNALITH_ASSISTANT_API_KEY`).
+`SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (also
+`SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
+`SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`).
 
 ## Detections and findings
 
@@ -369,7 +380,8 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
 | `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |
-| `internal/api` | REST API, query explanations |
+| `internal/users` | Roles, local users, Active Directory and LDAP sign-in and its tests |
+| `internal/api` | REST API, the role of every route, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
 | `deploy/` | Docker Compose, systemd unit, Windows installer script |
 

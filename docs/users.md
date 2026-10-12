@@ -1,0 +1,608 @@
+# Users and sign-in
+
+Everyone who signs in to Signalith has one of three roles. People can sign in in
+three ways:
+
+| Account | Where it lives | Managed on |
+| --- | --- | --- |
+| The **built-in admin** | `auth.admin_user` and `auth.admin_password_hash` in `signalith.yaml` | The server, with `signalith passwd` |
+| **Local users** | `users.json` in the lookups folder | The **Users** page |
+| **Directory users** | Your Active Directory or LDAP server; Signalith keeps a record after their first sign-in | The directory; on the **Users** page you can only disable or delete them |
+
+## Roles
+
+Each role can do everything the roles above it can.
+
+| Role | For | Can |
+| --- | --- | --- |
+| **Viewer** | Managers, auditors, other teams | Run searches and see dashboards, findings, investigations, detections, risk and intel. Cannot change anything. |
+| **Analyst** | SOC analysts | Also triage findings, work investigations, build dashboards, use **Ask** and add or remove intel indicators by hand. |
+| **Admin** | Whoever runs Signalith | Also create and change detections, refresh feeds and upload intel, edit asset and identity lists, see the agent setup (it holds the ingest token), manage users and set up directory sign-in. |
+
+By area:
+
+| Area | Viewer | Analyst | Admin |
+| --- | --- | --- | --- |
+| Search, query builder, explain, field lists | Yes | Yes | Yes |
+| **Ask** (plain English; can call a paid AI model) | No | Yes | Yes |
+| Dashboards: view and run | Yes | Yes | Yes |
+| Dashboards: create, edit, delete, add panels | No | Yes | Yes |
+| Findings: view | Yes | Yes | Yes |
+| Findings: status, owner, comments, bulk changes, create | No | Yes | Yes |
+| Investigations: view | Yes | Yes | Yes |
+| Investigations: create, edit, add findings, notes, entities | No | Yes | Yes |
+| Detections and ATT&CK coverage: view | Yes | Yes | Yes |
+| Detections: create, edit, delete, test, run, Sigma import | No | No | Yes |
+| Risk, asset and identity context: view | Yes | Yes | Yes |
+| Asset and identity lists: edit | No | No | Yes |
+| Threat intel: view and look up | Yes | Yes | Yes |
+| Threat intel: add or remove indicators by hand | No | Yes | Yes |
+| Threat intel: refresh feeds, upload files | No | No | Yes |
+| Add data (agent setup and ingest token) | No | No | Yes |
+| Users and directory sign-in | No | No | Yes |
+| Change your own password (local users) | Yes | Yes | Yes |
+
+Dashboards have no owner: any analyst can change or delete any custom dashboard.
+
+When someone tries something their role does not allow, Signalith answers
+`403` and says what is needed, for example *"This needs the Analyst role, and your
+role is Viewer. Ask an admin if you need access."* The [API section](#api) lists
+the role of every route.
+
+A role change, disabling or deleting a user takes effect on that user's next
+request: Signalith looks up the role every time instead of remembering it in the
+session.
+
+## The built-in admin
+
+The account in `auth.admin_user` (`admin` unless you changed it) always works, even
+when the directory server is down or every other admin has been removed, so you can
+always get back in. It shows on the Users page as **Built-in** and cannot be edited,
+disabled or deleted there. Change its password on the server:
+
+```sh
+signalith passwd -c /etc/signalith/signalith.yaml
+```
+
+Keep its password somewhere safe and use your own account day to day. No local user
+or directory user can have the built-in admin's name.
+
+## Managing local users
+
+Admins manage users on the **Users** page.
+
+**Add a user.** Enter a username, optionally a name and email address, and pick a
+role (Viewer if you don't). Usernames are 1 to 64 lower-case letters, digits, dots,
+dashes, underscores or `@`, starting with a letter or digit; they are not case
+sensitive. Signalith makes up a temporary password and shows it once (or you can
+type one, at least 8 characters). Give it to the person: at their first sign-in they
+must choose their own password before they can do anything else.
+
+**Change a user.** Edit their name and email, change their role, disable or enable
+them, reset their password (they get a new temporary password and must change it at
+the next sign-in), or delete them. Disabling, deleting or resetting a password signs
+that user out everywhere at once.
+
+To stop anyone locking everyone out:
+
+- You cannot disable, delete or change the role of your own account. Ask another
+  admin.
+- Signalith always keeps at least one enabled admin, and the built-in admin counts
+  as one.
+
+Passwords are stored as bcrypt hashes and never shown again.
+
+## Changing your password
+
+Local users change their password from the user menu (**Change password**): enter
+the current password and the new one (at least 8 characters, at most 72 bytes).
+Every other browser signed in as you is signed out. Scripts using your old password
+with HTTP Basic auth stop working at once.
+
+Directory users change their password in the directory (for example with
+Ctrl+Alt+Del on Windows). The built-in admin's password is changed with
+`signalith passwd`.
+
+## Signing in
+
+Sign-in checks the name in this order:
+
+1. **The built-in admin.** If the name is `auth.admin_user`, only its password works.
+2. **Local users.** If a local user has the name, only the local password works.
+   The directory is never asked about a local username, even with a domain in front
+   (`CORP\jane`).
+3. **The directory**, if directory sign-in is on.
+
+Failed sign-ins all get the same answer, *"Username and password don't match."*, so
+they do not reveal which usernames exist. Other answers are:
+
+| `code` | When |
+| --- | --- |
+| `wrong_credentials` (401) | Wrong username or password, or an empty one |
+| `disabled` (403) | The account is disabled in Signalith |
+| `not_in_group` (403) | A directory user in no group mapped to a role: *"Your directory account is not in a group that can use Signalith."* |
+| `password_expired` (403) | Active Directory says the password expired or must be changed |
+| `directory_unavailable` (503) | The directory server could not be reached |
+| `locked_out` (429) | Ten wrong passwords from one address within 15 minutes lock that address out for 15 minutes. Wrong directory passwords count too; an unreachable directory does not |
+
+The web UI keeps you signed in with a session cookie. Sessions end after
+`auth.session_timeout` without activity (12 hours by default), after 7 days with
+**Keep me signed in**, when you sign out, or when an admin disables, deletes or
+resets your account.
+
+Scripts and API clients can use HTTP Basic auth with the same username and password.
+Signalith remembers a correct username and password briefly so it does not check
+the hash or ask the directory on every request: for 10 minutes for local users and
+the built-in admin, and 2 minutes for directory users. Changing or resetting a local
+password, or changing the directory settings, ends that at once. A password changed
+in the directory keeps working for Basic auth for up to 2 minutes.
+
+**Temporary passwords.** Signing in with a temporary password works, but the reply
+says `"must_change_password": true` and the sign-in page asks for a new password.
+Until it is changed, every request other than `GET /api/me` and
+`POST /api/me/password` answers `403` with code `password_change_required`.
+
+## Sign in with Active Directory or LDAP
+
+Directory sign-in lets people use their Active Directory or LDAP account, with their
+role decided by the groups they are in.
+
+### How it works
+
+When someone signs in with a name that is not the built-in admin or a local user:
+
+1. Signalith connects to the directory server (the failover server if the first
+   cannot be reached), over TLS when set up to.
+2. It signs in as the service account (or searches anonymously if there is none).
+3. It searches under the user base DN with the user filter, the typed name in place
+   of `{username}`. Exactly one entry must match; none or several refuse the
+   sign-in. `CORP\jane` is looked up as `jane`, and with the Active Directory
+   filter `jane@corp.example.com` works too.
+4. It checks the password by signing in to the directory as that entry's DN. Empty
+   passwords are refused before anything is sent: many LDAP servers treat a sign-in
+   with an empty password as anonymous and let it through.
+5. It finds the user's groups and maps them to a role. A user in several mapped
+   groups gets the highest role. A user in none is refused, unless you choose to let
+   such users in as viewers.
+6. The user appears on the Users page as a directory user, with their name, email
+   and DN from the directory. Their role is updated at every sign-in, so a change of
+   groups applies the next time they sign in.
+
+Directory users who have never signed in are not listed. You can disable a directory
+user in Signalith (they stay out whatever the directory says), or delete their record
+(it comes back at their next sign-in). Turning directory sign-in off signs out every
+directory user at their next request.
+
+### Set it up
+
+On the **Users** page, open **Directory sign-in**:
+
+1. Pick **Active Directory** or **OpenLDAP**. This fills in the filter and attribute
+   defaults below; change any of them if your directory differs.
+2. Enter the server address and, if you have one, a failover server.
+3. Enter the service account's DN and password.
+4. Enter the user base DN, and the group base DN for OpenLDAP.
+5. Map groups to roles by their full DN.
+6. Click **Test connection**, then **Test a user** with your own account, then turn
+   directory sign-in on and save.
+
+Settings can be saved switched off while you work on them; they are only required to
+be complete when directory sign-in is on.
+
+**Use an encrypted connection.** Passwords are sent to the directory to check them.
+Use `ldaps://host` (port 636), or `ldap://host` (port 389) with StartTLS. Signalith
+accepts TLS 1.2 or newer and checks the server's certificate against the system's
+trusted CAs plus any CA certificate you paste. Plain `ldap://` without StartTLS works
+but shows a warning, and so does turning certificate checks off.
+
+**The service account** needs only read access to users and groups. In Active
+Directory any domain user account can do this; a dedicated account whose password
+does not expire is best, so sign-in does not stop when it expires.
+
+### Active Directory
+
+| Setting | Example |
+| --- | --- |
+| Server | `ldaps://dc1.corp.example.com` |
+| Failover server | `ldaps://dc2.corp.example.com` |
+| Service account DN | `CN=svc-signalith,OU=Service Accounts,DC=corp,DC=example,DC=com` |
+| User base DN | `DC=corp,DC=example,DC=com` |
+| Admin groups | `CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com` |
+| Analyst groups | `CN=SOC Analysts,OU=Groups,DC=corp,DC=example,DC=com` |
+| Viewer groups | `CN=SOC Viewers,OU=Groups,DC=corp,DC=example,DC=com` |
+
+The Active Directory preset:
+
+- finds users by logon name or `user@domain`, and skips disabled accounts:
+  `(&(objectCategory=person)(objectClass=user)(|(sAMAccountName={username})(userPrincipalName={username}))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))`
+- reads `sAMAccountName` (username), `displayName` (name) and `mail` (email)
+- reads groups from `memberOf`, and with **Nested groups** on (the default) also
+  counts groups inside groups: if `IT Leads` is a member of `Signalith Admins`, members
+  of `IT Leads` are admins. The domain controller works this out with the
+  `LDAP_MATCHING_RULE_IN_CHAIN` rule (`1.2.840.113556.1.4.1941`).
+
+Your domain controllers need an LDAPS certificate for `ldaps://` (most domains with
+Active Directory Certificate Services have one). Paste your enterprise root CA's
+certificate in **CA certificate** if the Signalith server does not trust it already.
+
+### OpenLDAP
+
+| Setting | Example |
+| --- | --- |
+| Server | `ldap://ldap.example.org` with StartTLS on, or `ldaps://ldap.example.org` |
+| Service account DN | `cn=signalith,ou=services,dc=example,dc=org` |
+| User base DN | `ou=people,dc=example,dc=org` |
+| Group base DN | `ou=groups,dc=example,dc=org` |
+| Admin groups | `cn=signalith-admins,ou=groups,dc=example,dc=org` |
+| Analyst groups | `cn=soc,ou=groups,dc=example,dc=org` |
+
+The OpenLDAP preset finds users with `(&(objectClass=inetOrgPerson)(uid={username}))`,
+reads `uid`, `cn` and `mail`, and finds groups by searching the group base DN with a
+filter that covers the three usual kinds of group:
+
+```
+(|(&(objectClass=groupOfNames)(member={dn}))(&(objectClass=groupOfUniqueNames)(uniqueMember={dn}))(&(objectClass=posixGroup)(memberUid={username})))
+```
+
+`{dn}` is the user's DN and `{username}` their username as stored in the directory.
+If your server has the `memberof` overlay, you can set **Groups** to *memberOf
+attribute* instead. Nested groups are only followed on Active Directory.
+
+The same preset works for 389 Directory Server and FreeIPA (users under
+`cn=users,cn=accounts,dc=...`, groups under `cn=groups,cn=accounts,dc=...`).
+
+### Testing
+
+**Test connection** connects to each server, signs in as the service account and
+checks that the base DNs exist. It tests what is in the form, saved or not. Each step
+says what worked or, in plain words, what went wrong and what to do: a name that
+does not resolve, a port nothing listens on, a firewall, an untrusted certificate,
+a certificate for another name, a refused service account password, a base DN that
+does not exist.
+
+**Test a user** looks a user up exactly as sign-in would and shows their DN, every
+group found, the groups that matched a role, and the role they would get, or why
+they would be refused. Enter their password too to check it; a wrong password there
+counts toward the failed sign-in limit like a real sign-in.
+
+### Setting it in signalith.yaml
+
+Instead of the Users page you can put the settings in `signalith.yaml` under
+`auth.ldap`, for example to deploy the same settings to several servers. The Users
+page then shows them read-only, marked *From signalith.yaml*, and changes made in
+the file apply when Signalith restarts.
+
+```yaml
+auth:
+  ldap:
+    type: ad
+    url: ldaps://dc1.corp.example.com
+    failover_url: ldaps://dc2.corp.example.com
+    ca_cert_file: /etc/signalith/corp-root-ca.pem
+    bind_dn: CN=svc-signalith,OU=Service Accounts,DC=corp,DC=example,DC=com
+    # bind_password: set SIGNALITH_LDAP_BIND_PASSWORD instead
+    user_base_dn: DC=corp,DC=example,DC=com
+    admin_groups:
+      - CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com
+    analyst_groups:
+      - CN=SOC Analysts,OU=Groups,DC=corp,DC=example,DC=com
+    viewer_groups:
+      - CN=SOC Viewers,OU=Groups,DC=corp,DC=example,DC=com
+```
+
+Directory sign-in is on whenever `auth.ldap` is present, unless it says
+`enabled: false`. Keep the service account's password out of the file with the
+`SIGNALITH_LDAP_BIND_PASSWORD` environment variable. `signalith validate` checks the
+settings.
+
+### Settings reference
+
+The keys are the same in `signalith.yaml` and the API.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | off on the Users page; on in `signalith.yaml` | Directory sign-in on or off |
+| `type` | `ad` | `ad` or `openldap`; fills in the defaults marked *preset* |
+| `url` | required | `ldaps://host[:port]` or `ldap://host[:port]` |
+| `failover_url` | none | Tried when `url` cannot be reached (not when it refuses a password) |
+| `start_tls` | `false` | Encrypt an `ldap://` connection before anything else is sent |
+| `ca_cert` | none | PEM certificate(s) of the CA that issued the server's certificate, added to the system's trusted CAs |
+| `ca_cert_file` | none | `signalith.yaml` only: read `ca_cert` from this file |
+| `tls_skip_verify` | `false` | Accept any certificate. Only for testing: anyone who can intercept the connection can read passwords |
+| `connect_timeout_seconds` | `5` | How long to wait for a server to answer a connection (1-120) |
+| `timeout_seconds` | `10` | How long to wait for each request (1-300) |
+| `bind_dn` | none (anonymous) | The service account that searches for users |
+| `bind_password` | none | Its password. The API never returns it, only `bind_password_set`; leave it empty to keep the saved one. Or set `SIGNALITH_LDAP_BIND_PASSWORD` |
+| `user_base_dn` | required | Where to search for users |
+| `user_filter` | preset | LDAP filter with `{username}` for the typed name (escaped, so `*` and `(` match only themselves) |
+| `username_attribute` | preset | Attribute holding the username: `sAMAccountName`, `uid` |
+| `name_attribute`, `email_attribute` | preset | `displayName` or `cn`; `mail` |
+| `group_search` | preset | `memberof` (read the user's `memberOf`) or `search` (search with `group_filter`) |
+| `nested_groups` | `true` for `ad` | Count groups inside groups (Active Directory only) |
+| `group_base_dn` | `user_base_dn` | Where to search for groups |
+| `group_filter` | preset | Filter for `search`, with `{dn}` and/or `{username}` |
+| `admin_groups`, `analyst_groups`, `viewer_groups` | none | Group DNs whose members get each role; the highest wins. Compared the way the directory compares DNs (case and spacing do not matter) |
+| `default_role` | `none` | Role for users in no mapped group: `none` refuses them, `viewer` lets them in as viewers |
+
+## Troubleshooting
+
+Start with **Test connection** and **Test a user**; their messages name the problem.
+Every sign-in failure is also in the server log with the reason (see
+[Audit log](#audit-log)).
+
+**"The server's TLS certificate is not trusted."** Paste the certificate of the CA
+that issued the directory server's certificate (for Active Directory, usually the
+enterprise root CA, exported as Base-64) under **CA certificate**.
+
+**"The server's TLS certificate is for dc1.corp.example.com, not 10.0.0.5."** Use a
+name that is on the certificate in the server address, not an IP address.
+
+**"The server did not answer with TLS."** The port does not speak LDAPS. Use
+`ldaps://` with port 636, or `ldap://` with port 389 and StartTLS.
+
+**"refused the connection" or "did not answer within 5 seconds".** Check the address
+and port, and that firewalls let the Signalith server reach the directory.
+
+**"The directory refused the service account's bind DN or password."** Check the
+full DN (not `CORP\svc-signalith`) and the password. Active Directory adds a reason,
+such as *password expired* or *account disabled*.
+
+**"The server does not allow anonymous searches."** Enter a service account. Active
+Directory always needs one.
+
+**"The server only accepts sign-ins over an encrypted connection."** Use `ldaps://` or
+StartTLS. Active Directory with LDAP signing required refuses plain binds.
+
+**"No user matches."** Check the user base DN (the user must be under it) and the
+user filter. With the Active Directory preset, disabled accounts are never found.
+
+**"More than one entry matches."** The filter is too loose, for example two accounts
+with the same `uid` in different branches. Narrow the base DN or the filter.
+
+**A user is refused with "not in a group that can use Signalith".** **Test a user**
+lists every group found. Map one of them to a role, or set `default_role: viewer`.
+Check that the DN in the mapping is the group's full DN. Group changes in the
+directory apply at the user's next sign-in.
+
+**Nested groups are not counted.** Nested groups only work on Active Directory with
+**Nested groups** on. For OpenLDAP, map each group directly.
+
+**"Your directory password has expired or must be changed."** Active Directory
+accepted the password but requires a new one first. The user changes it (for example
+by signing in to Windows) and signs in again.
+
+**"Signalith could not reach the directory server."** Sign-in with the built-in admin
+and local users still works. Fix the connection, or add a failover server.
+
+**A directory user who left still has access through a script.** Directory users are
+checked against the directory at every sign-in, and Basic auth credentials for
+at most 2 minutes. Disable them on the Users page to stop them at once.
+
+## Where user data is stored
+
+| File | Holds | Default place |
+| --- | --- | --- |
+| `users.json` | Local users (with bcrypt password hashes), directory users seen so far, last sign-in times | The lookups folder (`lookups.dir`), or `auth.users_file` / `SIGNALITH_USERS_FILE` |
+| `directory.json` | Directory sign-in settings from the Users page, including the service account's password | Next to `users.json` |
+
+The lookups folder is:
+
+| Install | Folder |
+| --- | --- |
+| Docker | `/var/lib/signalith/lookups` in the `signalith-data` volume |
+| Linux (systemd) | `/var/lib/signalith/lookups` |
+| Windows | `C:\ProgramData\Signalith\lookups` |
+| Anywhere else | `lookups` next to `signalith.yaml` |
+
+Both files are written with permissions `0600` (readable only by the account
+Signalith runs as), by writing a new file and renaming it so a crash never leaves
+half a file. Back them up with the rest of the lookups folder. Signalith reads them
+at start-up and rewrites them on every change, so edit them only while it is
+stopped. If `users.json` is damaged, Signalith refuses to start and says so; move it
+away to start again with only the built-in admin.
+
+## Audit log
+
+Signalith logs every sign-in, sign-out and change to users or directory settings to
+its log (journald, the Windows event log, or the container's output), with
+`audit=true`, who did it and from which address. Passwords never appear.
+
+| Message | Fields |
+| --- | --- |
+| `signed in` | `user`, `role`, `source`, `client`, `method` (session or basic) |
+| `sign-in failed` | `user`, `client`, `method`, `reason` (for example `wrong password`, `account disabled`, `directory: in no group mapped to a role`), `locked_out` |
+| `signed out` | `user`, `client` |
+| `user created` | `by`, `user`, `role`, `must_change_password` |
+| `user changed` | `by`, `user`, `fields` |
+| `user role changed` | `by`, `user`, `from`, `to` |
+| `user disabled`, `user enabled` | `by`, `user`, `sessions_ended` |
+| `user deleted` | `by`, `user`, `source`, `role`, `sessions_ended` |
+| `password reset` | `by`, `user`, `sessions_ended` |
+| `password changed` | `by`, `user`, `other_sessions_ended` |
+| `password change refused` | `user`, `client`, `reason` |
+| `directory settings changed` | `by`, `enabled`, `fields` (names only) |
+| `directory connection tested`, `directory user looked up` | `by`, results |
+
+For example:
+
+```
+level=INFO msg="user role changed" audit=true by=ann client=10.0.0.12 user=sam from=analyst to=admin
+level=WARN msg="sign-in failed" audit=true user=dave client=10.0.0.40 method=session reason="directory: in no group mapped to a role" locked_out=false
+```
+
+## API
+
+All routes need a signed-in user (session cookie or HTTP Basic auth) except
+`POST /api/login`, `POST /api/logout` and `POST /api/ingest` (which takes an ingest
+token). Requests from a browser that change something must come from the Signalith
+page itself.
+
+### Roles of every route
+
+**Every role** (also allowed while a password change is pending): `GET /api/me`,
+`POST /api/me/password`.
+
+**Viewer:** `GET /api/health`, `POST /api/search`, `POST /api/explain`,
+`POST /api/build`, `POST /api/parse`, `GET /api/datamodels`, `GET /api/fields`,
+`GET /api/fields/values`, `GET /api/language`, `GET /api/ask`,
+`GET /api/detections`, `GET /api/detections/{id}`, `GET /api/detections/{id}/yaml`,
+`GET /api/coverage`, `GET /api/findings`, `GET /api/findings/summary`,
+`GET /api/findings/{id}`, `GET /api/cases`, `GET /api/cases/summary`,
+`GET /api/cases/{id}`, `GET /api/lookups/context`, `GET /api/lookups/{kind}`,
+`GET /api/risk`, `GET /api/risk/object`, `GET /api/intel`,
+`GET /api/intel/indicators`, `GET /api/intel/lookup`, `GET /api/posture`,
+`GET /api/dashboards`, `GET /api/dashboards/{id}`, `GET /api/dashboards/{id}/yaml`,
+`POST /api/dashboards/{id}/run`, `POST /api/panels/run`, and the web UI.
+
+**Analyst:** `POST /api/ask`, `POST /api/findings`, `POST /api/findings/bulk`,
+`PATCH /api/findings/{id}`, `POST /api/cases`, `PATCH /api/cases/{id}`,
+`POST /api/cases/{id}/findings`, `DELETE /api/cases/{id}/findings/{fid}`,
+`POST /api/cases/{id}/entries`, `DELETE /api/cases/{id}/entries/{entry}`,
+`POST /api/cases/{id}/entities`, `POST /api/dashboards`, `PUT /api/dashboards/{id}`,
+`DELETE /api/dashboards/{id}`, `POST /api/dashboards/{id}/panels`,
+`POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`.
+
+**Admin:** `GET /api/agents/config`, `POST /api/detections`,
+`POST /api/detections/test`, `POST /api/detections/sigma`,
+`PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,
+`POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
+`POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/upload`, and every
+`/api/users` and `/api/auth/directory` route below.
+
+A route added without a role is admin-only, and a test fails until it gets one.
+
+A refused request:
+
+```json
+{"error": "This needs the Analyst role, and your role is Viewer. Ask an admin if you need access.",
+ "code": "forbidden", "role": "viewer", "required": "analyst"}
+```
+
+### The signed-in user
+
+`GET /api/me`, and the reply to `POST /api/login`:
+
+```json
+{"username": "jlee", "user": "jlee", "name": "Jordan Lee", "email": "",
+ "role": "analyst", "role_label": "Analyst", "source": "local",
+ "must_change_password": true, "can_change_password": true, "auth": "session"}
+```
+
+`source` is `builtin`, `local` or `directory`; `auth` is `session` or `basic`.
+
+`POST /api/me/password` with `{"current_password": "...", "new_password": "..."}`
+returns the same object. Errors are `400` with a `code`: `wrong_password` (field
+`current_password`), `same_password`, `invalid_password` (field `new_password`),
+`builtin` or `directory` (those passwords are changed elsewhere).
+
+### Users (admin)
+
+`GET /api/users`:
+
+```json
+{
+  "users": [
+    {"username": "admin", "name": "", "email": "", "role": "admin", "source": "builtin",
+     "disabled": false, "must_change_password": false, "created": null, "updated": null,
+     "last_sign_in": "2026-10-12T15:35:22Z", "you": true, "actions": []},
+    {"username": "alice", "name": "Alice Admin", "email": "alice@corp.example.com",
+     "role": "admin", "source": "directory", "disabled": false, "must_change_password": false,
+     "dn": "CN=Alice Admin,OU=Staff,DC=corp,DC=example,DC=com",
+     "created": "2026-10-12T15:35:11Z", "updated": "2026-10-12T15:35:11Z",
+     "last_sign_in": "2026-10-12T15:35:11Z", "you": false, "actions": ["disable", "delete"]}
+  ],
+  "roles": [{"id": "viewer", "label": "Viewer", "description": "..."}, ...],
+  "directory": {"enabled": true, "from_config": false}
+}
+```
+
+`actions` lists what the signed-in admin may do to that user: `edit` (name and
+email), `role`, `reset_password`, `disable` or `enable`, and `delete`.
+
+| Route | Body | Reply |
+| --- | --- | --- |
+| `POST /api/users` | `{"username", "name", "email", "role", "password", "must_change_password"}`; only `username` is required. `role` defaults to `viewer`, an empty `password` makes one up, `must_change_password` defaults to `true` | `201 {"user": {...}, "temporary_password": "kqpp-bsqy-b6hq-mwfm"}` (`temporary_password` only when made up) |
+| `PUT /api/users/{username}` | Any of `{"name", "email", "role", "disabled"}` | `{"user": {...}}` |
+| `POST /api/users/{username}/password` | Optional `{"password"}` | `{"user": {...}, "temporary_password": "..."}` |
+| `DELETE /api/users/{username}` | | `{"deleted": "priya"}` |
+
+Errors are `{"error": "..."}`, with `"field"` naming the form field when one value is
+the problem (`username`, `name`, `email`, `role`, `password`): `400` for a bad value,
+`404` for an unknown user, `409` for a taken name, the built-in admin, a change to
+your own account, the last admin, or a directory user's name, email, role or
+password.
+
+### Directory sign-in (admin)
+
+`GET /api/auth/directory` (and the reply to a successful `PUT`):
+
+```json
+{
+  "settings": {"enabled": true, "type": "ad", "url": "ldaps://dc1.corp.example.com",
+               "failover_url": "", "start_tls": false, "ca_cert": "", "tls_skip_verify": false,
+               "connect_timeout_seconds": 5, "timeout_seconds": 10,
+               "bind_dn": "CN=svc-signalith,OU=Service Accounts,DC=corp,DC=example,DC=com",
+               "bind_password_set": true,
+               "user_base_dn": "DC=corp,DC=example,DC=com", "user_filter": "(&(objectCategory=person)...)",
+               "username_attribute": "sAMAccountName", "name_attribute": "displayName",
+               "email_attribute": "mail", "group_search": "memberof", "nested_groups": true,
+               "group_base_dn": "", "group_filter": "",
+               "admin_groups": ["CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com"],
+               "analyst_groups": [], "viewer_groups": [], "default_role": "none"},
+  "from_config": false,
+  "warnings": [],
+  "presets": {"ad": {...}, "openldap": {...}},
+  "directory_users": 3
+}
+```
+
+`from_config` is `true` when the settings come from `signalith.yaml`; `config_file`
+then names the file, and `PUT` answers `409`.
+
+`PUT /api/auth/directory` takes the `settings` object (with `bind_password` instead
+of `bind_password_set`; leave it empty to keep the saved one). Settings that need
+fixing answer `400`:
+
+```json
+{"error": "Some settings need fixing: ...",
+ "problems": ["\"http://x\" must be ldaps://host or ldap://host, with an optional :port and nothing after it"],
+ "fields": {"url": "\"http://x\" must be ldaps://host or ldap://host, with an optional :port and nothing after it"}}
+```
+
+`POST /api/auth/directory/test` with an optional `{"settings": {...}}` (the unsaved
+form; the saved settings when left out):
+
+```json
+{"ok": true, "message": "Connected and signed in as the service account.",
+ "servers": [{"url": "ldaps://dc1.corp.example.com", "ok": true,
+              "message": "Connected to dc1.corp.example.com over TLS 1.3.",
+              "steps": [{"step": "connect", "ok": true, "message": "Connected to dc1.corp.example.com over TLS 1.3."},
+                        {"step": "bind", "ok": true, "message": "Signed in as CN=svc-signalith,..."},
+                        {"step": "user_base", "ok": true, "message": "Found DC=corp,DC=example,DC=com."}]}]}
+```
+
+A failed server has `"ok": false`, a `code` (`connect`, `tls_untrusted`,
+`tls_hostname`, `tls_expired`, `tls_handshake`, `starttls_refused`, `ca_cert`,
+`encryption_required`, `bind_refused`, `bind_failed`, `bind_required`,
+`base_not_found`, `search_refused`, `search_failed`), a plain `message` and the
+technical `detail`.
+
+`POST /api/auth/directory/test-user` with `{"username": "alice", "password": "...",
+"settings": {...}}` (`password` and `settings` optional):
+
+```json
+{"ok": true, "message": "alice would sign in as Admin. The password was not checked.",
+ "user": {"username": "alice", "dn": "CN=Alice Admin,OU=Staff,DC=corp,DC=example,DC=com",
+          "name": "Alice Admin", "email": "alice@corp.example.com",
+          "groups": ["CN=All Staff,OU=Groups,DC=corp,DC=example,DC=com",
+                     "CN=IT Leads,OU=Groups,DC=corp,DC=example,DC=com",
+                     "CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com"],
+          "matched_groups": ["CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com"],
+          "role": "admin"},
+ "password_checked": false}
+```
+
+When the user would be refused, `ok` is `false` and `code` is `user_not_found`,
+`multiple_matches`, `wrong_password`, `password_expired`, `no_role`, `refused`, or
+one of the connection codes above. `warning` is added when the name belongs to the
+built-in admin or a local user, since sign-in would then never ask the directory.

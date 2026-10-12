@@ -1,25 +1,22 @@
 package api
 
 import (
-	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io/fs"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/auth"
+	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
 // sessionCookie holds the sign-in session token for the web UI.
 const sessionCookie = "signalith_session"
 
-type userKey struct{}
+// publicRoutes work without signing in. Ingest checks its own token.
+var publicRoutes = []string{"POST /api/ingest", "POST /api/login", "POST /api/logout"}
 
 // routeLogin adds the routes that work without signing in: the sign-in
 // page, its static assets, and sign-in and sign-out.
@@ -37,6 +34,9 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 	}
 }
 
+// sessions sets up everything sign-in needs on first use: sessions, the
+// failed sign-in limit, and in-memory users and directory settings when
+// none were given.
 func (s *Server) sessions() *auth.Sessions {
 	s.authOnce.Do(func() {
 		if s.Sessions == nil {
@@ -44,6 +44,15 @@ func (s *Server) sessions() *auth.Sessions {
 		}
 		if s.Limiter == nil {
 			s.Limiter = auth.NewLimiter()
+		}
+		if s.Users == nil {
+			s.Users = users.NewMemory()
+		}
+		if s.Users.BuiltinAdmin == "" {
+			s.Users.BuiltinAdmin = s.Config.Auth.AdminUser
+		}
+		if s.Directory == nil {
+			s.Directory, _ = users.OpenDirectory("", nil)
 		}
 	})
 	return s.Sessions
@@ -54,60 +63,14 @@ func (s *Server) limiter() *auth.Limiter {
 	return s.Limiter
 }
 
-// requireAdmin admits requests with a valid sign-in session or HTTP Basic
-// credentials. Signed-out browsers are sent to the sign-in page; API
-// clients get 401.
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, ok, err := s.authenticate(r)
-		if err != nil {
-			writeError(w, http.StatusTooManyRequests, err)
-			return
-		}
-		if !ok {
-			s.unauthorized(w, r)
-			return
-		}
-		if !sameOrigin(r) {
-			writeError(w, http.StatusForbidden, errors.New("cross-site request refused"))
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, user)))
-	})
+func (s *Server) userStore() *users.Store {
+	s.sessions()
+	return s.Users
 }
 
-// authenticate checks the session cookie, then Basic credentials.
-// Successful Basic credentials are cached by hash so bcrypt runs once per
-// password; failures count toward the sign-in limit.
-func (s *Server) authenticate(r *http.Request) (string, bool, error) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		if ss, ok := s.sessions().Lookup(c.Value); ok {
-			return ss.User, true, nil
-		}
-	}
-	user, pass, ok := r.BasicAuth()
-	if !ok {
-		return "", false, nil
-	}
-	key := sha256.Sum256([]byte(user + "\x00" + pass + "\x00" + s.Config.Auth.AdminPasswordHash))
-	if _, hit := s.authCache.Load(key); hit {
-		return user, true, nil
-	}
-	client := clientIP(r)
-	if allowed, wait := s.limiter().Allow(client); !allowed {
-		return "", false, lockedOut(wait)
-	}
-	if !s.Config.CheckPassword(user, pass) {
-		s.limiter().Fail(client)
-		return "", false, nil
-	}
-	s.limiter().Succeed(client)
-	s.authCache.Store(key, struct{}{})
-	return user, true, nil
-}
-
-func lockedOut(wait time.Duration) error {
-	return fmt.Errorf("too many failed sign-ins from this address; try again in %d minutes", int(math.Ceil(wait.Minutes())))
+func (s *Server) dir() *users.Directory {
+	s.sessions()
+	return s.Directory
 }
 
 func (s *Server) unauthorized(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +123,9 @@ func (s *Server) secureCookie(r *http.Request) bool {
 		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
+// handleLogin signs in from the sign-in page. A user who must change
+// their password gets a session that only allows that (see allow), and
+// the reply says so.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !sameOrigin(r) {
@@ -175,30 +141,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	client := clientIP(r)
-	lim := s.limiter()
-	if allowed, wait := lim.Allow(client); !allowed {
-		w.Header().Set("Retry-After", fmt.Sprint(int(math.Ceil(wait.Seconds()))))
-		writeError(w, http.StatusTooManyRequests, lockedOut(wait))
+	p, err := s.signIn(r, req.Username, req.Password, "session")
+	if err != nil {
+		writeSignInError(w, err)
 		return
 	}
-	user := strings.TrimSpace(req.Username)
-	if !s.Config.CheckPassword(user, req.Password) {
-		locked := lim.Fail(client)
-		s.Log.Warn("sign-in failed", "user", user, "client", client, "locked_out", locked)
-		writeError(w, http.StatusUnauthorized, errors.New("wrong username or password"))
-		return
-	}
-	lim.Succeed(client)
-	token := s.sessions().Create(user, req.Remember)
+	token := s.sessions().Create(p.Username, req.Remember)
 	c := &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, Secure: s.secureCookie(r)}
 	if req.Remember {
 		c.MaxAge = int(s.sessions().MaxAge.Seconds())
 	}
 	http.SetCookie(w, c)
-	s.Log.Info("signed in", "user", user, "client", client)
-	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+	p.Method = "session"
+	writeJSON(w, http.StatusOK, meView(p))
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +163,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
+		if ss, ok := s.sessions().Lookup(c.Value); ok {
+			s.Log.Info("signed out", "audit", true, "user", ss.User, "client", clientIP(r))
+		}
 		s.sessions().Delete(c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
@@ -214,11 +173,16 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
+// handleLoginPage serves the sign-in page, or sends a signed-in browser
+// to the app. A user who must choose a new password stays here, where the
+// page asks for it.
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		if _, ok := s.sessions().Lookup(c.Value); ok {
-			http.Redirect(w, r, "/", http.StatusSeeOther)
-			return
+		if ss, ok := s.sessions().Lookup(c.Value); ok {
+			if p := s.principalFor(ss.User); p != nil && !p.MustChangePassword {
+				http.Redirect(w, r, "/", http.StatusSeeOther)
+				return
+			}
 		}
 	}
 	page, err := fs.ReadFile(s.UI, "login.html")
@@ -229,26 +193,4 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(page)
-}
-
-// userOf returns the signed-in user.
-func userOf(r *http.Request) string {
-	if u, ok := r.Context().Value(userKey{}).(string); ok && u != "" {
-		return u
-	}
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "unknown"
-}
-
-// authMethod reports how the request signed in, so the UI knows whether
-// signing out means anything.
-func authMethod(r *http.Request) string {
-	if _, err := r.Cookie(sessionCookie); err == nil {
-		if _, _, basic := r.BasicAuth(); !basic {
-			return "session"
-		}
-	}
-	return "basic"
 }

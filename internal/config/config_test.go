@@ -181,3 +181,63 @@ func TestDashboardSettings(t *testing.T) {
 		t.Errorf("env dir: %v %v", err, c)
 	}
 }
+
+func TestUsersAndDirectorySettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "from-the-env")
+	os.WriteFile(path, []byte("lookups:\n  dir: lists\n"), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UsersFile() != filepath.Join(dir, "lists", "users.json") || c.DirectoryFile() != filepath.Join(dir, "lists", "directory.json") {
+		t.Errorf("users file = %s, directory file = %s", c.UsersFile(), c.DirectoryFile())
+	}
+	if s, err := c.LDAP(); s != nil || err != nil {
+		t.Errorf("no auth.ldap = %v %v", s, err)
+	}
+	if !c.CheckPassword("ADMIN", "from-the-env") {
+		t.Error("the built-in admin's name should ignore case")
+	}
+	t.Setenv("SIGNALITH_USERS_FILE", filepath.Join(dir, "elsewhere", "people.json"))
+	if c, _ := Load(path); c.UsersFile() != filepath.Join(dir, "elsewhere", "people.json") {
+		t.Errorf("env users file = %s", c.UsersFile())
+	}
+
+	// auth.ldap: problems are listed with their keys.
+	os.WriteFile(path, []byte("auth:\n  ldap:\n    type: ad\n    url: http://dc1\n    bind_dn: CN=svc,DC=corp,DC=example,DC=com\n"), 0o600)
+	_, err = Load(path)
+	for _, want := range []string{"auth.ldap.url", "auth.ldap.bind_password: set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD", "auth.ldap.user_base_dn", "auth.ldap.admin_groups"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+	// A complete block: on by default, preset defaults filled in, the
+	// password from the environment and never written back to the file.
+	os.WriteFile(path, []byte(`auth:
+  ldap:
+    type: ad
+    url: ldaps://dc1.corp.example.com
+    bind_dn: CN=svc,DC=corp,DC=example,DC=com
+    user_base_dn: DC=corp,DC=example,DC=com
+    admin_groups:
+      - CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com
+`), 0o600)
+	t.Setenv("SIGNALITH_LDAP_BIND_PASSWORD", "bind-secret")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.LDAP()
+	if err != nil || !s.IsEnabled() || s.BindPassword != "bind-secret" || s.UsernameAttribute != "sAMAccountName" || !s.Nested() {
+		t.Errorf("ldap = %+v %v", s, err)
+	}
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "bind-secret") || strings.Contains(string(raw), "sAMAccountName") {
+		t.Errorf("saved file has the env password or filled defaults:\n%s", raw)
+	}
+}

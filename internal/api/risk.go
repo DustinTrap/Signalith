@@ -15,12 +15,13 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/query"
 )
 
-func (s *Server) routeRisk(api *http.ServeMux) {
-	api.HandleFunc("GET /api/lookups/context", s.handleLookupContext)
-	api.HandleFunc("GET /api/lookups/{kind}", s.handleGetLookup)
-	api.HandleFunc("PUT /api/lookups/{kind}", s.handlePutLookup)
-	api.HandleFunc("GET /api/risk", s.handleRiskObjects)
-	api.HandleFunc("GET /api/risk/object", s.handleRiskObject)
+func (s *Server) routeRisk(api *router) {
+	api.viewer("GET /api/lookups/context", s.handleLookupContext)
+	api.viewer("GET /api/lookups/{kind}", s.handleGetLookup)
+	// Replacing the asset or identity list is admin work.
+	api.admin("PUT /api/lookups/{kind}", s.handlePutLookup)
+	api.viewer("GET /api/risk", s.handleRiskObjects)
+	api.viewer("GET /api/risk/object", s.handleRiskObject)
 }
 
 var errLookupsOff = errors.New("asset and identity lists are not configured on this server")

@@ -15,17 +15,18 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/query"
 )
 
-func (s *Server) routeCases(api *http.ServeMux) {
-	api.HandleFunc("GET /api/cases", s.handleListCases)
-	api.HandleFunc("POST /api/cases", s.handleCreateCase)
-	api.HandleFunc("GET /api/cases/summary", s.handleCasesSummary)
-	api.HandleFunc("GET /api/cases/{id}", s.handleGetCase)
-	api.HandleFunc("PATCH /api/cases/{id}", s.handleUpdateCase)
-	api.HandleFunc("POST /api/cases/{id}/findings", s.handleAddCaseFindings)
-	api.HandleFunc("DELETE /api/cases/{id}/findings/{fid}", s.handleRemoveCaseFinding)
-	api.HandleFunc("POST /api/cases/{id}/entries", s.handleAddCaseEntry)
-	api.HandleFunc("DELETE /api/cases/{id}/entries/{entry}", s.handleRemoveCaseEntry)
-	api.HandleFunc("POST /api/cases/{id}/entities", s.handleAddCaseEntity)
+func (s *Server) routeCases(api *router) {
+	api.viewer("GET /api/cases", s.handleListCases)
+	api.viewer("GET /api/cases/summary", s.handleCasesSummary)
+	api.viewer("GET /api/cases/{id}", s.handleGetCase)
+	// Working investigations is analyst work.
+	api.analyst("POST /api/cases", s.handleCreateCase)
+	api.analyst("PATCH /api/cases/{id}", s.handleUpdateCase)
+	api.analyst("POST /api/cases/{id}/findings", s.handleAddCaseFindings)
+	api.analyst("DELETE /api/cases/{id}/findings/{fid}", s.handleRemoveCaseFinding)
+	api.analyst("POST /api/cases/{id}/entries", s.handleAddCaseEntry)
+	api.analyst("DELETE /api/cases/{id}/entries/{entry}", s.handleRemoveCaseEntry)
+	api.analyst("POST /api/cases/{id}/entities", s.handleAddCaseEntity)
 }
 
 var errCasesOff = errors.New("investigation cases are not configured on this server")

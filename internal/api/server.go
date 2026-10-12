@@ -31,6 +31,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
+	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
 // Backend is what the API needs from OpenSearch beyond searching.
@@ -70,39 +71,52 @@ type Server struct {
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
 	Sessions *auth.Sessions
 	Limiter  *auth.Limiter
+	// Users holds local users and directory users seen at sign-in, and
+	// Directory the LDAP or Active Directory sign-in settings. nil keeps
+	// them in memory only.
+	Users     *users.Store
+	Directory *users.Directory
 
-	authOnce  sync.Once
-	authCache sync.Map   // sha256(user:pass) -> struct{}
-	caseMu    sync.Mutex // serializes case changes
+	authOnce sync.Once
+	creds    credCache  // recently checked Basic credentials
+	routes   []route    // every API route and its role, from Handler
+	caseMu   sync.Mutex // serializes case changes
 }
 
-// Handler returns the HTTP handler.
+// Handler returns the HTTP handler. Every API route is registered with
+// the least role that may use it (see router); the role table is in
+// docs/users.md.
 func (s *Server) Handler() http.Handler {
+	s.sessions()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/ingest", s.handleIngest)
 
-	api := http.NewServeMux()
-	api.HandleFunc("GET /api/health", s.handleHealth)
-	api.HandleFunc("POST /api/search", s.handleSearch)
-	api.HandleFunc("POST /api/explain", s.handleExplain)
-	api.HandleFunc("POST /api/build", s.handleBuild)
-	api.HandleFunc("POST /api/parse", s.handleParse)
-	api.HandleFunc("GET /api/datamodels", s.handleDatamodels)
-	api.HandleFunc("GET /api/fields", s.handleFields)
-	api.HandleFunc("GET /api/fields/values", s.handleFieldValues)
-	api.HandleFunc("GET /api/agents/config", s.handleAgentConfig)
-	api.HandleFunc("GET /api/language", s.handleLanguage)
+	api := &router{s: s, mux: http.NewServeMux()}
+	api.viewer("GET /api/health", s.handleHealth)
+	// Searching and the query tools only read events.
+	api.viewer("POST /api/search", s.handleSearch)
+	api.viewer("POST /api/explain", s.handleExplain)
+	api.viewer("POST /api/build", s.handleBuild)
+	api.viewer("POST /api/parse", s.handleParse)
+	api.viewer("GET /api/datamodels", s.handleDatamodels)
+	api.viewer("GET /api/fields", s.handleFields)
+	api.viewer("GET /api/fields/values", s.handleFieldValues)
+	api.viewer("GET /api/language", s.handleLanguage)
+	// Agent configs carry the ingest token.
+	api.admin("GET /api/agents/config", s.handleAgentConfig)
 	s.routeDetections(api)
 	s.routeRisk(api)
 	s.routeAsk(api)
 	s.routeIntel(api)
 	s.routeDashboards(api)
 	s.routeCases(api)
+	s.routeUsers(api)
 	if s.UI != nil {
-		api.Handle("GET /", revalidate(http.FileServerFS(s.UI)))
+		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
 	}
+	s.routes = api.routes
 	s.routeLogin(mux)
-	mux.Handle("/", s.requireAdmin(api))
+	mux.Handle("/", s.requireUser(api.mux))
 	return securityHeaders(mux)
 }
 
