@@ -220,6 +220,10 @@ func TestSyslogSettings(t *testing.T) {
 	if err != nil || c.Syslog.Enabled() {
 		t.Fatalf("absent syslog section: %v %+v", err, c.Syslog)
 	}
+	// Turning syslog on then means adding the section, not editing it.
+	if c.HasSection("syslog") || !c.HasSection("search") {
+		t.Errorf("sections: syslog %v, search %v", c.HasSection("syslog"), c.HasSection("search"))
+	}
 
 	os.WriteFile(path, []byte(`syslog:
   udp: 0.0.0.0:514
@@ -257,6 +261,16 @@ syslog:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
+	}
+
+	// Docker: listen on 5514, devices send to the 514 published for it.
+	os.WriteFile(path, []byte("syslog:\n  udp: 0.0.0.0:5514\n  tcp: 0.0.0.0:5514\n  public_port: 514\n"), 0o600)
+	if c, err := Load(path); err != nil || c.Syslog.PublicPort != 514 {
+		t.Errorf("public_port: %v %+v", err, c.Syslog)
+	}
+	os.WriteFile(path, []byte("syslog:\n  udp: 0.0.0.0:5514\n  public_port: 70000\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "syslog.public_port 70000 must be 1-65535") {
+		t.Errorf("public_port 70000: %v", err)
 	}
 
 	os.WriteFile(path, []byte("syslog:\n  udp: myhost:514\n  tcp: 0.0.0.0:514\n  tls: :514\n"), 0o600)
@@ -297,7 +311,16 @@ func TestSavedFileExplainsSyslog(t *testing.T) {
 		}
 	}
 	got, err := Load(path)
-	if err != nil || got.Syslog.UDP != "0.0.0.0:514" || got.Syslog.TCP != "0.0.0.0:514" {
+	if err != nil || got.Syslog.UDP != "0.0.0.0:514" || got.Syslog.TCP != "0.0.0.0:514" || !got.HasSection("syslog") {
 		t.Errorf("reload: %v %+v", err, got.Syslog)
+	}
+
+	// Off is written as empty settings, so the section is there to edit.
+	c.Syslog.UDP, c.Syslog.TCP = "", ""
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(path); err != nil || got.Syslog.Enabled() || !got.HasSection("syslog") {
+		t.Errorf("off: %v %+v, section %v", err, got.Syslog, got != nil && got.HasSection("syslog"))
 	}
 }

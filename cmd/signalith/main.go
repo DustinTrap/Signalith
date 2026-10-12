@@ -184,7 +184,18 @@ func syslogSummary(c *config.Config) string {
 			parts = append(parts, l.name+" "+l.addr)
 		}
 	}
-	return strings.Join(parts, ", ")
+	s := strings.Join(parts, ", ")
+	// public_port applies to UDP and TCP, whichever are on.
+	var fwd []string
+	for _, l := range []struct{ name, addr string }{{"UDP", c.Syslog.UDP}, {"TCP", c.Syslog.TCP}} {
+		if l.addr != "" {
+			fwd = append(fwd, l.name)
+		}
+	}
+	if c.Syslog.PublicPort > 0 && len(fwd) > 0 {
+		s += fmt.Sprintf(" (devices send %s to port %d)", strings.Join(fwd, " and "), c.Syslog.PublicPort)
+	}
+	return s
 }
 
 // printSyslogPorts prints the syslog listeners for install scripts, such
@@ -488,7 +499,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
-			MaxAge: syslogMaxAge(c.Retention.Days),
+			MaxAge: syslogMaxAge(c.Retention.Days), PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err
