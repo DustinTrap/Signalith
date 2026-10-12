@@ -348,61 +348,89 @@
   </section>
 
   <!-- Findings (incident review) -->
-  <section id="page-findings" class="page" data-legacy>
-    <div class="page-head">
-      <h2>Findings</h2>
-      <div id="f-summary" class="sev-summary"></div>
+  <section id="page-findings" class="page">
+    <div class="split split--solo" id="f-split">
+      <section class="queue" aria-label="Findings queue">
+        <div class="pills" id="f-summary" role="group" aria-label="Filter by urgency"></div>
+        <div class="toolbar" id="f-toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input class="input" id="f-text" type="search" placeholder="Search title, host, user, IP" aria-label="Search findings" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></div>
+          <select class="select" id="f-status" aria-label="Status">
+            <option value="new,in_progress,pending" selected>Open</option>
+            <option value="new">New</option>
+            <option value="in_progress">In progress</option>
+            <option value="pending">Pending</option>
+            <option value="resolved,closed">Resolved or closed</option>
+            <option value="">Any status</option>
+          </select>
+          <select class="select" id="f-owner" aria-label="Owner">
+            <option value="" selected>Any owner</option>
+            <option value="__me">Assigned to me</option>
+            <option value="__none">Unassigned</option>
+          </select>
+          <div class="seg" id="f-since" role="group" aria-label="Created in the last">
+            <button type="button" data-since="24h" aria-pressed="false">24h</button>
+            <button type="button" data-since="7d" aria-pressed="true">7d</button>
+            <button type="button" data-since="30d" aria-pressed="false">30d</button>
+            <button type="button" data-since="" aria-pressed="false" title="All time">All</button>
+          </div>
+          <span class="fnd-filter hidden" id="f-detection"></span>
+          <span class="spacer hide-sm"></span>
+          <button class="btn btn--ghost btn--icon hide-sm hidden" type="button" id="f-clear" aria-label="Clear filters" title="Clear filters"><svg class="icon" aria-hidden="true"><use href="#i-filter-x"/></svg></button>
+          <button class="btn btn--ghost btn--icon hide-sm" type="button" id="f-export" aria-label="Export these findings as CSV" title="Export as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></button>
+        </div>
+        <div class="bulkbar hidden" id="f-bulk" role="toolbar" aria-label="Selected findings">
+          <button class="btn btn--ghost btn--icon btn--sm" type="button" id="f-bulk-clear" aria-label="Clear selection" title="Clear selection"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+          <b id="f-bulk-count" aria-live="polite"></b>
+          <span class="spacer"></span>
+          <button class="btn btn--ghost btn--sm" type="button" id="f-bulk-mine" title="Assign the selected findings to you"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"/></svg><span class="hide-sm">Assign to me</span></button>
+          <button class="btn btn--ghost btn--sm" type="button" id="f-bulk-case" title="Group the selected findings into an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span class="hide-sm">Add to case</span></button>
+          <button class="btn btn--ghost btn--sm" type="button" id="f-bulk-edit" title="Set status, disposition or owner, or add a note"><svg class="icon" aria-hidden="true"><use href="#i-pencil"/></svg><span class="hide-sm">Edit</span></button>
+          <button class="btn btn--primary btn--sm" type="button" id="f-bulk-resolve">Resolve</button>
+        </div>
+        <div class="card fnd-card">
+          <div class="table-wrap" id="f-list"></div>
+          <div class="table-foot hidden" id="f-foot"></div>
+        </div>
+      </section>
+      <aside class="card inspector" id="f-detail" aria-label="Finding details" hidden></aside>
     </div>
-    <div class="toolbar">
-      <select id="f-status" title="Status">
-        <option value="new,in_progress,pending" selected>Open</option>
-        <option value="new">New</option>
-        <option value="in_progress">In progress</option>
-        <option value="pending">Pending</option>
-        <option value="resolved,closed">Resolved or closed</option>
-        <option value="">Any status</option>
-      </select>
-      <select id="f-severity" title="Urgency: severity adjusted for how critical the assets and users are">
-        <option value="">Any urgency</option>
-        <option value="critical">Critical</option>
-        <option value="high,critical">High and above</option>
-        <option value="medium,high,critical">Medium and above</option>
-      </select>
-      <input id="f-owner" type="search" placeholder="Owner">
-      <input id="f-text" type="search" placeholder="Search title, user, host, IP">
-      <select id="f-since" title="Created">
-        <option value="24h">Last 24 hours</option>
-        <option value="7d" selected>Last 7 days</option>
-        <option value="30d">Last 30 days</option>
-        <option value="">All time</option>
-      </select>
-      <button id="f-refresh">Refresh</button>
-    </div>
-    <div id="f-bulk" class="bulk hidden">
-      <span id="f-bulk-count"></span>
-      <select id="f-bulk-status">
-        <option value="">Set status...</option>
-        <option value="in_progress">In progress</option>
-        <option value="pending">Pending</option>
-        <option value="resolved">Resolved</option>
-        <option value="closed">Closed</option>
-      </select>
-      <select id="f-bulk-disposition">
-        <option value="">Disposition...</option>
-        <option value="true_positive">True positive</option>
-        <option value="benign_true_positive">Benign true positive</option>
-        <option value="false_positive">False positive</option>
-        <option value="undetermined">Undetermined</option>
-      </select>
-      <input id="f-bulk-owner" type="text" placeholder="Assign to">
-      <input id="f-bulk-comment" type="text" placeholder="Comment (optional)">
-      <button id="f-bulk-apply" class="primary">Apply</button>
-      <button id="f-bulk-case" title="Group the selected findings into an investigation">Add to case</button>
-    </div>
-    <div class="split">
-      <div id="f-list" class="results"></div>
-      <aside id="f-detail" class="detail hidden"></aside>
-    </div>
+    <datalist id="f-owner-list"></datalist>
+    <dialog class="modal" id="f-bulk-dialog" aria-labelledby="f-bulk-title">
+      <form method="dialog" id="f-bulk-form">
+        <div class="modal__head">
+          <div><h2 class="modal__title" id="f-bulk-title">Update findings</h2><p class="modal__desc">Fields you leave as they are do not change.</p></div>
+          <button class="btn btn--ghost btn--icon btn--sm dx-close" type="button" value="cancel" formnovalidate aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div class="alert hidden" data-tone="danger" id="f-bulk-error" role="alert"><svg class="icon" aria-hidden="true"><use href="#i-circle-alert"/></svg><div><b>Nothing was changed.</b><p id="f-bulk-error-text"></p></div></div>
+          <div class="form-grid">
+            <div class="field"><label class="label" for="f-bulk-status">Status</label>
+              <select class="select select--block" id="f-bulk-status">
+                <option value="">Leave as is</option>
+                <option value="new">New</option>
+                <option value="in_progress">In progress</option>
+                <option value="pending">Pending</option>
+                <option value="resolved">Resolved</option>
+                <option value="closed">Closed</option>
+              </select></div>
+            <div class="field"><label class="label" for="f-bulk-disposition">Disposition</label>
+              <select class="select select--block" id="f-bulk-disposition">
+                <option value="">Leave as is</option>
+                <option value="true_positive">True positive</option>
+                <option value="benign_true_positive">Benign true positive</option>
+                <option value="false_positive">False positive</option>
+                <option value="undetermined">Undetermined</option>
+              </select></div>
+          </div>
+          <div class="field"><label class="label" for="f-bulk-owner">Owner</label><input class="input" id="f-bulk-owner" type="text" placeholder="Leave as is" list="f-owner-list" autocomplete="off"></div>
+          <div class="field"><label class="label" for="f-bulk-comment">Note</label><textarea class="textarea" id="f-bulk-comment" rows="3" placeholder="Optional. Added to each finding's activity."></textarea></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" value="cancel" id="f-bulk-cancel">Cancel</button>
+          <button class="btn btn--primary" type="submit" id="f-bulk-apply">Apply</button>
+        </div>
+      </form>
+    </dialog>
   </section>
 
   <!-- Investigations -->
@@ -593,46 +621,69 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
   </section>
 
   <!-- Detections -->
-  <section id="page-detections" class="page" data-legacy>
+  <section id="page-detections" class="page">
     <div class="page-head">
-      <h2>Detections</h2>
-      <div class="toolbar">
-        <input id="d-filter" type="search" placeholder="Filter by name, ATT&amp;CK ID or tag">
-        <select id="d-show">
-          <option value="">All</option>
-          <option value="enabled">Enabled</option>
-          <option value="disabled">Disabled</option>
-          <option value="custom">Custom or edited</option>
-          <option value="errors">Failing</option>
-        </select>
-        <button id="d-new" class="primary">New detection</button>
-        <button id="d-sigma">Import Sigma rule</button>
+      <div>
+        <h2 class="page-head__title">Detections</h2>
+        <p class="page-head__desc" id="d-desc">Scheduled searches that raise a finding for each result.</p>
+      </div>
+      <div class="page-head__actions">
+        <button class="btn btn--secondary" type="button" id="d-sigma"><svg class="icon" aria-hidden="true"><use href="#i-sigma"/></svg>Import Sigma rule</button>
+        <button class="btn btn--primary" type="button" id="d-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
       </div>
     </div>
-    <div id="d-scheduler-note" class="notice hidden">The scheduler is off on this server, so detections only run when you click Run now.</div>
-    <div id="d-sigma-box" class="panel hidden">
-      <h3>Import a Sigma rule</h3>
-      <p class="muted">Paste a <a href="https://github.com/SigmaHQ/sigma" target="_blank" rel="noopener">Sigma</a> rule to convert it to a query. Imported rules start disabled.</p>
-      <textarea id="d-sigma-text" rows="12" spellcheck="false" placeholder="title: ...&#10;logsource: ...&#10;detection: ..."></textarea>
-      <div class="row"><button id="d-sigma-convert" class="primary">Convert</button><button id="d-sigma-cancel">Cancel</button></div>
-      <div id="d-sigma-error" class="error hidden"></div>
+    <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b>The scheduler is off on this server.</b><p>Detections only run when you choose Run now.</p></div></div>
+    <div class="split split--solo" id="d-split">
+      <section class="queue" aria-label="Detection list">
+        <div class="pills" id="d-show" role="group" aria-label="Show"></div>
+        <div class="toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input class="input" id="d-filter" type="search" placeholder="Filter by name, ATT&amp;CK ID or tag" aria-label="Filter detections" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></div>
+        </div>
+        <div class="card">
+          <div class="table-wrap" id="d-list"></div>
+          <div class="table-foot hidden" id="d-foot"></div>
+        </div>
+      </section>
+      <aside class="card inspector" id="d-detail" aria-label="Detection details" hidden></aside>
     </div>
-    <div id="d-editor" class="panel hidden"></div>
-    <div id="d-list" class="results"></div>
+    <dialog class="modal det-editor" id="d-editor" aria-labelledby="de-heading"></dialog>
+    <dialog class="modal" id="d-sigma-box" aria-labelledby="d-sigma-title">
+      <form method="dialog" id="d-sigma-form">
+        <div class="modal__head">
+          <div><h2 class="modal__title" id="d-sigma-title">Import a Sigma rule</h2><p class="modal__desc">Paste a <a href="https://github.com/SigmaHQ/sigma" target="_blank" rel="noopener">Sigma</a> rule to turn it into a detection. You review it before saving, and it starts turned off.</p></div>
+          <button class="btn btn--ghost btn--icon btn--sm dx-close" type="button" aria-label="Close" id="d-sigma-x"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div class="alert hidden" data-tone="danger" id="d-sigma-error" role="alert"><svg class="icon" aria-hidden="true"><use href="#i-circle-alert"/></svg><div><b>This rule could not be converted.</b><p id="d-sigma-error-text"></p></div></div>
+          <div class="field"><label class="label" for="d-sigma-text">Rule (YAML)</label><textarea class="textarea mono det-code" id="d-sigma-text" rows="14" spellcheck="false" placeholder="title: ...&#10;logsource: ...&#10;detection: ..."></textarea></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" id="d-sigma-cancel">Cancel</button>
+          <button class="btn btn--primary" type="submit" id="d-sigma-convert">Convert</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog class="modal" id="d-confirm" aria-labelledby="d-confirm-title"></dialog>
   </section>
 
   <!-- ATT&CK coverage -->
-  <section id="page-coverage" class="page" data-legacy>
-    <div class="page-head">
-      <h2>MITRE ATT&amp;CK coverage</h2>
-      <div class="toolbar">
-        <label><input type="checkbox" id="c-only"> Only techniques with detections</label>
+  <section id="page-coverage" class="page">
+    <div class="kpis cov-kpis" id="c-summary" aria-live="polite"></div>
+    <div class="alert hidden" data-tone="warning" id="cov-unknown"><svg class="icon" aria-hidden="true"><use href="#i-triangle-alert"/></svg><div><b>Some techniques are not in this ATT&amp;CK version.</b><p id="cov-unknown-text"></p></div></div>
+    <div class="toolbar cov-toolbar">
+      <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input class="input" id="cov-filter" type="search" placeholder="Find a technique" aria-label="Find a technique by ID or name" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></div>
+      <label class="switch"><input type="checkbox" id="c-only">Only techniques with detections</label>
+      <span class="spacer"></span>
+      <div class="legend cov-legend" aria-label="Cell colours">
+        <span><i data-level="0"></i>None</span>
+        <span><i data-level="off"></i>Turned off</span>
+        <span><i data-level="1"></i>1 detection</span>
+        <span><i data-level="2"></i>2</span>
+        <span><i data-level="3"></i>3 or more</span>
       </div>
     </div>
-    <div id="c-summary" class="stat-grid"></div>
-    <div class="legend-row"><span class="cov-cell enabled">Enabled detection</span><span class="cov-cell available">Detection available, disabled</span><span class="cov-cell">No detection</span></div>
-    <div id="c-matrix" class="matrix"></div>
-    <p class="muted small">ATT&amp;CK® is a registered trademark of The MITRE Corporation. Matrix data © The MITRE Corporation, used under the ATT&amp;CK terms of use.</p>
+    <div class="cov" id="c-matrix" tabindex="0" aria-label="ATT&amp;CK matrix: one column per tactic"></div>
+    <p class="cov-note">ATT&amp;CK® is a registered trademark of The MITRE Corporation. Matrix data © The MITRE Corporation, used under the ATT&amp;CK terms of use.</p>
   </section>
 
   <!-- Add data -->
