@@ -571,6 +571,10 @@ func connectError(server, addr string, err error, s *LDAPSettings) *DirectoryErr
 	return &DirectoryError{Code: "connect", Server: server, Message: msg, Err: err}
 }
 
+// wsaConnReset is Windows' "connection was forcibly closed" error
+// (WSAECONNRESET), which syscall.ECONNRESET does not match there.
+const wsaConnReset = syscall.Errno(10054)
+
 func tlsError(server, host, scheme string, err error, s *LDAPSettings) *DirectoryError {
 	var unknown x509.UnknownAuthorityError
 	var hostErr x509.HostnameError
@@ -595,7 +599,7 @@ func tlsError(server, host, scheme string, err error, s *LDAPSettings) *Director
 	case errors.As(err, &invalid) && invalid.Reason == x509.Expired:
 		e.Code = "tls_expired"
 		e.Message = "The server's TLS certificate has expired or is not valid yet. Renew it, or check the clocks on both servers."
-	case errors.As(err, &record) || errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || strings.Contains(err.Error(), "reset"):
+	case errors.As(err, &record) || errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, wsaConnReset) || strings.Contains(err.Error(), "reset"):
 		// A plain LDAP port answers a TLS hello with junk or by hanging up.
 		if scheme == "ldaps" {
 			e.Message = "The server did not answer with TLS. If it listens on port 389, use ldap:// with StartTLS instead of ldaps://."
