@@ -406,29 +406,35 @@
   </section>
 
   <!-- Investigations -->
-  <section id="page-cases" class="page" data-legacy>
+  <section id="page-cases" class="page">
     <div id="c-list-view">
       <div class="page-head">
-        <h2>Investigations</h2>
-        <button id="c-new" class="primary">New case</button>
+        <div>
+          <h2 class="page-head__title">Investigations</h2>
+          <p class="page-head__desc">Cases group related findings with your notes, searches and pinned events.</p>
+        </div>
+        <div class="page-head__actions">
+          <button id="c-new" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New case</button>
+        </div>
       </div>
-      <div class="toolbar">
-        <select id="c-status" title="Status">
-          <option value="new,in_progress,pending" selected>Open</option>
-          <option value="new">New</option>
-          <option value="in_progress">In progress</option>
-          <option value="pending">Pending</option>
-          <option value="resolved,closed">Resolved or closed</option>
-          <option value="">Any status</option>
-        </select>
-        <select id="c-owner" title="Owner">
-          <option value="">Anyone's</option>
-          <option value="me">Mine</option>
-        </select>
-        <input id="c-text" type="search" placeholder="Search title, case ID, user, host, IP">
-        <button id="c-refresh">Refresh</button>
+      <div class="queue">
+        <div class="toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="c-text" class="input" type="search" placeholder="Search title, case ID, user, host, IP" aria-label="Search cases" autocomplete="off"><kbd aria-hidden="true">/</kbd></div>
+          <select id="c-status" class="select" aria-label="Status">
+            <option value="new,in_progress,pending" selected>Open</option>
+            <option value="new">New</option>
+            <option value="in_progress">In progress</option>
+            <option value="pending">Pending</option>
+            <option value="resolved,closed">Resolved or closed</option>
+            <option value="">Any status</option>
+          </select>
+          <select id="c-owner" class="select" aria-label="Owner">
+            <option value="">Any owner</option>
+            <option value="me">Assigned to me</option>
+          </select>
+        </div>
+        <div id="c-list" class="card c-list"></div>
       </div>
-      <div id="c-list" class="results"></div>
     </div>
     <div id="c-view" class="hidden"></div>
   </section>
@@ -701,7 +707,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 </main>
 </div>
 </div>
-<dialog id="case-picker" class="case-picker" data-legacy></dialog>
+<dialog id="case-picker" class="modal" aria-labelledby="cp-title"></dialog>
 <div id="toast" class="toast hidden" role="status" data-legacy></div>
 <script src="app.js"></script>
 <script src="detections.js"></script>

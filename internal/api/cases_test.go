@@ -72,9 +72,24 @@ func TestCasesAPI(t *testing.T) {
 	if code != 200 || out["total"] != float64(1) {
 		t.Errorf("search by entity = %d %v", code, out)
 	}
+	if code, _ := put(t, ts.URL+"/api/lookups/identities", "identity,name,priority\neve,Eve,high\n"); code != 200 {
+		t.Fatalf("identities = %d", code)
+	}
 	code, out = do(t, ts, "GET", "/api/cases/"+id, "", true)
 	if code != 200 || len(out["findings"].([]any)) != 2 || len(out["case"].(map[string]any)["entries"].([]any)) != 5 {
 		t.Errorf("get = %d %v", code, out)
+	}
+	// Entity context lines up with the entities; unlisted values are null.
+	ents, ectx := out["case"].(map[string]any)["entities"].([]any), out["entity_context"].([]any)
+	if len(ectx) != len(ents) {
+		t.Fatalf("entity_context = %v for %v", ectx, ents)
+	}
+	for i, e := range ents {
+		e := e.(map[string]any)
+		c, _ := ectx[i].(map[string]any)
+		if listed := e["field"] == "user" && e["value"] == "eve"; listed != (c != nil) || (listed && c["name"] != "Eve") {
+			t.Errorf("context for %v = %v", e, ectx[i])
+		}
 	}
 	if code, out := do(t, ts, "GET", "/api/cases/summary", "", true); code != 200 || out["open"] != float64(2) {
 		t.Errorf("summary = %d %v", code, out)
