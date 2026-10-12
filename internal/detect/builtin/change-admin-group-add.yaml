@@ -1,0 +1,15 @@
+id: change-admin-group-add
+title: $member$ added to privileged group $object$ on $dest$
+description: An account was added to a group that grants administrator rights.
+query: |
+  datamodel=Change object_category=group action=modified
+  object IN (Administrators, "Domain Admins", "Enterprise Admins", "Schema Admins", "Backup Operators", sudo, wheel, admin, root)
+schedule: 5m
+lookback: 10m
+severity: high
+mitre: [T1098]
+throttle:
+  fields: [member, object, dest]
+  window: 24h
+enabled: true
+tags: [persistence, privilege-escalation]

@@ -1,0 +1,14 @@
+id: change-account-deleted
+title: Account $object$ deleted on $dest$
+description: A user account was deleted. Attackers delete accounts to lock out administrators or hide their tracks.
+query: |
+  datamodel=Change object_category=user action=deleted
+schedule: 5m
+lookback: 10m
+severity: low
+mitre: [T1531]
+throttle:
+  fields: [object, dest]
+  window: 24h
+enabled: false
+tags: [impact]

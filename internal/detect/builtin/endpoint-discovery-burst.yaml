@@ -1,0 +1,17 @@
+id: endpoint-discovery-burst
+title: Burst of discovery commands by $user$ on $dest$
+description: One account ran several reconnaissance tools in a short time, typical of hands-on-keyboard activity after a compromise.
+query: |
+  datamodel=Endpoint
+  process_name IN (whoami.exe, net.exe, net1.exe, nltest.exe, systeminfo.exe, ipconfig.exe, quser.exe, tasklist.exe, dsquery.exe, arp.exe)
+  | stats dc(process_name) as tools, count by dest, user
+  | where tools >= 4
+schedule: 10m
+lookback: 30m
+severity: medium
+mitre: [T1033, T1087, T1082, T1016]
+throttle:
+  fields: [dest, user]
+  window: 4h
+enabled: true
+tags: [discovery, windows]

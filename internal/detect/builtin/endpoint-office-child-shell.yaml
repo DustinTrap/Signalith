@@ -1,0 +1,16 @@
+id: endpoint-office-child-shell
+title: $parent_process_name$ started $process_name$ on $dest$
+description: An Office application started a shell or script host, typical of a malicious document macro.
+query: |
+  datamodel=Endpoint
+  parent_process_name IN (winword.exe, excel.exe, powerpnt.exe, outlook.exe, msaccess.exe, onenote.exe)
+  process_name IN (cmd.exe, powershell.exe, pwsh.exe, wscript.exe, cscript.exe, mshta.exe, rundll32.exe, regsvr32.exe)
+schedule: 5m
+lookback: 10m
+severity: high
+mitre: [T1566.001, T1204.002]
+throttle:
+  fields: [dest, parent_process_name, process_name]
+  window: 4h
+enabled: true
+tags: [initial-access, execution, windows]

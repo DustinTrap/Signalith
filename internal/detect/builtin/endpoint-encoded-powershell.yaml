@@ -1,0 +1,16 @@
+id: endpoint-encoded-powershell
+title: Encoded PowerShell command on $dest$
+description: PowerShell ran a base64-encoded command, a common way to hide what a script does.
+query: |
+  datamodel=Endpoint process_name IN (powershell.exe, pwsh.exe)
+  process IN ("* -e *", "* -en *", "* -enc *", "* -enco*", "* -ec *", "*-encodedcommand*")
+schedule: 5m
+lookback: 10m
+severity: high
+mitre: [T1059.001, T1027]
+throttle:
+  fields: [dest, user, process]
+  window: 24h
+enabled: true
+tags: [execution, windows]
+guidance: Decode the command (it is base64 of UTF-16LE text) and check what it downloads or runs.

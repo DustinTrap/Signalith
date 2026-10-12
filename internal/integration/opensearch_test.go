@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/detect"
+	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -46,6 +48,7 @@ func setup(t *testing.T) (*store.Client, *search.Engine, string) {
 			_ = cl.DeleteIndex(ctx, n)
 		}
 		_ = cl.Do(ctx, http.MethodDelete, "/_index_template/"+prefix, nil, nil)
+		_ = cl.DeleteIndex(ctx, prefix+"_findings")
 	})
 	eng := &search.Engine{Store: cl, Opt: search.Options{IndexPrefix: prefix, DefaultEarliest: "-24h"}}
 	return cl, eng, prefix
@@ -198,3 +201,114 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 }
+
+func TestDetectionsEndToEnd(t *testing.T) {
+	cl, eng, prefix := setup(t)
+	load(t, cl, prefix)
+	ctx := context.Background()
+	fs := findings.NewOpenSearch(cl, prefix)
+	if err := fs.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.EnsureIndex(ctx); err != nil {
+		t.Fatalf("second EnsureIndex: %v", err)
+	}
+	lib, _, err := detect.NewLibrary("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs}
+	run := func(id string, want int) []*findings.Finding {
+		t.Helper()
+		d, err := lib.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Lookback = "1h" // test data spans the last 16 minutes
+		res, err := sched.Run(ctx, d)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if len(res.Findings) != want {
+			t.Fatalf("%s raised %d findings, want %d (results %d, throttled %d)", id, len(res.Findings), want, res.Results, res.Throttled)
+		}
+		return res.Findings
+	}
+
+	bf := run("auth-brute-force", 1)
+	if bf[0].Title != "Brute force against web1 from 203.0.113.9" || bf[0].Result["count"] != int64(12) {
+		t.Errorf("brute force finding = %q %v", bf[0].Title, bf[0].Result)
+	}
+	// The drilldown search returns the events behind the finding.
+	dq := bf[0].Query + " earliest=" + bf[0].Earliest
+	if res, err := eng.Run(ctx, dq); err != nil || res.Matched != 12 {
+		t.Errorf("drilldown %q: %v matched %v", dq, err, res)
+	}
+	run("auth-brute-force", 0) // throttled
+	run("auth-shadow-file-access", 1)
+	run("change-account-created", 1)
+	ps := run("endpoint-encoded-powershell", 1)
+	if ps[0].Entities["dest"] != "WS1" || ps[0].Entities["user"] != "bob" {
+		t.Errorf("entities = %v", ps[0].Entities)
+	}
+	run("endpoint-credential-dumping", 0)
+
+	// A converted Sigma rule finds the same activity.
+	sig, err := detect.ConvertSigma([]byte(`title: Encoded PowerShell
+logsource: {category: process_creation, product: windows}
+detection:
+  img:
+    Image|endswith: ['\\powershell.exe', '\\pwsh.exe']
+  cli:
+    CommandLine|contains|windash: ' -enc '
+  condition: img and cli
+level: high
+tags: [attack.t1059.001]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := eng.Run(ctx, sig.Detection.Query+" earliest=-1h"); err != nil || res.Matched != 1 {
+		t.Errorf("sigma query %q: %v matched %v", sig.Detection.Query, err, res)
+	}
+
+	// Triage and queue queries against the real index.
+	f, err := fs.Get(ctx, bf[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, owner := findings.StatusInProgress, "analyst1"
+	f.Apply(findings.Update{Status: &st, Owner: &owner, Comment: "blocking at the firewall"}, "admin", time.Now())
+	if err := fs.Save(ctx, f); err != nil {
+		t.Fatal(err)
+	}
+	got, err := fs.Get(ctx, f.ID)
+	if err != nil || got.Status != st || len(got.Comments) != 1 || len(got.History) != 2 {
+		t.Fatalf("after save = %+v %v", got, err)
+	}
+	list, total, err := fs.Search(ctx, findings.Filter{Status: []string{findings.StatusNew}})
+	if err != nil || total != 3 || len(list) != 3 {
+		t.Errorf("new findings = %d %v", total, err)
+	}
+	list, _, err = fs.Search(ctx, findings.Filter{Text: "203.0.113.9"})
+	if err != nil || len(list) != 1 || list[0].ID != f.ID {
+		t.Errorf("entity search = %v %v", list, err)
+	}
+	list, _, err = fs.Search(ctx, findings.Filter{Text: "powershell"})
+	if err != nil || len(list) != 1 {
+		t.Errorf("title search = %v %v", list, err)
+	}
+	sum, err := fs.Summary(ctx)
+	if err != nil || sum.Open != 4 || sum.ByStatus[findings.StatusInProgress] != 1 || sum.BySeverity["high"] != 2 {
+		t.Errorf("summary = %+v %v", sum, err)
+	}
+	if _, err := fs.Get(ctx, "nope"); err != findings.ErrNotFound {
+		t.Errorf("missing = %v", err)
+	}
+	// Event searches never see findings.
+	if res := run1(t, eng, `*`); res.Matched != 22 {
+		t.Errorf("events matched %d; findings may be leaking into searches", res.Matched)
+	}
+}
+
+func run1(t *testing.T, eng *search.Engine, q string) *search.Result { return run(t, eng, q) }

@@ -1,0 +1,16 @@
+id: auth-sudo-failures
+title: Repeated sudo failures by $src_user$ on $dest$
+description: An account failed sudo several times, which can mean someone guessing a password to escalate privileges.
+query: |
+  datamodel=Authentication app=sudo action=failure
+  | stats count by src_user, dest
+  | where count >= 3
+schedule: 5m
+lookback: 15m
+severity: medium
+mitre: [T1548.003]
+throttle:
+  fields: [src_user, dest]
+  window: 1h
+enabled: true
+tags: [authentication, linux]

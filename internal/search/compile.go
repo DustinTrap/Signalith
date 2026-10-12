@@ -111,7 +111,9 @@ func equalsQuery(field, value string) map[string]any {
 		return map[string]any{"exists": map[string]any{"field": field}}
 	}
 	if strings.ContainsAny(value, "*?") {
-		return map[string]any{"wildcard": map[string]any{field: map[string]any{"value": value, "case_insensitive": true}}}
+		// Backslash is the wildcard escape character; Windows paths need it literal.
+		escaped := strings.ReplaceAll(value, `\`, `\\`)
+		return map[string]any{"wildcard": map[string]any{field: map[string]any{"value": escaped, "case_insensitive": true}}}
 	}
 	if _, ok := parseNumber(value); ok {
 		// Numbers match both numeric and keyword fields exactly.

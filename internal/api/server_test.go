@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/detect"
+	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
@@ -48,13 +50,23 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeOS) {
 		t.Fatal(err)
 	}
 	fos := &fakeOS{}
+	lib, _, err := detect.NewLibrary(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := &search.Engine{Store: fos}
+	fs := findings.NewMemory()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	s := &Server{
-		Config:   cfg,
-		Engine:   &search.Engine{Store: fos},
-		Pipeline: &ingest.Pipeline{Store: fos},
-		Backend:  fos,
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Version:  "test",
+		Config:     cfg,
+		Engine:     eng,
+		Pipeline:   &ingest.Pipeline{Store: fos},
+		Backend:    fos,
+		Detections: lib,
+		Scheduler:  &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Log: logger},
+		Findings:   fs,
+		Log:        logger,
+		Version:    "test",
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)

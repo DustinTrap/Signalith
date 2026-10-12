@@ -1,0 +1,14 @@
+id: endpoint-scheduled-task
+title: Scheduled task created on $dest$ by $user$
+description: schtasks.exe created a scheduled task, a common persistence method.
+query: |
+  datamodel=Endpoint process_name=schtasks.exe process="*/create*"
+schedule: 5m
+lookback: 10m
+severity: low
+mitre: [T1053.005]
+throttle:
+  fields: [dest, process]
+  window: 24h
+enabled: true
+tags: [persistence, windows]

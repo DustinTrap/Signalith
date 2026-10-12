@@ -79,6 +79,14 @@ func TestCompileSearch(t *testing.T) {
 	}
 }
 
+func TestWildcardEscapesBackslash(t *testing.T) {
+	p := compile(t, `process_path="*\\powershell.exe"`)
+	got := asJSON(p.Body["query"])
+	if !strings.Contains(got, `"value":"*\\\\powershell.exe"`) {
+		t.Errorf("backslash not escaped: %s", got)
+	}
+}
+
 func TestCompilePushesLeadingWhereIntoOpenSearch(t *testing.T) {
 	p := compile(t, `* | where bytes > 100 | stats sum(bytes) by src`)
 	got := asJSON(p.Body["query"])

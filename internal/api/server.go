@@ -21,6 +21,8 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
+	"github.com/jrsamsanchez/signalith/internal/detect"
+	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
@@ -38,9 +40,14 @@ type Server struct {
 	Engine   *search.Engine
 	Pipeline *ingest.Pipeline
 	Backend  Backend
-	UI       fs.FS // web UI files; nil disables the UI
-	Log      *slog.Logger
-	Version  string
+	// Detections, Scheduler and Findings enable detections and the
+	// findings queue; when nil those endpoints return 503.
+	Detections *detect.Library
+	Scheduler  *detect.Scheduler
+	Findings   findings.Store
+	UI         fs.FS // web UI files; nil disables the UI
+	Log        *slog.Logger
+	Version    string
 
 	authCache sync.Map // sha256(user:pass) -> struct{}
 }
@@ -61,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/fields/values", s.handleFieldValues)
 	api.HandleFunc("GET /api/agents/config", s.handleAgentConfig)
 	api.HandleFunc("GET /api/language", s.handleLanguage)
+	s.routeDetections(api)
 	if s.UI != nil {
 		api.Handle("GET /", http.FileServerFS(s.UI))
 	}
@@ -122,6 +130,13 @@ func writeError(w http.ResponseWriter, status int, err error) {
 func readJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := dec.Decode(v); err != nil {
+		return errors.New("request body must be JSON: " + err.Error())
+	}
+	return nil
+}
+
+func decodeJSON(b []byte, v any) error {
+	if err := json.Unmarshal(b, v); err != nil {
 		return errors.New("request body must be JSON: " + err.Error())
 	}
 	return nil

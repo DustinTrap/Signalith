@@ -37,6 +37,8 @@ services:
       - SIGNALITH_INGEST_TOKEN=change-this-ingest-token
     volumes:
       - ./signalith.yaml:/etc/signalith/signalith.yaml:ro
+      - signalith-data:/var/lib/signalith
 
 volumes:
   opensearch-data:
+  signalith-data:

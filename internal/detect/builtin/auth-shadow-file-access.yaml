@@ -1,0 +1,14 @@
+id: auth-shadow-file-access
+title: $src_user$ read password hashes on $dest$ with sudo
+description: A sudo command touched /etc/shadow or /etc/gshadow, where Linux stores password hashes.
+query: |
+  datamodel=Authentication app=sudo action=success process IN ("*/etc/shadow*", "*/etc/gshadow*")
+schedule: 5m
+lookback: 10m
+severity: high
+mitre: [T1003.008]
+throttle:
+  fields: [src_user, dest, process]
+  window: 24h
+enabled: true
+tags: [credential-access, linux]

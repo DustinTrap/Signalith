@@ -1,0 +1,17 @@
+id: auth-brute-force-success
+title: Possible successful brute force of $user$ from $src$
+description: The same source both failed and succeeded to log on as one account, after many attempts.
+query: |
+  datamodel=Authentication action IN (success, failure)
+  | stats dc(action) as outcomes, count by src, user, dest
+  | where outcomes > 1 AND count >= 10
+schedule: 10m
+lookback: 1h
+severity: high
+mitre: [T1110, T1078]
+throttle:
+  fields: [src, user]
+  window: 4h
+enabled: true
+tags: [authentication]
+guidance: Treat the account as compromised until proven otherwise. Reset its password and review what it did after the successful logon.

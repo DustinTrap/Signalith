@@ -18,6 +18,8 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/detect"
+	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/retention"
@@ -151,6 +153,23 @@ func cmdValidate(args []string) error {
 		return err
 	}
 	fmt.Printf("%s is valid.\n", *path)
+	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
+	if err != nil {
+		return err
+	}
+	if len(problems) > 0 {
+		for _, p := range problems {
+			fmt.Println("Detection error:", p)
+		}
+		return fmt.Errorf("%d detection file(s) in %s need fixing", len(problems), c.DetectionsDir())
+	}
+	enabled := 0
+	for _, d := range lib.List() {
+		if d.Enabled {
+			enabled++
+		}
+	}
+	fmt.Printf("%d detections loaded, %d enabled (custom ones in %s).\n", len(lib.List()), enabled, c.DetectionsDir())
 	cl := newStore(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -284,16 +303,47 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		return err
 	}
 	cl := newStore(c)
-	srv := &api.Server{
-		Config:   c,
-		Engine:   newEngine(c, cl),
-		Pipeline: &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix},
-		Backend:  cl,
-		UI:       web.FS(),
-		Log:      log,
-		Version:  version,
+	eng := newEngine(c, cl)
+	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
+	if err != nil {
+		return err
 	}
-	go ensureTemplate(ctx, cl, c, log)
+	for _, p := range problems {
+		// One bad file should not stop the SIEM; it is skipped and reported.
+		log.Error("detection skipped", "err", p)
+	}
+	fstore := findings.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
+	sched := &detect.Scheduler{
+		Library: lib, Engine: eng, Findings: fstore, Log: log,
+		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
+	}
+	srv := &api.Server{
+		Config:     c,
+		Engine:     eng,
+		Pipeline:   &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix},
+		Backend:    cl,
+		Detections: lib,
+		Scheduler:  sched,
+		Findings:   fstore,
+		UI:         web.FS(),
+		Log:        log,
+		Version:    version,
+	}
+	go func() {
+		if !ensureTemplate(ctx, cl, c, log) {
+			return
+		}
+		if err := fstore.EnsureIndex(ctx); err != nil {
+			log.Error("could not create the findings index; detections will not run", "index", fstore.Index, "err", err)
+			return
+		}
+		if c.Detections.Scheduler {
+			log.Info("detection scheduler started", "detections", len(lib.List()))
+			sched.Start(ctx)
+		} else {
+			log.Info("detection scheduler is off (detections.scheduler: false)")
+		}
+	}()
 	go retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log)
 
 	hs := &http.Server{
@@ -322,18 +372,19 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 }
 
 // ensureTemplate installs the index template, retrying until OpenSearch is up.
-func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log *slog.Logger) {
+// It reports false if ctx ended first.
+func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log *slog.Logger) bool {
 	tmpl := ingest.IndexTemplate(c.OpenSearch.IndexPrefix, c.OpenSearch.Replicas)
 	for {
 		err := cl.PutIndexTemplate(ctx, c.OpenSearch.IndexPrefix, tmpl)
 		if err == nil {
 			log.Info("opensearch index template ready", "url", c.OpenSearch.URL)
-			return
+			return true
 		}
 		log.Warn("waiting for opensearch", "url", c.OpenSearch.URL, "err", err)
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(15 * time.Second):
 		}
 	}

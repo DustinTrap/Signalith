@@ -1,0 +1,19 @@
+id: endpoint-shadow-copy-delete
+title: Shadow copies deleted on $dest$
+description: Volume shadow copies or backups were deleted, which ransomware does to stop recovery.
+query: |
+  datamodel=Endpoint
+  (process_name=vssadmin.exe process="*delete*shadows*")
+  OR (process_name=wmic.exe process="*shadowcopy*delete*")
+  OR (process_name=wbadmin.exe process="*delete*catalog*")
+  OR (process_name=bcdedit.exe process="*recoveryenabled*no*")
+schedule: 5m
+lookback: 10m
+severity: critical
+mitre: [T1490]
+throttle:
+  fields: [dest]
+  window: 1h
+enabled: true
+tags: [impact, ransomware, windows]
+guidance: Isolate the host immediately. This usually happens seconds before files are encrypted.

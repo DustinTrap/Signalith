@@ -116,7 +116,9 @@ func lex(src string) ([]token, error) {
 			var b strings.Builder
 			closed := false
 			for i < len(src) {
-				if src[i] == '\\' && i+1 < len(src) {
+				// \" and \\ are escapes; any other backslash is literal so
+				// Windows paths like "C:\Windows\System32" work as typed.
+				if src[i] == '\\' && i+1 < len(src) && (src[i+1] == '"' || src[i+1] == '\\') {
 					b.WriteByte(src[i+1])
 					i += 2
 					continue

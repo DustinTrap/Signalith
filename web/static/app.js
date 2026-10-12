@@ -17,15 +17,16 @@ const el = (tag, attrs = {}, ...children) => {
   return n;
 };
 
-async function api(path, body) {
-  const opts = body === undefined ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+async function api(path, body, method) {
+  const opts = body === undefined ? { method: method || 'GET' } : {
+    method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   };
   const resp = await fetch(path, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const err = new Error(data.error || resp.statusText);
     err.pos = data.pos;
+    err.problems = data.problems;
     throw err;
   }
   return data;
@@ -38,6 +39,7 @@ function showPage(name) {
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === 'page-' + name));
   if (name === 'data') loadAgentConfig();
   if (name === 'health') loadHealth();
+  if (typeof onPageShown === 'function') onPageShown(name);
   try { localStorage.setItem('signalith.page', name); } catch (_) { /* storage may be blocked */ }
 }
 
