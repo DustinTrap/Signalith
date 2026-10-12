@@ -1,6 +1,6 @@
 # Signalith
 
-An open-source SIEM for Windows and Linux, modeled on Splunk Enterprise Security.
+An open-source SIEM for Windows and Linux, inspired by Splunk Enterprise Security.
 Signalith stores events in [OpenSearch](https://opensearch.org), collects them with
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
 query language that reads like SPL, plain-English questions that become queries, a
@@ -400,3 +400,11 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 ## License
 
 [Apache 2.0](LICENSE). See [NOTICE](NOTICE) for third-party data.
+
+## Trademarks
+
+Signalith is an independent open-source project. It is not affiliated with,
+endorsed by or sponsored by Splunk or Cisco, and contains no Splunk code.
+Splunk, Splunk Enterprise Security and SPL are trademarks of Splunk LLC; they are
+named here only to describe what Signalith works like. OpenSearch, Fluent Bit,
+Sigma and MITRE ATT&CK are trademarks of their respective owners.
