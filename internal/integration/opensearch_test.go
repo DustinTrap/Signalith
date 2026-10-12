@@ -811,8 +811,11 @@ func TestCasesEndToEnd(t *testing.T) {
 	if e["result_kind"] != "table" || len(e["rows"].([]any)) != 2 {
 		t.Errorf("search snapshot = %v", e)
 	}
-	ev := run(t, eng, "user=alice earliest=-1h").Rows[0]
-	call("POST", "/api/cases/"+id+"/entries", map[string]any{"kind": "event", "event": ev, "text": "alice read /etc/shadow"}, 201)
+	evs := run(t, eng, "src=203.0.113.9 earliest=-1h | head 1").Rows
+	if len(evs) != 1 {
+		t.Fatalf("no event to pin: %v", evs)
+	}
+	call("POST", "/api/cases/"+id+"/entries", map[string]any{"kind": "event", "event": evs[0], "text": "One of the failed logons"}, 201)
 	call("POST", "/api/cases/"+id+"/entries", map[string]any{"kind": "note", "text": "Source blocked at the firewall"}, 201)
 
 	// Searching by an entity finds the case, and the list leaves out the timeline.
