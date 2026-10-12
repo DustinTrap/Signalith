@@ -83,15 +83,38 @@ type Result struct {
 
 // Ingest normalizes records sent with a Fluent Bit tag and writes them.
 func (p *Pipeline) Ingest(ctx context.Context, tag string, records []map[string]any) (*Result, error) {
+	p.stats.Received.Add(int64(len(records)))
+	p.stats.LastSeen.Store(p.now().Unix())
+	events := make([]Event, 0, len(records))
+	for _, r := range records {
+		events = append(events, Normalize(tag, r, p.now()))
+	}
+	return p.write(ctx, events)
+}
+
+// IngestEvents writes events that are already normalized, such as syslog
+// messages, to the same daily data model indices as Ingest, and counts them
+// in the same stats. An event with no time gets the current time, and one
+// with no model goes to Other.
+func (p *Pipeline) IngestEvents(ctx context.Context, events []Event) (*Result, error) {
+	p.stats.Received.Add(int64(len(events)))
+	p.stats.LastSeen.Store(p.now().Unix())
+	return p.write(ctx, events)
+}
+
+func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 	prefix := p.Prefix
 	if prefix == "" {
 		prefix = "signalith"
 	}
-	p.stats.Received.Add(int64(len(records)))
-	p.stats.LastSeen.Store(p.now().Unix())
-	docs := make([]store.IndexedDoc, 0, len(records))
-	for _, r := range records {
-		ev := Normalize(tag, r, p.now())
+	docs := make([]store.IndexedDoc, 0, len(events))
+	for _, ev := range events {
+		if ev.Time.IsZero() {
+			ev.Time = p.now()
+		}
+		if ev.Model == "" {
+			ev.Model = "Other"
+		}
 		docs = append(docs, store.IndexedDoc{
 			Index: datamodel.IndexName(prefix, ev.Model, ev.Time.UTC().Format("2006.01.02")),
 			Doc:   ev.Document(),
@@ -104,7 +127,7 @@ func (p *Pipeline) Ingest(ctx context.Context, tag string, records []map[string]
 	}
 	p.stats.Indexed.Add(int64(len(docs) - len(errs)))
 	p.stats.Failed.Add(int64(len(errs)))
-	return &Result{Received: len(records), Indexed: len(docs) - len(errs), Errors: errs}, nil
+	return &Result{Received: len(events), Indexed: len(docs) - len(errs), Errors: errs}, nil
 }
 
 // Document returns the OpenSearch document for an event, dropping empty

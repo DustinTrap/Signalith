@@ -1,6 +1,6 @@
 # Signalith
 
-An open-source SIEM for Windows and Linux, modeled on Splunk Enterprise Security.
+An open-source SIEM for Windows and Linux, inspired by Splunk Enterprise Security.
 Signalith stores events in [OpenSearch](https://opensearch.org), collects them with
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
 query language that reads like SPL, plain-English questions that become queries, a
@@ -27,7 +27,9 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 Open http://localhost:8080 and sign in as `admin` with the password set in
 `deploy/docker/docker-compose.yml` (change it first).
 To update, run `git pull` and then the same command. It rebuilds Signalith from the
-new code each time.
+new code each time. After a reboot both containers start again by themselves once
+Docker is running; in Docker Desktop turn on Settings > General > "Start Docker
+Desktop when you sign in".
 
 ### Linux
 
@@ -56,7 +58,13 @@ new code each time.
 
 Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
 Fluent Bit, paste the generated configuration, restart it. The configuration already
-contains the server address and ingest token.
+contains the server address and ingest token. For firewalls, switches and other network
+devices, pick **Syslog** (see [Syslog](#syslog)).
+
+Agents on other machines must send to an address they can reach, such as
+`http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
+(or set `server.public_url` or `SIGNALITH_PUBLIC_URL`), and allow the port, 8080 by default,
+through this computer's firewall.
 
 Supported sources in Phase 1:
 
@@ -68,7 +76,58 @@ Supported sources in Phase 1:
 | Sysmon: event 1 process create, event 3 network connection | Endpoint, Network_Traffic |
 | Linux sshd, sudo, su (auth.log, secure, or journald) | Authentication |
 | Linux useradd, userdel, usermod, gpasswd | Change |
+| Syslog from any device (see below), including CEF | Authentication, Change, Network_Traffic or Other |
 | Anything else | Other (searchable by text and fields) |
+
+#### Syslog
+
+Firewalls, switches, routers, appliances and servers without an agent can send syslog.
+Point them at this server's address on **UDP or TCP port 514** (or the TLS port, if
+you set `syslog.tls`). `signalith init` turns UDP and TCP 514 on; the Docker quick start
+publishes port 514 too.
+
+Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
+and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
+address filled in. Send the test message it shows and watch it arrive on the same page.
+When syslog is off, the page gives the steps to turn it on for this system.
+By hand, forwarding a Linux server's logs with rsyslog is one line in
+`/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
+
+```
+*.* @@siem.example.com:514
+```
+
+`@@` sends over TCP; a single `@` sends over UDP. Signalith reads RFC 5424 and RFC 3164
+syslog (including the usual variations, such as Cisco IOS, IOS XR, NX-OS and ASA), and
+**CEF** (Common Event Format) from security products, mapped to CIM fields like `src`,
+`dest`, `dest_port`, `user` and `action`. Forwarded sshd, sudo, su and user-management messages
+land in Authentication and Change like agent data, so the built-in detections apply.
+Events have `sourcetype=syslog` (or `cef`), `host` from the message, `dvc` set to the
+sender's address, and `facility` and `severity`. The event time is the one in the message,
+unless it is more than a week old (or older than `retention.days`) or more than a day
+ahead; then it is the time Signalith received the message, and the device's own time is
+kept in `device_time`.
+
+To accept syslog only from known senders, list them under `syslog.allow`:
+
+```yaml
+syslog:
+  udp: 0.0.0.0:514
+  tcp: 0.0.0.0:514
+  allow: [10.0.0.0/8, 192.0.2.10]
+```
+
+Over UDP the sender address can be forged, so for trusted senders use TCP or TLS, and
+restrict the port with a firewall as well. The Windows installer limits its firewall
+rules to the `syslog.allow` senders.
+
+Ports below 1024 need extra permission on Linux. The systemd unit grants it; when
+running Signalith another way, use a port such as `0.0.0.0:1514`. When devices send to a
+different port than Signalith listens on, because Docker or a firewall forwards it, set
+`syslog.public_port` so Add data shows the right one (the Docker quick start listens on
+5514 and sets it to 514). The **Health** page (and `/api/health`, under `syslog`) shows the
+listeners, how many messages were received, dropped, not written and rejected, and the
+most recent senders.
 
 ### Sign in
 
@@ -88,7 +147,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
-| `server.public_url` | from `listen` | URL agents use; goes into generated agent configs |
+| `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials |
@@ -98,6 +157,10 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` |
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
+| `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
+| `syslog.tls` | off | Address for syslog over TLS, such as `0.0.0.0:6514`; uses `server.tls_cert` and `server.tls_key` |
+| `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |
+| `syslog.public_port` | the listen port | Port devices send UDP and TCP syslog to, when it is forwarded to the listen port; shown on Add data |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
@@ -120,8 +183,9 @@ Unknown keys are rejected, so typos do not silently do nothing.
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
-`SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`).
+`SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
+`SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`, and
+`SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
 
 ## Detections and findings
 
@@ -359,7 +423,7 @@ From the shell: `signalith query "datamodel=Authentication | top user"` or add
 ```
 Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSearch
  (Windows, Linux)            ingest, parse,          events by data model and day
-                             query compiler,
+syslog devices ──UDP/TCP──▶  query compiler,
                              web UI and API ◀── analyst browser
 ```
 
@@ -369,6 +433,7 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/query` | Query language lexer, parser, canonical printer, builder model |
 | `internal/search` | Compiles queries to OpenSearch DSL and runs remaining commands in memory |
 | `internal/ingest` | Fluent Bit record parsing for Windows and Linux, index template |
+| `internal/syslog` | Syslog receiver (UDP, TCP, TLS), RFC 5424, RFC 3164 and CEF parsing |
 | `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Risk, Other |
 | `internal/agents` | Fluent Bit configuration generator |
 | `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
@@ -405,3 +470,11 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 ## License
 
 [Apache 2.0](LICENSE). See [NOTICE](NOTICE) for third-party data.
+
+## Trademarks
+
+Signalith is an independent open-source project. It is not affiliated with,
+endorsed by or sponsored by Splunk or Cisco, and contains no Splunk code.
+Splunk, Splunk Enterprise Security and SPL are trademarks of Splunk LLC; they are
+named here only to describe what Signalith works like. OpenSearch, Fluent Bit,
+Sigma and MITRE ATT&CK are trademarks of their respective owners.

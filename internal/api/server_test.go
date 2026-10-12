@@ -3,12 +3,16 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/cases"
@@ -20,6 +24,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/syslog"
 )
 
 type fakeOS struct {
@@ -119,6 +124,53 @@ func TestAuthRequired(t *testing.T) {
 	}
 	if code, body := do(t, ts, "GET", "/api/health", "", true); code != 200 || body["opensearch"].(map[string]any)["status"] != "green" {
 		t.Errorf("health = %d %v", code, body)
+	} else if sl, _ := body["syslog"].(map[string]any); sl == nil || sl["enabled"] != false {
+		t.Errorf("syslog off: %v", body["syslog"])
+	}
+}
+
+func TestHealthShowsSyslog(t *testing.T) {
+	var rcv *syslog.Receiver
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		rcv = syslog.New(syslog.Config{UDP: "127.0.0.1:0", PublicPort: 514}, s.Pipeline, s.Log)
+		ctx, cancel := context.WithCancel(context.Background())
+		if err := rcv.Start(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { cancel(); rcv.Wait() })
+		s.Syslog = rcv
+		s.Runtime = &Runtime{OS: "linux", Systemd: true, Exe: "/usr/local/bin/signalith", Addresses: []string{"192.0.2.20"}}
+	})
+	addr := rcv.Stats().Listeners[0].Address
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprint(c, "<13>Oct 12 13:00:00 fw1 app: hello")
+	c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for rcv.Stats().Received == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, body := do(t, ts, "GET", "/api/health", "", true)
+	sl, _ := body["syslog"].(map[string]any)
+	if sl == nil || sl["enabled"] != true || sl["received"] != float64(1) {
+		t.Fatalf("syslog = %v", body["syslog"])
+	}
+	listeners, _ := sl["listeners"].([]any)
+	senders, _ := sl["senders"].([]any)
+	if len(listeners) != 1 || listeners[0].(map[string]any)["address"] != addr || listeners[0].(map[string]any)["port"] != float64(514) ||
+		len(senders) != 1 || senders[0].(map[string]any)["host"] != "fw1" {
+		t.Errorf("listeners %v senders %v", listeners, senders)
+	}
+	if allow, ok := sl["allow"].([]any); !ok || len(allow) != 0 {
+		t.Errorf("allow = %v, want [] (any sender)", sl["allow"])
+	}
+	// Add data words the steps for this system.
+	rt, _ := body["runtime"].(map[string]any)
+	if rt == nil || rt["os"] != "linux" || rt["systemd"] != true || rt["low_ports"] != false || rt["exe"] != "/usr/local/bin/signalith" ||
+		len(rt["addresses"].([]any)) != 1 || body["config_has_syslog"] != false {
+		t.Errorf("runtime = %v, config_has_syslog = %v", body["runtime"], body["config_has_syslog"])
 	}
 }
 
@@ -216,6 +268,50 @@ func TestAgentConfig(t *testing.T) {
 	for _, want := range []string{"winevtlog", "Microsoft-Windows-Sysmon/Operational", "Bearer tok-0123456789abcdef", "Port             8080", "Header_Tag"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("windows config missing %q:\n%s", want, cfg)
+		}
+	}
+}
+
+func TestAgentConfigServerAddress(t *testing.T) {
+	ts, _ := newTestServer(t)
+	// The default public_url is http://127.0.0.1:8080, which only this
+	// machine can reach; the response says so.
+	_, body := do(t, ts, "GET", "/api/agents/config?os=linux", "", true)
+	if body["server_url"] != "http://127.0.0.1:8080" || body["server_loopback"] != true {
+		t.Errorf("default address: server_url = %v, server_loopback = %v", body["server_url"], body["server_loopback"])
+	}
+
+	q := url.Values{"os": {"linux"}, "server": {"http://192.168.1.20:9000"}}
+	code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
+	cfg, _ := body["config"].(string)
+	if code != http.StatusOK || !strings.Contains(cfg, "Host             192.168.1.20\n") || !strings.Contains(cfg, "Port             9000\n") {
+		t.Fatalf("override: %d %v", code, body)
+	}
+	if body["server_url"] != "http://192.168.1.20:9000" || body["server_loopback"] != false {
+		t.Errorf("override: server_url = %v, server_loopback = %v", body["server_url"], body["server_loopback"])
+	}
+
+	for _, bad := range []string{
+		"http://192.168.1.20:8080\n[OUTPUT]\n    Name stdout\n    Match *",
+		"http://192.168.1.20:8080\r\n    Header X-Evil 1",
+		"http://192.168.1.20%0A:8080",
+		" http://192.168.1.20:8080",
+		"192.168.1.20:8080",
+		"ftp://192.168.1.20",
+		"http://admin:pw@192.168.1.20:8080",
+		"http://192.168.1.20:8080/api",
+		"http://192.168.1.20:8080?x=1",
+		"http://192.168.1.20:70000",
+		"http://" + strings.Repeat("a", 5000) + ":8080",
+	} {
+		q := url.Values{"os": {"windows"}, "server": {bad}}
+		code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
+		msg, _ := body["error"].(string)
+		if code != http.StatusBadRequest || msg == "" || body["field"] != "server" || body["config"] != nil {
+			t.Errorf("server=%q: %d %v", bad, code, body)
+		}
+		if strings.ContainsAny(msg, "\r\n") {
+			t.Errorf("server=%q: error has a line break: %q", bad, msg)
 		}
 	}
 }

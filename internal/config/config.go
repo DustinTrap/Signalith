@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +32,7 @@ type Config struct {
 	Retention  Retention  `yaml:"retention"`
 	Auth       Auth       `yaml:"auth"`
 	Ingest     Ingest     `yaml:"ingest"`
+	Syslog     Syslog     `yaml:"syslog"`
 	Detections Detections `yaml:"detections"`
 	Lookups    Lookups    `yaml:"lookups"`
 	Dashboards Dashboards `yaml:"dashboards"`
@@ -38,6 +41,8 @@ type Config struct {
 
 	// path is where the file was loaded from.
 	path string
+	// sections are the top-level keys in that file.
+	sections map[string]bool
 }
 
 // Server controls the web UI and API listener.
@@ -46,7 +51,8 @@ type Server struct {
 	// 0.0.0.0:8080 to accept agents from other machines.
 	Listen string `yaml:"listen"`
 	// PublicURL is the address agents and browsers use to reach this
-	// server. It goes into the agent configs Signalith generates.
+	// server: scheme, host and optional port, no path. It goes into the
+	// agent configs Signalith generates. SIGNALITH_PUBLIC_URL overrides it.
 	PublicURL string `yaml:"public_url"`
 	TLSCert   string `yaml:"tls_cert,omitempty"`
 	TLSKey    string `yaml:"tls_key,omitempty"`
@@ -95,6 +101,117 @@ type Ingest struct {
 	// Tokens agents present in the Authorization header. Rotate by adding a
 	// new token, updating agents, then removing the old one.
 	Tokens []string `yaml:"tokens"`
+}
+
+// Syslog receives syslog from systems that cannot run an agent: firewalls,
+// switches, routers, appliances and servers. Off unless an address is set.
+type Syslog struct {
+	// UDP and TCP are host:port addresses to listen on, such as
+	// 0.0.0.0:514. Empty turns that listener off.
+	UDP string `yaml:"udp"`
+	TCP string `yaml:"tcp"`
+	// TLS is a host:port for syslog over TLS (RFC 5425), such as
+	// 0.0.0.0:6514. It uses server.tls_cert and server.tls_key.
+	TLS string `yaml:"tls"`
+	// Allow lists the sender IP addresses or CIDRs that may send syslog.
+	// Empty allows any sender.
+	Allow []string `yaml:"allow"`
+	// PublicPort is the port devices send UDP and TCP syslog to, when it
+	// is not the one Signalith listens on: Docker or a firewall forwards
+	// 514 to 5514, say. The Add data page puts it in the setup it shows.
+	// Zero means the listen port.
+	PublicPort int `yaml:"public_port,omitempty"`
+}
+
+// Enabled reports whether any syslog listener is set.
+func (s Syslog) Enabled() bool { return s.UDP != "" || s.TCP != "" || s.TLS != "" }
+
+// AllowList returns syslog.allow as prefixes; single addresses become /32
+// or /128. Invalid entries are skipped (Validate reports them).
+func (s Syslog) AllowList() []netip.Prefix {
+	var out []netip.Prefix
+	for _, a := range s.Allow {
+		if p, err := parseAllow(a); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseAllow(s string) (netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	a = a.Unmap().WithZone("")
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+func (s *Syslog) problems(server Server) []string {
+	var p []string
+	for _, l := range []struct{ setting, addr string }{{"syslog.udp", s.UDP}, {"syslog.tcp", s.TCP}, {"syslog.tls", s.TLS}} {
+		if l.addr == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(l.addr)
+		if err != nil {
+			p = append(p, fmt.Sprintf("%s %q must be host:port, for example 0.0.0.0:514 (or empty to turn it off)", l.setting, l.addr))
+			continue
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			p = append(p, fmt.Sprintf("%s port %q must be 1-65535", l.setting, port))
+		}
+		if _, err := netip.ParseAddr(host); err != nil && host != "" && host != "localhost" {
+			p = append(p, fmt.Sprintf("%s host %q must be an IP address of this server, or 0.0.0.0 for all of them", l.setting, host))
+		}
+	}
+	// TCP listeners cannot share a port with each other or the web server.
+	tcp := []struct{ setting, addr string }{{"server.listen", server.Listen}, {"syslog.tcp", s.TCP}, {"syslog.tls", s.TLS}}
+	for i := range tcp {
+		for j := i + 1; j < len(tcp); j++ {
+			if sameListener(tcp[i].addr, tcp[j].addr) {
+				p = append(p, fmt.Sprintf("%s and %s both use %s; give them different ports", tcp[i].setting, tcp[j].setting, tcp[j].addr))
+			}
+		}
+	}
+	if s.TLS != "" && (server.TLSCert == "" || server.TLSKey == "") {
+		p = append(p, "syslog.tls needs server.tls_cert and server.tls_key; syslog over TLS uses the same certificate as the web UI")
+	}
+	if s.PublicPort < 0 || s.PublicPort > 65535 {
+		p = append(p, fmt.Sprintf("syslog.public_port %d must be 1-65535 (or 0 for the port syslog.udp and syslog.tcp listen on)", s.PublicPort))
+	}
+	for i, a := range s.Allow {
+		if _, err := parseAllow(a); err != nil {
+			p = append(p, fmt.Sprintf("syslog.allow[%d] %q must be an IP address or a CIDR such as 10.0.0.0/8", i, a))
+		}
+	}
+	return p
+}
+
+// sameListener reports whether two listen addresses would take the same
+// port: same port, and the same host or either on all interfaces.
+func sameListener(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	ha, pa, err1 := net.SplitHostPort(a)
+	hb, pb, err2 := net.SplitHostPort(b)
+	if err1 != nil || err2 != nil || pa != pb {
+		return false
+	}
+	wildcard := func(h string) bool { return h == "" || h == "0.0.0.0" || h == "::" }
+	return ha == hb || wildcard(ha) || wildcard(hb)
 }
 
 // Detections controls scheduled detections and findings.
@@ -231,6 +348,11 @@ func Default() *Config {
 // Path returns the file the config was loaded from.
 func (c *Config) Path() string { return c.path }
 
+// HasSection reports whether the file the config was loaded from has the
+// top-level section, such as "syslog". Settings for one that is missing
+// are added at the end of the file; a second "syslog:" would not load.
+func (c *Config) HasSection(name string) bool { return c.sections[name] }
+
 // Load reads a config file, applies defaults and environment overrides,
 // and validates it.
 func Load(path string) (*Config, error) {
@@ -248,6 +370,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	var top map[string]any
+	if yaml.Unmarshal(data, &top) == nil {
+		c.sections = make(map[string]bool, len(top))
+		for k := range top {
+			c.sections[k] = true
+		}
+	}
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
@@ -270,6 +399,12 @@ func (c *Config) applyEnv() error {
 	}
 	if v := os.Getenv("SIGNALITH_LISTEN"); v != "" {
 		c.Server.Listen = v
+	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_PUBLIC_URL")); v != "" {
+		if _, err := agents.ParseServerURL(v); err != nil {
+			return fmt.Errorf("SIGNALITH_PUBLIC_URL %q: %v", v, err)
+		}
+		c.Server.PublicURL = v
 	}
 	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
 		h, err := HashPassword(v)
@@ -296,7 +431,22 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
 		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
 	}
+	// "off" turns a syslog listener off, since an empty variable is
+	// indistinguishable from an unset one.
+	if v := os.Getenv("SIGNALITH_SYSLOG_UDP"); v != "" {
+		c.Syslog.UDP = offToEmpty(v)
+	}
+	if v := os.Getenv("SIGNALITH_SYSLOG_TCP"); v != "" {
+		c.Syslog.TCP = offToEmpty(v)
+	}
 	return nil
+}
+
+func offToEmpty(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), "off") {
+		return ""
+	}
+	return strings.TrimSpace(v)
 }
 
 // ValidationError lists every problem found, not just the first.
@@ -319,8 +469,8 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.PublicURL == "" {
 		c.Server.PublicURL = defaultPublicURL(c.Server)
-	} else if u, err := url.Parse(c.Server.PublicURL); err != nil || u.Host == "" {
-		p = append(p, fmt.Sprintf("server.public_url %q must be a full URL such as https://siem.example.com:8080", c.Server.PublicURL))
+	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
+		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	}
 	if u, err := url.Parse(c.OpenSearch.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		p = append(p, fmt.Sprintf("opensearch.url %q must be http(s)://host:port", c.OpenSearch.URL))
@@ -391,6 +541,7 @@ func (c *Config) Validate() error {
 			p = append(p, fmt.Sprintf("ingest.tokens[%d] is shorter than 16 characters", i))
 		}
 	}
+	p = append(p, c.Syslog.problems(c.Server)...)
 	if len(p) > 0 {
 		return &ValidationError{Problems: p}
 	}
@@ -402,16 +553,18 @@ func defaultPublicURL(s Server) string {
 	if err != nil {
 		return ""
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "localhost"
-		}
-	}
 	scheme := "http"
 	if s.TLSCert != "" {
 		scheme = "https"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+		// The machine's name, if it can go into an agent config as is.
+		if h, err := os.Hostname(); err == nil {
+			if _, err := agents.ParseServerURL(scheme + "://" + net.JoinHostPort(h, port)); err == nil {
+				host = h
+			}
+		}
 	}
 	return scheme + "://" + net.JoinHostPort(host, port)
 }
@@ -444,7 +597,20 @@ func RandomToken(nBytes int) string {
 
 // Save writes the config with a header comment explaining each section.
 func (c *Config) Save(path string) error {
-	out, err := yaml.Marshal(c)
+	var doc yaml.Node
+	if err := doc.Encode(c); err != nil {
+		return err
+	}
+	root := &doc
+	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
+		root = root.Content[0]
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if comment, ok := sectionComments[root.Content[i].Value]; ok {
+			root.Content[i].HeadComment = comment
+		}
+	}
+	out, err := yaml.Marshal(&doc)
 	if err != nil {
 		return err
 	}
@@ -457,18 +623,32 @@ func (c *Config) Save(path string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
 
+// sectionComments are written just above a section of the saved file.
+var sectionComments = map[string]string{
+	"syslog": `Syslog from systems that cannot run an agent (firewalls, switches, routers,
+appliances, servers). Point them at this server on UDP or TCP port 514.
+An empty address turns that listener off. tls (for example 0.0.0.0:6514)
+uses server.tls_cert and server.tls_key. allow limits who may send, as IPs
+or CIDRs such as 10.0.0.0/8; empty allows any sender.`,
+}
+
 const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
-# server.public_url  URL agents use to reach this server
+# server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
 # auth.session_timeout  sign the web UI out after this long idle (default 12h)
 # opensearch.*       where events are stored
 # search.*           default time range and result limits
 # retention.days     days of events to keep (0 = forever)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
+# syslog.udp, .tcp   receive syslog from devices without an agent, e.g. 0.0.0.0:514
+#                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)
+# syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses server.tls_cert and tls_key
+# syslog.allow       sender IPs or CIDRs allowed to send syslog (empty = any sender)
+# syslog.public_port port devices send to, if forwarded to another (Docker: 514 -> 5514)
 # detections.dir     folder for custom detections (relative to this file)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
 # dashboards.dir     folder for custom dashboards, one YAML file each (relative to this file)

@@ -19,6 +19,17 @@ jobs:
       - run: go test ./...
       - run: go build -o dist/ ./cmd/signalith
 
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Fails when a known vulnerability is reachable from Signalith's code,
+      # in a dependency or in the Go standard library it was built with.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
   integration:
     runs-on: ubuntu-latest
     services:
@@ -29,6 +40,8 @@ jobs:
           DISABLE_SECURITY_PLUGIN: "true"
           DISABLE_INSTALL_DEMO_CONFIG: "true"
           OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+          # Same as the Docker quick start, so the tests cover that setting.
+          node.store.allow_mmap: "false"
         ports:
           - 9200:9200
         options: >-

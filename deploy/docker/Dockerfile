@@ -1,4 +1,4 @@
-FROM golang:1.24 AS build
+FROM golang:1.26.9 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -14,6 +14,7 @@ COPY --from=build --chown=65532:65532 /out/data /var/lib/signalith
 ENV SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections \
     SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups \
     SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards
-EXPOSE 8080
+# Web UI and API, and syslog (see deploy/docker/signalith.yaml).
+EXPOSE 8080 5514/udp 5514/tcp
 ENTRYPOINT ["/usr/local/bin/signalith"]
 CMD ["serve", "-c", "/etc/signalith/signalith.yaml"]
