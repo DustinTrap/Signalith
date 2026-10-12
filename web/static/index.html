@@ -841,29 +841,65 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
   </section>
 
   <!-- Add data -->
-  <section id="page-data" class="page" data-legacy>
-    <h2>Add data</h2>
-    <p class="muted">Install Fluent Bit on each host, paste this configuration and restart it.</p>
-    <div class="agent-options">
-      <label><input type="radio" name="os" value="linux" checked> Linux</label>
-      <label><input type="radio" name="os" value="windows"> Windows</label>
-      <span id="linux-opts">
-        <select id="linux-source">
-          <option value="file">Read /var/log/auth.log or /var/log/secure</option>
-          <option value="journal">Read the systemd journal (no auth.log)</option>
-        </select>
-      </span>
-      <label id="windows-opts" class="hidden"><input type="checkbox" id="sysmon" checked> Include Sysmon</label>
+  <section id="page-data" class="page">
+    <header class="page-head">
+      <div>
+        <h2 class="page-head__title">Add data</h2>
+        <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent.</p>
+      </div>
+    </header>
+    <div class="agent">
+      <fieldset class="agent-os">
+        <legend class="sr-only">Operating system</legend>
+        <label class="card agent-os__card">
+          <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-square-terminal"/></svg></span>
+          <span class="agent-os__text"><b>Linux</b><span>SSH, sudo and account changes</span></span>
+          <input type="radio" name="os" value="linux" checked>
+        </label>
+        <label class="card agent-os__card">
+          <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></span>
+          <span class="agent-os__text"><b>Windows</b><span>Security event log and Sysmon</span></span>
+          <input type="radio" name="os" value="windows">
+        </label>
+      </fieldset>
+
+      <div class="card agent-setup">
+        <div class="card__head">
+          <div>
+            <h3 class="card__title" id="agent-title">Set up the agent</h3>
+            <p class="card__sub">Do this on each host you want to collect from.</p>
+          </div>
+          <div class="card__actions">
+            <label id="linux-opts" class="agent-opt"><span>Read from</span>
+              <select id="linux-source" class="select select--sm">
+                <option value="file">auth.log or secure</option>
+                <option value="journal">systemd journal</option>
+              </select>
+            </label>
+            <label id="windows-opts" class="switch hidden"><input type="checkbox" id="sysmon" checked> Include Sysmon</label>
+          </div>
+        </div>
+        <div class="card__body" id="agent-body">
+          <ol id="agent-steps" class="agent-steps" role="list" aria-busy="true"></ol>
+          <div id="agent-file" class="agent-file hidden">
+            <div class="agent-file__bar">
+              <svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>
+              <span id="agent-path" class="mono"></span>
+              <span class="spacer"></span>
+              <button class="btn btn--ghost btn--sm" type="button" id="agent-download"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span>Download</span></button>
+              <button class="btn btn--ghost btn--sm" type="button" id="copy-config"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button>
+            </div>
+            <pre id="agent-config" class="editor"></pre>
+          </div>
+        </div>
+      </div>
     </div>
-    <ol id="agent-steps"></ol>
-    <div class="code-head"><span id="agent-path" class="muted"></span><button id="copy-config">Copy</button></div>
-    <pre id="agent-config" class="code"></pre>
+    <p class="sr-only" id="agent-status" role="status"></p>
   </section>
 
   <!-- Health -->
-  <section id="page-health" class="page" data-legacy>
-    <h2>Health</h2>
-    <div id="health" class="stat-grid"></div>
+  <section id="page-health" class="page">
+    <div id="health" class="health-page"></div>
   </section>
 
   <!-- Help -->

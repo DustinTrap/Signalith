@@ -2420,10 +2420,115 @@ dialog.case-picker::backdrop { background: var(--scrim); backdrop-filter: blur(3
 /* ==== end page:intel ==== */
 
 /* ==== page:data (styles for this page only) ==== */
-/* (add data styles here) */
+/* One column: the OS cards, then one card with numbered steps. The config
+   file sits in an editor-styled block under the step that saves it. */
+#page-data .agent { display: grid; gap: var(--sp-4); max-width: 880px; }
+
+/* operating system: two selectable cards, the real radio drawn at the right */
+#page-data .agent-os { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); min-width: 0; margin: 0; padding: 0; border: 0; }
+#page-data .agent-os__card { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; transition: box-shadow var(--t-fast); }
+#page-data .agent-os__card:hover { box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-sm); }
+#page-data .agent-os__card:has(input:checked) { box-shadow: 0 0 0 1.5px var(--accent), var(--shadow-sm); }
+#page-data .agent-os__card:has(input:focus-visible) { box-shadow: 0 0 0 2px var(--sheet), 0 0 0 4px var(--accent); }
+#page-data .agent-os__icon { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: var(--r-md); color: var(--text-2); background: var(--hover); transition: background var(--t-fast), color var(--t-fast); }
+#page-data .agent-os__icon .icon { width: 20px; height: 20px; }
+#page-data .agent-os__card:has(input:checked) .agent-os__icon { color: var(--accent); background: var(--accent-soft-2); }
+#page-data .agent-os__text { display: grid; gap: 2px; flex: 1; min-width: 0; }
+#page-data .agent-os__text b { font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+#page-data .agent-os__text span { font-size: var(--fs-sm); color: var(--text-3); }
+#page-data .agent-os input {
+  appearance: none; -webkit-appearance: none; flex: none; width: 16px; height: 16px; margin: 0; border-radius: 50%; cursor: pointer;
+  background: var(--field); box-shadow: inset 0 0 0 1px var(--line-strong); transition: box-shadow var(--t-fast);
+}
+#page-data .agent-os input:checked { background: var(--text-on-accent); box-shadow: inset 0 0 0 5px var(--accent-fill); }
+#page-data .agent-os input:focus-visible { outline: none; }
+
+/* the setup card: options for the chosen OS sit in its header */
+#page-data .agent-setup .card__head { flex-wrap: wrap; row-gap: var(--sp-2); }
+#page-data .agent-setup .card__body { display: grid; gap: var(--sp-4); padding-top: 20px; }
+#page-data .agent-opt { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text-2); }
+
+/* numbered steps joined by a hairline */
+#page-data .agent-steps { list-style: none; margin: 0; padding: 0; display: grid; }
+#page-data .agent-step { position: relative; display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 14px; padding-bottom: 24px; }
+#page-data .agent-step:last-child { padding-bottom: 0; }
+#page-data .agent-step::before { content: ""; position: absolute; left: 11.5px; top: 32px; bottom: 8px; width: 1px; background: var(--line); }
+#page-data .agent-step:last-child::before { display: none; }
+#page-data .agent-step__num {
+  width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%;
+  font-size: var(--fs-sm); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-2);
+  background: var(--raised); box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+#page-data .agent-step__num:empty { background: var(--hover); box-shadow: none; }
+#page-data .agent-step__body { display: grid; gap: 10px; min-width: 0; padding-top: 2px; }
+#page-data .agent-step__text { color: var(--text); line-height: 20px; overflow-wrap: anywhere; }
+#page-data .agent-step__text code { padding: 1px 5px; border-radius: var(--r-xs); font-size: var(--fs-sm); color: var(--text); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
+#page-data .agent-step__text a .icon { margin-left: 3px; vertical-align: -1px; }
+#page-data .agent-skel-well { height: 32px; border-radius: var(--r-md); }
+
+/* a command: mono well with a ghost copy button */
+#page-data .agent-cmd { display: flex; align-items: flex-start; gap: 8px; padding: 4px 4px 4px 12px; border-radius: var(--r-md); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
+#page-data .agent-cmd code { flex: 1; min-width: 0; padding: 4px 0; font-size: var(--fs-sm); line-height: 20px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+#page-data .is-copied, #page-data .is-copied .icon { color: var(--success); }
+
+/* the config file */
+#page-data .agent-file { overflow: hidden; border-radius: var(--r-md); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
+#page-data .agent-file__bar { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 4px 4px 12px; color: var(--text-3); }
+#page-data .agent-file__bar #agent-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--text-2); }
+#page-data .agent-file .editor { font-size: var(--fs-sm); line-height: 20px; box-shadow: inset 0 1px 0 var(--line-subtle); }
+/* a value that wraps (phones) hangs under its key instead of the margin */
+#page-data .agent-file .editor .src { padding-left: calc(16px + 6ch); text-indent: -6ch; }
+#page-data .agent-s { color: var(--code-cmd); font-weight: 500; }
+#page-data .agent-k { color: var(--text-2); }
+#page-data .agent-c { color: var(--text-3); }
+
+@media (max-width: 600px) {
+  #page-data .agent-os { grid-template-columns: minmax(0, 1fr); }
+  #page-data .agent-step { gap: 12px; }
+  #page-data .agent-file .editor { grid-template-columns: 28px minmax(0, 1fr); }
+  #page-data .agent-file .editor .src { padding: 0 12px 0 calc(10px + 6ch); }
+  #page-data .agent-file__bar .btn span { display: none; }
+  #page-data .agent-file__bar .btn { width: var(--h); padding: 0; }
+}
 /* ==== end page:data ==== */
 
 /* ==== page:health (styles for this page only) ==== */
-/* (add health styles here) */
+/* Alerts (only when something needs a look), four KPI tiles of real
+   counters, then the components with a pulse each. */
+#page-health .health-page { display: grid; gap: var(--sp-4); }
+#page-health .hp-alerts { display: grid; gap: var(--sp-2); }
+#page-health .hp-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#page-health .kpi__value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-health .kpi__foot { display: block; overflow: hidden; text-overflow: ellipsis; }
+#page-health .kpi[data-tone="warning"] .kpi__value { color: var(--warning); }
+#page-health .kpi .skeleton { margin: 3px 0; }
+#page-health .hp-skel-value { width: 40%; height: 28px; border-radius: var(--r-sm); }
+
+#page-health .hp-table :is(th, td):first-child { padding-left: 16px; }
+#page-health .hp-table :is(th, td):last-child { padding-right: 16px; }
+#page-health .hp-table [data-col="name"] { width: 34%; }
+#page-health .hp-table [data-col="state"] { width: 190px; }
+#page-health .hp-table td { height: 60px; }
+#page-health .hp-comp { display: flex; align-items: center; gap: 12px; min-width: 0; }
+#page-health .hp-comp__icon { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: var(--r-md); color: var(--text-2); background: var(--hover); }
+#page-health .hp-comp__text { min-width: 0; }
+#page-health .hp-comp__meta { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-health .hp-state { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; color: var(--text); white-space: nowrap; }
+#page-health td[data-col="details"] { line-height: 1.45; overflow-wrap: anywhere; }
+#page-health td[data-col="details"] code { font-size: var(--fs-sm); color: var(--text); }
+#page-health .pulse[data-state="idle"] { background: var(--text-3); }
+#page-health .pulse[data-state="idle"]::after { box-shadow: 0 0 0 1px var(--text-3); }
+
+@media (max-width: 720px) {
+  #page-health .hp-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* components stack: name and status on one row, details under them */
+  #page-health .hp-table thead { display: none; }
+  #page-health .hp-table, #page-health .hp-table tbody { display: block; }
+  #page-health .hp-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 12px; padding: 14px 16px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+  #page-health .hp-table tbody tr:last-child { box-shadow: none; }
+  #page-health .hp-table td[data-col] { display: block; width: auto; height: auto; padding: 0; box-shadow: none; }
+  #page-health .hp-table tbody tr:hover td { background: none; }
+  #page-health .hp-table td[data-col="details"] { grid-column: 1 / -1; padding-left: 44px; }
+}
 /* ==== end page:health ==== */
 
