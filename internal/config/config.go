@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/detect"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -32,6 +33,7 @@ type Config struct {
 	Ingest     Ingest     `yaml:"ingest"`
 	Detections Detections `yaml:"detections"`
 	Lookups    Lookups    `yaml:"lookups"`
+	Dashboards Dashboards `yaml:"dashboards"`
 	Assistant  Assistant  `yaml:"assistant"`
 	Intel      Intel      `yaml:"intel"`
 
@@ -102,6 +104,16 @@ type Lookups struct {
 	// Dir holds assets.csv and identities.csv. A relative path is relative
 	// to the folder this config file is in.
 	Dir string `yaml:"dir"`
+}
+
+// Dashboards controls the posture and custom dashboards.
+type Dashboards struct {
+	// Dir holds custom dashboards as YAML files, one per dashboard. A
+	// relative path is relative to the folder this config file is in.
+	Dir string `yaml:"dir"`
+	// StaleAfter is how long a host and source type can go quiet before
+	// the posture dashboard lists it as a data source that stopped sending.
+	StaleAfter string `yaml:"stale_after"`
 }
 
 // Assistant is an optional AI model for questions the built-in
@@ -267,6 +279,18 @@ func (c *Config) resolve(d string) string {
 // DetectionsDir returns the absolute detections folder.
 func (c *Config) DetectionsDir() string { return c.resolve(c.Detections.Dir) }
 
+// DashboardsDir returns the absolute dashboards folder.
+func (c *Config) DashboardsDir() string { return c.resolve(c.Dashboards.Dir) }
+
+// StaleAfter returns dashboards.stale_after as a duration (2h if unset or
+// invalid; Validate reports invalid values).
+func (c *Config) StaleAfter() time.Duration {
+	if d, err := detect.ParseDuration(c.Dashboards.StaleAfter); err == nil && d > 0 {
+		return d
+	}
+	return 2 * time.Hour
+}
+
 // Default returns a config with every default filled in.
 func Default() *Config {
 	return &Config{
@@ -277,6 +301,7 @@ func Default() *Config {
 		Auth:       Auth{AdminUser: "admin"},
 		Detections: Detections{Dir: "detections", Scheduler: true, MaxFindingsPerRun: 100},
 		Lookups:    Lookups{Dir: "lookups"},
+		Dashboards: Dashboards{Dir: "dashboards", StaleAfter: "2h"},
 	}
 }
 
@@ -335,6 +360,9 @@ func (c *Config) applyEnv() error {
 	}
 	if v := os.Getenv("SIGNALITH_LOOKUPS_DIR"); v != "" {
 		c.Lookups.Dir = v
+	}
+	if v := os.Getenv("SIGNALITH_DASHBOARDS_DIR"); v != "" {
+		c.Dashboards.Dir = v
 	}
 	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
 		c.Assistant.APIKey = v
@@ -396,6 +424,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Lookups.Dir == "" {
 		p = append(p, "lookups.dir is required, for example: lookups")
+	}
+	if c.Dashboards.Dir == "" {
+		p = append(p, "dashboards.dir is required, for example: dashboards")
+	}
+	if c.Dashboards.StaleAfter == "" {
+		c.Dashboards.StaleAfter = "2h"
+	} else if d, err := detect.ParseDuration(c.Dashboards.StaleAfter); err != nil || d < 5*time.Minute {
+		p = append(p, fmt.Sprintf("dashboards.stale_after %q must be a duration of at least 5m, for example 2h or 1d", c.Dashboards.StaleAfter))
 	}
 	switch c.Assistant.Provider {
 	case "":
@@ -503,6 +539,8 @@ const header = `# Signalith configuration.
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
 # detections.dir     folder for custom detections (relative to this file)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
+# dashboards.dir     folder for custom dashboards, one YAML file each (relative to this file)
+# dashboards.stale_after  how long a host can go quiet before the posture dashboard flags it
 # assistant.*        optional AI model for "Ask in English" (provider: anthropic or openai);
 #                    off by default, and only the question and field names are sent
 # intel.feeds        threat intel feeds to download (none by default), for example:

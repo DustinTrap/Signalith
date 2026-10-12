@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
@@ -577,5 +579,159 @@ func TestThreatIntelEndToEnd(t *testing.T) {
 	}
 	if res := run(t, eng, `datamodel=Authentication | threatmatch src`); len(res.Rows) != 0 {
 		t.Errorf("dropped indicator still matches: %d rows", len(res.Rows))
+	}
+}
+
+// TestDashboardsEndToEnd runs the posture summary and saved dashboard
+// panels against real data.
+func TestDashboardsEndToEnd(t *testing.T) {
+	cl, eng, prefix := setup(t)
+	load(t, cl, prefix)
+	ctx := context.Background()
+	fs := findings.NewOpenSearch(cl, prefix)
+	if err := fs.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lib, _, err := detect.NewLibrary("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Risk: &risk.Store{Client: cl, Prefix: prefix}}
+	var bf *findings.Finding
+	for _, id := range []string{"auth-brute-force", "auth-shadow-file-access"} {
+		res, err := sched.Run(ctx, mustGet(t, lib, id, "1h"))
+		if err != nil || len(res.Findings) != 1 {
+			t.Fatalf("%s: %v %+v", id, err, res)
+		}
+		if bf == nil {
+			bf = res.Findings[0]
+		}
+	}
+	// Triage and resolve one finding so the time-to metrics have data.
+	st, owner := findings.StatusResolved, "analyst1"
+	bf.Apply(findings.Update{Status: &st, Owner: &owner}, "admin", time.Now())
+	if err := fs.Save(ctx, bf); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-risk-*/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &dashboards.Posture{Engine: eng, Findings: fs, Detections: lib, Status: sched.Status, SchedulerOn: true, StaleAfter: 3 * time.Minute}
+	rep := p.Report(ctx, 24*time.Hour, "24h")
+	if rep.Errors != nil {
+		t.Fatalf("posture errors: %v", rep.Errors)
+	}
+	ind := map[string]string{}
+	for _, i := range rep.Indicators {
+		v, prev := "nil", "nil"
+		if i.Value != nil {
+			v = fmt.Sprint(*i.Value)
+		}
+		if i.Previous != nil {
+			prev = fmt.Sprint(*i.Previous)
+		}
+		ind[i.ID] = v + "/" + prev
+	}
+	for id, want := range map[string]string{"events_ingested": "22/0", "new_findings": "2/0", "closed_findings": "1/0", "open_findings": "1/nil"} {
+		if ind[id] != want {
+			t.Errorf("%s = %s, want %s (all: %v)", id, ind[id], want, ind)
+		}
+	}
+	if mttr := ind["mean_time_to_resolve"]; !strings.HasSuffix(mttr, "/nil") || strings.HasPrefix(mttr, "nil") {
+		t.Errorf("mean time to resolve = %s", mttr)
+	}
+	sum := func(res *search.Result) (n int64) {
+		for _, r := range res.Rows {
+			for _, c := range res.Columns[1:] {
+				if v, ok := r[c].(int64); ok {
+					n += v
+				}
+			}
+		}
+		return n
+	}
+	if n := sum(rep.EventsByDatamodel); n != 22 || !slices.Contains(rep.EventsByDatamodel.Columns, "Authentication") {
+		t.Errorf("events by data model = %d %v", n, rep.EventsByDatamodel.Columns)
+	}
+	if n := sum(rep.EventsBySourcetype); n != 22 {
+		t.Errorf("events by source type = %d %v", n, rep.EventsBySourcetype.Columns)
+	}
+	if n := sum(rep.FindingsOverTime); n != 2 {
+		t.Errorf("findings over time = %d", n)
+	}
+	var sawBF bool
+	for _, d := range rep.TopDetections {
+		if d.ID == "auth-brute-force" {
+			sawBF = d.Findings == 1 && d.RiskEvents == 1
+		}
+	}
+	if !sawBF {
+		t.Errorf("top detections = %+v", rep.TopDetections)
+	}
+	// No asset list here, so scores are unscaled: shadow access adds 60 to
+	// alice and web1, brute force 30 to the source.
+	scores := map[string]string{}
+	for _, r := range rep.TopRiskObjects {
+		scores[fmt.Sprint(r["risk_object"])] = fmt.Sprint(r["risk_score"])
+	}
+	if fmt.Sprint(scores) != fmt.Sprint(map[string]string{"web1": "60", "alice": "60", "203.0.113.9": "30"}) || fmt.Sprint(rep.TopRiskObjects[2]["risk_score"]) != "30" {
+		t.Errorf("top risk objects = %v", rep.TopRiskObjects)
+	}
+	tactics := map[string]bool{}
+	for _, x := range rep.Tactics {
+		tactics[x.Tactic] = true
+	}
+	if !tactics["credential-access"] {
+		t.Errorf("tactics = %+v", rep.Tactics)
+	}
+	h := rep.Health
+	stale := map[string]bool{}
+	for _, s := range h.StaleSources {
+		stale[s.Host] = true
+	}
+	// web1 sent a minute ago; DC01 and WS1 last sent four minutes ago.
+	if h.Sources < 3 || stale["web1"] || !stale["DC01"] || !stale["WS1"] {
+		t.Errorf("sources %d stale %v", h.Sources, h.StaleSources)
+	}
+	silent := map[string]bool{}
+	for _, s := range h.Silent {
+		silent[s.ID] = true
+	}
+	if silent["auth-brute-force"] || !silent["endpoint-shadow-copy-delete"] {
+		t.Errorf("silent = %v", h.Silent)
+	}
+
+	// A saved dashboard runs its panels; a failing panel stays on its own.
+	store, err := dashboards.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &dashboards.Dashboard{ID: "auth", Title: "Authentication", Panels: []dashboards.Panel{
+		{Title: "Failed logins", Query: "datamodel=Authentication action=failure | stats count", Compare: true},
+		{Title: "Top sources", Query: "datamodel=Authentication | top limit=3 src"},
+		{Title: "Over time", Query: "datamodel=Authentication earliest=-4h | timechart span=1h count by action"},
+		{Title: "Bad span", Query: "datamodel=Authentication | timechart span=soon count"},
+	}}
+	if err := store.Put(d); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.Get("auth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := (&dashboards.Runner{Engine: eng}).Run(ctx, saved.Panels, saved.TimeRange)
+	if out[0].Error != "" || fmt.Sprint(out[0].Value) != "16" || fmt.Sprint(out[0].Previous) != "0" {
+		t.Errorf("single = %+v", out[0])
+	}
+	if out[1].Error != "" || len(out[1].Result.Rows) != 3 || out[1].Result.Rows[0]["src"] != "203.0.113.9" {
+		t.Errorf("bar = %+v", out[1])
+	}
+	// 16 failures and 3 successful logons in the last 4 hours.
+	if out[2].Error != "" || out[2].Result.Kind != "timechart" || sum(out[2].Result) != 19 {
+		t.Errorf("line = %+v", out[2])
+	}
+	if out[3].Error == "" || out[3].Result != nil {
+		t.Errorf("bad panel = %+v", out[3])
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
@@ -54,6 +55,9 @@ type Server struct {
 	// Intel disables the threat intel endpoints.
 	Intel *intel.Store
 	Feeds *intel.Feeds
+	// Dashboards holds custom dashboards; nil disables them (the built-in
+	// posture dashboard still works).
+	Dashboards *dashboards.Store
 	// Assistant is an optional AI model for plain-English questions.
 	Assistant *assistant.Client
 	UI        fs.FS // web UI files; nil disables the UI
@@ -83,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeRisk(api)
 	s.routeAsk(api)
 	s.routeIntel(api)
+	s.routeDashboards(api)
 	if s.UI != nil {
 		api.Handle("GET /", http.FileServerFS(s.UI))
 	}

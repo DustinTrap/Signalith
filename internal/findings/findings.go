@@ -84,7 +84,10 @@ type Filter struct {
 	DetectionID string   `json:"detection_id,omitempty"`
 	Text        string   `json:"text,omitempty"`
 	Since       time.Time
-	Limit       int
+	// UpdatedSince keeps findings changed at or after this time, so
+	// dashboards see old findings closed recently.
+	UpdatedSince time.Time
+	Limit        int
 }
 
 // Update is a triage change. Nil fields stay as they are.

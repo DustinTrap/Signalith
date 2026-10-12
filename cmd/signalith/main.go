@@ -21,6 +21,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
@@ -192,6 +193,17 @@ func cmdValidate(args []string) error {
 			}
 		}
 		fmt.Printf("%d threat intel feeds configured, %d enabled.\n", len(feeds), on)
+	}
+	if boards, err := dashboards.NewStore(c.DashboardsDir()); err != nil {
+		fmt.Printf("Warning: dashboards folder %s: %v\n", c.DashboardsDir(), err)
+	} else if list, problems, err := boards.List(); err == nil {
+		for _, p := range problems {
+			fmt.Printf("Dashboard error: %s: %s\n", p.File, p.Error)
+		}
+		if len(problems) > 0 {
+			return fmt.Errorf("%d dashboard file(s) in %s need fixing", len(problems), c.DashboardsDir())
+		}
+		fmt.Printf("%d custom dashboards loaded from %s.\n", len(list), c.DashboardsDir())
 	}
 	cl := newStore(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -417,6 +429,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		// One bad file should not stop the SIEM; it is skipped and reported.
 		log.Error("detection skipped", "err", p)
 	}
+	boards, err := dashboards.NewStore(c.DashboardsDir())
+	if err != nil {
+		return fmt.Errorf("dashboards.dir: %w", err)
+	}
+	if _, problems, err := boards.List(); err == nil {
+		for _, p := range problems {
+			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
+		}
+	}
 	fstore := findings.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	sched := &detect.Scheduler{
 		Library: lib, Engine: eng, Findings: fstore, Log: log,
@@ -434,6 +455,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Assets:     lists,
 		Intel:      indicators,
 		Feeds:      feeds,
+		Dashboards: boards,
 		Assistant:  newAssistant(c),
 		UI:         web.FS(),
 		Log:        log,

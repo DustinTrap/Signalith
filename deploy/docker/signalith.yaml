@@ -20,3 +20,6 @@ detections:
   max_findings_per_run: 100
 lookups:
   dir: /var/lib/signalith/lookups
+dashboards:
+  dir: /var/lib/signalith/dashboards
+  stale_after: 2h
