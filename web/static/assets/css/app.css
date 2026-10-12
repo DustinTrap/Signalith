@@ -2881,11 +2881,20 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-retention .rt-state[data-state="run"]::before { background: var(--accent); box-shadow: none; }
 #page-retention .rt-state[data-state="bad"] { color: var(--danger); }
 #page-retention .rt-state[data-state="bad"]::before { background: var(--danger); box-shadow: none; }
-#page-retention .rt-dir { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+#page-retention .rt-arch--view tbody tr { cursor: default; }
+#page-retention .rt-dir { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; white-space: nowrap; }
 #page-retention .rt-dir .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
+#page-retention .rt-pager { display: inline-flex; align-items: center; gap: 2px; }
+#page-retention .rt-pager .num { margin-right: 6px; white-space: nowrap; }
+#page-retention #rt-arch-foot .btn { margin: -4px 0; }
 
 /* dialogs */
 #page-retention .rt-dialog { width: min(560px, calc(100vw - 32px)); }
+/* Long previews scroll inside the dialog; the head and Save stay in view. */
+#page-retention .rt-dialog[open] { display: flex; flex-direction: column; max-height: calc(100dvh - 32px); overflow: hidden; }
+#page-retention .rt-dialog > form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+#page-retention .rt-dialog .modal__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+#page-retention .rt-dialog .modal__head, #page-retention .rt-dialog .modal__foot { flex: none; }
 #page-retention .modal__head > div { flex: 1; min-width: 0; }
 #page-retention .modal__close { margin: -4px -8px 0 auto; }
 #page-retention #rt-edit-form[data-kind="records"] .rt-events-only { display: none; }
@@ -2982,6 +2991,10 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
   #page-retention .rt-arch-table td.rt-ar-cat .cell-title::after { content: attr(data-day); font-weight: 400; color: var(--text-2); }
   #page-retention .rt-arch-table .rt-ar-state { display: flex; align-items: baseline; gap: 8px; }
   #page-retention .rt-arch-table .rt-ar-state .rt-sub { margin: 0; }
+  #page-retention .rt-arch-table.rt-arch--view tr { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "cat docs" "state state"; padding-left: 16px; }
+  #page-retention .rt-arch-table.rt-arch--view thead tr { grid-template-areas: "cat docs"; }
+  #page-retention #rt-arch-bar .select { flex: 1 1 140px; min-width: 0; }
+
   #page-retention .page-head__actions { width: 100%; }
   #page-retention #rt-run { flex: 1; }
 }

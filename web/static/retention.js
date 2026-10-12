@@ -50,17 +50,36 @@ function rtRange(days) {
   return a === b ? rtDay(a) : `${rtDay(a)} to ${rtDay(b)}`;
 }
 const rtDash = () => el('span', { class: 'subtle' }, el('span', { 'aria-hidden': 'true' }, '–'), el('span', { class: 'sr-only' }, 'None'));
+// rtCount prints a count in words past a million ("432 billion"), so it
+// never reads like a size in bytes.
+function rtCount(n) {
+  n = Number(n) || 0;
+  const big = [[1e12, 'trillion'], [1e9, 'billion'], [1e6, 'million']].find(([v]) => n >= v);
+  if (!big) return n.toLocaleString();
+  const v = n / big[0];
+  return `${v.toLocaleString(undefined, { maximumFractionDigits: v < 10 ? 1 : 0 })} ${big[1]}`;
+}
 function rtNoun(id, n) {
   const nouns = { findings: ['finding', 'findings'], cases: ['investigation', 'investigations'], intel: ['indicator', 'indicators'] };
   const [one, many] = nouns[id] || ['event', 'events'];
-  return `${n === 1 ? '1' : fmtCompact(n)} ${n === 1 ? one : many}`;
+  return `${rtCount(n)} ${n === 1 ? one : many}`;
+}
+// rtDates writes the server's YYYY-MM-DD days the way the page does.
+const rtDates = (t) => String(t == null ? '' : t).replace(/\b(\d{4}-\d{2}-\d{2})\b/g, (_, d) => rtDay(d));
+// rtSentence is sentence() for server text: it leaves an index name or
+// setting name at the start as it is ("signalith-endpoint-2026.07.05: ...").
+function rtSentence(msg) {
+  let m = rtDates(String(msg || 'Something went wrong').trim());
+  const first = m.split(/[\s:;,]/)[0];
+  if (!/[-_./\\\d]/.test(first)) m = m.charAt(0).toUpperCase() + m.slice(1);
+  return /[.!?]$/.test(m) ? m : m + '.';
 }
 // rtFix turns a server problem ("compact_after_days must be ...") into
 // the page's words ("Compact after must be ...").
 function rtFix(msg) {
   let m = String(msg || '');
   for (const [k, v] of Object.entries(RT_FIELD_NAME)) m = m.split(k).join(v);
-  return sentence(m);
+  return rtSentence(m);
 }
 function rtPolicyText(p) {
   return [
@@ -71,6 +90,7 @@ function rtPolicyText(p) {
   ].join(' · ');
 }
 function rtNextRun(sch) {
+  if (sch.read_only) return 'Runs on the scheduler server';
   if (!sch.automatic) return 'Not scheduled on this server';
   if (!sch.next_run) return `Every ${sch.interval}`;
   const u = until(sch.next_run);
@@ -116,22 +136,40 @@ function rtSchedule() {
   }, fast ? 2000 : 30000);
 }
 
-// rtExpectRun watches for the next run to finish and reports it. After a
-// save, a run that did nothing stays quiet: the save's own toast says enough.
-function rtExpectRun(quiet) {
-  const ov = rtState.ov;
-  rtState.awaitRun = { before: ov && ov.last_run ? ov.last_run.started : '', at: Date.now(), quiet: !!quiet };
+// rtExpectRun watches for runs we started (or queued) to finish and
+// reports each. After a save, a run that did nothing stays quiet: the
+// save's own toast says enough. wants lists the runs still to report, in
+// order, each with { quiet, title }; trigger, when set, skips runs of
+// another kind (a scheduled run going when a save was queued behind it).
+const rtLastStart = () => (rtState.ov && rtState.ov.last_run ? rtState.ov.last_run.started : '');
+function rtExpectRun(want, before, trigger) {
+  const w = rtState.awaitRun;
+  if (w) {
+    // A run we wait for is going: report it, then this one.
+    w.wants.push(want || {});
+    w.trigger = '';
+    return;
+  }
+  rtState.awaitRun = { before: before === undefined ? rtLastStart() : before, at: Date.now(), wants: [want || {}], trigger: trigger || '' };
 }
 function rtRunFinished(ov) {
   const w = rtState.awaitRun;
   if (!w || ov.schedule.running) return;
   const run = ov.last_run;
   if (!run || run.started === w.before) {
-    // the run has not started yet or was refused; stop waiting after a while
-    if (Date.now() - w.at > 20000) rtState.awaitRun = null;
+    // The run has not started yet or was refused; stop waiting after a
+    // while, unless one is queued.
+    if (!ov.schedule.queued && Date.now() - w.at > 20000) rtState.awaitRun = null;
     return;
   }
-  rtState.awaitRun = null;
+  w.before = run.started;
+  w.at = Date.now();
+  if (w.trigger && run.trigger !== w.trigger) return;
+  const want = w.wants.shift() || {};
+  if (!w.wants.length) rtState.awaitRun = null;
+  rtReportRun(run, want);
+}
+function rtReportRun(run, w) {
   const n = (run.errors || []).length;
   const done = [];
   if (run.archived) done.push(`archived ${rtDays(run.archived)}`);
@@ -140,9 +178,11 @@ function rtRunFinished(ov) {
   if (run.deleted_records) done.push(`deleted ${run.deleted_records.toLocaleString()} closed records`);
   if (w.quiet && !done.length && !n) return;
   const title = w.title && !n ? { title: w.title } : undefined;
-  let msg = done.length ? `Retention ${done.join(', ')}` : 'Retention ran; nothing needed doing';
+  let msg = done.length ? `Retention ${done.join(', ')}` : n ? 'Nothing was changed' : 'Retention ran; nothing needed doing';
   if (run.freed_bytes) msg += `, freeing ${rtBytes(run.freed_bytes)}`;
   msg += '.';
+  if (!done.length && n === 1) msg += ' ' + rtFix(run.errors[0]);
+  if (run.skipped) msg += ` It skipped ${plural(run.skipped, 'step')} that settings saved during the run no longer call for.`;
   if (n) {
     toast(msg, { label: 'Show errors', run: () => rtSelectTab('activity', true) },
       { tone: 'danger', title: `Retention finished with ${plural(n, 'error')}` });
@@ -163,7 +203,7 @@ function rtError(e) {
   $('rt-summary').removeAttribute('aria-busy');
   $('rt-summary').classList.add('rt-summary--empty');
   $('rt-summary').replaceChildren(riEmpty({ icon: 'circle-alert', tone: 'danger', title: 'Couldn’t load data retention',
-    text: sentence(e.message), action: riRetry(() => rtLoad()) }));
+    text: rtSentence(e.message), action: riRetry(() => rtLoad()) }));
   $('rt-alerts').replaceChildren();
   $('rt-main').classList.add('hidden');
   $('rt-run').disabled = true;
@@ -187,6 +227,8 @@ function rtRender() {
   rtTable(ov);
   rtDefaults(ov);
   rtActivity(ov);
+  // The archive tab depends on this server's role and the archive folder.
+  if (rtState.arch && rtState.tab === 'archive') rtRenderArchive();
   const files = (ov.archive || {}).files || 0;
   $('rt-archive-count').textContent = files.toLocaleString();
   $('rt-archive-count').classList.toggle('hidden', !files);
@@ -194,6 +236,8 @@ function rtRender() {
   $('rt-activity-count').textContent = errs;
   $('rt-activity-count').classList.toggle('hidden', !errs);
   $('rt-activity-count').title = errs ? `The last run had ${plural(errs, 'error')}` : '';
+  // A server that only shows retention has no Run now.
+  $('rt-run').classList.toggle('hidden', !!ov.schedule.read_only);
   $('rt-run').disabled = !!ov.schedule.running || !!ov.settings_error;
   $('rt-run').replaceChildren(icon('play'), ov.schedule.running ? (ov.schedule.current === 'restore' ? 'Restoring…' : 'Running…') : 'Run now');
   if (fk) {
@@ -255,7 +299,11 @@ function rtSummary(ov) {
     over: ['warn', 'Freeing space', `Disk is above ${g.max_disk_percent}%`],
     short: ['down', 'Can’t free enough', 'Add disk space or keep less'],
     unknown: ['warn', 'On', 'Disk use unknown'],
+    paused: ['down', 'Paused', 'Not checking the disk until the settings file is fixed'],
   }[st.state] || ['off', g.enabled ? 'On' : 'Off', ''];
+  // After a run that couldn't get under the limit, the guard waits for
+  // the next scheduled run.
+  if (g.paused_until && st.state !== 'paused' && st.state !== 'off') gs[2] = `Waits for the next run, ${until(g.paused_until)}`;
   const dot = el('span', { class: 'rt-dot', 'data-state': gs[0], 'aria-hidden': 'true' });
   const guard = rtStat('shield', 'Disk guard', [dot, gs[1]], gs[2], { tone: gs[0] === 'down' ? 'danger' : gs[0] === 'warn' && st.state === 'over' ? 'warning' : '' });
 
@@ -265,7 +313,7 @@ function rtSummary(ov) {
   if (sch.running) value = sch.current === 'restore' ? 'Restoring now' : 'Running now';
   else if (run) value = riCap(ago(run.finished || run.started));
   else value = 'Not yet';
-  const sub = [rtNextRun(sch)];
+  const sub = [sch.running && sch.queued ? 'Another run starts when it ends' : rtNextRun(sch)];
   const errs = run && !sch.running ? (run.errors || []).length : 0;
   if (errs) {
     sub.push(' · ', el('button', { class: 'link-btn rt-err-link', type: 'button', 'data-fk': 'sum-errors', onclick: () => rtSelectTab('activity', true) }, plural(errs, 'error')));
@@ -277,28 +325,36 @@ function rtSummary(ov) {
 
 function rtAlerts(ov) {
   const out = [];
-  const p = (t) => el('p', {}, t);
+  const p = (...t) => el('p', {}, ...t);
   if (ov.settings_error) {
     out.push(riAlert('danger', 'Retention is paused: its settings file has a mistake.',
-      p('Fix or delete the file; the page picks it up without a restart. Until then nothing is deleted or compacted, and settings can’t be saved here.'),
+      p('Fix or delete the file; the page picks it up without a restart. Until then nothing is deleted or compacted, the disk guard doesn’t check the disk, and settings can’t be saved here.'),
       el('p', { class: 'mono rt-alert-detail' }, ov.settings_error)));
   }
   if (ov.error) {
-    out.push(riAlert('danger', 'Couldn’t read OpenSearch.', p(rtFix(ov.error) + ' Sizes and days show again once it answers.')));
+    out.push(riAlert('danger', 'Couldn’t read OpenSearch.', p(rtFix(ov.error)),
+      p('Check that OpenSearch is running and that this server can reach it; ', el('a', { href: '#health', 'data-page': 'health' }, 'Health'),
+        ' shows its state. Sizes and days show again once it answers.')));
   }
   if (ov.disk_blocked) {
     out.push(riAlert('danger', `OpenSearch has stopped writes to ${plural(ov.disk_blocked, 'index', 'indices')}.`,
       p('Its disk passed the 95% flood stage, so new events are refused. It lifts the block by itself once space is freed; the disk guard deletes the oldest days to free it.')));
   }
-  const st = ov.guard.status || {};
-  if (st.state === 'short') out.push(riAlert('danger', 'The disk is still above the guard’s limit.', p(st.message)));
-  else if (st.state === 'over') out.push(riAlert('warning', 'The disk is above the guard’s limit.', p(st.message)));
+  const g = ov.guard;
+  const st = g.status || {};
+  const waits = g.paused_until && g.pause_reason
+    ? p(`It waits for the next scheduled run (${until(g.paused_until)}) before trying again: ${g.pause_reason}.`) : null;
+  if (st.state === 'short') out.push(riAlert('danger', 'The disk is still above the guard’s limit.', p(rtSentence(st.message)), waits));
+  else if (st.state === 'over') out.push(riAlert('warning', 'The disk is above the guard’s limit.', p(rtSentence(st.message)), waits));
+  else if (waits && st.state !== 'paused' && st.state !== 'off') out.push(riAlert('warning', 'The disk guard is waiting.', waits));
   for (const n of ov.notes || []) {
-    if (n !== st.message) out.push(riAlert('warning', sentence(n)));
+    if (n !== st.message) out.push(riAlert('warning', rtSentence(n)));
   }
-  if (!ov.schedule.automatic) {
-    out.push(riAlert('info', 'Retention doesn’t run on a schedule on this server.',
-      p('The detection scheduler is off here (detections.scheduler: false), so retention runs on the server that has it. Saving a change or Run now still runs retention on this server, with this server’s settings and archive folder.')));
+  if (ov.schedule.read_only) {
+    out.push(riAlert('info', 'This server only shows retention.',
+      p('Retention runs on the server with the detection scheduler (detections.scheduler: true), with the settings saved there. Make changes and restores on that server.')));
+  } else if (!ov.schedule.automatic) {
+    out.push(riAlert('info', 'Retention doesn’t run on a schedule yet.', p('It starts once the server has finished starting up.')));
   }
   $('rt-alerts').replaceChildren(...out);
 }
@@ -318,6 +374,12 @@ function rtSourceBadge(c) {
 
 // rtCanEdit: the page can change this category's policy.
 const rtCanEdit = (c) => c.editable && !rtState.ov.settings_error;
+// rtLock is the badge for settings the page can't change, saying why.
+function rtLock(ov, source) {
+  if (ov.settings_error) return el('span', { class: 'badge badge--outline', title: 'Fix the settings file first' }, icon('lock', 'icon--xs'), 'Settings file error');
+  if (ov.schedule.read_only) return el('span', { class: 'badge badge--outline', title: 'Change it on the server that runs the detection scheduler' }, icon('lock', 'icon--xs'), 'Read-only here');
+  return el('span', { class: 'badge badge--outline', title: source === 'config' ? 'From signalith.yaml; change it there' : '' }, icon('lock', 'icon--xs'), 'signalith.yaml');
+}
 
 function rtRow(c, ov) {
   const records = c.kind === 'records';
@@ -410,7 +472,8 @@ function rtDefaults(ov) {
   const g = ov.guard;
   const locked = !!ov.settings_error;
   const users = ov.categories.filter((c) => c.kind === 'events' && c.source === 'default').map((c) => c.name);
-  const dsrc = { days: 'Set by retention.days in signalith.yaml until you save one here.', ui: 'Saved on this page.', config: 'From signalith.yaml; change it there.' }[d.source] || '';
+  const editable = !locked && !ov.schedule.read_only;
+  const dsrc = { days: editable ? 'Set by retention.days in signalith.yaml until you save one here.' : 'Set by retention.days in signalith.yaml.', ui: 'Saved on this page.', config: 'From signalith.yaml; change it there.' }[d.source] || '';
   const editBtn = (label, run, fk) => el('button', { class: 'btn btn--secondary btn--sm', type: 'button', 'data-fk': fk, 'aria-label': label, onclick: run }, icon('pencil'), 'Edit');
   const block = (iconName, title, value, lines, btn) => el('section', { class: 'rt-def', 'aria-label': title },
     el('div', { class: 'rt-def__head' }, el('span', { class: 'rt-cat__icon' }, icon(iconName)), el('h4', { class: 'rt-def__title' }, title), el('span', { class: 'spacer' }), btn),
@@ -421,12 +484,13 @@ function rtDefaults(ov) {
   const rest = rtPolicyText(p).split(' · ').slice(1).join(' · ');
   const def = block('layers', 'Default policy', p.keep_days ? `Keep ${rtDays(p.keep_days)}` : 'Keep forever',
     [riCap(rest) + '.', users.length ? `Used by ${users.join(', ')}.` : 'No category uses it now.', dsrc],
-    d.editable && !locked ? editBtn('Edit the default policy', rtOpenDefault, 'def-edit') : el('span', { class: 'badge badge--outline' }, icon('lock', 'icon--xs'), 'signalith.yaml'));
+    d.editable && !locked ? editBtn('Edit the default policy', rtOpenDefault, 'def-edit') : rtLock(ov, d.source));
 
   const gsrc = { builtin: 'Built-in settings.', ui: 'Saved on this page.', config: 'From signalith.yaml; change it there.' }[g.source] || '';
   const guard = block('shield', 'Disk guard', g.enabled ? `On above ${g.max_disk_percent}% disk use` : 'Off',
-    [g.enabled ? `Deletes the oldest event days first, never the last ${rtDays(g.min_days)}.` : 'OpenSearch stops taking new events when its disk reaches 95%.', gsrc],
-    g.editable && !locked ? editBtn('Edit the disk guard', rtOpenGuard, 'guard-edit') : el('span', { class: 'badge badge--outline' }, icon('lock', 'icon--xs'), 'signalith.yaml'));
+    [g.enabled ? `Deletes the oldest event days first, never the last ${rtDays(g.min_days)}, and only when that gets the disk under the limit.` : 'OpenSearch stops taking new events when its disk reaches 95%.',
+      locked && g.enabled ? 'Paused: it doesn’t check the disk until the settings file is fixed.' : gsrc],
+    g.editable && !locked ? editBtn('Edit the disk guard', rtOpenGuard, 'guard-edit') : rtLock(ov, g.source));
 
   $('rt-defaults').replaceChildren(el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Defaults'),
     el('p', { class: 'card__sub' }, 'For event categories without their own policy, and for the disk as a whole.'))),
@@ -475,7 +539,8 @@ function rtActivity(ov) {
   const head = (sub) => el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Last run'), sub ? el('p', { class: 'card__sub' }, sub) : null));
   if (!run) {
     box.replaceChildren(head(rtNextRun(sch)), riEmpty({ icon: 'clock', title: sch.running ? 'Running now' : 'No runs yet',
-      text: sch.automatic ? 'The first scheduled run starts 2 minutes after the server starts. Run now runs it sooner.' : 'Retention doesn’t run on a schedule on this server. Run now runs it here.' }));
+      text: sch.read_only ? 'Retention runs on the server with the detection scheduler, not on this one.'
+        : 'The first scheduled run starts 2 minutes after the server starts. Run now runs it sooner.' }));
   } else {
     const secs = Math.max(0, Math.round((new Date(run.finished) - new Date(run.started)) / 1000));
     const took = secs < 1 ? 'under a second' : secs < 60 ? `${secs}s` : `${Math.round(secs / 60)}m`;
@@ -487,6 +552,8 @@ function rtActivity(ov) {
     stat(run.deleted, run.deleted === 1 ? 'day deleted' : 'days deleted');
     stat(run.compacted, run.compacted === 1 ? 'day compacted' : 'days compacted');
     stat(run.deleted_records, run.deleted_records === 1 ? 'closed record deleted' : 'closed records deleted');
+    stat(run.skipped, run.skipped === 1 ? 'step skipped: settings changed' : 'steps skipped: settings changed');
+
     if (run.freed_bytes) stats.push(el('div', { class: 'rt-run-stat' }, el('b', { class: 'num' }, rtBytes(run.freed_bytes)), 'freed'));
     const errs = run.errors || [];
     const body = el('div', { class: 'card__body rt-run' },
@@ -518,7 +585,7 @@ function rtActivity(ov) {
     else if (a.bytes) amount = rtBytes(a.bytes);
     const why = failed
       ? el('span', { class: 'rt-bad' }, rtFix(a.error))
-      : [a.reason ? sentence(a.reason) : '', a.by ? el('span', { class: 'subtle' }, ` By ${a.by}.`) : null];
+      : [a.reason ? rtSentence(a.reason) : '', a.by ? el('span', { class: 'subtle' }, ` By ${a.by}.`) : null];
     const ix = [...a.indices].sort();
     const title = ix.length > 1 ? `${ix[0]} to ${ix[ix.length - 1]}` : ix[0] || '';
     return el('tr', failed ? { 'data-failed': '' } : {},
@@ -611,12 +678,17 @@ function rtPreviewLine(tone, name, title, sub) {
 }
 
 // rtPreviewView describes a preview reply in a sentence or two, with the
-// days it touches under a disclosure.
+// days it touches under a disclosure. The run that saving starts also does
+// whatever is already due, so that is said too.
 function rtPreviewView(p, guard) {
   const s = p.summary;
   const out = [];
   const removes = p.steps.filter((d) => d.action === 'archive' || d.action === 'delete');
   const compacts = p.steps.filter((d) => d.action === 'compact');
+  const dueSteps = p.due_steps || [];
+  const dueRemoves = dueSteps.filter((d) => d.action === 'archive' || d.action === 'delete');
+  const dueCompacts = dueSteps.filter((d) => d.action === 'compact');
+  const dueRecords = p.due_records || [];
   if (removes.length) {
     const cats = new Set(removes.map((d) => d.category));
     const across = cats.size > 1 ? ` across ${cats.size} categories` : '';
@@ -631,37 +703,57 @@ function rtPreviewView(p, guard) {
   }
   if (compacts.length) {
     out.push(rtPreviewLine('', 'layers', `Saving compacts ${rtDays(s.compact_days)} (${rtBytes(s.compact_bytes)}).`,
-      `${rtRange(compacts.map((d) => d.day))} · read-only and merged, so they take less space`));
+      `${rtRange(compacts.map((d) => d.day))} · read-only and merged, so they take less space. Events that arrive later for these days are refused and lost.`));
   }
   for (const r of p.records || []) {
     const what = r.category === 'findings' ? (r.count === 1 ? 'finding' : 'findings') : (r.count === 1 ? 'investigation' : 'investigations');
     out.push(rtPreviewLine('warning', 'trash-2', `Saving deletes ${r.count.toLocaleString()} resolved or closed ${what}.`,
       `Unchanged since before ${rtDay(String(r.before).slice(0, 10), true)}`));
   }
-  if (!out.length) {
-    const why = guard && !guard.enabled ? 'Policies still delete days as they get older.' : 'The disk is below the limit.';
-    out.push(guard ? rtPreviewLine('', 'circle-check', 'Saving deletes nothing now.', why)
-      : rtPreviewLine('', 'circle-check', 'Saving deletes and compacts nothing now.', 'The policy applies as days get older.'));
+  // What is due under the current settings anyway: the run that saving
+  // starts does it now.
+  const due = p.due || {};
+  const dueBits = [];
+  if (due.delete_days) dueBits.push(`${due.archive_days === due.delete_days ? 'archives and deletes' : 'deletes'} ${rtDays(due.delete_days)} (${rtBytes(due.delete_bytes)})`);
+  if (due.compact_days) dueBits.push(`compacts ${rtDays(due.compact_days)}`);
+  const dueRecs = dueRecords.reduce((n, r) => n + r.count, 0);
+  if (dueRecs) dueBits.push(`deletes ${plural(dueRecs, 'closed record')}`);
+  if (dueBits.length) {
+    const days = [...dueRemoves, ...dueCompacts].map((d) => d.day);
+    out.push(rtPreviewLine(due.delete_days || dueRecs ? 'warning' : '', due.delete_days || dueRecs ? 'trash-2' : 'layers',
+      `${out.length ? 'Saving also' : 'Saving'} ${rtJoin(dueBits)} that ${due.delete_days + due.compact_days + dueRecs === 1 ? 'is' : 'are'} already due.`,
+      `${days.length ? rtRange(days) + ' · ' : ''}Due under the current settings; the run that saving starts does it now.`));
   }
-  if (p.guard && p.guard.state === 'short') out.push(rtPreviewLine('danger', 'triangle-alert', 'The disk would stay above the guard’s limit.', p.guard.message));
-  for (const n of p.notes || []) if (!p.guard || n !== p.guard.message) out.push(rtPreviewLine('warning', 'triangle-alert', sentence(n)));
-  const touched = [...removes, ...compacts];
+  if (!out.length) {
+    const gs = p.guard || {};
+    let why = 'The policy applies as days get older.';
+    if (guard) why = !guard.enabled ? 'Policies still delete days as they get older.' : gs.message ? rtSentence(gs.message) : '';
+    out.push(rtPreviewLine('', 'circle-check', guard ? 'Saving deletes nothing now.' : 'Saving deletes and compacts nothing now.', why));
+  }
+  if (p.guard && p.guard.state === 'short') out.push(rtPreviewLine('danger', 'triangle-alert', 'The disk would stay above the guard’s limit.', rtSentence(p.guard.message)));
+  for (const n of p.notes || []) if (!p.guard || n !== p.guard.message) out.push(rtPreviewLine('warning', 'triangle-alert', rtSentence(n)));
+  const touched = [...removes, ...compacts, ...dueRemoves, ...dueCompacts];
   if (touched.length) {
     const max = 60;
     const multi = new Set(touched.map((d) => d.category)).size > 1;
     const names = {};
     for (const c of (rtState.ov || { categories: [] }).categories) names[c.id] = c.name;
     const verb = { archive: 'Archive', delete: 'Delete', compact: 'Compact' };
+    const dueSet = new Set(dueSteps);
     out.push(el('details', { class: 'rt-steps' },
       el('summary', {}, icon('chevron-down', 'icon--sm chev'), `Show the ${touched.length === 1 ? 'day' : touched.length.toLocaleString() + ' days'}`),
       el('ul', { class: 'rt-steps__list' }, ...touched.slice(0, max).map((d) => el('li', {},
         el('span', { class: 'rt-steps__day' }, rtDay(d.day, true)),
-        el('span', { class: 'rt-steps__what' }, verb[d.action] || d.action, multi ? el('span', { class: 'subtle' }, ' · ' + (names[d.category] || d.category)) : null),
+        el('span', { class: 'rt-steps__what' }, verb[d.action] || d.action,
+          multi ? el('span', { class: 'subtle' }, ' · ' + (names[d.category] || d.category)) : null,
+          dueSet.has(d) ? el('span', { class: 'subtle' }, ' · already due') : null),
         el('span', { class: 'rt-steps__size num' }, rtBytes(d.bytes)))),
       touched.length > max ? el('li', { class: 'subtle' }, `and ${(touched.length - max).toLocaleString()} more`) : null)));
   }
   return out;
 }
+// rtJoin joins phrases: "a", "a and b", "a, b and c".
+const rtJoin = (xs) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
 
 // rtShowPreview runs a preview for a form and draws it in box. It returns
 // the reply, or null when the change is not valid.
@@ -680,7 +772,10 @@ async function rtShowPreview(box, body, onFields) {
     if (fields.length && onFields) {
       onFields(res.e.problems);
       box.replaceChildren(rtPreviewLine('', 'info', 'Fix the setting marked above to see what saving does.'));
-    } else box.replaceChildren(rtPreviewLine('danger', 'circle-alert', 'Couldn’t check what saving does.', rtFix(res.e.message)));
+    } else if (rtUnchecked(res)) {
+      box.replaceChildren(rtPreviewLine('warning', 'triangle-alert', 'OpenSearch isn’t answering, so what saving deletes can’t be checked.',
+        'You can still save: the change applies at the first run once OpenSearch answers. Check that OpenSearch is running; Health shows its state.'));
+    } else box.replaceChildren(rtPreviewLine('danger', 'circle-alert', 'Couldn’t check what saving does.', `${rtFix(res.e.message)} Try again in a moment.`));
     return res;
   }
   box.dataset.state = 'ok';
@@ -690,39 +785,62 @@ async function rtShowPreview(box, body, onFields) {
 function rtProblemFields(problems) {
   return (problems || []).map((p) => String(p).split(' ')[0]).filter((f) => RT_FIELD_NAME[f]);
 }
+// rtUnchecked: the preview failed only because OpenSearch is down; the
+// change can still be saved.
+const rtUnchecked = (res) => !!res && !res.ok && res.e.status === 503;
 
 // ---------- confirm ----------
-// rtConfirm asks before a save that deletes data, describing the preview.
+// rtConfirm asks before a save that deletes data, describing the preview:
+// what the change deletes and what is already due, since the run that
+// saving starts does both. Without a preview (OpenSearch down) it says
+// that what saving deletes can't be checked.
 function rtConfirm(p, what, save) {
-  const s = p.summary;
   const lines = [];
   let title;
   let button = 'Delete and save';
-  const removes = p.steps.filter((d) => d.action === 'archive' || d.action === 'delete');
-  if (s.delete_days) {
-    const cats = new Set(removes.map((d) => d.category));
-    const of = cats.size === 1 && what ? ` of ${what}` : '';
-    if (s.archive_days === s.delete_days) {
-      title = `Archive and delete ${rtDays(s.delete_days)}${of}?`;
-      button = 'Archive, delete and save';
-      lines.push(`Saving archives ${rtDays(s.delete_days)} (${rtRange(removes.map((d) => d.day))}), then deletes them from OpenSearch, freeing ${rtBytes(s.delete_bytes)}.`,
-        'They stop showing in searches. You can restore them from the Archive tab.');
-    } else {
-      title = `Delete ${rtDays(s.delete_days)}${of}?`;
-      lines.push(`Saving deletes ${rtDays(s.delete_days)} (${rtRange(removes.map((d) => d.day))}) from OpenSearch now, freeing ${rtBytes(s.delete_bytes)}.`,
-        s.archive_days ? `${s.archive_days.toLocaleString()} of them are archived first; the others can’t be brought back.` : 'They can’t be searched or brought back afterwards.');
+  if (!p) {
+    title = 'Save without checking?';
+    button = 'Save anyway';
+    lines.push('OpenSearch isn’t answering, so what this change deletes can’t be checked now.',
+      'It applies at the first run once OpenSearch answers, and deletes whatever the new settings call for then.');
+  } else {
+    const s = p.summary;
+    const d = p.due || {};
+    const removes = p.steps.filter((x) => x.action === 'archive' || x.action === 'delete');
+    const dueRemoves = (p.due_steps || []).filter((x) => x.action === 'archive' || x.action === 'delete');
+    const all = [...removes, ...dueRemoves];
+    const days = (s.delete_days || 0) + (d.delete_days || 0);
+    const archived = (s.archive_days || 0) + (d.archive_days || 0);
+    const bytes = (s.delete_bytes || 0) + (d.delete_bytes || 0);
+    if (days) {
+      const cats = new Set(all.map((x) => x.category));
+      const of = cats.size === 1 && what ? ` of ${what}` : '';
+      const dueNote = d.delete_days ? ` ${d.delete_days === days ? 'All' : rtCount(d.delete_days)} of them ${d.delete_days === 1 ? 'is' : 'are'} already due under the current settings.` : '';
+      if (archived === days) {
+        title = `Archive and delete ${rtDays(days)}${of}?`;
+        button = 'Archive, delete and save';
+        lines.push(`Saving archives ${rtDays(days)} (${rtRange(all.map((x) => x.day))}), then deletes them from OpenSearch, freeing ${rtBytes(bytes)}.${dueNote}`,
+          'They stop showing in searches. You can restore them from the Archive tab.');
+      } else {
+        title = `Delete ${rtDays(days)}${of}?`;
+        lines.push(`Saving deletes ${rtDays(days)} (${rtRange(all.map((x) => x.day))}) from OpenSearch now, freeing ${rtBytes(bytes)}.${dueNote}`,
+          archived ? `${archived.toLocaleString()} of them are archived first; the others can’t be brought back.` : 'They can’t be searched or brought back afterwards.');
+      }
     }
-  }
-  for (const r of p.records || []) {
-    const n = r.count.toLocaleString();
-    const noun = r.category === 'findings' ? (r.count === 1 ? 'finding' : 'findings') : (r.count === 1 ? 'investigation' : 'investigations');
-    if (!title) title = `Delete ${n} closed ${noun}?`;
-    lines.push(`Saving deletes ${n} resolved or closed ${noun}. This can’t be undone.`);
+    const recs = {};
+    for (const r of [...(p.records || []), ...(p.due_records || [])]) recs[r.category] = (recs[r.category] || 0) + r.count;
+    for (const [cat, count] of Object.entries(recs)) {
+      const n = count.toLocaleString();
+      const noun = cat === 'findings' ? (count === 1 ? 'finding' : 'findings') : (count === 1 ? 'investigation' : 'investigations');
+      if (!title) title = `Delete ${n} closed ${noun}?`;
+      lines.push(`Saving deletes ${n} resolved or closed ${noun}. This can’t be undone.`);
+    }
   }
   rtState.confirm = save;
   $('rt-confirm-title').textContent = title || 'Delete data now?';
   $('rt-confirm-desc').replaceChildren(...lines.map((t) => el('p', {}, t)));
   $('rt-confirm-ok').textContent = button;
+
   $('rt-confirm-ok').disabled = false;
   $('rt-confirm').showModal();
   $('rt-confirm').querySelector('[data-close]').focus();
@@ -742,6 +860,8 @@ $('rt-confirm').addEventListener('close', () => { rtState.confirm = null; });
 function rtOpenCategory(id) {
   const c = rtState.ov.categories.find((x) => x.id === id);
   if (!c || !rtCanEdit(c)) return;
+  rtRememberOpener();
+  if (!rtState.opener) rtState.opener = 'row-' + id;
   const records = c.kind === 'records';
   rtState.edit = { target: 'category', cat: c, mode: c.source === 'ui' ? 'own' : 'default' };
   $('rt-edit-title').textContent = c.name;
@@ -754,6 +874,7 @@ function rtOpenCategory(id) {
 function rtOpenDefault() {
   const ov = rtState.ov;
   if (!ov.default.editable) return;
+  rtState.opener = 'def-edit';
   rtState.edit = { target: 'default', cat: null, mode: 'own' };
   const users = ov.categories.filter((c) => c.kind === 'events' && c.source === 'default').map((c) => c.name);
   $('rt-edit-title').textContent = 'Default policy';
@@ -776,7 +897,7 @@ function rtFillForm(p, kind, c) {
     $('rt-keep-label').textContent = 'Delete after';
     $('rt-forever-label').textContent = 'Keep forever';
     $('rt-keep-hint').textContent = c.id === 'findings'
-      ? 'Days since a resolved or closed finding last changed. Open findings, and findings in an open investigation, stay.'
+      ? 'Days since a resolved or closed finding last changed. Open findings stay, and so do findings in an investigation, for as long as the investigation is kept.'
       : 'Days since a resolved or closed investigation last changed. Open ones stay, with their notes and pinned events.';
   } else {
     $('rt-keep-label').textContent = 'Keep searchable for';
@@ -785,8 +906,9 @@ function rtFillForm(p, kind, c) {
       ? `Older days are deleted. Now ${rtDays(c.days)}, since ${rtDay(c.oldest_day, true)}.`
       : 'Older days are deleted.';
   }
-  $('rt-cap-hint').textContent = c ? `Oldest days go first above it. Now ${rtBytes(c.bytes)}.` : 'Each category’s oldest days go first above it.';
-  $('rt-archive-hint').replaceChildren('Each day is saved to ', el('span', { class: 'mono' }, ov.archive.dir || 'the archive folder'), ' first, so you can restore it.');
+  $('rt-cap-hint').textContent = c ? `Oldest days go first above it; restored days don’t count.${ov.error ? '' : ` Now ${rtBytes(c.bytes)}.`}` : 'Each category’s oldest days go first above it.';
+  $('rt-archive-hint').replaceChildren('Each day is saved to ', el('span', { class: 'mono' }, ov.archive.dir || 'the archive folder'), ' first, so you can restore it.',
+    ov.archive.same_disk ? ' That folder looks to be on OpenSearch’s disk, so archives take space there too.' : '');
   // Only event categories can follow the default policy.
   const choose = e.target === 'category' && kind === 'events';
   $('rt-mode').classList.toggle('hidden', !choose);
@@ -964,29 +1086,36 @@ $('rt-forever').addEventListener('change', () => {
   rtEditChanged();
 });
 
-// rtSave sends a change; it asks first when the preview deletes data.
-// said(reply) is the toast for the saved change. The run that a save
-// starts reports under it when it does something.
+// rtSave sends a change; it asks first when the preview deletes data, or
+// when there is no preview because OpenSearch is down. said(reply) is the
+// toast for the saved change. The run that a save starts (or queues behind
+// the run or restore going now) reports under it when it does something.
 async function rtSave(req, preview, what, msgBox, dialog, said) {
-  const work = !!preview && ((preview.steps || []).length + (preview.records || []).length) > 0;
+  const work = !!preview && ['steps', 'records', 'due_steps', 'due_records'].some((k) => (preview[k] || []).length > 0);
   const send = async () => {
-    rtExpectRun(true);
+    const before = rtLastStart();
+    const busy = rtState.ov && rtState.ov.schedule.current;
     try {
       const res = await api(req.path, req.method === 'DELETE' ? undefined : req.body, req.method);
       dialog.close();
       const msg = said(res);
-      if (!res.run_started) rtState.awaitRun = null;
-      else if (rtState.awaitRun) rtState.awaitRun.title = msg.replace(/\.$/, '');
-      toast(!res.run_started ? `${msg} It applies at the next run.` : work ? `${msg} Retention is applying it now.` : msg);
+      const want = { quiet: true, title: msg.replace(/\.$/, '') };
+      if (res.run_started) {
+        rtExpectRun(want, before);
+        toast(work ? `${msg} Retention is applying it now.` : msg);
+      } else if (res.run_queued) {
+        // Keep waiting for the run already going; ours comes after it.
+        rtExpectRun(want, before, 'policy_change');
+        toast(`${msg} ${busy === 'restore' ? 'A restore' : 'A run'} is going now; the change applies as soon as it ends.`);
+      } else toast(`${msg} It applies at the next run.`);
       rtLoad(true);
     } catch (e) {
-      rtState.awaitRun = null;
       if (!dialog.open) dialog.showModal();
       if (e.problems && e.problems.length) rtMarkProblems(e.problems, dialog.querySelector('form'));
       msgBox.replaceChildren(riAlert('danger', 'Couldn’t save.', el('p', {}, rtFix(e.message))));
     }
   };
-  if (preview && preview.deletes_data) rtConfirm(preview, what, send);
+  if (!preview || preview.deletes_data) rtConfirm(preview, what, send);
   else await send();
 }
 
@@ -1003,12 +1132,14 @@ $('rt-edit-form').addEventListener('submit', async (ev) => {
   const res = await rtShowPreview($('rt-preview'), req.preview, (problems) => rtMarkProblems(problems, $('rt-edit-form')));
   btn.disabled = false;
   if (!res) return;
-  if (!res.ok) {
-    $('rt-edit-msg').replaceChildren(riAlert('danger', 'Couldn’t save.', el('p', {}, rtFix(res.e.message))));
+  if (!res.ok && !rtUnchecked(res)) {
+    if (!rtProblemFields(res.e.problems).length) {
+      $('rt-edit-msg').replaceChildren(riAlert('danger', 'Nothing was saved: what saving does couldn’t be checked.', el('p', {}, `${rtFix(res.e.message)} Try again in a moment.`)));
+    }
     return;
   }
   const what = e.target === 'default' ? '' : e.cat.name;
-  await rtSave(req, res.r, what, $('rt-edit-msg'), $('rt-edit'), () => {
+  await rtSave(req, res.ok ? res.r : null, what, $('rt-edit-msg'), $('rt-edit'), () => {
     if (req.method === 'DELETE' && e.cat.kind === 'events') return `${e.cat.name} uses the default policy again.`;
     return e.target === 'default' ? 'Default policy saved.' : `${e.cat.name} policy saved.`;
   });
@@ -1019,6 +1150,8 @@ function rtOpenGuard() {
   const ov = rtState.ov;
   const g = ov.guard;
   if (!g.editable) return;
+  rtState.opener = 'guard-edit';
+
   $('rt-guard-on').checked = g.enabled;
   $('rt-pct').value = g.max_disk_percent;
   $('rt-min').value = g.min_days;
@@ -1116,39 +1249,68 @@ $('rt-guard-form').addEventListener('submit', async (ev) => {
   const res = await rtShowPreview($('rt-guard-preview'), { guard: body }, (problems) => rtMarkProblems(problems, $('rt-guard-form')));
   btn.disabled = false;
   if (!res) return;
-  if (!res.ok) {
-    $('rt-guard-msg').replaceChildren(riAlert('danger', 'Couldn’t save.', el('p', {}, rtFix(res.e.message))));
+  if (!res.ok && !rtUnchecked(res)) {
+    if (!rtProblemFields(res.e.problems).length) {
+      $('rt-guard-msg').replaceChildren(riAlert('danger', 'Nothing was saved: what saving does couldn’t be checked.', el('p', {}, `${rtFix(res.e.message)} Try again in a moment.`)));
+    }
     return;
   }
-  await rtSave({ method: 'PUT', path: 'api/retention/guard', body }, res.r, '', $('rt-guard-msg'), $('rt-guard'),
+  await rtSave({ method: 'PUT', path: 'api/retention/guard', body }, res.ok ? res.r : null, '', $('rt-guard-msg'), $('rt-guard'),
     (out) => out.enabled ? `Disk guard saved: it acts above ${out.max_disk_percent}%.` : 'Disk guard turned off.');
 });
 
 for (const d of ['rt-edit', 'rt-guard', 'rt-confirm', 'rt-restore']) {
   $(d).querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', () => $(d).close()));
 }
+// A dialog gives focus back to the control that opened it. When the page
+// has redrawn meanwhile (polls redraw the table), that control is a new
+// element with the same data-fk, so find it again.
+function rtRememberOpener() {
+  const a = document.activeElement;
+  rtState.opener = a && a.dataset ? a.dataset.fk || (a.id ? '#' + a.id : '') : '';
+}
+for (const d of ['rt-edit', 'rt-guard', 'rt-restore']) {
+  $(d).addEventListener('close', () => {
+    const fk = rtState.opener;
+    const page = $('page-retention');
+    const a = document.activeElement;
+    // Focus that the browser already gave back to a live page control stays.
+    // A control inside the closed dialog does not count.
+    if (!fk || $('rt-confirm').open || (a && a !== document.body && a.isConnected && page.contains(a) && !a.closest('dialog'))) return;
+    const back = fk.startsWith('#') ? $(fk.slice(1)) : page.querySelector(`[data-fk="${CSS.escape(fk)}"]`);
+    if (back && !back.disabled && back.offsetParent !== null) back.focus({ preventScroll: true });
+  });
+}
 
 // ---------- run now ----------
 $('rt-run').addEventListener('click', async () => {
   const btn = $('rt-run');
   btn.disabled = true;
-  rtExpectRun();
+  const before = rtLastStart();
   try {
     await api('api/retention/run', {}, 'POST');
+    rtExpectRun({}, before);
     toast('Retention is running. The result shows here when it finishes.');
   } catch (e) {
-    rtState.awaitRun = null;
     toastError('Couldn’t start a run', e);
   }
   rtLoad(true);
 });
+
 $('rt-refresh').addEventListener('click', () => {
   rtLoad();
   if (rtState.tab === 'archive') rtLoadArchive();
 });
 
 // ---------- archive ----------
+// Archived days, a page at a time: a year or two of several categories is
+// thousands of days. Filters narrow them by category and month. Selecting
+// days, and the progress of restores, change rows in place instead of
+// drawing the table again.
 const RT_ARCH_COLS = [['', 'col-check'], ['Category', 'rt-ar-cat'], ['Day', 'rt-ar-day'], ['Events', 'num rt-ar-docs'], ['Size', 'num rt-ar-size hide-sm'], ['Status', 'rt-ar-state']];
+const RT_ARCH_PAGE = 100;
+rtState.archPage = 0;
+rtState.archShown = [];
 
 async function rtLoadArchive(quiet) {
   const seq = ++rtState.archSeq;
@@ -1161,6 +1323,7 @@ async function rtLoadArchive(quiet) {
     if (seq !== rtState.archSeq) return;
     rtState.arch = null;
     rtState.archKey = '';
+    $('rt-arch-bar').classList.add('hidden');
     $('rt-arch-foot').classList.add('hidden');
     $('rt-arch-msg').replaceChildren();
     $('rt-arch').replaceChildren(riEmpty({ icon: 'circle-alert', tone: 'danger', title: 'Couldn’t read the archive', text: rtFix(e.message), action: riRetry(() => rtLoadArchive()) }));
@@ -1183,6 +1346,9 @@ async function rtLoadArchive(quiet) {
   }
 }
 const rtArchBusy = (a) => !!a && (a.restores || []).some((r) => r.state === 'queued' || r.state === 'running');
+const rtArchRowBusy = (a) => !!a.restore && (a.restore.state === 'queued' || a.restore.state === 'running');
+// Only the server that runs retention restores.
+const rtCanRestore = () => !!rtState.ov && !rtState.ov.schedule.read_only;
 
 function rtArchState(a) {
   const r = a.restore;
@@ -1193,91 +1359,202 @@ function rtArchState(a) {
   if (a.searchable) return ['ok', 'Also in OpenSearch', 'The day is searchable'];
   return ['', 'Archived', ''];
 }
+const rtArchSig = (a) => JSON.stringify(rtArchState(a));
+function rtArchStateCell(td, a) {
+  const [state, label, sub] = rtArchState(a);
+  td.replaceChildren(el('span', { class: 'rt-state', 'data-state': state }, label), sub ? el('span', { class: 'rt-sub', title: sub }, sub) : '');
+}
+
+function rtMonthName(m) {
+  const d = new Date(m + '-01T00:00:00Z');
+  return isNaN(d) ? m : d.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+// rtArchFilters fills the category and month filters from the archive,
+// keeping what is chosen when it still exists.
+function rtArchFilters(res) {
+  const fill = (sel, opts, all) => {
+    const key = JSON.stringify(opts);
+    if (sel.dataset.key !== key) {
+      const cur = sel.value;
+      sel.dataset.key = key;
+      sel.replaceChildren(el('option', { value: '' }, all), ...opts.map(([v, label]) => el('option', { value: v }, label)));
+      sel.value = opts.some(([v]) => v === cur) ? cur : '';
+    }
+    sel.classList.toggle('hidden', opts.length < 2 && !sel.value);
+  };
+  const cats = [...new Map(res.archives.map((a) => [a.category, a.category_name || a.category])).entries()].sort((x, y) => x[1].localeCompare(y[1]));
+  fill($('rt-arch-cat'), cats, 'All categories');
+  const months = [...new Set(res.archives.map((a) => a.day.slice(0, 7)))].sort().reverse();
+  fill($('rt-arch-month'), months.map((m) => [m, rtMonthName(m)]), 'All months');
+}
+
+// rtArchMatches is every archived day that matches the filters, newest
+// day first.
+function rtArchMatches(res) {
+  const cat = $('rt-arch-cat').value;
+  const month = $('rt-arch-month').value;
+  return res.archives.filter((a) => (!cat || a.category === cat) && (!month || a.day.startsWith(month)))
+    .sort((a, b) => (a.day !== b.day ? (a.day < b.day ? 1 : -1) : (a.category_name || a.category).localeCompare(b.category_name || b.category) || a.id.localeCompare(b.id)));
+}
+
+function rtArchRow(a, canPick) {
+  const tr = el('tr', { 'data-id': a.id, 'data-sig': rtArchSig(a) });
+  if (canPick) {
+    const box = el('input', { type: 'checkbox', 'aria-label': `Select ${a.category_name || a.category} ${rtDay(a.day, true)}`, 'data-fk': 'arch-' + a.id });
+    box.addEventListener('change', () => {
+      if (box.checked) rtState.selected.add(a.id); else rtState.selected.delete(a.id);
+      rtArchSyncChecks();
+    });
+    tr.append(el('td', { class: 'col-check' }, el('label', { class: 'check' }, box)));
+    tr.addEventListener('click', (ev) => {
+      if (ev.target.closest('label, input') || box.disabled) return;
+      box.checked = !box.checked;
+      box.dispatchEvent(new Event('change'));
+    });
+  }
+  const state = el('td', { class: 'rt-ar-state' });
+  rtArchStateCell(state, a);
+  tr.append(
+    el('td', { class: 'rt-ar-cat' }, el('span', { class: 'cell-title', 'data-day': ` · ${rtDay(a.day, true)}` }, a.category_name || a.category),
+      el('span', { class: 'rt-sub mono', title: a.file }, a.id)),
+    el('td', { class: 'rt-ar-day' }, rtDay(a.day, true)),
+    el('td', { class: 'num rt-ar-docs' }, a.docs.toLocaleString()),
+    el('td', { class: 'num rt-ar-size hide-sm' }, el('span', { class: 'rt-line' }, rtBytes(a.bytes)), el('span', { class: 'rt-sub', title: 'Size it had in OpenSearch' }, `was ${rtBytes(a.index_bytes)}`)),
+    state);
+  return tr;
+}
+
+// rtArchSyncChecks updates the check boxes, the select-all box, the
+// footer and the Restore button to the selection, without redrawing.
+function rtArchSyncChecks() {
+  const res = rtState.arch;
+  if (!res) return;
+  const byId = new Map(res.archives.map((a) => [a.id, a]));
+  $('rt-arch').querySelectorAll('tbody tr[data-id]').forEach((tr) => {
+    const box = tr.querySelector('input[type="checkbox"]');
+    const a = byId.get(tr.dataset.id);
+    if (!box || !a) return;
+    box.disabled = rtArchRowBusy(a);
+    box.checked = rtState.selected.has(a.id);
+    if (box.checked) tr.setAttribute('aria-selected', 'true'); else tr.removeAttribute('aria-selected');
+  });
+  const all = $('rt-arch').querySelector('thead input[type="checkbox"]');
+  if (all) {
+    const pickable = rtState.archShown.filter((a) => !rtArchRowBusy(a));
+    const n = pickable.filter((a) => rtState.selected.has(a.id)).length;
+    all.checked = pickable.length > 0 && n === pickable.length;
+    all.indeterminate = n > 0 && n < pickable.length;
+    all.disabled = !pickable.length;
+  }
+  rtArchFoot();
+  rtSyncRestoreButton();
+}
+
+function rtArchFoot() {
+  const res = rtState.arch;
+  const shown = rtState.archShown;
+  const bytes = shown.reduce((n, a) => n + a.bytes, 0);
+  const docs = shown.reduce((n, a) => n + a.docs, 0);
+  const sel = rtState.selected.size;
+  $('rt-arch-count').textContent = `${rtDays(shown.length)} · ${rtNoun('', docs)} · ${rtBytes(bytes)}${sel ? ` · ${sel.toLocaleString()} selected` : ''}`;
+  const free = rtState.ov && rtState.ov.archive.free >= 0 ? ` · ${rtBytes(rtState.ov.archive.free)} free` : '';
+  $('rt-arch-dir').replaceChildren(icon('folder', 'icon--sm'), el('span', { class: 'mono' }, res.dir), free);
+  const pages = Math.ceil(shown.length / RT_ARCH_PAGE);
+  const start = rtState.archPage * RT_ARCH_PAGE;
+  $('rt-arch-pager').classList.toggle('hidden', pages < 2);
+  $('rt-arch-range').textContent = `${(start + 1).toLocaleString()}–${Math.min(start + RT_ARCH_PAGE, shown.length).toLocaleString()} of ${shown.length.toLocaleString()}`;
+  $('rt-arch-prev').disabled = rtState.archPage === 0;
+  $('rt-arch-next').disabled = rtState.archPage >= pages - 1;
+  $('rt-arch-foot').classList.remove('hidden');
+}
 
 function rtRenderArchive() {
   const res = rtState.arch;
-  const cat = $('rt-arch-cat');
-  const cur = cat.value;
-  const cats = [...new Map(res.archives.map((a) => [a.category, a.category_name || a.category])).entries()];
-  cat.replaceChildren(el('option', { value: '' }, 'All categories'), ...cats.map(([id, name]) => el('option', { value: id }, name)));
-  cat.value = cats.some(([id]) => id === cur) ? cur : '';
-  cat.classList.toggle('hidden', cats.length < 2);
-
+  const ov = rtState.ov;
+  rtArchFilters(res);
   const msgs = [];
   if (res.error) msgs.push(riAlert('warning', rtFix(res.error)));
   if ((res.problems || []).length) {
     msgs.push(riAlert('warning', `${plural(res.problems.length, 'file')} in the archive folder can’t be read.`,
       el('ul', { class: 'rt-errs' }, ...res.problems.slice(0, 5).map((p) => el('li', { class: 'mono' }, p)))));
   }
-  $('rt-arch-msg').replaceChildren(...msgs);
+  if (ov && ov.archive.same_disk && (res.archives.length || ov.categories.some((c) => c.kind === 'events' && c.policy.archive))) {
+    msgs.push(riAlert('info', 'The archive folder looks to be on OpenSearch’s disk.',
+      el('p', {}, 'Archiving the days the disk guard picks then takes space on the disk it is trying to free. Point retention.archive_dir at another disk.')));
+  }
+  const msgKey = JSON.stringify(msgs.map((m) => m.textContent));
+  if ($('rt-arch-msg').dataset.key !== msgKey) {
+    $('rt-arch-msg').dataset.key = msgKey;
+    $('rt-arch-msg').replaceChildren(...msgs);
+  }
 
   const known = new Set(res.archives.map((a) => a.id));
   for (const id of [...rtState.selected]) if (!known.has(id)) rtState.selected.delete(id);
-  const shown = res.archives.filter((a) => !cat.value || a.category === cat.value);
-  const foot = $('rt-arch-foot');
   if (!res.archives.length) {
-    foot.classList.add('hidden');
+    rtState.archKey = '';
+    rtState.archShown = [];
+    $('rt-arch-bar').classList.add('hidden');
+    $('rt-arch-foot').classList.add('hidden');
     $('rt-arch').replaceChildren(riEmpty({ icon: 'archive', title: 'Nothing archived yet',
       text: 'Turn on Archive before deleting in a policy, and each day is saved here before it is deleted.' }));
     rtSyncRestoreButton();
     return;
   }
-  const busy = (a) => a.restore && (a.restore.state === 'queued' || a.restore.state === 'running');
-  const pickable = shown.filter((a) => !busy(a));
-  const all = el('input', { type: 'checkbox', 'aria-label': 'Select every day shown' });
-  const nSel = pickable.filter((a) => rtState.selected.has(a.id)).length;
-  all.checked = pickable.length > 0 && nSel === pickable.length;
-  all.indeterminate = nSel > 0 && nSel < pickable.length;
-  all.disabled = !pickable.length;
-  all.addEventListener('change', () => {
-    for (const a of pickable) {
-      if (all.checked) rtState.selected.add(a.id); else rtState.selected.delete(a.id);
-    }
-    rtRenderArchive();
-    const again = $('rt-arch').querySelector('thead input');
-    if (again) again.focus();
-  });
-  const rows = shown.map((a) => {
-    const box = el('input', { type: 'checkbox', 'aria-label': `Select ${a.category_name || a.category} ${rtDay(a.day, true)}`, 'data-fk': 'arch-' + a.id });
-    box.checked = rtState.selected.has(a.id);
-    box.disabled = busy(a);
-    box.addEventListener('change', () => {
-      if (box.checked) rtState.selected.add(a.id); else rtState.selected.delete(a.id);
-      rtRenderArchive();
-      const again = $('rt-arch').querySelector(`[data-fk="${CSS.escape('arch-' + a.id)}"]`);
-      if (again) again.focus();
-    });
-    const [state, label, sub] = rtArchState(a);
-    const tr = el('tr', { 'data-id': a.id },
-      el('td', { class: 'col-check' }, el('label', { class: 'check' }, box)),
-      el('td', { class: 'rt-ar-cat' }, el('span', { class: 'cell-title', 'data-day': ` · ${rtDay(a.day, true)}` }, a.category_name || a.category),
-        el('span', { class: 'rt-sub mono', title: a.file }, a.id !== a.index ? a.id : a.index)),
-      el('td', { class: 'rt-ar-day' }, rtDay(a.day, true)),
-      el('td', { class: 'num rt-ar-docs' }, a.docs.toLocaleString()),
-      el('td', { class: 'num rt-ar-size hide-sm' }, el('span', { class: 'rt-line' }, rtBytes(a.bytes)), el('span', { class: 'rt-sub', title: 'Size it had in OpenSearch' }, `was ${rtBytes(a.index_bytes)}`)),
-      el('td', { class: 'rt-ar-state' }, el('span', { class: 'rt-state', 'data-state': state }, label), sub ? el('span', { class: 'rt-sub', title: sub }, sub) : null));
-    if (box.checked) tr.setAttribute('aria-selected', 'true');
-    tr.addEventListener('click', (ev) => {
-      if (ev.target.closest('label, input') || box.disabled) return;
-      box.checked = !box.checked;
-      box.dispatchEvent(new Event('change'));
-    });
-    return tr;
-  });
-  const key = JSON.stringify([res, [...rtState.selected], cat.value]);
-  if (key !== rtState.archKey) {
-    rtState.archKey = key;
-    $('rt-arch').replaceChildren(el('table', { class: 'table rt-arch-table' },
-      el('thead', {}, el('tr', {}, el('th', { class: 'col-check' }, el('label', { class: 'check' }, all)),
-        ...RT_ARCH_COLS.slice(1).map(([h, cls]) => el('th', { class: cls }, h)))),
-      el('tbody', {}, ...rows)));
+  const canPick = rtCanRestore();
+  $('rt-restore-open').classList.toggle('hidden', !canPick);
+  // No filters to offer and nothing to restore here: no toolbar at all.
+  $('rt-arch-bar').classList.toggle('hidden', !canPick && ['rt-arch-cat', 'rt-arch-month'].every((id) => $(id).classList.contains('hidden')));
+  const shown = rtArchMatches(res);
+  rtState.archShown = shown;
+  const pages = Math.max(1, Math.ceil(shown.length / RT_ARCH_PAGE));
+  rtState.archPage = Math.min(rtState.archPage, pages - 1);
+  const start = rtState.archPage * RT_ARCH_PAGE;
+  const rows = shown.slice(start, start + RT_ARCH_PAGE);
+  if (!shown.length) {
+    rtState.archKey = '';
+    $('rt-arch').replaceChildren(riEmpty({ icon: 'archive', title: 'No archived days match',
+      text: 'Try another category or month.', action: el('button', { class: 'btn btn--secondary btn--sm', type: 'button', onclick: () => {
+        $('rt-arch-cat').value = '';
+        $('rt-arch-month').value = '';
+        rtState.archPage = 0;
+        rtRenderArchive();
+      } }, 'Show every day') }));
+    rtArchFoot();
+    rtSyncRestoreButton();
+    return;
   }
-  const bytes = shown.reduce((n, a) => n + a.bytes, 0);
-  const docs = shown.reduce((n, a) => n + a.docs, 0);
-  foot.replaceChildren(el('span', {}, `${rtDays(shown.length)} · ${rtNoun('', docs)} · ${rtBytes(bytes)}`), el('span', { class: 'spacer' }),
-    el('span', { class: 'rt-dir', title: 'Archive folder on this server' }, icon('folder', 'icon--sm'), el('span', { class: 'mono' }, res.dir)));
-  foot.classList.remove('hidden');
-  rtSyncRestoreButton();
+  const key = JSON.stringify([canPick, rows.map((a) => a.id)]);
+  const table = $('rt-arch').querySelector('table');
+  if (key !== rtState.archKey || !table) {
+    rtState.archKey = key;
+    const head = RT_ARCH_COLS.slice(canPick ? 0 : 1).map(([h, cls]) => el('th', { class: cls }, h));
+    if (canPick) {
+      const all = el('input', { type: 'checkbox', 'aria-label': 'Select every day that matches the filters' });
+      all.addEventListener('change', () => {
+        for (const a of rtState.archShown) {
+          if (rtArchRowBusy(a)) continue;
+          if (all.checked) rtState.selected.add(a.id); else rtState.selected.delete(a.id);
+        }
+        rtArchSyncChecks();
+      });
+      head[0] = el('th', { class: 'col-check' }, el('label', { class: 'check' }, all));
+    }
+    $('rt-arch').replaceChildren(el('table', { class: 'table rt-arch-table' + (canPick ? '' : ' rt-arch--view') }, el('thead', {}, el('tr', {}, ...head)),
+
+      el('tbody', {}, ...rows.map((a) => rtArchRow(a, canPick)))));
+  } else {
+    // Same rows: only redraw the status of those whose state changed.
+    const byId = new Map(rows.map((a) => [a.id, a]));
+    table.querySelectorAll('tbody tr[data-id]').forEach((tr) => {
+      const a = byId.get(tr.dataset.id);
+      const sig = a && rtArchSig(a);
+      if (a && tr.dataset.sig !== sig) {
+        tr.dataset.sig = sig;
+        rtArchStateCell(tr.querySelector('.rt-ar-state'), a);
+      }
+    });
+  }
+  rtArchSyncChecks();
 }
 
 function rtSyncRestoreButton() {
@@ -1285,11 +1562,22 @@ function rtSyncRestoreButton() {
   $('rt-restore-open').disabled = !n || !!(rtState.ov && rtState.ov.settings_error);
   $('rt-restore-label').textContent = n ? `Restore ${rtDays(n)}` : 'Restore';
 }
-$('rt-arch-cat').addEventListener('change', () => { rtState.archKey = ''; rtRenderArchive(); });
+for (const id of ['rt-arch-cat', 'rt-arch-month']) {
+  $(id).addEventListener('change', () => { rtState.archPage = 0; rtRenderArchive(); });
+}
+$('rt-arch-prev').addEventListener('click', () => { rtState.archPage = Math.max(0, rtState.archPage - 1); rtRenderArchive(); });
+$('rt-arch-next').addEventListener('click', () => { rtState.archPage++; rtRenderArchive(); });
 
+// ---------- restore ----------
+// The restore dialog checks first what restoring does to OpenSearch's
+// disk. Restored days are spared by size caps and the disk guard, so if
+// they take the disk over the guard's limit, the guard deletes other live
+// days to make room. The dialog then says which, and Restore becomes
+// "Restore anyway"; the server refuses such a restore without it.
 $('rt-restore-open').addEventListener('click', () => {
   const res = rtState.arch;
   if (!res || !rtState.selected.size) return;
+  rtState.opener = '#rt-restore-open';
   const picked = res.archives.filter((a) => rtState.selected.has(a.id));
   const n = picked.length;
   $('rt-restore-title').textContent = n === 1 ? `Restore ${picked[0].category_name || picked[0].category}, ${rtDay(picked[0].day, true)}?` : `Restore ${rtDays(n)}?`;
@@ -1303,12 +1591,96 @@ $('rt-restore-open').addEventListener('click', () => {
   rtRestoreHint();
   $('rt-restore-msg').replaceChildren();
   rtClearErrors($('rt-restore-form'));
-  $('rt-restore-ok').disabled = false;
-  $('rt-restore-ok').textContent = n === 1 ? 'Restore' : `Restore ${rtDays(n)}`;
   $('rt-restore').showModal();
   $('rt-rkeep').focus();
   $('rt-rkeep').select();
+  rtRestoreCheck();
 });
+
+function rtRestoreOk(chk) {
+  const btn = $('rt-restore-ok');
+  const n = rtState.selected.size;
+  const confirm = !!(chk && chk.needs_confirm);
+  btn.textContent = confirm ? 'Restore anyway' : n === 1 ? 'Restore' : `Restore ${rtDays(n)}`;
+  btn.classList.toggle('btn--danger', confirm);
+  btn.classList.toggle('btn--primary', !confirm);
+  btn.disabled = !chk;
+}
+
+async function rtRestoreCheck() {
+  const seq = (rtState.restoreSeq = (rtState.restoreSeq || 0) + 1);
+  const box = $('rt-restore-check');
+  rtState.restoreCheck = null;
+  rtRestoreOk(null);
+  box.setAttribute('aria-busy', 'true');
+  box.replaceChildren(rtPreviewLine('', 'refresh-cw', 'Checking how much room the days need…'));
+  const keep = rtNum($('rt-rkeep'));
+  let chk;
+  try {
+    chk = await api('api/retention/archive/preview', { ids: [...rtState.selected], keep_days: keep >= 1 && keep <= 365 ? keep : 0 });
+  } catch (e) {
+    if (seq !== rtState.restoreSeq) return;
+    box.removeAttribute('aria-busy');
+    box.replaceChildren(e.status === 503
+      ? rtPreviewLine('danger', 'circle-alert', 'OpenSearch isn’t answering, so nothing can be restored now.', 'Check that OpenSearch is running; Health shows its state. Then try again.')
+      : rtPreviewLine('danger', 'circle-alert', 'Couldn’t check what restoring does.', `${rtFix(e.message)} Try again in a moment.`));
+    return;
+  }
+  if (seq !== rtState.restoreSeq) return;
+  box.removeAttribute('aria-busy');
+  rtState.restoreCheck = chk;
+  box.replaceChildren(...rtRestoreView(chk));
+  rtRestoreOk(chk);
+}
+
+function rtRestoreView(chk) {
+  const out = [];
+  const ov = rtState.ov;
+  const limit = ov && ov.guard.enabled ? ov.guard.max_disk_percent : 0;
+  const steps = chk.steps || [];
+  if (chk.disk) {
+    const now = Math.round(chk.disk.percent);
+    const after = Math.round(chk.percent_after);
+    const tone = chk.flood ? 'danger' : chk.over_limit || steps.length ? 'warning' : '';
+    out.push(el('div', { class: 'rt-guard-disk' },
+      el('div', { class: 'rt-guard-disk__row' }, el('span', {}, 'Disk after'), el('b', { class: 'num' }, `${after}%`),
+        el('span', { class: 'subtle' }, chk.bytes ? `now ${now}%, adds about ${rtBytes(chk.bytes)}` : `now ${now}%`)),
+      rtMeter(chk.percent_after, limit, tone, `About ${after}% of the disk used after restoring${limit ? `, guard limit ${limit}%` : ''}`)));
+  } else if (chk.bytes) {
+    out.push(rtPreviewLine('', 'info', `Adds about ${rtBytes(chk.bytes)} to OpenSearch.`, 'Disk use couldn’t be read, so how full the disk gets can’t be checked.'));
+  }
+  if (chk.flood) {
+    out.push(rtPreviewLine('danger', 'triangle-alert', 'This could fill OpenSearch’s disk.', rtSentence(chk.message)));
+  }
+  if (steps.length) {
+    const d = chk.deletes || {};
+    out.push(rtPreviewLine('warning', 'trash-2', `To make room, the disk guard then deletes ${rtDays(d.delete_days)} of live data (${rtBytes(d.delete_bytes)}).`,
+      chk.unarchived ? `${chk.unarchived === steps.length ? (steps.length === 1 ? 'It isn’t' : 'None of them is') : `${chk.unarchived.toLocaleString()} of them aren’t`} archived, so ${chk.unarchived === 1 ? 'it' : 'those'} can’t be brought back. Free disk space first, or restore fewer days.`
+        : 'They are archived first, so they can be restored later.'));
+    const names = {};
+    for (const c of (ov || { categories: [] }).categories) names[c.id] = c.name;
+    const max = 30;
+    out.push(el('details', { class: 'rt-steps' },
+      el('summary', {}, icon('chevron-down', 'icon--sm chev'), `Show the ${steps.length === 1 ? 'day' : steps.length.toLocaleString() + ' days'}`),
+      el('ul', { class: 'rt-steps__list' }, ...rtUnarchivedFirst(steps).slice(0, max).map((s) => el('li', {},
+        el('span', { class: 'rt-steps__day' }, rtDay(s.day, true)),
+        el('span', { class: 'rt-steps__what' }, names[s.category] || s.category,
+          el('span', { class: 'subtle' }, rtArchivedFirst(s) ? ' · archived first' : ' · not archived')),
+        el('span', { class: 'rt-steps__size num' }, rtBytes(s.bytes)))),
+      steps.length > max ? el('li', { class: 'subtle' }, `and ${(steps.length - max).toLocaleString()} more`) : null)));
+  } else if (chk.over_limit && !chk.flood) {
+    out.push(rtPreviewLine('warning', 'triangle-alert', 'The disk would go above the guard’s limit.', rtSentence(chk.message)));
+  } else if (!chk.flood) {
+    out.push(rtPreviewLine('', 'circle-check', chk.bytes ? 'Nothing else is deleted to make room.' : 'These days are still in OpenSearch, so restoring takes no more room.',
+      chk.bytes && limit ? `The disk stays below the ${limit}% disk guard.` : ''));
+  }
+  return out;
+}
+
+// rtUnarchivedFirst lists the days that can't be brought back first.
+const rtArchivedFirst = (s) => s.action === 'archive' || /already archived/.test(s.reason);
+const rtUnarchivedFirst = (steps) => [...steps].sort((a, b) => rtArchivedFirst(a) - rtArchivedFirst(b));
+
 function rtRestoreHint() {
   const n = rtNum($('rt-rkeep'));
   const max = (rtState.arch && rtState.arch.max_keep_days) || 365;
@@ -1328,11 +1700,13 @@ $('rt-restore-form').addEventListener('submit', async (ev) => {
     $('rt-rkeep').focus();
     return;
   }
+  const chk = rtState.restoreCheck;
+  if (!chk) return;
   const ids = [...rtState.selected];
   const btn = $('rt-restore-ok');
   btn.disabled = true;
   try {
-    const res = await api('api/retention/archive/restore', { ids, keep_days: keep }, 'POST');
+    const res = await api('api/retention/archive/restore', { ids, keep_days: keep, confirm: !!chk.needs_confirm }, 'POST');
     $('rt-restore').close();
     rtState.selected.clear();
     const n = (res.restores || []).length;
@@ -1340,6 +1714,14 @@ $('rt-restore-form').addEventListener('submit', async (ev) => {
     rtLoadArchive(true);
     rtLoad(true);
   } catch (e) {
+    if (e.status === 409 && !chk.needs_confirm) {
+      // Something changed since the check: show it again before restoring.
+      await rtRestoreCheck();
+      if (rtState.restoreCheck && rtState.restoreCheck.needs_confirm) {
+        $('rt-restore-msg').replaceChildren(riAlert('warning', 'Things changed since the check. Look again, then restore.'));
+        return;
+      }
+    }
     btn.disabled = false;
     $('rt-restore-msg').replaceChildren(riAlert('danger', 'Couldn’t start the restore.', el('p', {}, rtFix(e.message))));
   }

@@ -956,15 +956,25 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     </div>
 
     <div id="rt-panel-archive" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-archive" hidden>
-      <div class="toolbar">
+      <div class="toolbar hidden" id="rt-arch-bar">
         <select id="rt-arch-cat" class="select" aria-label="Category"><option value="">All categories</option></select>
+        <select id="rt-arch-month" class="select" aria-label="Month"><option value="">All months</option></select>
         <span class="spacer"></span>
         <button id="rt-restore-open" class="btn btn--primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-rotate-ccw"/></svg><span id="rt-restore-label">Restore</span></button>
       </div>
       <div id="rt-arch-msg"></div>
       <div class="card">
         <div id="rt-arch" class="table-wrap"></div>
-        <div id="rt-arch-foot" class="table-foot hidden"></div>
+        <div id="rt-arch-foot" class="table-foot hidden">
+          <span id="rt-arch-count"></span>
+          <span class="spacer"></span>
+          <span id="rt-arch-dir" class="rt-dir" title="Archive folder on this server"></span>
+          <span id="rt-arch-pager" class="rt-pager hidden">
+            <span id="rt-arch-range" class="num"></span>
+            <button id="rt-arch-prev" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Previous page" title="Previous page"><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
+            <button id="rt-arch-next" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Next page" title="Next page"><svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+          </span>
+        </div>
       </div>
     </div>
 
@@ -1016,7 +1026,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
             <div class="rt-set rt-events-only" id="rt-f-compact">
               <div class="rt-set__text">
                 <label class="rt-set__label" for="rt-compact">Compact after</label>
-                <p class="rt-set__hint" id="rt-compact-hint">Older days become read-only and smaller. Keep it above how long agents can be offline.</p>
+                <p class="rt-set__hint" id="rt-compact-hint">Older days become read-only and smaller. Events that arrive later for a compacted day are refused and lost, so keep it above how long agents can be offline.</p>
               </div>
               <div class="rt-set__ctl">
                 <div class="rt-unit"><input id="rt-compact" class="input" type="number" inputmode="numeric" min="0" step="1" placeholder="Never" aria-describedby="rt-compact-hint"><span aria-hidden="true">days</span></div>
@@ -1098,7 +1108,8 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
       </div>
     </dialog>
 
-    <dialog id="rt-restore" class="modal" aria-labelledby="rt-restore-title" aria-describedby="rt-restore-desc">
+    <dialog id="rt-restore" class="modal rt-dialog" aria-labelledby="rt-restore-title" aria-describedby="rt-restore-desc">
+
       <form id="rt-restore-form" novalidate autocomplete="off">
         <div class="modal__head">
           <div>
@@ -1118,7 +1129,9 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
               <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-rkeep" class="input" type="number" inputmode="numeric" min="1" max="365" step="1" value="14" aria-describedby="rt-rkeep-hint"><span aria-hidden="true">days</span></div></div>
             </div>
           </div>
+          <div id="rt-restore-check" class="rt-preview" aria-live="polite"></div>
         </div>
+
         <div class="modal__foot">
           <button class="btn btn--ghost" type="button" data-close>Cancel</button>
           <button class="btn btn--primary" type="submit" id="rt-restore-ok">Restore</button>
