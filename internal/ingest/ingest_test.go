@@ -94,6 +94,11 @@ func TestLinuxAuthLines(t *testing.T) {
 			map[string]any{"datamodel": "Authentication", "action": "failure", "user": "oracle", "src": "192.0.2.4", "reason": "unknown user", "host": "web1", "app": "sshd", "process_id": int64(811)}},
 		{"Oct 11 09:15:09 web1 sshd[812]: Accepted publickey for deploy from 192.0.2.10 port 40200 ssh2: RSA SHA256:abc",
 			map[string]any{"action": "success", "user": "deploy", "authentication_method": "publickey"}},
+		// OpenSSH 9.8 and later (Debian 13, Ubuntu 24.10, Fedora 41, RHEL 10).
+		{"Oct 11 09:15:20 web1 sshd-session[1234]: Accepted password for root from 192.0.2.11 port 50000 ssh2",
+			map[string]any{"datamodel": "Authentication", "action": "success", "user": "root", "src": "192.0.2.11", "app": "sshd", "process_id": int64(1234)}},
+		{"Oct 11 09:15:21 web1 sshd-auth[1235]: Failed password for bob from 192.0.2.11 port 50001 ssh2",
+			map[string]any{"datamodel": "Authentication", "action": "failure", "user": "bob", "app": "sshd"}},
 		{"Oct 11 09:16:00 web1 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/cat /etc/shadow",
 			map[string]any{"datamodel": "Authentication", "action": "success", "src_user": "alice", "user": "root", "process": "/usr/bin/cat /etc/shadow"}},
 		{"Oct 11 09:16:30 web1 sudo:    alice : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/bin/bash",

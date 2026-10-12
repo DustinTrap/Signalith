@@ -67,8 +67,8 @@ var (
 	groupAdd      = regexp.MustCompile(`^add '([^']+)' to (?:shadow )?group '([^']+)'`)
 )
 
-// ParseProgram maps one syslog program's message onto a data model: sshd,
-// sudo and su logons become Authentication events; useradd, userdel,
+// ParseProgram maps one syslog program's message onto a data model: sshd
+// (including OpenSSH 9.8+ sshd-session), sudo and su logons become Authentication events; useradd, userdel,
 // usermod and gpasswd become Change events; anything else is Other. Agent
 // logs and the syslog receiver both use it, so the built-in detections fire
 // whichever way Linux auth logs arrive.
@@ -82,7 +82,10 @@ func ParseProgram(host, program, pid, msg, sourcetype string) Event {
 	}
 	ev := Event{Model: "Other", Fields: f}
 	switch program {
-	case "sshd":
+	case "sshd", "sshd-session", "sshd-auth":
+		// OpenSSH 9.8 and later log logons from sshd-session (and 10.0
+		// from sshd-auth); they are still sshd to detections and searches.
+		f["app"] = "sshd"
 		if m := sshdAuth.FindStringSubmatch(msg); m != nil {
 			ev.Model = "Authentication"
 			f["action"] = map[string]string{"Accepted": "success", "Failed": "failure"}[m[1]]

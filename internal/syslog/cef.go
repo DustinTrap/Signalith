@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
 
 // CEF is one ArcSight Common Event Format record:
@@ -201,8 +203,9 @@ var ipProtocols = map[string]string{"1": "icmp", "6": "tcp", "17": "udp", "47": 
 
 // cefFieldsFor maps a CEF record onto CIM fields. Well-known keys get CIM
 // names; other keys are kept as cef_<key>, at most extra of them. It also
-// returns the event time from rt, end or start, when one parses.
-func cefFieldsFor(c *CEF, f map[string]any, extra *int) time.Time {
+// returns the event time from rt, end or start, when one parses; now gives
+// times without a year the right one.
+func cefFieldsFor(c *CEF, f map[string]any, extra *int, now time.Time) time.Time {
 	f["sourcetype"] = "cef"
 	f["vendor_product"] = vendorProduct(c.Vendor, c.Product)
 	f["signature"] = c.Name
@@ -276,7 +279,7 @@ func cefFieldsFor(c *CEF, f map[string]any, extra *int) time.Time {
 	}
 	for _, k := range []string{"rt", "deviceReceiptTime", "end", "endTime", "start", "startTime"} {
 		if v, ok := times[k]; ok {
-			if t2, ok := cefTime(v); ok {
+			if t2, ok := cefTime(v, now); ok {
 				t = t2
 				break
 			}
@@ -358,12 +361,18 @@ func cefSeverity(s string) (string, any) {
 	}
 }
 
-var cefTimeLayouts = []string{"Jan 2 2006 15:04:05.000", "Jan 2 2006 15:04:05"}
+var (
+	cefTimeLayouts = []string{"Jan 2 2006 15:04:05.000", "Jan 2 2006 15:04:05"}
+	// cefYearless are the spec's forms without a year.
+	cefYearless = []string{"Jan 2 15:04:05.000", "Jan 2 15:04:05"}
+)
 
 // cefTime reads a CEF timestamp: milliseconds (or seconds) since 1970,
-// "MMM dd yyyy HH:mm:ss[.SSS] [zone]" or ISO 8601. Zones other than UTC and
-// GMT are ignored and the time is taken as local, like syslog headers.
-func cefTime(v string) (time.Time, bool) {
+// "MMM dd [yyyy] HH:mm:ss[.SSS] [zone]" or ISO 8601. The zone may be UTC,
+// GMT, Z or an offset such as +0200 or -07:00; other zone names are
+// ambiguous and ignored, and the time is taken as local, like syslog
+// headers. Times without a year get the one ingest.GuessYear picks.
+func cefTime(v string, now time.Time) (time.Time, bool) {
 	v = strings.Join(strings.Fields(v), " ")
 	if v == "" {
 		return time.Time{}, false
@@ -386,6 +395,9 @@ func cefTime(v string) (time.Time, bool) {
 		if zone == "UTC" || zone == "GMT" || zone == "Z" {
 			loc = time.UTC
 			v = v[:i]
+		} else if off, ok := zoneOffset(zone); ok {
+			loc = time.FixedZone("", off)
+			v = v[:i]
 		} else if strings.Trim(zone, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") == "" {
 			v = v[:i]
 		}
@@ -395,5 +407,31 @@ func cefTime(v string) (time.Time, bool) {
 			return t.UTC(), true
 		}
 	}
+	for _, l := range cefYearless {
+		if t, err := time.ParseInLocation(l, v, loc); err == nil {
+			return ingest.GuessYear(t, now), true
+		}
+	}
 	return time.Time{}, false
+}
+
+// zoneOffset reads "+0200", "-07:00" and the like as seconds east of UTC.
+func zoneOffset(z string) (int, bool) {
+	if len(z) < 5 || (z[0] != '+' && z[0] != '-') {
+		return 0, false
+	}
+	digits := strings.Replace(z[1:], ":", "", 1)
+	if len(digits) != 4 || !allDigits(digits) {
+		return 0, false
+	}
+	h, _ := strconv.Atoi(digits[:2])
+	m, _ := strconv.Atoi(digits[2:])
+	if h > 23 || m > 59 {
+		return 0, false
+	}
+	off := h*3600 + m*60
+	if z[0] == '-' {
+		off = -off
+	}
+	return off, true
 }

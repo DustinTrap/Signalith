@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -165,6 +166,16 @@ func cmdInit(args []string) error {
 	return nil
 }
 
+// syslogMaxAge is how old a syslog message's own timestamp may be and still
+// be its event time: a week, or the retention period when that is shorter,
+// since older events would only land in indices about to be deleted.
+func syslogMaxAge(retentionDays int) time.Duration {
+	if d := time.Duration(retentionDays) * 24 * time.Hour; d > 0 && d < syslog.DefaultMaxAge {
+		return d
+	}
+	return syslog.DefaultMaxAge
+}
+
 // syslogSummary describes the syslog listeners, or "" when syslog is off.
 func syslogSummary(c *config.Config) string {
 	var parts []string
@@ -176,13 +187,36 @@ func syslogSummary(c *config.Config) string {
 	return strings.Join(parts, ", ")
 }
 
+// printSyslogPorts prints the syslog listeners for install scripts, such
+// as "udp 514 10.0.0.0/8,192.0.2.10/32" or "tcp 514 any".
+func printSyslogPorts(c *config.Config) {
+	allow := "any"
+	if list := c.Syslog.AllowList(); len(list) > 0 {
+		var parts []string
+		for _, p := range list {
+			parts = append(parts, p.String())
+		}
+		allow = strings.Join(parts, ",")
+	}
+	for _, l := range []struct{ proto, addr string }{{"udp", c.Syslog.UDP}, {"tcp", c.Syslog.TCP}, {"tls", c.Syslog.TLS}} {
+		if _, port, err := net.SplitHostPort(l.addr); err == nil {
+			fmt.Println(l.proto, port, allow)
+		}
+	}
+}
+
 func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	path := configFlag(fs)
+	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
 	fs.Parse(args)
 	c, err := config.Load(*path)
 	if err != nil {
 		return err
+	}
+	if *ports {
+		printSyslogPorts(c)
+		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
@@ -222,6 +256,9 @@ func cmdValidate(args []string) error {
 			allow = strings.Join(c.Syslog.Allow, ", ")
 		}
 		fmt.Printf("Syslog receiver on %s, accepting %s.\n", s, allow)
+		if c.Syslog.UDP != "" && len(c.Syslog.Allow) > 0 {
+			fmt.Println("Note: over UDP a sender's address can be forged, so syslog.allow cannot fully protect syslog.udp. Use TCP or TLS for trusted senders, and limit the port with a firewall.")
+		}
 	} else {
 		fmt.Println("Syslog receiver is off (set syslog.udp or syslog.tcp to turn it on).")
 	}
@@ -451,6 +488,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
+			MaxAge: syslogMaxAge(c.Retention.Days),
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err
@@ -460,7 +498,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			cancel()
 			receiver.Wait()
 			s := receiver.Stats()
-			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "rejected", s.Rejected)
+			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
 		}()
 		var addrs []any
 		for _, l := range receiver.Stats().Listeners {

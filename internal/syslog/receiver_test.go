@@ -483,3 +483,283 @@ func TestLoggerClient(t *testing.T) {
 		}
 	}
 }
+
+// startWith runs a receiver writing to sink after setup has adjusted it,
+// and stops it when the test ends.
+func startWith(t *testing.T, cfg Config, sink Sink, setup func(*Receiver)) (*Receiver, context.CancelFunc) {
+	t.Helper()
+	if cfg.FlushInterval == 0 {
+		cfg.FlushInterval = 20 * time.Millisecond
+	}
+	r := New(cfg, sink, nil)
+	if setup != nil {
+		setup(r)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := r.Start(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		r.Wait()
+	})
+	return r, cancel
+}
+
+// sink is a Sink that records batch sizes, optionally taking delay per
+// call or failing, or hanging until the write is cancelled.
+type sink struct {
+	mu      sync.Mutex
+	batches []int
+	delay   time.Duration
+	hang    bool
+	fail    error
+}
+
+func (s *sink) IngestEvents(ctx context.Context, events []ingest.Event) (*ingest.Result, error) {
+	if s.hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	s.batches = append(s.batches, len(events))
+	s.mu.Unlock()
+	if s.fail != nil {
+		return nil, s.fail
+	}
+	return &ingest.Result{Received: len(events), Indexed: len(events)}, nil
+}
+
+func (s *sink) sizes() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int{}, s.batches...)
+}
+
+// TestOldTimestampsCannotCreateIndices sends messages naming many distinct
+// old days; they all go to today's index, so a sender cannot use up the
+// cluster's shards.
+func TestOldTimestampsCannotCreateIndices(t *testing.T) {
+	bulk := &capture{}
+	r, _, _ := start(t, Config{UDP: "127.0.0.1:0"}, bulk)
+	var msgs []string
+	for i := range 300 {
+		day := time.Date(2001, 1, 1, 12, 0, 0, 0, time.UTC).AddDate(0, 0, 7*i)
+		msgs = append(msgs, fmt.Sprintf("<13>1 %s h app - - - old %d", day.Format(time.RFC3339), i))
+	}
+	msgs = append(msgs, "<134>CEF:0|V|P|1|1|N|3|rt=978307200000 src=10.0.0.1 dst=10.0.0.2")
+	sendUDP(t, addr(t, r, "udp"), msgs...)
+	waitFor(t, "all messages", func() bool { return bulk.count() == len(msgs) })
+	indices := map[string]bool{}
+	for _, d := range bulk.all() {
+		indices[d.Index] = true
+		if d.Doc["device_time"] == nil {
+			t.Fatalf("device time not kept: %v", d.Doc)
+		}
+	}
+	// Other and Network_Traffic for today (two if the test spans midnight).
+	if len(indices) > 4 {
+		t.Errorf("%d indices: %v", len(indices), indices)
+	}
+}
+
+// TestNoTinyBatchesAfterASlowWrite checks that the flush interval counts
+// from the end of a write: a write slower than the interval must not be
+// followed by a near-empty one.
+func TestNoTinyBatchesAfterASlowWrite(t *testing.T) {
+	ready := make(chan struct{})
+	sk := &sink{delay: 60 * time.Millisecond}
+	r, _ := startWith(t, Config{UDP: "127.0.0.1:0", Ready: ready, BatchSize: 100, FlushInterval: 20 * time.Millisecond}, sk, nil)
+	for i := range 1000 {
+		r.handle(context.Background(), fmt.Appendf(nil, "<13>Oct 12 13:00:00 h app: message %d", i), sender, "udp", true)
+	}
+	close(ready)
+	waitFor(t, "all batches", func() bool {
+		n := 0
+		for _, b := range sk.sizes() {
+			n += b
+		}
+		return n == 1000
+	})
+	if got := sk.sizes(); len(got) != 10 {
+		t.Errorf("batches %v, want 10 of 100", got)
+	}
+}
+
+// TestShutdownDeadline stops a receiver whose OpenSearch hangs: Wait must
+// return by the deadline, and what was not written is counted.
+func TestShutdownDeadline(t *testing.T) {
+	sk := &sink{hang: true}
+	r, cancel := startWith(t, Config{UDP: "127.0.0.1:0", BatchSize: 100}, sk, func(r *Receiver) { r.finalFlush = 300 * time.Millisecond })
+	for i := range 1200 {
+		r.handle(context.Background(), fmt.Appendf(nil, "<13>Oct 12 13:00:00 h app: message %d", i), sender, "udp", true)
+	}
+	time.Sleep(50 * time.Millisecond) // the first write is in progress
+	began := time.Now()
+	cancel()
+	r.Wait()
+	if took := time.Since(began); took > 2*time.Second {
+		t.Errorf("shutdown took %v", took)
+	}
+	s := r.Stats()
+	if s.Dropped+s.WriteFailed != 1200 || s.WriteFailed == 0 || s.Dropped == 0 {
+		t.Errorf("received %d dropped %d write_failed %d", s.Received, s.Dropped, s.WriteFailed)
+	}
+}
+
+func TestWriteFailuresAreCounted(t *testing.T) {
+	sk := &sink{fail: errors.New("opensearch is down")}
+	r, _ := startWith(t, Config{UDP: "127.0.0.1:0"}, sk, nil)
+	sendUDP(t, addr(t, r, "udp"), "<13>Oct 12 13:00:00 h app: one", "<13>Oct 12 13:00:00 h app: two")
+	waitFor(t, "the failures", func() bool { return r.Stats().WriteFailed == 2 })
+	if s := r.Stats(); s.Dropped != 0 {
+		t.Errorf("stats = %+v", s)
+	}
+}
+
+// dialFrom connects from a given loopback address, or skips the test when
+// the system cannot (only Linux routes all of 127.0.0.0/8 by default).
+func dialFrom(t *testing.T, from, to string) net.Conn {
+	t.Helper()
+	d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(from)}, Timeout: 2 * time.Second}
+	c, err := d.Dial("tcp", to)
+	if err != nil {
+		t.Skipf("cannot connect from %s: %v", from, err)
+	}
+	return c
+}
+
+func closedByServer(c net.Conn) bool {
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, err := c.Read(make([]byte, 1))
+	return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// TestOneSenderCannotTakeAllConnections opens more connections from one
+// address than it may have; another address can still connect.
+func TestOneSenderCannotTakeAllConnections(t *testing.T) {
+	bulk := &capture{}
+	r, _, _ := start(t, Config{TCP: "127.0.0.1:0", MaxConnections: 10, MaxConnectionsPerSender: 3}, bulk)
+	to := addr(t, r, "tcp")
+	var conns []net.Conn
+	for range 3 {
+		c := dialFrom(t, "127.0.0.1", to)
+		defer c.Close()
+		conns = append(conns, c)
+	}
+	waitFor(t, "three connections", func() bool { return r.Stats().Connections == 3 })
+	extra := dialFrom(t, "127.0.0.1", to)
+	defer extra.Close()
+	if !closedByServer(extra) {
+		t.Error("connection over the per-sender limit stayed open")
+	}
+	other := dialFrom(t, "127.0.0.2", to)
+	defer other.Close()
+	fmt.Fprint(other, "<13>Oct 12 13:00:00 h app: from another sender\n")
+	waitFor(t, "the other sender's message", func() bool { return bulk.count() == 1 })
+	if s := r.Stats(); s.RejectedBy.TooManyFromSender != 1 || s.RejectedBy.TooManyConnections != 0 || s.Rejected != 1 {
+		t.Errorf("stats = %+v", s.RejectedBy)
+	}
+}
+
+// TestQuietConnectionsMakeRoom fills the connection limit with quiet
+// connections; a new one still gets in by closing the quietest.
+func TestQuietConnectionsMakeRoom(t *testing.T) {
+	bulk := &capture{}
+	r, _ := startWith(t, Config{TCP: "127.0.0.1:0", MaxConnections: 2}, &ingest.Pipeline{Store: bulk, Prefix: "sig"}, func(r *Receiver) { r.evictAfter = 100 * time.Millisecond })
+	to := addr(t, r, "tcp")
+	first := dialFrom(t, "127.0.0.1", to)
+	defer first.Close()
+	time.Sleep(20 * time.Millisecond)
+	second := dialFrom(t, "127.0.0.1", to)
+	defer second.Close()
+	waitFor(t, "two connections", func() bool { return r.Stats().Connections == 2 })
+
+	// Both are too recent to close: the new one is refused.
+	early := dialFrom(t, "127.0.0.1", to)
+	defer early.Close()
+	if !closedByServer(early) {
+		t.Fatal("connection over the limit stayed open")
+	}
+	time.Sleep(150 * time.Millisecond)
+	fmt.Fprint(second, "<13>Oct 12 13:00:00 h app: still here\n") // second is no longer quiet
+	waitFor(t, "the message", func() bool { return bulk.count() == 1 })
+	late := dialFrom(t, "127.0.0.1", to)
+	defer late.Close()
+	fmt.Fprint(late, "<13>Oct 12 13:00:00 h app: got in\n")
+	waitFor(t, "the new connection's message", func() bool { return bulk.count() == 2 })
+	if !closedByServer(first) {
+		t.Error("the quietest connection was not closed")
+	}
+	if s := r.Stats(); s.Connections != 2 || s.RejectedBy.TooManyConnections != 1 {
+		t.Errorf("stats = %+v", s)
+	}
+}
+
+// TestUnfinishedMessagesTimeOut: a message must be finished within the
+// message timeout of its first byte, even if bytes keep trickling in.
+func TestUnfinishedMessagesTimeOut(t *testing.T) {
+	bulk := &capture{}
+	r, _, _ := start(t, Config{TCP: "127.0.0.1:0", MessageTimeout: 300 * time.Millisecond}, bulk)
+	to := addr(t, r, "tcp")
+
+	trickle := dialFrom(t, "127.0.0.1", to)
+	defer trickle.Close()
+	began := time.Now()
+	go func() {
+		for _, b := range []byte("500 <13>trickling one byte at a time") {
+			if _, err := trickle.Write([]byte{b}); err != nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+	if !closedByServer(trickle) {
+		t.Fatal("trickling connection stayed open")
+	}
+	if took := time.Since(began); took > 2*time.Second {
+		t.Errorf("closed after %v", took)
+	}
+
+	// A last line without a newline is written when the time is up.
+	open := dialFrom(t, "127.0.0.1", to)
+	defer open.Close()
+	fmt.Fprint(open, "<13>Oct 12 13:00:00 h app: complete\n<13>Oct 12 13:00:01 h app: no newline")
+	if !closedByServer(open) {
+		t.Fatal("connection with an unfinished line stayed open")
+	}
+	waitFor(t, "both lines", func() bool { return bulk.count() == 2 })
+
+	// Between messages, only the idle timeout applies.
+	quiet := dialFrom(t, "127.0.0.1", to)
+	defer quiet.Close()
+	fmt.Fprint(quiet, "<13>Oct 12 13:00:00 h app: then quiet\n")
+	quiet.SetReadDeadline(time.Now().Add(600 * time.Millisecond))
+	if _, err := quiet.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("quiet connection: %v", err)
+	}
+}
+
+func TestSenderHostIsCapped(t *testing.T) {
+	r := New(Config{}, &sink{}, nil)
+	r.handle(context.Background(), []byte("<13>1 - "+strings.Repeat("h", 60000)+" app - - - hi"), sender, "udp", false)
+	if s := r.senders.list(); len(s) != 1 || len(s[0].Host) != 255 {
+		t.Errorf("sender host is %d bytes", len(s[0].Host))
+	}
+}
+
+type zonedConn struct{ net.Conn }
+
+func (zonedConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("fe80::1"), Port: 5000, Zone: "eth0"}
+}
+
+func TestLinkLocalSenderMatchesAllowList(t *testing.T) {
+	r := New(Config{Allow: []netip.Prefix{netip.MustParsePrefix("fe80::/10")}}, &sink{}, nil)
+	from := remoteAddr(zonedConn{})
+	if from.Zone() != "" || !r.allowed(from) {
+		t.Errorf("%v not allowed", from)
+	}
+}

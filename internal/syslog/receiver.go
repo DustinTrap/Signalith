@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -29,19 +30,33 @@ const (
 	// long. It is long because quiet devices (a switch that logs once a
 	// day) keep one connection open, and closing it can lose the next
 	// message; TCP keepalives find dead senders much sooner.
-	DefaultIdleTimeout   = time.Hour
-	DefaultBatchSize     = 500
-	DefaultFlushInterval = time.Second
-	DefaultQueueSize     = 10000
-	DefaultQueueBytes    = 64 << 20
+	DefaultIdleTimeout = time.Hour
+	// DefaultMessageTimeout is how long a sender has to finish a message
+	// once its first byte arrived, so a connection cannot hold a partial
+	// message (and its buffer) for the whole idle timeout.
+	DefaultMessageTimeout = time.Minute
+	DefaultBatchSize      = 500
+	DefaultFlushInterval  = time.Second
+	DefaultQueueSize      = 10000
+	DefaultQueueBytes     = 64 << 20
 	// maxSenders is how many recent senders the stats keep.
 	maxSenders = 50
-	// maxExtraNamesPerDay caps the distinct cef_* and sd_* field names
-	// added per day, well under OpenSearch's 1000 fields per index.
-	maxExtraNamesPerDay = 500
-	handshakeTimeout    = 10 * time.Second
-	writeTimeout        = 30 * time.Second
-	finalFlushTimeout   = 10 * time.Second
+	// maxExtraNamesPerIndex caps the distinct cef_* and sd_* field names
+	// one daily index gets per run, and maxExtraNamesPerSender one
+	// sender's share of that, so one device cannot use up the budget of
+	// the others. Together with the data model fields this stays well
+	// under the 2000 fields the index template allows.
+	maxExtraNamesPerIndex  = 600
+	maxExtraNamesPerSender = 150
+	// evictAfter is how long a TCP connection must have been quiet before
+	// it is closed to make room for a new one when the limit is reached.
+	evictAfter       = 30 * time.Second
+	handshakeTimeout = 10 * time.Second
+	writeTimeout     = 30 * time.Second
+	// finalFlushTimeout is how long the queue has to be written out once
+	// the receiver stops; whatever is left then is counted as dropped. It
+	// fits in the 10 seconds docker stop waits.
+	finalFlushTimeout = 5 * time.Second
 )
 
 // Config says where the receiver listens and how it treats senders.
@@ -58,14 +73,24 @@ type Config struct {
 	// get the right field types. Messages wait in the queue meanwhile.
 	Ready <-chan struct{}
 
+	// MaxAge is how old a message's own timestamp may be and still be the
+	// event time (zero: DefaultMaxAge). Older ones use the receive time
+	// and are kept in device_time, so senders cannot create an index for
+	// every day they name.
+	MaxAge time.Duration
+
 	// Limits; zero uses the defaults above.
 	MaxMessageSize int
 	MaxConnections int
-	IdleTimeout    time.Duration
-	BatchSize      int
-	FlushInterval  time.Duration
-	QueueSize      int
-	QueueBytes     int64
+	// MaxConnectionsPerSender limits the TCP and TLS connections from one
+	// address; zero uses a tenth of MaxConnections, at least 16.
+	MaxConnectionsPerSender int
+	IdleTimeout             time.Duration
+	MessageTimeout          time.Duration
+	BatchSize               int
+	FlushInterval           time.Duration
+	QueueSize               int
+	QueueBytes              int64
 }
 
 // Sink receives batches of events; ingest.Pipeline is one.
@@ -96,13 +121,21 @@ type Receiver struct {
 	done     chan struct{}
 	started  bool
 	stopOnce sync.Once
+	// drain ends finalFlushTimeout after the receiver starts stopping;
+	// writes use it so a slow OpenSearch cannot hold up the shutdown.
+	drain       context.Context
+	drainCancel context.CancelFunc
 
-	mu      sync.Mutex
-	conns   map[net.Conn]struct{}
-	closing bool
+	mu         sync.Mutex
+	conns      map[net.Conn]*connState
+	perSender  map[netip.Addr]int
+	closing    bool
+	evictAfter time.Duration
+	finalFlush time.Duration
 
-	received, dropped                         atomic.Int64
+	received, dropped, writeFailed            atomic.Int64
 	notAllowed, tooLarge, badFraming, tooMany atomic.Int64
+	tooManyFromSender                         atomic.Int64
 	lastMessage                               atomic.Int64 // unix nanoseconds
 	senders                                   senderTable
 	names                                     nameBudget
@@ -137,6 +170,7 @@ type Rejections struct {
 	TooLarge           int64 `json:"too_large"`            // message over the size limit
 	BadFraming         int64 `json:"bad_framing"`          // TCP stream with an impossible octet count
 	TooManyConnections int64 `json:"too_many_connections"` // TCP connection over the limit
+	TooManyFromSender  int64 `json:"too_many_from_sender"` // TCP connection over the per-sender limit
 }
 
 // Stats is what the receiver has done since start, for the health page.
@@ -147,10 +181,13 @@ type Stats struct {
 	Received int64 `json:"received"`
 	// Dropped counts received messages lost because the queue was full
 	// (OpenSearch slower than the senders) or the server was stopping.
-	Dropped    int64      `json:"dropped"`
-	Rejected   int64      `json:"rejected"`
-	RejectedBy Rejections `json:"rejected_by"`
-	Queued     int        `json:"queued"`
+	Dropped int64 `json:"dropped"`
+	// WriteFailed counts messages OpenSearch did not store: it was down,
+	// timed out, or rejected them.
+	WriteFailed int64      `json:"write_failed"`
+	Rejected    int64      `json:"rejected"`
+	RejectedBy  Rejections `json:"rejected_by"`
+	Queued      int        `json:"queued"`
 	// Connections is the number of open TCP and TLS connections.
 	Connections int       `json:"connections"`
 	LastMessage time.Time `json:"last_message,omitzero"`
@@ -166,8 +203,17 @@ func New(cfg Config, sink Sink, log *slog.Logger) *Receiver {
 	if cfg.MaxConnections <= 0 {
 		cfg.MaxConnections = DefaultMaxConnections
 	}
+	if cfg.MaxConnectionsPerSender <= 0 {
+		cfg.MaxConnectionsPerSender = max(16, cfg.MaxConnections/10)
+	}
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = DefaultIdleTimeout
+	}
+	if cfg.MessageTimeout <= 0 {
+		cfg.MessageTimeout = DefaultMessageTimeout
+	}
+	if cfg.MaxAge <= 0 {
+		cfg.MaxAge = DefaultMaxAge
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = DefaultBatchSize
@@ -184,17 +230,23 @@ func New(cfg Config, sink Sink, log *slog.Logger) *Receiver {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	drain, drainCancel := context.WithCancel(context.Background())
 	return &Receiver{
-		cfg:     cfg,
-		sink:    sink,
-		log:     log,
-		now:     time.Now,
-		queue:   make(chan queued, cfg.QueueSize),
-		done:    make(chan struct{}),
-		conns:   map[net.Conn]struct{}{},
-		senders: senderTable{max: maxSenders, m: map[netip.Addr]*Sender{}},
-		names:   nameBudget{max: maxExtraNamesPerDay, seen: map[string]struct{}{}},
-		warned:  map[string]time.Time{},
+		cfg:         cfg,
+		sink:        sink,
+		log:         log,
+		now:         time.Now,
+		queue:       make(chan queued, cfg.QueueSize),
+		done:        make(chan struct{}),
+		drain:       drain,
+		drainCancel: drainCancel,
+		conns:       map[net.Conn]*connState{},
+		perSender:   map[netip.Addr]int{},
+		evictAfter:  evictAfter,
+		finalFlush:  finalFlushTimeout,
+		senders:     senderTable{max: maxSenders, m: map[netip.Addr]*Sender{}},
+		names:       newNameBudget(maxExtraNamesPerIndex, maxExtraNamesPerSender),
+		warned:      map[string]time.Time{},
 	}
 }
 
@@ -263,9 +315,12 @@ func (r *Receiver) Wait() {
 }
 
 // stop closes the listeners and connections, waits for the readers, and
-// closes the queue so the writer flushes what is left and finishes.
+// closes the queue so the writer flushes what is left and finishes. The
+// writer has finalFlushTimeout from now, including a write in progress;
+// what is still queued then is counted as dropped.
 func (r *Receiver) stop() {
 	r.stopOnce.Do(func() {
+		time.AfterFunc(r.finalFlush, r.drainCancel)
 		r.mu.Lock()
 		r.closing = true
 		for c := range r.conns {
@@ -345,7 +400,8 @@ func (r *Receiver) readUDP(ctx context.Context) {
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		from := ap.Addr().Unmap()
+		// Without the zone, fe80::1%eth0 matches fe80::/10 in syslog.allow.
+		from := ap.Addr().Unmap().WithZone("")
 		if !r.allowed(from) {
 			r.rejectSender(from)
 			continue
@@ -384,56 +440,143 @@ func (r *Receiver) accept(ctx context.Context, ln net.Listener, proto string) {
 			c.Close()
 			continue
 		}
-		if !r.track(c) {
+		cs := &connState{from: from}
+		cs.active.Store(time.Now().UnixNano())
+		switch r.track(c, cs) {
+		case trackOK:
+			r.readers.Add(1)
+			go r.serveConn(ctx, c, cs, proto)
+			continue
+		case trackSenderFull:
+			r.tooManyFromSender.Add(1)
+			r.warn("sender-connections", "syslog connection refused: this sender has too many open connections", "limit", r.cfg.MaxConnectionsPerSender, "sender", from.String())
+		case trackFull:
 			r.tooMany.Add(1)
 			r.warn("connections", "syslog connection refused: too many open connections", "limit", r.cfg.MaxConnections, "sender", from.String())
-			c.Close()
-			continue
 		}
-		r.readers.Add(1)
-		go r.serveConn(ctx, c, from, proto)
+		c.Close()
 	}
 }
 
 func remoteAddr(c net.Conn) netip.Addr {
 	if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
-		return a.AddrPort().Addr().Unmap()
+		return a.AddrPort().Addr().Unmap().WithZone("")
 	}
 	ap, _ := netip.ParseAddrPort(c.RemoteAddr().String())
-	return ap.Addr().Unmap()
+	return ap.Addr().Unmap().WithZone("")
 }
 
-func (r *Receiver) track(c net.Conn) bool {
+// connState is what the receiver knows about one TCP or TLS connection.
+type connState struct {
+	from netip.Addr
+	// active is when the connection last sent something, and msgStart
+	// when the message being read began (zero between messages), both
+	// in unix nanoseconds.
+	active, msgStart atomic.Int64
+}
+
+type trackResult int
+
+const (
+	trackOK trackResult = iota
+	trackSenderFull
+	trackFull
+	trackStopping
+)
+
+// track registers a new connection. When its sender, or the receiver as a
+// whole, is at the connection limit, the connection quiet the longest (of
+// that sender, or of all) makes room if it has been quiet for evictAfter,
+// so idle connections cannot lock other devices out; otherwise the new
+// connection is refused.
+func (r *Receiver) track(c net.Conn, cs *connState) trackResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closing || len(r.conns) >= r.cfg.MaxConnections {
+	if r.closing {
+		return trackStopping
+	}
+	if r.perSender[cs.from] >= r.cfg.MaxConnectionsPerSender && !r.evictLocked(cs.from, true) {
+		return trackSenderFull
+	}
+	if len(r.conns) >= r.cfg.MaxConnections && !r.evictLocked(netip.Addr{}, false) {
+		return trackFull
+	}
+	r.conns[c] = cs
+	r.perSender[cs.from]++
+	return trackOK
+}
+
+// evictLocked closes the connection quiet the longest, from sender only
+// when sameSender is set, if it has been quiet for evictAfter. r.mu is held.
+func (r *Receiver) evictLocked(sender netip.Addr, sameSender bool) bool {
+	var victim net.Conn
+	var quietSince int64
+	for c, cs := range r.conns {
+		if sameSender && cs.from != sender {
+			continue
+		}
+		if a := cs.active.Load(); victim == nil || a < quietSince {
+			victim, quietSince = c, a
+		}
+	}
+	if victim == nil || time.Since(time.Unix(0, quietSince)) < r.evictAfter {
 		return false
 	}
-	r.conns[c] = struct{}{}
+	from := r.conns[victim].from
+	r.forgetLocked(victim)
+	victim.Close()
+	r.warn("evict", "closed the longest-quiet syslog connection to make room for a new one (logged once a minute)", "sender", from.String())
 	return true
+}
+
+func (r *Receiver) forgetLocked(c net.Conn) {
+	cs, ok := r.conns[c]
+	if !ok {
+		return
+	}
+	delete(r.conns, c)
+	if r.perSender[cs.from] <= 1 {
+		delete(r.perSender, cs.from)
+	} else {
+		r.perSender[cs.from]--
+	}
 }
 
 func (r *Receiver) untrack(c net.Conn) {
 	r.mu.Lock()
-	delete(r.conns, c)
+	r.forgetLocked(c)
 	r.mu.Unlock()
 	c.Close()
 }
 
-// idleReader closes a connection's read side after a quiet period.
-type idleReader struct {
-	c    net.Conn
-	idle time.Duration
+// connReader reads from a connection with two deadlines: the idle timeout
+// between messages, and the message timeout once a message has begun, so
+// a sender trickling a byte at a time cannot hold a partial message open.
+type connReader struct {
+	c         net.Conn
+	cs        *connState
+	idle, msg time.Duration
 }
 
-func (ir idleReader) Read(p []byte) (int, error) {
-	_ = ir.c.SetReadDeadline(time.Now().Add(ir.idle))
-	return ir.c.Read(p)
+func (cr connReader) Read(p []byte) (int, error) {
+	deadline := time.Now().Add(cr.idle)
+	if start := cr.cs.msgStart.Load(); start != 0 {
+		if d := time.Unix(0, start).Add(cr.msg); d.Before(deadline) {
+			deadline = d
+		}
+	}
+	_ = cr.c.SetReadDeadline(deadline)
+	n, err := cr.c.Read(p)
+	if n > 0 {
+		cr.cs.active.Store(time.Now().UnixNano())
+	}
+	return n, err
 }
 
-func (r *Receiver) serveConn(ctx context.Context, c net.Conn, from netip.Addr, proto string) {
+func (r *Receiver) serveConn(ctx context.Context, c net.Conn, cs *connState, proto string) {
 	defer r.readers.Done()
 	defer r.untrack(c)
+	from := cs.from
 	conn := c
 	if proto == "tls" {
 		tc := tls.Server(c, r.tlsConf)
@@ -446,7 +589,14 @@ func (r *Receiver) serveConn(ctx context.Context, c net.Conn, from netip.Addr, p
 		}
 		conn = tc
 	}
-	fr := newFramer(idleReader{c: conn, idle: r.cfg.IdleTimeout}, r.cfg.MaxMessageSize)
+	fr := newFramer(connReader{c: conn, cs: cs, idle: r.cfg.IdleTimeout, msg: r.cfg.MessageTimeout}, r.cfg.MaxMessageSize)
+	fr.mark = func(inMessage bool) {
+		if inMessage {
+			cs.msgStart.Store(time.Now().UnixNano())
+		} else {
+			cs.msgStart.Store(0)
+		}
+	}
 	for {
 		msg, err := fr.Next()
 		switch {
@@ -492,8 +642,8 @@ func (r *Receiver) handle(ctx context.Context, data []byte, from netip.Addr, pro
 	if m.Raw == "" {
 		return
 	}
-	ev := m.Event(from, now)
-	r.names.limit(ev.Fields, now)
+	ev := m.Event(from, now, r.cfg.MaxAge)
+	r.names.limit(ev, from, now, r.cfg.MaxAge)
 	r.received.Add(1)
 	r.lastMessage.Store(now.UnixNano())
 	r.senders.seen(from, m.Hostname, proto, now)
@@ -548,31 +698,39 @@ func (r *Receiver) write(ctx context.Context) {
 		case <-ctx.Done():
 		}
 	}
+	defer r.drainCancel()
 	tick := time.NewTicker(r.cfg.FlushInterval)
 	defer tick.Stop()
 	batch := make([]ingest.Event, 0, r.cfg.BatchSize)
-	flush := func(timeout time.Duration) {
-		if len(batch) == 0 {
-			return
+	flush := func() {
+		if len(batch) > 0 {
+			r.send(batch)
+			clear(batch)
+			batch = batch[:0]
 		}
-		r.send(batch, timeout)
-		clear(batch)
-		batch = batch[:0]
+		// Count the interval from the end of this write, so a slow write
+		// is not followed straight away by a tiny batch.
+		tick.Reset(r.cfg.FlushInterval)
 	}
 	for {
 		select {
 		case q, ok := <-r.queue:
 			if !ok {
-				flush(finalFlushTimeout)
+				flush()
 				return
 			}
 			r.queuedBytes.Add(-q.size)
+			if r.drain.Err() != nil {
+				// Stopping, and out of time to write: what is left is lost.
+				r.dropped.Add(1)
+				continue
+			}
 			batch = append(batch, q.ev)
 			if len(batch) >= r.cfg.BatchSize {
-				flush(writeTimeout)
+				flush()
 			}
 		case <-tick.C:
-			flush(writeTimeout)
+			flush()
 		}
 	}
 }
@@ -589,23 +747,25 @@ func (r *Receiver) ready() bool {
 	}
 }
 
-// send writes one batch. Failures are counted by the pipeline (ingest
-// stats "failed") and logged at most once a minute; the batch is not
-// retried, so a slow or down OpenSearch cannot back up the receiver.
-func (r *Receiver) send(batch []ingest.Event, timeout time.Duration) {
-	if !r.ready() {
-		// Stopping before OpenSearch was ever ready.
+// send writes one batch. Failures are counted (write_failed here, and
+// "failed" in the ingest stats) and logged at most once a minute; the batch
+// is not retried, so a slow or down OpenSearch cannot back up the receiver.
+func (r *Receiver) send(batch []ingest.Event) {
+	if !r.ready() || r.drain.Err() != nil {
+		// Stopping before OpenSearch was ever ready, or out of time.
 		r.dropped.Add(int64(len(batch)))
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(r.drain, writeTimeout)
 	defer cancel()
 	res, err := r.sink.IngestEvents(ctx, batch)
 	if err != nil {
+		r.writeFailed.Add(int64(len(batch)))
 		r.warn("write", "could not write syslog events to OpenSearch; they were dropped", "events", len(batch), "err", err)
 		return
 	}
 	if len(res.Errors) > 0 {
+		r.writeFailed.Add(int64(len(res.Errors)))
 		r.warn("rejected", "OpenSearch rejected some syslog events", "rejected", len(res.Errors), "first", res.Errors[0].Reason)
 	}
 }
@@ -633,20 +793,22 @@ func (r *Receiver) Stats() Stats {
 		return Stats{Listeners: []Listener{}, Senders: []Sender{}}
 	}
 	s := Stats{
-		Enabled:   true,
-		Listeners: append([]Listener{}, r.listeners...),
-		Received:  r.received.Load(),
-		Dropped:   r.dropped.Load(),
+		Enabled:     true,
+		Listeners:   append([]Listener{}, r.listeners...),
+		Received:    r.received.Load(),
+		Dropped:     r.dropped.Load(),
+		WriteFailed: r.writeFailed.Load(),
 		RejectedBy: Rejections{
 			NotAllowed:         r.notAllowed.Load(),
 			TooLarge:           r.tooLarge.Load(),
 			BadFraming:         r.badFraming.Load(),
 			TooManyConnections: r.tooMany.Load(),
+			TooManyFromSender:  r.tooManyFromSender.Load(),
 		},
 		Queued:  len(r.queue),
 		Senders: r.senders.list(),
 	}
-	s.Rejected = s.RejectedBy.NotAllowed + s.RejectedBy.TooLarge + s.RejectedBy.BadFraming + s.RejectedBy.TooManyConnections
+	s.Rejected = s.RejectedBy.NotAllowed + s.RejectedBy.TooLarge + s.RejectedBy.BadFraming + s.RejectedBy.TooManyConnections + s.RejectedBy.TooManyFromSender
 	if ns := r.lastMessage.Load(); ns > 0 {
 		s.LastMessage = time.Unix(0, ns).UTC()
 	}
@@ -684,8 +846,10 @@ func (t *senderTable) seen(a netip.Addr, host, proto string, at time.Time) {
 	s.Messages++
 	s.LastSeen = at.UTC()
 	s.Protocol = proto
-	if host != "" {
-		s.Host = host
+	// Capped like the event's host, and copied so the table does not keep
+	// the whole message alive.
+	if host = truncate(host, maxHostLen); host != "" && host != s.Host {
+		s.Host = strings.Clone(host)
 	}
 }
 
@@ -705,35 +869,63 @@ func (t *senderTable) list() []Sender {
 	return out
 }
 
-// nameBudget limits how many distinct vendor-specific field names (cef_*,
-// sd_*) are added per day, across all senders. Indices are daily, so a
-// sender inventing new keys cannot push an index past OpenSearch's field
-// limit; names over the budget stay in the raw message.
+// nameBudget limits the distinct vendor-specific field names (cef_*,
+// sd_*) each daily index gets, and each sender's share of them. Events go
+// to an index by their own day, which can be up to MaxAge back or a day
+// ahead, so the budget is kept per index rather than per receive day; names
+// over it are dropped and stay in the raw message.
 type nameBudget struct {
-	mu   sync.Mutex
-	max  int
-	day  string
-	seen map[string]struct{}
+	mu        sync.Mutex
+	perIndex  int
+	perSender int
+	indices   map[string]*indexNames // by model and day
 }
 
-func (b *nameBudget) limit(f map[string]any, now time.Time) {
+type indexNames struct {
+	day     string
+	names   map[string]struct{}
+	senders map[netip.Addr]int // names each sender added
+}
+
+func newNameBudget(perIndex, perSender int) nameBudget {
+	return nameBudget{perIndex: perIndex, perSender: perSender, indices: map[string]*indexNames{}}
+}
+
+func (b *nameBudget) limit(ev ingest.Event, from netip.Addr, now time.Time, maxAge time.Duration) {
+	day := ev.Time.UTC().Format("2006.01.02")
+	key := ev.Model + "/" + day
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if d := now.UTC().Format("2006-01-02"); d != b.day {
-		b.day = d
-		clear(b.seen)
-	}
-	for k := range f {
+	ix := b.indices[key]
+	for k := range ev.Fields {
 		if !isExtra(k) {
 			continue
 		}
-		if _, ok := b.seen[k]; ok {
+		if ix == nil {
+			ix = b.add(key, day, now, maxAge)
+		}
+		if _, ok := ix.names[k]; ok {
 			continue
 		}
-		if len(b.seen) >= b.max {
-			delete(f, k)
+		if len(ix.names) >= b.perIndex || ix.senders[from] >= b.perSender {
+			delete(ev.Fields, k)
 			continue
 		}
-		b.seen[k] = struct{}{}
+		ix.names[k] = struct{}{}
+		ix.senders[from]++
 	}
+}
+
+// add starts the budget of an index, forgetting indices no event can be
+// written to any more.
+func (b *nameBudget) add(key, day string, now time.Time, maxAge time.Duration) *indexNames {
+	oldest := now.Add(-maxAge - 24*time.Hour).UTC().Format("2006.01.02")
+	for k, ix := range b.indices {
+		if ix.day < oldest {
+			delete(b.indices, k)
+		}
+	}
+	ix := &indexNames{day: day, names: map[string]struct{}{}, senders: map[netip.Addr]int{}}
+	b.indices[key] = ix
+	return ix
 }

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
-	"time"
 	"unicode/utf8"
 )
 
@@ -21,6 +20,12 @@ var fuzzSeeds = []string{
 	"<166>Oct 12 2026 13:59:00 asa1 : %ASA-6-302013: Built inbound TCP connection",
 	"<189>45: router1: *Mar  1 00:01:02.345 UTC: %LINEPROTO-5-UPDOWN: Line protocol",
 	"<187>Oct 12 13:59:00 rtr2 1234: Oct 12 13:58:59 EST: %MGBL-CONFIG-6-DB_COMMIT : x",
+	"<189>48: rtr1: 000048: *Oct 12 13:59:00.123 UTC: %SYS-5-CONFIG_I: x",
+	"<187>: 2026 Oct 12 13:59:00 UTC: %ETHPORT-3-IF_DOWN_LINK_FAILURE: x",
+	"<189>1234: xr1 RP/0/RSP0/CPU0:Oct 12 13:59:00.123 UTC: config[65738]: %MGBL-CONFIG-6-DB_COMMIT : x",
+	"<4>Oct 12 13:59:00 U7PG2,b4fbe4aabbcc,v4.3.20.11298: hostapd: ath0: x",
+	"<13>1 2001-01-01T12:00:00Z h app - - - old",
+	"CEF:0|V|P|1|1|N|3|rt=Oct 12 13:00:00.123 +02:00 end=1",
 	`<134>Oct 12 13:59:00 fw1 CEF:0|Ven\|dor|P|1|sig|N|5|rt=1791813540000 src=10.0.0.1 dst=10.0.0.2 msg=a\=b c\\d\n request=http://x/?a=b`,
 	"CEF:0|V|P|1|1|N|Very-High|spt=abc in=5 out=x act=Deny proto=6",
 	"hello world\x00\r\n",
@@ -39,8 +44,9 @@ func FuzzParse(f *testing.F) {
 		if strings.Trim(string(b), "\x00\r\n\t ") != "" && m.Raw == "" {
 			t.Fatalf("message lost: %q", b)
 		}
-		ev := m.Event(sender, now)
-		if ev.Model == "" || ev.Time.IsZero() || ev.Time.After(now.Add(24*time.Hour+time.Second)) {
+		ev := m.Event(sender, now, 0)
+		// The event time, and so the daily index, stays in the window.
+		if ev.Model == "" || ev.Time.Before(now.Add(-DefaultMaxAge)) || ev.Time.After(now.Add(maxAhead)) {
 			t.Fatalf("model %q time %v", ev.Model, ev.Time)
 		}
 		d := ev.Document()

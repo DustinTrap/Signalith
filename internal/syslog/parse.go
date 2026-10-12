@@ -233,6 +233,12 @@ var (
 	programTag = regexp.MustCompile(`^([^\s\[\]:%][^\s\[\]:]{0,63})(?:\[([^\]\s]{0,64})\])?:(?:\s|$)`)
 	pidTag     = regexp.MustCompile(`^[^\s\[\]:%][^\s\[\]:]{0,63}\[[^\]\s]{0,64}\]:(?:\s|$)`)
 	ciscoTag   = regexp.MustCompile(`^%([A-Za-z0-9_][A-Za-z0-9_-]{0,63}?)-([0-7])-([A-Za-z0-9_]{1,64})\s?:\s?`)
+	// xrNode is the "[host ]RP/0/RSP0/CPU0:" IOS XR puts before its
+	// timestamp.
+	xrNode = regexp.MustCompile(`^(?:([A-Za-z0-9][A-Za-z0-9._-]{0,254}) )?[A-Z0-9]{1,16}/[A-Za-z0-9/]{1,64}:`)
+	// unifiTag is the "model,mac,version: " UniFi access points and
+	// switches put before the program tag.
+	unifiTag = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63},[0-9A-Fa-f]{12},[^\s:,]{1,64}: `)
 )
 
 // head is the start of s that header patterns look at, so a long message
@@ -249,16 +255,17 @@ func head(s string) string {
 // devices add sequence numbers, a host name before the timestamp, and
 // %FACILITY-SEVERITY-MNEMONIC tags.
 func parse3164(m *Message, s string, now time.Time) {
-	s = strings.TrimLeft(s, " ")
+	// Cisco NX-OS writes "<PRI>: 2026 Oct 12 ...".
+	s = strings.TrimPrefix(strings.TrimLeft(s, " "), ": ")
 	if g := ciscoSeq.FindStringSubmatch(head(s)); g != nil {
 		m.Sequence = g[1]
 		s = s[len(g[0]):]
 	}
-	if g := hostColon.FindStringSubmatch(head(s)); g != nil {
-		if _, _, ok := parseStamp(s[len(g[0]):], now); ok {
-			m.Hostname = g[1]
-			s = s[len(g[0]):]
+	if host, rest, ok := ciscoPrefix(s, now); ok {
+		if host != "" {
+			m.Hostname = host
 		}
+		s = rest
 	}
 	t, after, hasTime := parseStamp(s, now)
 	if hasTime {
@@ -291,16 +298,12 @@ func parse3164(m *Message, s string, now time.Time) {
 		}
 		s = after
 	}
-	switch {
-	case strings.HasPrefix(s, "%"):
-		if g := ciscoTag.FindStringSubmatch(head(s)); g != nil {
-			sev, _ := strconv.Atoi(g[2])
-			m.Cisco = &CiscoTag{Facility: g[1], Severity: sev, Mnemonic: g[3]}
-			m.Format = "rfc3164"
-			s = s[len(g[0]):]
-		}
-	case strings.HasPrefix(s, "CEF:"):
-	default:
+	// UniFi devices write "model,mac,version: prog: ..."; the program is
+	// the tag, and the device stays known by its address.
+	if g := unifiTag.FindString(head(s)); g != "" && programTag.MatchString(head(s[len(g):])) {
+		s = s[len(g):]
+	}
+	if !strings.HasPrefix(s, "%") && !strings.HasPrefix(s, "CEF:") {
 		if g := programTag.FindStringSubmatch(head(s)); g != nil {
 			m.AppName = g[1]
 			m.ProcID = g[2]
@@ -308,10 +311,53 @@ func parse3164(m *Message, s string, now time.Time) {
 			s = strings.TrimPrefix(s[len(g[0]):], " ")
 		}
 	}
+	// The Cisco tag comes first, or after the program as in IOS XR's
+	// "config[65738]: %MGBL-CONFIG-6-DB_COMMIT : ...".
+	if strings.HasPrefix(s, "%") {
+		if g := ciscoTag.FindStringSubmatch(head(s)); g != nil {
+			sev, _ := strconv.Atoi(g[2])
+			m.Cisco = &CiscoTag{Facility: g[1], Severity: sev, Mnemonic: g[3]}
+			m.Format = "rfc3164"
+			s = s[len(g[0]):]
+		}
+	}
 	if hasTime {
 		m.Format = "rfc3164"
 	}
 	m.Text = s
+}
+
+// ciscoPrefix reads what Cisco devices put between the sequence number and
+// the timestamp: IOS "host: " (logging origin-id) and "000048: " (service
+// sequence-numbers), in that order and each optional, or IOS XR's
+// "[host ]RP/0/RSP0/CPU0:". It reports false, changing nothing, unless a
+// timestamp follows.
+func ciscoPrefix(s string, now time.Time) (host, rest string, ok bool) {
+	rest = s
+	if g := hostColon.FindStringSubmatch(head(rest)); g != nil && !allDigits(g[1]) {
+		host, rest = g[1], rest[len(g[0]):]
+	} else if g := xrNode.FindStringSubmatch(head(rest)); g != nil {
+		host, rest = g[1], rest[len(g[0]):]
+	}
+	if g := ciscoSeq.FindString(head(rest)); g != "" {
+		rest = rest[len(g):]
+	}
+	if len(rest) == len(s) {
+		return "", s, false
+	}
+	if _, _, ok := parseStamp(rest, now); !ok {
+		return "", s, false
+	}
+	return host, rest, true
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isDigit(s[i]) {
+			return false
+		}
+	}
+	return s != ""
 }
 
 var months = map[string]time.Month{
@@ -321,7 +367,9 @@ var months = map[string]time.Month{
 }
 
 var (
-	bsdStamp   = regexp.MustCompile(`^([A-Za-z]{3})\s+(\d{1,2})\s+(?:(\d{4})\s+)?(\d{1,2}):(\d{2}):(\d{2})(\.\d{1,9})?`)
+	bsdStamp = regexp.MustCompile(`^([A-Za-z]{3})\s+(\d{1,2})\s+(?:(\d{4})\s+)?(\d{1,2}):(\d{2}):(\d{2})(\.\d{1,9})?`)
+	// yearFirst is the Cisco NX-OS "2026 Oct 12 13:59:00".
+	yearFirst  = regexp.MustCompile(`^(\d{4}) ([A-Za-z]{3})\s+(\d{1,2}) (\d{1,2}):(\d{2}):(\d{2})(\.\d{1,9})?`)
 	stampYear  = regexp.MustCompile(`^ ((?:19|20)\d{2})(?:\s|$)`)
 	stampZone  = regexp.MustCompile(`^ ([A-Z]{3,5})(:|\s|$)`)
 	isoPattern = regexp.MustCompile(`^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:?\d{2})?`)
@@ -345,7 +393,9 @@ func parseStamp(s string, now time.Time) (time.Time, string, bool) {
 	var n int
 	var ok bool
 	if p != "" && isDigit(p[0]) {
-		t, n, ok = parseISO(p)
+		if t, n, ok = parseISO(p); !ok {
+			t, n, ok = parseBSD(p, now)
+		}
 	} else {
 		t, n, ok = parseBSD(p, now)
 	}
@@ -364,33 +414,41 @@ func parseStamp(s string, now time.Time) (time.Time, string, bool) {
 	return t, rest, true
 }
 
-// parseBSD reads "Mmm dd [yyyy] hh:mm:ss[.frac] [yyyy] [UTC|ZONE:]". Times
+// parseBSD reads "Mmm dd [yyyy] hh:mm:ss[.frac] [yyyy] [UTC|ZONE:]", or
+// "yyyy Mmm dd hh:mm:ss[.frac] [UTC|ZONE:]" as Cisco NX-OS writes it. Times
 // without a zone, or with a zone other than UTC, are taken as this server's
 // local time; times without a year get the one ingest.GuessYear picks.
 func parseBSD(s string, now time.Time) (time.Time, int, bool) {
-	g := bsdStamp.FindStringSubmatch(head(s))
-	if g == nil {
+	// g holds month, day, year, hours, minutes, seconds and fraction.
+	var g [7]string
+	n := 0
+	if b := bsdStamp.FindStringSubmatch(head(s)); b != nil {
+		g = [7]string{b[1], b[2], b[3], b[4], b[5], b[6], b[7]}
+		n = len(b[0])
+	} else if y := yearFirst.FindStringSubmatch(head(s)); y != nil {
+		g = [7]string{y[2], y[3], y[1], y[4], y[5], y[6], y[7]}
+		n = len(y[0])
+	} else {
 		return time.Time{}, 0, false
 	}
-	mon, ok := months[strings.ToLower(g[1])]
+	mon, ok := months[strings.ToLower(g[0])]
 	if !ok {
 		return time.Time{}, 0, false
 	}
-	day, _ := strconv.Atoi(g[2])
-	hh, _ := strconv.Atoi(g[4])
-	mm, _ := strconv.Atoi(g[5])
-	ss, _ := strconv.Atoi(g[6])
+	day, _ := strconv.Atoi(g[1])
+	hh, _ := strconv.Atoi(g[3])
+	mm, _ := strconv.Atoi(g[4])
+	ss, _ := strconv.Atoi(g[5])
 	if day < 1 || day > 31 || hh > 23 || mm > 59 || ss > 60 {
 		return time.Time{}, 0, false
 	}
 	if ss == 60 {
 		ss = 59
 	}
-	nsec := fraction(g[7])
-	n := len(g[0])
+	nsec := fraction(g[6])
 	year := 0
-	if g[3] != "" {
-		year, _ = strconv.Atoi(g[3])
+	if g[2] != "" {
+		year, _ = strconv.Atoi(g[2])
 	} else if y := stampYear.FindStringSubmatch(head(s[n:])); y != nil {
 		year, _ = strconv.Atoi(y[1])
 		n += 1 + len(y[1])

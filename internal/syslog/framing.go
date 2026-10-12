@@ -31,6 +31,9 @@ type framer struct {
 	max int
 	buf []byte
 	err error
+	// mark, when set, is told when a message begins (its first byte is
+	// in) and when Next returns, so the reader can time the message.
+	mark func(inMessage bool)
 }
 
 func newFramer(r io.Reader, max int) *framer {
@@ -63,6 +66,10 @@ func (f *framer) Next() ([]byte, error) {
 			break
 		}
 		f.r.Discard(1)
+	}
+	if f.mark != nil {
+		f.mark(true)
+		defer f.mark(false)
 	}
 	n, counted, err := f.octetCount()
 	if err != nil {

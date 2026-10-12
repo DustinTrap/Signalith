@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,8 @@ func TestSyslogEndToEnd(t *testing.T) {
 			syslogTime(time.Now().Add(-time.Minute)), 4000+i, 50000+i)
 	}
 	fmt.Fprintf(udp, "<134>1 %s fw1 - - - - CEF:0|Acme|Firewall|1.0|100|Blocked connection|7|src=10.0.0.5 dst=198.51.100.9 spt=40000 dpt=4444 proto=TCP act=deny", stamp)
+	// A replayed or forged old timestamp must not create an index for its day.
+	fmt.Fprint(udp, "<13>1 2001-01-01T12:00:00Z oldhost app - - - replayed")
 	udp.Close()
 	tcp, err := net.Dial("tcp", addrs["tcp"])
 	if err != nil {
@@ -50,7 +53,7 @@ func TestSyslogEndToEnd(t *testing.T) {
 	tcp.Close()
 
 	deadline := time.Now().Add(30 * time.Second)
-	for p.Stats().Indexed < 5 {
+	for p.Stats().Indexed < 6 {
 		if time.Now().After(deadline) {
 			t.Fatalf("indexed %+v, receiver %+v", p.Stats(), r.Stats())
 		}
@@ -75,9 +78,23 @@ func TestSyslogEndToEnd(t *testing.T) {
 		t.Errorf("text search matched %d", res.Matched)
 	}
 
+	res = run(t, eng, `host=oldhost`)
+	if res.Matched != 1 || res.Rows[0]["device_time"] != "2001-01-01T12:00:00Z" {
+		t.Errorf("old message rows = %v", res.Rows)
+	}
+	names, err := cl.ListIndices(ctx, prefix+"-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if strings.Contains(n, "2001.") {
+			t.Errorf("index %s created for the old timestamp", n)
+		}
+	}
+
 	cancel()
 	r.Wait()
-	if s := r.Stats(); s.Received != 5 || s.Dropped != 0 {
+	if s := r.Stats(); s.Received != 6 || s.Dropped != 0 || s.WriteFailed != 0 {
 		t.Errorf("receiver stats = %+v", s)
 	}
 }

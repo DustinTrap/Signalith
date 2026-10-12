@@ -3,6 +3,8 @@
 #   .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
 # A new config receives syslog on UDP and TCP 514; pass -SyslogUdp "" and
 # -SyslogTcp "" to leave it off, or other addresses such as 0.0.0.0:1514.
+# The firewall rules for syslog admit only the syslog.allow senders when the
+# config lists any.
 param(
   [string]$OpenSearchUrl = "http://127.0.0.1:9200",
   [string]$Listen = "0.0.0.0:8080",
@@ -30,21 +32,27 @@ icacls $ConfigDir /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI
 & $exe service start
 New-NetFirewallRule -DisplayName "Signalith" -Direction Inbound -Protocol TCP -LocalPort ($Listen.Split(":")[-1]) -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
-# Open the syslog ports the config turns on (syslog.udp, syslog.tcp, syslog.tls).
-$syslog = @{}
-$inSyslog = $false
-foreach ($line in Get-Content $config) {
-  if ($line -match '^\S') { $inSyslog = $line -match '^syslog:'; continue }
-  if ($inSyslog -and $line -match '^\s+(udp|tcp|tls):\s*["'']?([^"''#\s]*)') { $syslog[$Matches[1]] = $Matches[2] }
-}
-foreach ($kind in "udp", "tcp", "tls") {
-  $addr = $syslog[$kind]
-  if (-not $addr) { continue }
-  $port = $addr.Split(":")[-1]
-  $protocol = if ($kind -eq "udp") { "UDP" } else { "TCP" }
-  $name = "Signalith syslog $($kind.ToUpper()) $port"
-  Remove-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
-  New-NetFirewallRule -DisplayName $name -Direction Inbound -Protocol $protocol -LocalPort $port -Action Allow -ErrorAction SilentlyContinue | Out-Null
-  Write-Host "Syslog: receiving on $protocol port $port ($kind)."
+# Open the syslog ports the config turns on (syslog.udp, syslog.tcp,
+# syslog.tls), only to the senders in syslog.allow when it lists any.
+# signalith reads the config itself, so every YAML style works.
+$ports = @(& $exe validate -c $config -syslog-ports)
+if ($LASTEXITCODE -ne 0) {
+  Write-Warning "Could not read the syslog settings in $config, so no firewall rules for syslog were added. Fix the config, then run this script again."
+} else {
+  foreach ($line in $ports) {
+    $kind, $port, $allow = $line -split ' '
+    if (-not $port) { continue }
+    $protocol = if ($kind -eq "udp") { "UDP" } else { "TCP" }
+    $name = "Signalith syslog $($kind.ToUpper()) $port"
+    $rule = @{ DisplayName = $name; Direction = "Inbound"; Protocol = $protocol; LocalPort = $port; Action = "Allow" }
+    $from = "any sender"
+    if ($allow -and $allow -ne "any") {
+      $rule.RemoteAddress = $allow -split ','
+      $from = $allow -replace ',', ', '
+    }
+    Remove-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
+    New-NetFirewallRule @rule -ErrorAction SilentlyContinue | Out-Null
+    Write-Host "Syslog: receiving on $protocol port $port ($kind) from $from."
+  }
 }
 Write-Host "Signalith is running. Open http://localhost:$($Listen.Split(':')[-1])"

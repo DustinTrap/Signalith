@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
 
 func TestMain(m *testing.M) {
@@ -26,7 +29,7 @@ var (
 // document that would be indexed.
 func doc(line string) map[string]any {
 	m := Parse([]byte(line), now)
-	ev := m.Event(sender, now)
+	ev := m.Event(sender, now, 0)
 	d := ev.Document()
 	d["_model"] = ev.Model
 	d["_format"] = m.Format
@@ -56,11 +59,13 @@ func TestParseFormats(t *testing.T) {
 	}{
 		{"RFC 5424 example with BOM", "<34>1 2003-10-11T22:14:15.003Z mymachine.example.com su - ID47 - \ufeff'su root' failed for lonvick on /dev/pts/8",
 			map[string]any{"_format": "rfc5424", "host": "mymachine.example.com", "app": "su", "msgid": "ID47", "facility": "auth",
-				"severity": "critical", "severity_id": int64(2), "@timestamp": "2003-10-11T22:14:15.003Z", "dvc": "192.0.2.50",
+				"severity": "critical", "severity_id": int64(2), "dvc": "192.0.2.50",
+				// Older than syslog accepts as the event time: kept, but not used.
+				"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2003-10-11T22:14:15.003Z",
 				"sourcetype": "syslog", "_model": "Other", "process_id": nil}},
 		{"RFC 5424 structured data", `<165>1 2003-08-24T05:14:15.000003-07:00 192.0.2.1 myproc 8710 - [exampleSDID@32473 iut="3" eventSource="Application" eventID="1011"][examplePriority@32473 class="high"] An application event log entry`,
 			map[string]any{"host": "192.0.2.1", "app": "myproc", "process_id": int64(8710), "facility": "local4", "severity": "notice",
-				"@timestamp": "2003-08-24T12:14:15.000003Z", "sd_examplesdid_32473_iut": "3", "sd_examplesdid_32473_eventsource": "Application",
+				"device_time": "2003-08-24T12:14:15.000003Z", "sd_examplesdid_32473_iut": "3", "sd_examplesdid_32473_eventsource": "Application",
 				"sd_exampleprioritysd_32473_class": nil, "sd_examplepriority_32473_class": "high"}},
 		{"RFC 5424 escaped structured data", `<13>1 2026-10-12T13:00:00Z h app - - [x@1 a="q\"uote" b="back\\slash" c="br\]acket"] msg`,
 			map[string]any{"sd_x_1_a": `q"uote`, "sd_x_1_b": `back\slash`, "sd_x_1_c": "br]acket"}},
@@ -82,11 +87,15 @@ func TestParseFormats(t *testing.T) {
 			map[string]any{"_format": "rfc3164", "_model": "Authentication", "src_user": "alice", "user": "root", "facility": nil, "severity": nil}},
 		{"no hostname", "<4>Oct 12 13:59:00 kernel: eth0: link up",
 			map[string]any{"host": "192.0.2.50", "app": "kernel", "facility": "kern", "severity": "warning"}},
-		{"single-digit day", "<13>Oct  2 13:59:00 h app: x", map[string]any{"@timestamp": "2026-10-02T13:59:00Z", "host": "h"}},
+		{"single-digit day", "<13>Oct  9 13:59:00 h app: x", map[string]any{"@timestamp": "2026-10-09T13:59:00Z", "host": "h", "device_time": nil}},
 		{"ISO timestamp", "<86>2026-10-12T13:59:00.123+02:00 web1 useradd[900]: new user: name=backdoor, UID=1002, GID=1002, home=/home/backdoor, shell=/bin/bash",
 			map[string]any{"_model": "Change", "object": "backdoor", "@timestamp": "2026-10-12T11:59:00.123Z", "facility": "authpriv", "host": "web1"}},
 		{"ISO timestamp with a space", "<13>2026-10-12 13:59:00 h app: x", map[string]any{"@timestamp": "2026-10-12T13:59:00Z", "host": "h", "app": "app"}},
-		{"year after the time", "<13>Oct 12 13:59:00 2025 h app: x", map[string]any{"@timestamp": "2025-10-12T13:59:00Z", "host": "h"}},
+		{"year after the time", "<13>Oct 11 13:59:00 2026 h app: x", map[string]any{"@timestamp": "2026-10-11T13:59:00Z", "host": "h"}},
+		{"last year", "<13>Oct 12 13:59:00 2025 h app: x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2025-10-12T13:59:00Z", "host": "h"}},
+		{"a week old", "<13>1 2026-10-05T14:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-05T14:00:00Z", "device_time": nil}},
+		{"older than a week", "<13>1 2026-10-05T13:59:59Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2026-10-05T13:59:59Z"}},
+		{"yearless, almost a year back", "<13>Oct 14 13:59:00 h app: x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2025-10-14T13:59:00Z"}},
 		{"upper-case host is not a zone", "<13>Oct 12 13:59:00 MAIL app: x", map[string]any{"host": "MAIL", "app": "app"}},
 		{"IPv6 host", "<13>Oct 12 13:59:00 2001:db8::1 app[7]: x", map[string]any{"host": "2001:db8::1", "app": "app", "process_id": int64(7)}},
 		{"tag with slash", "<22>Oct 12 13:59:00 mail postfix/smtpd[1234]: connect from unknown[192.0.2.1]",
@@ -106,6 +115,27 @@ func TestParseFormats(t *testing.T) {
 			map[string]any{"sequence": int64(45), "host": "router1", "@timestamp": "2026-10-12T13:59:00.123Z", "signature_id": "LINEPROTO-5-UPDOWN"}},
 		{"Cisco relayed with its own timestamp", "<187>Oct 12 13:59:00 rtr2 1234: Oct 12 13:58:59 EST: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed by user 'admin'",
 			map[string]any{"host": "rtr2", "sequence": int64(1234), "signature_id": "MGBL-CONFIG-6-DB_COMMIT", "@timestamp": "2026-10-12T13:59:00Z", "severity": "error"}},
+		{"Cisco IOS service sequence-numbers", "<189>48: 000048: Oct 12 13:59:00.123: %SYS-5-CONFIG_I: Configured from console by admin on vty0 (10.0.0.9)",
+			map[string]any{"host": "192.0.2.50", "sequence": int64(48), "signature_id": "SYS-5-CONFIG_I", "@timestamp": "2026-10-12T13:59:00.123Z", "vendor_product": "Cisco"}},
+		{"Cisco IOS sequence-numbers, unsynced clock", "<189>48: 000048: *Oct 12 13:59:00.123 UTC: %SYS-5-CONFIG_I: Configured from console",
+			map[string]any{"host": "192.0.2.50", "sequence": int64(48), "signature_id": "SYS-5-CONFIG_I", "@timestamp": "2026-10-12T14:00:00Z"}},
+		{"Cisco IOS origin-id and sequence-numbers", "<189>48: rtr1: 000048: Oct 12 13:59:00.123 UTC: %SYS-5-CONFIG_I: Configured from console",
+			map[string]any{"host": "rtr1", "app": "SYS", "sequence": int64(48), "signature_id": "SYS-5-CONFIG_I", "@timestamp": "2026-10-12T13:59:00.123Z", "vendor_product": "Cisco"}},
+		{"Cisco NX-OS", "<187>: 2026 Oct 12 13:59:00 UTC: %ETHPORT-3-IF_DOWN_LINK_FAILURE: Interface Ethernet1/49 is down (Link failure)",
+			map[string]any{"host": "192.0.2.50", "app": "ETHPORT", "signature_id": "ETHPORT-3-IF_DOWN_LINK_FAILURE", "@timestamp": "2026-10-12T13:59:00Z",
+				"severity": "error", "vendor_product": "Cisco"}},
+		{"Cisco IOS XR", "<189>1234: RP/0/RSP0/CPU0:Oct 12 13:59:00.123 UTC: config[65738]: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed by user 'admin'.",
+			map[string]any{"host": "192.0.2.50", "app": "config", "process_id": int64(65738), "sequence": int64(1234), "signature_id": "MGBL-CONFIG-6-DB_COMMIT",
+				"@timestamp": "2026-10-12T13:59:00.123Z", "vendor_product": "Cisco"}},
+		{"Cisco IOS XR with host", "<189>1234: xr1 RP/0/RSP0/CPU0:Oct 12 13:59:00.123 UTC: config[65738]: %MGBL-CONFIG-6-DB_COMMIT : Configuration committed",
+			map[string]any{"host": "xr1", "app": "config", "signature_id": "MGBL-CONFIG-6-DB_COMMIT", "@timestamp": "2026-10-12T13:59:00.123Z"}},
+		{"UniFi", "<4>Oct 12 13:59:00 U7PG2,b4fbe4aabbcc,v4.3.20.11298: hostapd: ath0: STA 00:11:22:33:44:55 IEEE 802.11: associated",
+			map[string]any{"host": "192.0.2.50", "app": "hostapd", "@timestamp": "2026-10-12T13:59:00Z"}},
+		{"UniFi with host", "<4>Oct 12 13:59:00 ap-lobby BZ2,18e829aabbcc,v4.0.80.10875: hostapd: ath0: STA associated",
+			map[string]any{"host": "ap-lobby", "app": "hostapd"}},
+		{"all-digit word is not a host", "<13>12: 34: Oct 12 13:59:00 h app: x", map[string]any{"host": "h", "app": "app", "sequence": int64(12)}},
+		{"sshd-session (OpenSSH 9.8+)", "<38>Oct 12 13:59:00 web1 sshd-session[1234]: Accepted password for bob from 10.0.0.5 port 50000 ssh2",
+			map[string]any{"_model": "Authentication", "app": "sshd", "action": "success", "user": "bob", "src": "10.0.0.5", "process_id": int64(1234)}},
 		{"Cisco without PRI", "%LINK-3-UPDOWN: Interface Gi0/2, changed state to down",
 			map[string]any{"signature_id": "LINK-3-UPDOWN", "severity": "error", "severity_id": int64(3), "facility": nil}},
 		{"trailing NUL and CRLF", "<13>Oct 12 13:59:00 h app: hi\r\n\x00", map[string]any{"message": "<13>Oct 12 13:59:00 h app: hi"}},
@@ -113,8 +143,9 @@ func TestParseFormats(t *testing.T) {
 			"_model": "Other", "sourcetype": "syslog", "facility": nil, "app": nil}},
 		{"PRI out of range", "<999>hello", map[string]any{"_format": "raw", "facility": nil, "message": "<999>hello"}},
 		{"PRI only", "<13>", map[string]any{"facility": "user", "message": "<13>"}},
-		{"clock never set", "<13>1 1970-01-01T00:00:00Z h a - - - boot", map[string]any{"@timestamp": "2026-10-12T14:00:00Z"}},
-		{"clock far ahead", "<13>1 2099-01-01T00:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z"}},
+		{"clock never set", "<13>1 1970-01-01T00:00:00Z h a - - - boot", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "1970-01-01T00:00:00Z"}},
+		{"clock far ahead", "<13>1 2099-01-01T00:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2099-01-01T00:00:00Z"}},
+		{"a day ahead", "<13>1 2026-10-13T14:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-13T14:00:00Z"}},
 		{"impossible date", "<13>Feb 30 13:59:00 h app: x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z"}},
 	}
 	for _, c := range cases {
@@ -145,7 +176,7 @@ func TestStrangeInputNeverFails(t *testing.T) {
 	}
 	for _, in := range inputs {
 		m := Parse([]byte(in), now)
-		d := m.Event(sender, now).Document()
+		d := m.Event(sender, now, 0).Document()
 		if _, err := json.Marshal(d); err != nil {
 			t.Errorf("%q: %v", in, err)
 		}
@@ -188,6 +219,16 @@ func TestCEF(t *testing.T) {
 				"vendor_product": "Fortinet Fortigate"}},
 		{"device host name when the header has none", "<134>CEF:0|V|P|1|1|N|Very-High|dvchost=sensor1 rt=1791813540000",
 			map[string]any{"host": "sensor1", "severity": "critical", "@timestamp": "2026-10-12T13:59:00Z"}},
+		{"yearless rt", "<134>Oct 12 13:59:00 fw1 CEF:0|V|P|1|1|N|3|rt=Oct 12 13:00:00.123 UTC src=10.0.0.1",
+			map[string]any{"@timestamp": "2026-10-12T13:00:00.123Z"}},
+		{"rt with a numeric zone", "<134>Oct 12 13:59:00 fw1 CEF:0|V|P|1|1|N|3|rt=Oct 12 2026 10:00:00.123 +0200 src=10.0.0.1",
+			map[string]any{"@timestamp": "2026-10-12T08:00:00.123Z"}},
+		{"yearless rt with a numeric zone", "CEF:0|V|P|1|1|N|3|rt=Oct 12 13:30:00 -07:00 src=10.0.0.1",
+			map[string]any{"@timestamp": "2026-10-12T20:30:00Z", "device_time": nil}},
+		{"implausible rt keeps the header time", "<134>Oct 12 13:59:00 fw1 CEF:0|V|P|1|1|N|3|rt=1 src=10.0.0.1",
+			map[string]any{"@timestamp": "2026-10-12T13:59:00Z", "cef_rt": "1", "device_time": nil}},
+		{"old rt and no header time", "CEF:0|V|P|1|1|N|3|rt=978307200000 src=10.0.0.1",
+			map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2001-01-01T00:00:00Z"}},
 		{"bad numbers stay as text", "CEF:0|V|P|1|1|N|3|spt=abc dpt=80", map[string]any{"cef_spt": "abc", "dest_port": int64(80), "src_port": nil}},
 		{"not enough header fields", "CEF:0|only|three|fields", map[string]any{"sourcetype": "syslog", "cef_vendor": nil}},
 		{"not a version", "CEF:x|a|b|c|d|e|f|src=1", map[string]any{"sourcetype": "syslog"}},
@@ -219,23 +260,57 @@ func TestCEFExtraFieldsAreCapped(t *testing.T) {
 }
 
 func TestFieldNameBudget(t *testing.T) {
-	b := nameBudget{max: 3, seen: map[string]struct{}{}}
-	f := map[string]any{"cef_a": "1", "cef_b": "2", "src": "x"}
-	b.limit(f, now)
-	g := map[string]any{"cef_a": "1", "cef_c": "3", "cef_d": "4", "sd_e": "5", "dest": "y"}
-	b.limit(g, now)
-	extras := 0
-	for k := range g {
-		if isExtra(k) {
-			extras++
+	b := newNameBudget(3, 2)
+	a, c := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2")
+	day := time.Date(2026, 10, 14, 1, 0, 0, 0, time.UTC)
+	ev := func(model string, at time.Time, fields ...string) ingest.Event {
+		f := map[string]any{"src": "x"}
+		for _, k := range fields {
+			f[k] = "v"
 		}
+		return ingest.Event{Model: model, Time: at, Fields: f}
 	}
-	if g["cef_a"] == nil || extras != 2 || g["dest"] == nil {
-		t.Errorf("after budget: %v", g)
+	extras := func(e ingest.Event) []string {
+		var out []string
+		for k := range e.Fields {
+			if isExtra(k) {
+				out = append(out, k)
+			}
+		}
+		slices.Sort(out)
+		return out
 	}
-	h := map[string]any{"cef_z": "1"}
-	b.limit(h, now.Add(24*time.Hour))
-	if h["cef_z"] == nil {
-		t.Error("budget did not reset the next day")
+
+	// One sender gets at most its share of an index's names.
+	e1 := ev("Other", day, "cef_a", "cef_b", "cef_c")
+	b.limit(e1, a, now, DefaultMaxAge)
+	if got := extras(e1); len(got) != 2 || e1.Fields["src"] == nil {
+		t.Errorf("first sender kept %v", got)
+	}
+	// Another sender fills the index; names already there always pass.
+	e2 := ev("Other", day, "cef_x", "cef_y", extras(e1)[0])
+	b.limit(e2, c, now, DefaultMaxAge)
+	if got := extras(e2); len(got) != 2 {
+		t.Errorf("second sender kept %v", got)
+	}
+	// The same index on the next receive day: the budget does not reset,
+	// so the index never gets more than its budget of names.
+	e3 := ev("Other", day.Add(5*time.Hour), "cef_new1", "cef_new2")
+	b.limit(e3, netip.MustParseAddr("10.0.0.3"), now.Add(24*time.Hour), DefaultMaxAge)
+	if got := extras(e3); len(got) != 0 {
+		t.Errorf("full index took %v the next day", got)
+	}
+	// Another model or another day is another index.
+	e4 := ev("Network_Traffic", day, "cef_new1")
+	b.limit(e4, a, now, DefaultMaxAge)
+	e5 := ev("Other", day.Add(24*time.Hour), "cef_new1")
+	b.limit(e5, a, now, DefaultMaxAge)
+	if len(extras(e4)) != 1 || len(extras(e5)) != 1 {
+		t.Errorf("other indices: %v %v", extras(e4), extras(e5))
+	}
+	// Indices no event can reach any more are forgotten.
+	b.limit(ev("Other", now.Add(30*24*time.Hour), "cef_z"), a, now.Add(30*24*time.Hour), DefaultMaxAge)
+	if len(b.indices) != 1 {
+		t.Errorf("%d indices remembered", len(b.indices))
 	}
 }

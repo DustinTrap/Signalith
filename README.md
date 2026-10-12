@@ -84,12 +84,15 @@ publishes port 514 too. To forward a Linux server's logs with rsyslog, add one l
 ```
 
 `@@` sends over TCP; a single `@` sends over UDP. Signalith reads RFC 5424 and RFC 3164
-syslog (including the usual variations, such as Cisco IOS and ASA), and **CEF**
-(Common Event Format) from security products, mapped to CIM fields like `src`, `dest`,
-`dest_port`, `user` and `action`. Forwarded sshd, sudo, su and user-management messages
+syslog (including the usual variations, such as Cisco IOS, IOS XR, NX-OS and ASA), and
+**CEF** (Common Event Format) from security products, mapped to CIM fields like `src`,
+`dest`, `dest_port`, `user` and `action`. Forwarded sshd, sudo, su and user-management messages
 land in Authentication and Change like agent data, so the built-in detections apply.
 Events have `sourcetype=syslog` (or `cef`), `host` from the message, `dvc` set to the
-sender's address, and `facility` and `severity`.
+sender's address, and `facility` and `severity`. The event time is the one in the message,
+unless it is more than a week old (or older than `retention.days`) or more than a day
+ahead; then it is the time Signalith received the message, and the device's own time is
+kept in `device_time`.
 
 To accept syslog only from known senders, list them under `syslog.allow`:
 
@@ -100,10 +103,14 @@ syslog:
   allow: [10.0.0.0/8, 192.0.2.10]
 ```
 
+Over UDP the sender address can be forged, so for trusted senders use TCP or TLS, and
+restrict the port with a firewall as well. The Windows installer limits its firewall
+rules to the `syslog.allow` senders.
+
 Ports below 1024 need extra permission on Linux. The systemd unit grants it; when
 running Signalith another way, use a port such as `0.0.0.0:1514`. `/api/health` shows,
-under `syslog`, the listeners, how many messages were received, dropped and rejected,
-and the most recent senders.
+under `syslog`, the listeners, how many messages were received, dropped, not written
+and rejected, and the most recent senders.
 
 ### Sign in
 

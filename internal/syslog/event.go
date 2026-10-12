@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
@@ -12,6 +13,16 @@ import (
 // maxExtraFields caps the vendor-specific fields (cef_* and sd_*) one
 // message can add, so one sender cannot explode the index mapping.
 const maxExtraFields = 64
+
+// DefaultMaxAge is how old a message's own timestamp may be before the
+// receive time is used instead. Events go to one index per day, so without
+// a bound a sender could create an index for every day it names and use up
+// the cluster's shard limit, which stops all ingestion.
+const DefaultMaxAge = 7 * 24 * time.Hour
+
+// maxAhead is how far in the future a message's timestamp may be (clock
+// skew and time zone mistakes) before the receive time is used instead.
+const maxAhead = 24 * time.Hour
 
 var facilityNames = [24]string{
 	"kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news",
@@ -24,16 +35,18 @@ var severityNames = [8]string{"emergency", "alert", "critical", "error", "warnin
 // Event turns a parsed message into an event for the ingest pipeline.
 // sender is the address the message came from and received is when it
 // arrived; they fill dvc, host when the message names none, and the time
-// when the message has no usable timestamp.
-func (m *Message) Event(sender netip.Addr, received time.Time) ingest.Event {
+// when the message has no usable timestamp. A message time older than
+// maxAge (zero: DefaultMaxAge) or more than a day ahead is not used for the
+// event time; it is kept in device_time instead.
+func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Duration) ingest.Event {
+	if maxAge <= 0 {
+		maxAge = DefaultMaxAge
+	}
 	senderIP := ""
 	if sender.IsValid() {
-		senderIP = sender.Unmap().String()
+		senderIP = sender.Unmap().WithZone("").String()
 	}
-	host := m.Hostname
-	if len(host) > 255 {
-		host = host[:255]
-	}
+	host := truncate(m.Hostname, maxHostLen)
 	app := m.AppName
 	if app == "" && m.Cisco != nil {
 		app = m.Cisco.Facility
@@ -43,7 +56,9 @@ func (m *Message) Event(sender netip.Addr, received time.Time) ingest.Event {
 	t := m.Time
 	if m.CEF != nil {
 		f := map[string]any{"app": app}
-		if ct := cefFieldsFor(m.CEF, f, &extra); !ct.IsZero() {
+		// The CEF time (rt, end or start) is more precise than the syslog
+		// header, but an implausible one does not replace a good header.
+		if ct := cefFieldsFor(m.CEF, f, &extra, received); !ct.IsZero() && (plausible(ct, received, maxAge) || !plausible(t, received, maxAge)) {
 			t = ct
 		}
 		if host == "" {
@@ -105,7 +120,12 @@ func (m *Message) Event(sender netip.Addr, received time.Time) ingest.Event {
 		}
 	}
 	f["message"] = m.Raw
-	ev.Time = eventTime(t, received)
+	ev.Time = received.UTC()
+	if plausible(t, received, maxAge) {
+		ev.Time = t.UTC()
+	} else if !t.IsZero() {
+		f["device_time"] = t.UTC().Format(time.RFC3339Nano)
+	}
 	return ev
 }
 
@@ -119,13 +139,26 @@ func ciscoProduct(facility string) string {
 	return "Cisco"
 }
 
-// eventTime uses the message time unless it is missing or implausible: a
-// clock that was never set (before 2000) or more than a day in the future.
-func eventTime(t, received time.Time) time.Time {
-	if t.IsZero() || t.Year() < 2000 || t.After(received.Add(24*time.Hour)) {
-		return received.UTC()
+// plausible reports whether a message time can be the event time: set, no
+// older than maxAge (a clock never set, a replayed or forged message) and
+// at most a day ahead. Keeping event times in this window bounds the daily
+// indices syslog can write to.
+func plausible(t, received time.Time, maxAge time.Duration) bool {
+	return !t.IsZero() && !t.Before(received.Add(-maxAge)) && !t.After(received.Add(maxAhead))
+}
+
+// maxHostLen is the longest host name kept, the DNS limit.
+const maxHostLen = 255
+
+// truncate cuts s to at most n bytes without splitting a character.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	return t.UTC()
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // isExtra reports whether a field is vendor-specific (cef_* or sd_*), the
