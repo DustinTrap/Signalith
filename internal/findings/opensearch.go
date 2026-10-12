@@ -141,6 +141,9 @@ func filterQuery(flt Filter) map[string]any {
 	if !flt.Since.IsZero() {
 		fs = append(fs, map[string]any{"range": map[string]any{"created": map[string]any{"gte": flt.Since.UTC().Format(time.RFC3339Nano)}}})
 	}
+	if !flt.UpdatedSince.IsZero() {
+		fs = append(fs, map[string]any{"range": map[string]any{"updated": map[string]any{"gte": flt.UpdatedSince.UTC().Format(time.RFC3339Nano)}}})
+	}
 	if t := strings.TrimSpace(flt.Text); t != "" {
 		fs = append(fs, map[string]any{"bool": map[string]any{"minimum_should_match": 1, "should": []any{
 			map[string]any{"match": map[string]any{"title": t}},
@@ -169,9 +172,11 @@ type searchResp struct {
 
 func (s *OpenSearch) Search(ctx context.Context, flt Filter) ([]*Finding, int, error) {
 	limit := flt.Limit
-	if limit <= 0 || limit > 1000 {
+	if limit <= 0 {
 		limit = 200
 	}
+	// OpenSearch returns at most 10000 hits per request by default.
+	limit = min(limit, 10000)
 	body := map[string]any{
 		"query":            filterQuery(flt),
 		"size":             limit,

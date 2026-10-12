@@ -12,6 +12,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
@@ -65,6 +66,10 @@ func newTestServerWith(t *testing.T, change func(*Server)) (*httptest.Server, *f
 	eng := &search.Engine{Store: fos, Assets: lists}
 	fs := findings.NewMemory()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	boards, err := dashboards.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{
 		Config:     cfg,
 		Engine:     eng,
@@ -74,6 +79,7 @@ func newTestServerWith(t *testing.T, change func(*Server)) (*httptest.Server, *f
 		Scheduler:  &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Log: logger},
 		Findings:   fs,
 		Assets:     lists,
+		Dashboards: boards,
 		Log:        logger,
 		Version:    "test",
 	}

@@ -18,10 +18,11 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadOnlyPaths=/etc/signalith
-# Custom detections and asset and identity lists are saved here.
+# Custom detections, asset and identity lists, and dashboards are saved here.
 StateDirectory=signalith
 Environment=SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
 Environment=SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
+Environment=SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards
 
 [Install]
 WantedBy=multi-user.target

@@ -87,3 +87,29 @@ func TestAssistantSettings(t *testing.T) {
 		t.Errorf("env key: %v %+v", err, c)
 	}
 }
+
+func TestDashboardSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dash.yaml")
+	os.WriteFile(path, []byte("dashboards:\n  dir: \"\"\n  stale_after: soon\n"), 0o600)
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	_, err := Load(path)
+	for _, want := range []string{"dashboards.dir", "dashboards.stale_after"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	os.WriteFile(path, []byte("dashboards:\n  stale_after: 1d\n"), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DashboardsDir() != filepath.Join(dir, "dashboards") || c.StaleAfter().Hours() != 24 {
+		t.Errorf("dir %s stale %v", c.DashboardsDir(), c.StaleAfter())
+	}
+	other := filepath.Join(t.TempDir(), "dash")
+	t.Setenv("SIGNALITH_DASHBOARDS_DIR", other)
+	if c, err := Load(path); err != nil || c.DashboardsDir() != other {
+		t.Errorf("env dir: %v %v", err, c)
+	}
+}

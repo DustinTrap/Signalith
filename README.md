@@ -5,8 +5,9 @@ Signalith stores events in [OpenSearch](https://opensearch.org), collects them w
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
 query language that reads like SPL, plain-English questions that become queries, a
 visual query builder, CIM-style data models, scheduled detections with a findings
-queue for triage, Sigma rule import, a MITRE ATT&CK coverage map, and risk-based
-alerting with asset and identity context.
+queue for triage, Sigma rule import, a MITRE ATT&CK coverage map, risk-based
+alerting with asset and identity context, and a security posture dashboard plus
+dashboards you build from queries.
 Threat intel and investigations come in later phases.
 
 The server is a single Go binary with the web UI embedded. It runs as a Windows
@@ -89,12 +90,15 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
+| `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
+| `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
 | `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
 | `assistant.url`, `assistant.model`, `assistant.api_key` | per provider | Endpoint, model name and key; `anthropic` defaults to `claude-sonnet-5-5` |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_ASSISTANT_API_KEY`).
+`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
+`SIGNALITH_ASSISTANT_API_KEY`).
 
 ## Detections and findings
 
@@ -167,6 +171,49 @@ Context changes three things:
 Risk events are stored under the Risk data model (`datamodel=Risk`) in
 `<prefix>-risk-YYYY.MM.DD` indices, which ordinary searches leave out.
 
+## Dashboards
+
+The **Dashboards** tab opens on the built-in **Security posture** dashboard, like the
+Splunk ES Security Posture and executive summary views. Pick a time range (last hour
+to 30 days) and, if you like, auto-refresh. It shows:
+
+- **Key indicators** compared with the previous period of the same length: open
+  findings by urgency, new findings, findings closed, mean time to triage, mean time
+  to resolve, and events ingested.
+- **Findings over time by urgency**, **top detections firing** (findings and risk
+  events), **top risk objects** and **ATT&CK tactics seen**.
+- **Events by data model** and **by source type** over time.
+- **Detection health**: how many detections are enabled, which ones failed on their
+  last run, which enabled ones matched nothing in 30 days, and which hosts stopped
+  sending (quiet for `dashboards.stale_after`).
+
+**Custom dashboards** are panels of queries shown as a single value (optionally with
+the change from the previous period), a table, bars, or a line or area chart. Build
+one with **New dashboard**, then **Add panel**: ask a question in plain English and
+the query is written for you, or write it, and preview before saving. On the Search
+page, **Add to dashboard** turns the current search into a panel. Panels can be
+edited, reordered and removed in the UI; they run in parallel and a failing panel
+shows its error without breaking the others.
+
+Each custom dashboard is a YAML file in `dashboards.dir`, so dashboards can be
+reviewed and shared in Git. Files dropped into the folder show up without a restart.
+
+```yaml
+id: auth-watch
+title: Authentication watch
+time_range: 24h
+panels:
+  - title: Failed logons
+    query: datamodel=Authentication action=failure | stats count
+    viz: single
+    compare: true
+  - title: Logons over time
+    query: datamodel=Authentication | timechart count by action
+    viz: area
+```
+
+See [docs/dashboards.md](docs/dashboards.md) for every option and the API.
+
 ## Writing queries
 
 ```
@@ -231,6 +278,7 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/findings` | Findings model and its OpenSearch store |
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
 | `internal/risk` | Risk event store |
+| `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
@@ -252,7 +300,7 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 
 1. **Search foundation**: agents, parsing, data models, query language, builder, installers.
 2. **Detect and triage**: scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
-3. **ES depth** (in progress): risk-based alerting, asset and identity context, and plain-English to query are in; threat intel feeds and posture dashboards are next.
+3. **ES depth** (in progress): risk-based alerting, asset and identity context, plain-English to query, and posture dashboards (security posture summary and custom dashboards) are in; threat intel feeds are next.
 4. **Respond and scale**: investigation cases, response actions, playbooks, multi-node deployments.
 
 ## License
