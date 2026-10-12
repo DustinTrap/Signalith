@@ -4,6 +4,8 @@
 #
 #   docker compose -f deploy/docker/docker-compose.yml up -d
 #   open http://localhost:8080  (user admin, password from SIGNALITH_ADMIN_PASSWORD below)
+#
+# To update: git pull, then run the same command; it rebuilds Signalith.
 services:
   opensearch:
     image: opensearchproject/opensearch:2.17.1
@@ -26,6 +28,9 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
+    # Rebuild from the checked-out code on every `up`, so after `git pull` the
+    # same command runs the new version instead of the last image built.
+    pull_policy: build
     depends_on:
       opensearch: { condition: service_healthy }
     ports:
