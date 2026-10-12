@@ -314,37 +314,44 @@
   </section>
 
   <!-- Dashboards -->
-  <section id="page-dashboards" class="page" data-legacy>
+  <section id="page-dashboards" class="page">
     <div class="page-head">
-      <select id="db-select" class="db-select" aria-label="Dashboard"></select>
-      <div class="toolbar">
-        <select id="db-range" title="Time range" aria-label="Time range">
-          <option value="1h">Last hour</option>
-          <option value="4h">Last 4 hours</option>
-          <option value="24h" selected>Last 24 hours</option>
-          <option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option>
-        </select>
-        <select id="db-refresh" title="Auto-refresh" aria-label="Auto-refresh">
-          <option value="0">Auto-refresh off</option>
-          <option value="60">Every minute</option>
-          <option value="300">Every 5 minutes</option>
-          <option value="900">Every 15 minutes</option>
-        </select>
-        <button id="db-reload">Refresh</button>
-        <button id="db-new">New dashboard</button>
+      <div class="db-head">
+        <details class="menu db-switch" id="db-switch">
+          <summary class="dash-switch" title="Switch dashboard"><span class="dash-switch__icon"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg></span><b id="db-name">Security posture</b><span class="badge" id="db-builtin">Built-in</span><svg class="icon" aria-hidden="true"><use href="#i-chevrons-up-down"/></svg><span class="sr-only">Switch dashboard</span></summary>
+          <div class="menu__panel" id="db-menu"></div>
+        </details>
+        <p id="db-desc" class="page-head__desc"></p>
+      </div>
+      <div class="page-head__actions">
+        <div class="seg" id="db-range" role="group" aria-label="Time range">
+          <button type="button" data-range="1h" title="Last hour">1h</button>
+          <button type="button" data-range="4h" title="Last 4 hours">4h</button>
+          <button type="button" data-range="24h" title="Last 24 hours" aria-pressed="true">24h</button>
+          <button type="button" data-range="7d" title="Last 7 days">7d</button>
+          <button type="button" data-range="30d" title="Last 30 days">30d</button>
+        </div>
+        <label class="switch hide-sm" title="Reload the dashboard while this page is open"><input type="checkbox" id="db-auto">Auto-refresh</label>
+        <div class="db-tools hidden" id="db-tools">
+          <button class="btn btn--ghost" type="button" id="db-edit" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
+          <a class="btn btn--ghost btn--icon" id="db-yaml" href="#" download title="Download YAML" aria-label="Download YAML"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></a>
+          <button class="btn btn--secondary" type="button" id="db-add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add panel</button>
+        </div>
+        <button class="btn btn--secondary" type="button" id="db-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New dashboard</button>
       </div>
     </div>
-    <p id="db-desc" class="muted db-desc"></p>
-    <div id="db-tools" class="toolbar hidden">
-      <button id="db-add" class="primary">Add panel</button>
-      <button id="db-edit">Edit dashboard</button>
-      <a id="db-yaml" class="button-link" href="#">Download YAML</a>
+    <div id="db-problems" class="alert hidden" data-tone="warning" role="status"></div>
+    <div id="db-body" class="dash" aria-busy="false"></div>
+    <div class="db-foot">
+      <span class="db-live hidden" id="db-live"><span class="pulse" aria-hidden="true"></span>Live</span>
+      <span id="db-updated"></span>
+      <details class="menu db-every hidden" id="db-every">
+        <summary class="btn btn--ghost btn--sm" title="How often to reload"><span id="db-every-text">every minute</span><svg class="icon" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="menu__panel" id="db-every-menu"></div>
+      </details>
+      <button class="btn btn--ghost btn--sm" type="button" id="db-reload"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg>Refresh</button>
     </div>
-    <div id="db-problems" class="notice hidden"></div>
-    <div id="db-editor" class="panel hidden"></div>
-    <div id="db-body" class="dash-grid"></div>
-    <div id="db-updated" class="muted small db-updated"></div>
+    <dialog id="db-editor" class="modal" aria-labelledby="db-editor-title"></dialog>
   </section>
 
   <!-- Findings (incident review) -->
