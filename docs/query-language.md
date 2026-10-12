@@ -21,6 +21,7 @@ datamodel=Authentication action=failure earliest=-24h
 | `field=value` | Exact match, case-insensitive |
 | `field=val*` | Wildcard match with `*` and `?` |
 | `field=*` | The field has any value |
+| `src=10.0.0.0/8` | An IPv4 address range (CIDR) |
 | `field!=value` | Does not match |
 | `field>10`, `>=`, `<`, `<=` | Numeric (or text) comparison |
 | `field IN (a, b, c)` | Any of several values |
