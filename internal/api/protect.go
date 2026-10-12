@@ -24,9 +24,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
-		if r.TLS != nil || strings.HasPrefix(s.Config.Server.PublicURL, "https://") {
-			// Browsers then use only HTTPS for this site for a year. They
-			// ignore the header over plain HTTP or with a certificate
+		if s.overHTTPS(r) {
+			// Browsers then use only HTTPS for this site for a year. Sent
+			// only over HTTPS, directly or through a trusted proxy;
+			// browsers ignore it over plain HTTP or with a certificate
 			// they had to be told to accept.
 			h.Set("Strict-Transport-Security", "max-age=31536000")
 		}

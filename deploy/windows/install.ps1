@@ -1,8 +1,10 @@
 # Installs Signalith as a Windows service.
 # Run in an elevated PowerShell from the folder that contains signalith.exe:
 #   .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
-# A new config receives syslog on UDP and TCP 514; pass -SyslogUdp "" and
-# -SyslogTcp "" to leave it off, or other addresses such as 0.0.0.0:1514.
+# A new config serves the web UI over HTTPS with a certificate Signalith
+# makes for itself, and receives syslog on UDP and TCP 514 and over TLS on
+# 6514; pass -SyslogUdp "", -SyslogTcp "" or -SyslogTls "" to leave one
+# off, or other addresses such as 0.0.0.0:1514.
 # The firewall rules for syslog admit only the syslog.allow senders when the
 # config lists any.
 param(
@@ -10,6 +12,7 @@ param(
   [string]$Listen = "0.0.0.0:8080",
   [string]$SyslogUdp = "0.0.0.0:514",
   [string]$SyslogTcp = "0.0.0.0:514",
+  [string]$SyslogTls = "0.0.0.0:6514",
   [string]$InstallDir = "$env:ProgramFiles\Signalith",
   [string]$ConfigDir = "$env:ProgramData\Signalith"
 )
@@ -22,7 +25,7 @@ $config = Join-Path $ConfigDir "signalith.yaml"
 
 if (-not (Test-Path $config)) {
   # -flag=value keeps an empty value, which PowerShell would otherwise drop.
-  & $exe init -c $config -listen $Listen -opensearch $OpenSearchUrl "-syslog-udp=$SyslogUdp" "-syslog-tcp=$SyslogTcp"
+  & $exe init -c $config -listen $Listen -opensearch $OpenSearchUrl "-syslog-udp=$SyslogUdp" "-syslog-tcp=$SyslogTcp" "-syslog-tls=$SyslogTls"
 }
 # Only Administrators and SYSTEM may read the config (it holds the ingest token).
 icacls $ConfigDir /inheritance:r /grant:r "Administrators:(OI)(CI)F" "SYSTEM:(OI)(CI)F" | Out-Null
@@ -55,10 +58,12 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "Syslog: receiving on $protocol port $port ($kind) from $from."
   }
 }
-Write-Host "Signalith is running. Open http://localhost:$($Listen.Split(':')[-1])"
-# Retention settings saved in the web UI go to $ConfigDir\lookups, and days
-# archived before deletion to $ConfigDir\archive (retention.archive_dir in
-# signalith.yaml moves them). The lookups folder inherits the Administrators
+Write-Host "Signalith is running. Open https://localhost:$($Listen.Split(':')[-1])"
+Write-Host "Your browser warns about the certificate until you trust Signalith's own CA ($ConfigDir\tls\ca.pem); docs\https.md says how."
+# The HTTPS certificate and its CA go to $ConfigDir\tls. Retention settings
+# saved in the web UI go to $ConfigDir\lookups, and days archived before
+# deletion to $ConfigDir\archive (retention.archive_dir in signalith.yaml
+# moves them). The lookups folder inherits the Administrators
 # and SYSTEM only permissions above. The server gives the archive folder,
 # wherever it is, its own access list: SYSTEM, Administrators and the service
 # account only, not inherited from the drive.

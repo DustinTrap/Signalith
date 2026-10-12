@@ -96,6 +96,13 @@
     pass.focus();
   });
 
+  // The certificate link shows when this server has its own CA to give
+  // out (HTTPS with the certificate Signalith made for itself).
+  const caHelp = $('ca-help');
+  fetch('api/tls/ca.pem', { method: 'HEAD', cache: 'no-store' })
+    .then((r) => { caHelp.hidden = !r.ok; })
+    .catch(() => { /* no link then */ });
+
   forgot.addEventListener('click', () => {
     const open = forgotNote.hidden;
     forgotNote.hidden = !open;

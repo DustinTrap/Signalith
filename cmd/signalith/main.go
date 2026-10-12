@@ -11,6 +11,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -39,6 +41,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
+	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
 	"golang.org/x/term"
@@ -131,6 +134,7 @@ func cmdInit(args []string) error {
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
 	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
 	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
+	syslogTLS := fs.String("syslog-tls", "0.0.0.0:6514", "address to receive syslog on over TLS (empty: off)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	fs.Parse(args)
 
@@ -140,6 +144,9 @@ func cmdInit(args []string) error {
 	c := config.Default()
 	c.Server.Listen = *listen
 	c.Server.PublicURL = *publicURL
+	// HTTPS with a certificate the server makes for itself, and no
+	// agents over plain HTTP.
+	c.Server.TLS = &config.ServerTLS{Mode: config.TLSAuto, PlaintextIngest: "deny"}
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
 	c.OpenSearch.AllowInsecureHTTP = *osInsecure
@@ -147,6 +154,7 @@ func cmdInit(args []string) error {
 	// syslog section keep it off.
 	c.Syslog.UDP = *syslogUDP
 	c.Syslog.TCP = *syslogTCP
+	c.Syslog.TLS = *syslogTLS
 	pw := *password
 	generated := pw == ""
 	if generated {
@@ -166,6 +174,8 @@ func cmdInit(args []string) error {
 	}
 	fmt.Printf("Wrote %s\n\n", *path)
 	fmt.Printf("  Web UI:    %s\n", c.Server.PublicURL)
+	fmt.Printf("  HTTPS:     the server makes its own certificate when it starts; browsers warn\n")
+	fmt.Printf("             until you trust it (see docs/https.md)\n")
 	fmt.Printf("  User:      %s\n", c.Auth.AdminUser)
 	if generated {
 		fmt.Printf("  Password:  %s   (shown once; change it with: signalith passwd)\n", pw)
@@ -175,6 +185,28 @@ func cmdInit(args []string) error {
 	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
+}
+
+// httpsSummary says how the web UI and agents are protected in transit.
+func httpsSummary(c *config.Config) string {
+	var s string
+	switch c.Server.TLSMode() {
+	case config.TLSOff:
+		s = "HTTPS is off (server.tls.mode: off), so a reverse proxy in front must add it."
+	case config.TLSFiles:
+		cert, _ := c.TLSFiles()
+		s = "HTTPS is on with the certificate in " + cert + "."
+	default:
+		s = "HTTPS is on with Signalith's own certificate, kept in " + c.TLSDir() + "."
+	}
+	if c.Server.HTTPS() {
+		if c.Server.PlaintextIngest() {
+			s += " Agents may still send over plain HTTP (server.tls.plaintext_ingest: allow); the Health page lists any that do."
+		} else {
+			s += " Agents must send over HTTPS."
+		}
+	}
+	return s
 }
 
 // syslogSummary describes the syslog listeners, or "" when syslog is off.
@@ -231,6 +263,7 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
+	fmt.Println(httpsSummary(c))
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -577,17 +610,28 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	ret := newRetention(c, cl, log)
 	maxAge := c.MaxEventAge(retentionKeepDays(ret))
 	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
+	// The HTTPS certificate, which syslog over TLS uses too.
+	var certs *tlsauto.Manager
+	if c.Server.HTTPS() || c.Syslog.TLS != "" {
+		if certs, err = newCertificates(c, log); err != nil {
+			return err
+		}
+		go certs.Run(ctx)
+	}
 	// Closed once the index template is in place, so syslog does not
 	// create the day's first indices with the wrong field types.
 	templateReady := make(chan struct{})
 	var receiver *syslog.Receiver
 	if c.Syslog.Enabled() {
-		receiver = syslog.New(syslog.Config{
+		sc := syslog.Config{
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
-			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
 			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
-		}, pipeline, log)
+		}
+		if certs != nil {
+			sc.GetCertificate = certs.GetCertificate
+		}
+		receiver = syslog.New(sc, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err
 		}
@@ -689,6 +733,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
+		TLS:        certs,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,
@@ -732,16 +777,31 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 
 	lim := httpserver.Limits{Max: c.Server.MaxConnections, Shared: c.Server.SharedList()}
-	hs := httpserver.New(srv.Handler(), lim, log)
+	handler := srv.Handler()
+	hs := httpserver.New(handler, lim, log)
 	ln, err := httpserver.Listen(c.Server.Listen, lim, log)
 	if err != nil {
 		return err
 	}
+	servers := []*http.Server{hs}
 	errc := make(chan error, 1)
-	go func() {
-		log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "version", version)
-		errc <- httpserver.Serve(hs, ln, c.Server.TLSCert, c.Server.TLSKey)
-	}()
+	if c.Server.HTTPS() {
+		// HTTPS and, on the same port, plain HTTP that sends browsers to
+		// HTTPS (and takes events from old agents while allowed).
+		hs.TLSConfig.GetCertificate = certs.GetCertificate
+		plain := httpserver.New(srv.PlainHandler(handler), lim, log)
+		servers = append(servers, plain)
+		go func() {
+			log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "https", c.Server.TLSMode(),
+				"plaintext_ingest", c.Server.PlaintextIngest(), "version", version)
+			errc <- httpserver.ServeBoth(hs, plain, ln)
+		}()
+	} else {
+		go func() {
+			log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "https", "off", "version", version)
+			errc <- httpserver.Serve(hs, ln, "", "")
+		}()
+	}
 	select {
 	case err := <-errc:
 		return err
@@ -749,8 +809,42 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		log.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		return hs.Shutdown(shutdownCtx)
+		var errs []error
+		for _, s := range servers {
+			errs = append(errs, s.Shutdown(shutdownCtx))
+		}
+		return errors.Join(errs...)
 	}
+}
+
+// newCertificates loads or makes the HTTPS certificate: server.tls_cert
+// and tls_key when set, else one from Signalith's own CA covering this
+// machine, public_url's host and server.tls.names. It logs the CA's
+// fingerprint, so admins can check the CA they install elsewhere.
+func newCertificates(c *config.Config, log *slog.Logger) (*tlsauto.Manager, error) {
+	o := tlsauto.Options{Log: log}
+	if c.Server.TLSCert != "" {
+		o.CertFile, o.KeyFile = c.TLSFiles()
+	} else {
+		o.Dir = c.TLSDir()
+		if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
+			o.Names = append(o.Names, u.Hostname())
+		}
+		o.Names = append(o.Names, c.Server.TLSNames()...)
+	}
+	m, err := tlsauto.New(o)
+	if err != nil {
+		return nil, err
+	}
+	leaf, names := m.Leaf(), m.Names()
+	if m.LocalCA() {
+		log.Info("HTTPS certificate from Signalith's own certificate authority; browsers warn until this CA is trusted (see docs/https.md)",
+			"ca_file", m.CAPath(), "ca_sha256", m.Fingerprint(), "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly))
+	} else {
+		log.Info("HTTPS certificate from server.tls_cert; reloaded when the file changes",
+			"file", o.CertFile, "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly), "ca_sha256", m.Fingerprint())
+	}
+	return m, nil
 }
 
 // newRetention returns the retention manager. Policies saved on the Data

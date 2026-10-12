@@ -26,6 +26,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 )
 
 // capture is a Bulker that keeps what it is sent. When block is set,
@@ -232,6 +233,38 @@ func TestTLS(t *testing.T) {
 	if bulk.count() != 1 {
 		t.Errorf("plain text over the TLS port was accepted")
 	}
+}
+
+// With Signalith's own certificate: senders trust its CA, and a renewed
+// certificate is served without a restart.
+func TestTLSWithCertificateManager(t *testing.T) {
+	m, err := tlsauto.New(tlsauto.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bulk := &capture{}
+	r, _, _ := start(t, Config{TLS: "127.0.0.1:0", GetCertificate: m.GetCertificate}, bulk)
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(m.CAPEM())
+	send := func() *x509.Certificate {
+		c, err := tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		msg := "<86>1 2026-10-12T13:00:00Z web1 sshd 900 - - Accepted password for bob from 192.0.2.4 port 22 ssh2"
+		fmt.Fprintf(c, "%d %s", len(msg), msg)
+		return c.ConnectionState().PeerCertificates[0]
+	}
+	first := send()
+	waitFor(t, "the event", func() bool { return bulk.count() == 1 })
+	if err := m.EnsureName("syslog.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if second := send(); second.SerialNumber.Cmp(first.SerialNumber) == 0 || second.VerifyHostname("syslog.example.com") != nil {
+		t.Error("the new certificate is not served")
+	}
+	waitFor(t, "the second event", func() bool { return bulk.count() == 2 })
 }
 
 func TestTLSNeedsCertificate(t *testing.T) {

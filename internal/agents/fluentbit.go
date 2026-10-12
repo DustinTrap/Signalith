@@ -23,7 +23,22 @@ type Options struct {
 	LinuxSource string
 	// Sysmon adds the Sysmon operational channel on Windows.
 	Sysmon bool
+	// CA is the certificate authority, in PEM, that the agent checks the
+	// server's certificate with over https: Signalith's own, or the root
+	// of the admin's certificate. Empty when the agent's system already
+	// trusts the server's certificate, unless CAUnknown.
+	CA string
+	// CAUnknown means the server's certificate is from a private CA that
+	// Signalith does not have (server.tls_cert without its chain): the
+	// agent still reads tls.ca_file, and a step says to put that CA there.
+	CAUnknown bool
 }
+
+// Where the agent keeps the CA certificate it checks the server with.
+const (
+	LinuxCAPath   = "/etc/fluent-bit/signalith-ca.pem"
+	WindowsCAPath = `C:\Program Files\fluent-bit\conf\signalith-ca.pem`
+)
 
 // Agent is a generated agent setup.
 type Agent struct {
@@ -35,6 +50,16 @@ type Agent struct {
 	ServerURL      string   `json:"server_url"`
 	ServerLoopback bool     `json:"server_loopback"`
 	Steps          []string `json:"steps"`
+	// ConfigStep is the step (from 1) that saves the config file, and
+	// CAStep the one that saves the CA certificate (0: none).
+	ConfigStep int `json:"config_step"`
+	CAStep     int `json:"ca_step,omitempty"`
+	// CAPath is where the agent reads the CA certificate, and CA the
+	// certificate to save there; CAFingerprint is its SHA-256, for
+	// checking it out of band.
+	CAPath        string `json:"ca_path,omitempty"`
+	CA            string `json:"ca,omitempty"`
+	CAFingerprint string `json:"ca_fingerprint,omitempty"`
 }
 
 var hostLabel = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$`)
@@ -44,7 +69,7 @@ var hostLabel = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_
 // because the host and port are written into a config file.
 func ParseServerURL(raw string) (*url.URL, error) {
 	if raw == "" {
-		return nil, errors.New("address is empty; use one such as http://192.168.1.20:8080")
+		return nil, errors.New("address is empty; use one such as https://192.168.1.20:8080")
 	}
 	if len(raw) > 300 {
 		return nil, errors.New("address is too long")
@@ -62,13 +87,13 @@ func ParseServerURL(raw string) (*url.URL, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, errors.New("address is not valid; use one such as http://192.168.1.20:8080")
+		return nil, errors.New("address is not valid; use one such as https://192.168.1.20:8080")
 	}
 	if u.User != nil {
 		return nil, errors.New("address must not include a user name or password")
 	}
 	if u.Host == "" {
-		return nil, errors.New("address needs a host name or IP address, such as http://192.168.1.20:8080")
+		return nil, errors.New("address needs a host name or IP address, such as https://192.168.1.20:8080")
 	}
 	if u.Path != "" && u.Path != "/" {
 		return nil, errors.New("address must not include a path; agents always send to /api/ingest")
@@ -142,6 +167,15 @@ func Generate(o Options) (*Agent, error) {
 
 	var b strings.Builder
 	a := &Agent{OS: o.OS, ServerURL: u.Scheme + "://" + u.Host, ServerLoopback: IsLoopback(u)}
+	// Over https the agent checks the server's certificate against the CA
+	// saved next to its config, unless its system trusts it already.
+	useCA := u.Scheme == "https" && (strings.TrimSpace(o.CA) != "" || o.CAUnknown)
+	if useCA {
+		a.CA = strings.TrimSpace(o.CA)
+		if a.CA != "" {
+			a.CA += "\n"
+		}
+	}
 	switch o.OS {
 	case "linux":
 		a.ConfigPath = "/etc/fluent-bit/fluent-bit.conf"
@@ -173,12 +207,24 @@ func Generate(o Options) (*Agent, error) {
 				{"storage.type", "filesystem"},
 			}))
 		}
-		a.Steps = []string{
-			"Install Fluent Bit: curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh",
-			"Save the configuration below as " + a.ConfigPath,
-			"Restart the agent: sudo systemctl enable --now fluent-bit && sudo systemctl restart fluent-bit",
-			"Events appear in Search within a minute; check the Health page if they do not.",
+		// Only root may read the config: it holds the ingest token.
+		a.Steps = []string{"Install Fluent Bit: curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh"}
+		if useCA {
+			a.CAPath = LinuxCAPath
+			a.Steps = append(a.Steps, caStep(a, "signalith-ca.pem"))
 		}
+		a.Steps = append(a.Steps, "Save the configuration below as fluent-bit.conf.")
+		a.ConfigStep = len(a.Steps)
+		if useCA {
+			a.Steps = append(a.Steps, "From the folder you saved both files in, put them in place. Only root can read the configuration, since it holds the ingest token: "+
+				"sudo install -m 644 -o root -g root signalith-ca.pem "+LinuxCAPath+" && sudo install -m 600 -o root -g root fluent-bit.conf "+a.ConfigPath)
+		} else {
+			a.Steps = append(a.Steps, "From the folder you saved it in, put it in place. Only root can read it, since it holds the ingest token: "+
+				"sudo install -m 600 -o root -g root fluent-bit.conf "+a.ConfigPath)
+		}
+		a.Steps = append(a.Steps,
+			"Restart the agent: sudo systemctl enable --now fluent-bit && sudo systemctl restart fluent-bit",
+			"Events appear in Search within a minute; check the Health page if they do not.")
 	case "windows":
 		a.ConfigPath = `C:\Program Files\fluent-bit\conf\fluent-bit.conf`
 		channels := "Security"
@@ -198,19 +244,26 @@ func Generate(o Options) (*Agent, error) {
 			{"DB", `C:\ProgramData\fluent-bit\signalith-winevtlog.sqlite`},
 			{"storage.type", "filesystem"},
 		}))
-		a.Steps = []string{
-			"Install Fluent Bit for Windows (64-bit installer) from https://docs.fluentbit.io/manual/installation/windows",
-			"Save the configuration below as " + a.ConfigPath,
-			`Register and start the service in an elevated PowerShell: New-Service fluent-bit -BinaryPathName '"C:\Program Files\fluent-bit\bin\fluent-bit.exe" -c "C:\Program Files\fluent-bit\conf\fluent-bit.conf"' -StartupType Automatic; Start-Service fluent-bit`,
-			"Events appear in Search within a minute; check the Health page if they do not.",
-		}
 		if o.Sysmon {
-			a.Steps = append([]string{"Install Sysmon with a config such as SwiftOnSecurity's sysmon-config, so process and network events are recorded"}, a.Steps...)
+			a.Steps = append(a.Steps, "Install Sysmon with a config such as SwiftOnSecurity's sysmon-config, so process and network events are recorded")
 		}
+		a.Steps = append(a.Steps, "Install Fluent Bit for Windows (64-bit installer) from https://docs.fluentbit.io/manual/installation/windows")
+		if useCA {
+			a.CAPath = WindowsCAPath
+			a.Steps = append(a.Steps, caStep(a, a.CAPath))
+		}
+		a.Steps = append(a.Steps, "Save the configuration below as "+a.ConfigPath)
+		a.ConfigStep = len(a.Steps)
+		// Only SYSTEM and Administrators may read the config: it holds
+		// the ingest token, and Program Files lets every user read.
+		a.Steps = append(a.Steps,
+			`In an elevated PowerShell, let only SYSTEM and Administrators read the configuration, since it holds the ingest token: icacls "`+a.ConfigPath+`" /inheritance:r /grant:r SYSTEM:F Administrators:F`,
+			`Register and start the service in an elevated PowerShell: New-Service fluent-bit -BinaryPathName '"C:\Program Files\fluent-bit\bin\fluent-bit.exe" -c "C:\Program Files\fluent-bit\conf\fluent-bit.conf"' -StartupType Automatic; Start-Service fluent-bit`,
+			"Events appear in Search within a minute; check the Health page if they do not.")
 	default:
 		return nil, fmt.Errorf("unknown os %q; use linux or windows", o.OS)
 	}
-	b.WriteString(section("OUTPUT", [][2]string{
+	out := [][2]string{
 		{"Name", "http"}, {"Match", "*"},
 		{"Host", host}, {"Port", port},
 		{"URI", "/api/ingest"},
@@ -218,10 +271,30 @@ func Generate(o Options) (*Agent, error) {
 		{"Header", "Authorization Bearer " + o.Token},
 		{"Header_Tag", "X-Signalith-Tag"},
 		{"tls", tls}, {"tls.verify", "On"},
-		{"Retry_Limit", "False"},
-	}))
+	}
+	if a.CAPath != "" {
+		out = append(out, [2]string{"tls.ca_file", a.CAPath})
+	}
+	// The name the agent asks the server for. An IP address is not a
+	// valid name for that (SNI), so it is left out then.
+	if tls == "On" && net.ParseIP(host) == nil {
+		out = append(out, [2]string{"tls.vhost", host})
+	}
+	out = append(out, [2]string{"Retry_Limit", "False"})
+	b.WriteString(section("OUTPUT", out))
 	a.Config = b.String()
 	return a, nil
+}
+
+// caStep is the step that saves the CA certificate as name, and records
+// its number.
+func caStep(a *Agent, name string) string {
+	a.CAStep = len(a.Steps) + 1
+	if a.CA == "" {
+		return "Save the certificate of the CA that issued Signalith's certificate as " + name +
+			". The agent checks the server with it. Signalith's certificate file (server.tls_cert) does not include it, so get it from whoever issued the certificate."
+	}
+	return "Save Signalith's CA certificate below as " + name + ". The agent checks it is sending to this server with it."
 }
 
 func section(name string, kv [][2]string) string {

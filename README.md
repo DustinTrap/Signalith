@@ -24,8 +24,11 @@ service or a systemd unit.
 docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
-Open http://localhost:8080 and sign in as `admin` with the password set in
-`deploy/docker/docker-compose.yml` (change it first).
+Open https://localhost:8080 and sign in as `admin` with the password set in
+`deploy/docker/docker-compose.yml` (change it first). Signalith serves HTTPS with a
+certificate it makes for itself, so the browser warns until you trust it; the sign-in page
+has a **Download the server certificate** link, and [docs/https.md](docs/https.md) says
+how to trust it.
 To update, run `git pull` and then the same command. It rebuilds Signalith from the
 new code each time. After a reboot both containers start again by themselves once
 Docker is running; in Docker Desktop turn on Settings > General > "Start Docker
@@ -43,7 +46,8 @@ Desktop when you sign in".
    sudo cp deploy/systemd/signalith.service /etc/systemd/system/
    sudo systemctl enable --now signalith
    ```
-   `init` prints the admin password once.
+   `init` prints the admin password once. Open `https://<server>:8080`: Signalith serves
+   HTTPS with a certificate it makes for itself (see [HTTPS](#https)).
 
 ### Windows
 
@@ -53,16 +57,18 @@ Desktop when you sign in".
    .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
    ```
    This writes `C:\ProgramData\Signalith\signalith.yaml`, installs the **Signalith** service and starts it.
+   Open https://localhost:8080 (see [HTTPS](#https) to stop the certificate warning).
 
 ### Send data
 
-Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
-Fluent Bit, paste the generated configuration, restart it. The configuration already
-contains the server address and ingest token. For firewalls, switches and other network
+Open **Add data** in the UI, pick Linux or Windows, and follow the steps: install
+Fluent Bit, save Signalith's CA certificate and the generated configuration, restart it.
+The configuration already contains the server address and ingest token, and sends over
+HTTPS, checking the server's certificate with that CA. For firewalls, switches and other network
 devices, pick **Syslog** (see [Syslog](#syslog)).
 
 Agents on other machines must send to an address they can reach, such as
-`http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
+`https://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
 (or set `server.public_url` or `SIGNALITH_PUBLIC_URL`), and allow the port, 8080 by default,
 through this computer's firewall.
 
@@ -114,13 +120,14 @@ counted in the event's `dropped_fields` (search `dropped_fields>0`), their value
 #### Syslog
 
 Firewalls, switches, routers, appliances and servers without an agent can send syslog.
-Point them at this server's address on **UDP or TCP port 514** (or the TLS port, if
-you set `syslog.tls`). `signalith init` turns UDP and TCP 514 on; the Docker quick start
-publishes port 514 too.
+Point them at this server's address on **UDP or TCP port 514**, or over **TLS on port
+6514**. `signalith init` turns all three on; the Docker quick start publishes port 514.
+Syslog over TLS uses the web UI's certificate (see [docs/https.md](docs/https.md#agents-and-syslog)).
 
 Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
 and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
-address filled in. Send the test message it shows and watch it arrive on the same page.
+address filled in; rsyslog and syslog-ng send over TLS when it is on, with the CA certificate
+to save. Send the test message it shows and watch it arrive on the same page.
 When syslog is off, the page gives the steps to turn it on for this system.
 By hand, forwarding a Linux server's logs with rsyslog is one line in
 `/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
@@ -169,7 +176,7 @@ activity (12 hours by default) or when you sign out; tick **Keep me signed in** 
 signed in for up to 7 days. Ten wrong passwords for one account from one address within
 15 minutes lock that account out for that address for 15 minutes (with wider limits per
 address and per account; see [docs/users.md](docs/users.md#signing-in)). Scripts and API
-clients can keep using HTTP Basic auth with the same username and password.
+clients can keep using HTTP Basic auth with the same username and password, over HTTPS.
 
 Admins add people on the **Users** page and give each one a role: **Viewer** (look,
 search, change nothing), **Analyst** (also triage findings, work investigations, build
@@ -180,8 +187,30 @@ from their groups; set it up and test it on the same page. The `admin` account f
 `signalith.yaml` stays as a break-glass account that always works. See
 [docs/users.md](docs/users.md).
 
+### HTTPS
+
+The web UI, API and agent ingest use HTTPS by default, on the same port as before (8080).
+On first start Signalith makes a small certificate authority of its own and a server
+certificate signed by it, and renews the certificate by itself; nothing has to be set up.
+Browsers warn until the CA is trusted: download it from the sign-in page (**Download the
+server certificate**) and trust it once per computer. Agent setups on **Add data** carry the
+CA and check the server with it. Plain `http://` still reaches the port: browsers are
+redirected, and passwords and sessions are refused.
+
+To use your own certificate, set `server.tls.mode: files` with `server.tls_cert` and
+`tls_key`; behind a reverse proxy that adds HTTPS, `server.tls.mode: off` with
+`server.trusted_proxies`. Configs from earlier versions keep working: agents set up for
+`http://` keep sending until they get a new configuration, and the **Health** page lists
+them. All of this, with the commands to trust the CA on Windows, macOS and Linux, is in
+[docs/https.md](docs/https.md).
+
 ### Hardening built in
 
+- **Encryption in transit**: HTTPS by default, TLS 1.2 or newer, for the UI, API and
+  agents, which check the server's certificate; passwords, Basic credentials and session
+  cookies are refused over plain HTTP, and the session cookie is HTTPS-only
+  (`__Host-signalith_session`). `X-Forwarded-Proto` is believed only from
+  `server.trusted_proxies`. See [docs/https.md](docs/https.md).
 - **Connections**: clients get 10 seconds to send request headers and a minute to send a
   request body (after their token or sign-in is checked, agent batches get 2 minutes, more
   while they keep arriving, and signed-in uploads 10 minutes); idle kept-alive connections
@@ -217,8 +246,12 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
-| `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
-| `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
+| `server.public_url` | `https://` and the `listen` host and port | URL agents use (scheme, host and port); goes into generated agent configs. With HTTPS on it must be `https://` |
+| `server.tls.mode` | `auto` | `auto`: HTTPS with a certificate Signalith makes and renews itself; `files`: `server.tls_cert` and `tls_key`; `off`: plain HTTP behind a reverse proxy that adds HTTPS. See [docs/https.md](docs/https.md) |
+| `server.tls.names` | none | Extra host names or IP addresses for the `auto` certificate (this machine's names and addresses, `public_url` and addresses entered on Add data are always in it) |
+| `server.tls.plaintext_ingest` | `deny` (`allow` for configs from before HTTPS was the default) | Whether agents may still send events over plain `http://`; the Health page lists any that do |
+| `server.tls_cert`, `server.tls_key` | none | Your certificate (with its chain) and key, for `server.tls.mode: files`; reloaded when they change. TLS 1.2 or newer; browsers are told to use HTTPS only |
+| `server.trusted_proxies` | none | IPs or CIDRs of reverse proxies whose `X-Forwarded-Proto: https` is believed (HSTS, HTTPS-only cookie, no redirect) |
 | `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
 | `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
@@ -242,7 +275,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
 | `ingest.max_event_age` | `7d` (or the shortest retention period if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
 | `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
-| `syslog.tls` | off | Address for syslog over TLS, such as `0.0.0.0:6514`; uses `server.tls_cert` and `server.tls_key` |
+| `syslog.tls` | off (`init` sets `0.0.0.0:6514`) | Address for syslog over TLS, such as `0.0.0.0:6514`; uses the web UI's certificate |
 | `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |
 | `syslog.public_port` | the listen port | Port devices send UDP and TCP syslog to, when it is forwarded to the listen port; shown on Add data |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
@@ -271,7 +304,10 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`,
 `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
 `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
-`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
+`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). `SIGNALITH_STATE_DIR` is the folder
+where Signalith keeps files it makes for itself, such as its HTTPS certificate (in `tls`); it
+defaults to the folder that holds `lookups.dir`, and the systemd unit and Docker image set it to
+`/var/lib/signalith`.
 
 ## Detections and findings
 
@@ -570,9 +606,9 @@ From the shell: `signalith query "datamodel=Authentication | top user"` or add
 ## Architecture
 
 ```
-Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSearch
+Fluent Bit agents ──HTTPS──▶ signalith (Go) ──REST──▶ OpenSearch
  (Windows, Linux)            ingest, parse,          events by data model and day
-syslog devices ──UDP/TCP──▶  query compiler,
+syslog devices ─UDP/TCP/TLS▶ query compiler,
                              web UI and API ◀── analyst browser
 ```
 
@@ -595,7 +631,8 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
-| `internal/httpserver` | Web server timeouts and connection limits |
+| `internal/httpserver` | Web server timeouts, connection limits, HTTPS and plain HTTP on one port |
+| `internal/tlsauto` | Signalith's own certificate authority and HTTPS certificate: issue, renew, reload |
 | `internal/safelog` | Length limits for log values, rotating log file |
 | `internal/redact` | Hides secrets in URLs before they are shown or logged |
 | `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |

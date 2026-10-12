@@ -38,6 +38,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
+	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -80,6 +81,9 @@ type Server struct {
 
 	// Syslog is the syslog receiver, for its stats; nil when it is off.
 	Syslog *syslog.Receiver
+	// TLS is the HTTPS certificate, for the CA agents and browsers trust;
+	// nil when Signalith does not serve HTTPS itself.
+	TLS *tlsauto.Manager
 	// Runtime overrides what api/health says about the system the server
 	// runs on; nil looks it up.
 	Runtime *Runtime
@@ -217,6 +221,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if !s.validToken(r) {
 		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 		return
+	}
+	if plaintextIngest(r) {
+		s.Pipeline.NotePlaintext(clientaddr.Parse(r.RemoteAddr))
 	}
 	// The whole batch is read before a pipeline slot is taken, so a
 	// sender that sends slowly holds only its connection and the bytes it
@@ -581,30 +588,65 @@ func (s *Server) handleLanguage(w http.ResponseWriter, r *http.Request) {
 // handleAgentConfig writes a Fluent Bit config. server=<url> replaces
 // server.public_url as the address agents send to, for when the configured
 // one (often localhost) is not reachable from the hosts being set up.
+// When Signalith serves HTTPS, agents send over https and check the
+// server with its CA, and the certificate is made to cover the address.
 func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
 	server := s.Config.Server.PublicURL
+	fieldError := func(err error) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "server"})
+	}
 	if o := v.Get("server"); o != "" {
-		if _, err := agents.ParseServerURL(o); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "server"})
+		u, err := agents.ParseServerURL(o)
+		if err != nil {
+			fieldError(err)
+			return
+		}
+		if u.Scheme == "http" && s.Config.Server.HTTPS() {
+			fieldError(fmt.Errorf("this server only accepts agents over HTTPS; use https://%s", u.Host))
 			return
 		}
 		server = o
+	}
+	u, err := agents.ParseServerURL(server)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("server.public_url: %w", err))
+		return
+	}
+	// With HTTPS off, a certificate kept for syslog over TLS is not the
+	// one agents meet (a proxy in front has its own).
+	certs := s.TLS
+	if !s.Config.Server.HTTPS() {
+		certs = nil
+	}
+	if u.Scheme == "https" && certs != nil {
+		if err := certs.EnsureName(u.Hostname()); err != nil {
+			fieldError(err)
+			return
+		}
 	}
 	token := ""
 	if len(s.Config.Ingest.Tokens) > 0 {
 		token = s.Config.Ingest.Tokens[0]
 	}
-	a, err := agents.Generate(agents.Options{
+	opts := agents.Options{
 		OS:          v.Get("os"),
 		ServerURL:   server,
 		Token:       token,
 		LinuxSource: v.Get("source"),
 		Sysmon:      v.Get("sysmon") == "true",
-	})
+	}
+	if certs != nil {
+		opts.CA = string(certs.CAPEM())
+		opts.CAUnknown = opts.CA == "" && !certs.PublicCA()
+	}
+	a, err := agents.Generate(opts)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if a.CA != "" {
+		a.CAFingerprint = certs.Fingerprint()
 	}
 	writeJSON(w, http.StatusOK, a)
 }
@@ -629,6 +671,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// For the steps that turn syslog on: edit the section or add one.
 	out["config_has_syslog"] = s.Config.HasSection("syslog")
 	out["runtime"] = s.runtimeInfo()
+	out["tls"] = s.tlsInfo()
 	osURL := redact.URL(s.Config.OpenSearch.URL)
 	if err != nil {
 		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
@@ -639,8 +682,58 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if len(s.Config.Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
 	}
+	if senders := s.Pipeline.PlaintextSenders(time.Now().Add(-plaintextWindow)); len(senders) > 0 {
+		out["plaintext_senders"] = senders
+		warnings = append(warnings, plaintextWarning(senders))
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// tlsInfo says how Signalith serves HTTPS, the names its certificate
+// covers and, when it has one to give out, the fingerprint of the CA
+// certificate agents and syslog devices check it with (GET
+// /api/tls/ca.pem). own_ca says the CA is Signalith's own, which issues
+// certificates for this server only.
+func (s *Server) tlsInfo() map[string]any {
+	t := map[string]any{"mode": s.Config.Server.TLSMode()}
+	if s.TLS != nil {
+		t["names"] = s.TLS.Names()
+	}
+	if s.TLS.CAPEM() != nil {
+		t["ca_sha256"] = s.TLS.Fingerprint()
+		t["own_ca"] = s.TLS.LocalCA()
+	}
+	return t
+}
+
+// plaintextWindow is how far back the Health page looks for agents
+// sending over plain HTTP: long enough to see agents that send rarely.
+const plaintextWindow = 24 * time.Hour
+
+// plaintextWarning names the agents still sending over plain HTTP and
+// says how to move them to HTTPS.
+func plaintextWarning(senders []ingest.PlaintextSender) string {
+	var names []string
+	for i, x := range senders {
+		if i == 5 {
+			names = append(names, fmt.Sprintf("%d more", len(senders)-5))
+			break
+		}
+		names = append(names, x.Address)
+	}
+	list := names[0]
+	if len(names) > 1 {
+		list = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	}
+	if len(senders) == 1 {
+		return "An agent still sends events over plain HTTP, which anyone on the network can read: " + list + ". " +
+			"On the Add data page, get a new configuration for it, which uses HTTPS, and put it on that agent. " +
+			"Then set server.tls.plaintext_ingest: deny in signalith.yaml."
+	}
+	return fmt.Sprintf("%d agents still send events over plain HTTP, which anyone on the network can read: %s. "+
+		"On the Add data page, get a new configuration, which uses HTTPS, and put it on each of them. "+
+		"Once all are updated, set server.tls.plaintext_ingest: deny in signalith.yaml.", len(senders), list)
 }

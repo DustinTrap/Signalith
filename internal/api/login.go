@@ -12,17 +12,25 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
-// sessionCookie holds the sign-in session token for the web UI.
-const sessionCookie = "signalith_session"
+// The cookie that holds the sign-in session token for the web UI. Over
+// HTTPS it has the __Host- prefix, so browsers keep it only when it is
+// Secure, for this exact host and every path: another site or a plain
+// HTTP page on this host cannot set or replace it.
+const (
+	sessionCookie       = "signalith_session"
+	secureSessionCookie = "__Host-signalith_session"
+)
 
-// publicRoutes work without signing in. Ingest checks its own token.
-var publicRoutes = []string{"POST /api/ingest", "POST /api/login", "POST /api/logout"}
+// publicRoutes work without signing in. Ingest checks its own token; the
+// CA certificate is public.
+var publicRoutes = []string{"POST /api/ingest", "POST /api/login", "POST /api/logout", "GET /api/tls/ca.pem"}
 
 // routeLogin adds the routes that work without signing in: the sign-in
 // page, its static assets, and sign-in and sign-out.
 func (s *Server) routeLogin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
+	mux.HandleFunc("GET /api/tls/ca.pem", s.handleCAPEM)
 	if s.UI != nil {
 		mux.HandleFunc("GET /login", s.handleLoginPage)
 		// Stylesheets, fonts, the logo and the sign-in script are public so
@@ -118,9 +126,19 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// secureCookie reports whether the session cookie is sent over HTTPS
+// only: when the browser reached Signalith over HTTPS, or, with HTTPS
+// off, when public_url says a proxy in front adds it.
 func (s *Server) secureCookie(r *http.Request) bool {
-	return r.TLS != nil || strings.HasPrefix(s.Config.Server.PublicURL, "https://") ||
-		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	return s.overHTTPS(r) || (!s.Config.Server.HTTPS() && strings.HasPrefix(s.Config.Server.PublicURL, "https://"))
+}
+
+// cookieName is the session cookie's name for a request.
+func (s *Server) cookieName(r *http.Request) string {
+	if s.secureCookie(r) {
+		return secureSessionCookie
+	}
+	return sessionCookie
 }
 
 // handleLogin signs in from the sign-in page. A user who must change
@@ -147,7 +165,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := s.sessions().Create(p.Username, req.Remember)
-	c := &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true,
+	c := &http.Cookie{Name: s.cookieName(r), Value: token, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, Secure: s.secureCookie(r)}
 	if req.Remember {
 		c.MaxAge = int(s.sessions().MaxAge.Seconds())
@@ -162,13 +180,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, errors.New("cross-site request refused"))
 		return
 	}
-	if c, err := r.Cookie(sessionCookie); err == nil {
+	if c, err := r.Cookie(s.cookieName(r)); err == nil {
 		if ss, ok := s.sessions().Lookup(c.Value); ok {
 			s.Log.Info("signed out", "audit", true, "user", ss.User, "client", clientIP(r))
 		}
 		s.sessions().Delete(c.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+	http.SetCookie(w, &http.Cookie{Name: s.cookieName(r), Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, Secure: s.secureCookie(r)})
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
@@ -177,7 +195,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // to the app. A user who must choose a new password stays here, where the
 // page asks for it.
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
+	if c, err := r.Cookie(s.cookieName(r)); err == nil {
 		if ss, ok := s.sessions().Lookup(c.Value); ok {
 			if p := s.principalFor(ss.User); p != nil && !p.MustChangePassword {
 				http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -193,4 +211,27 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(page)
+}
+
+// handleCAPEM serves the certificate authority that Signalith's HTTPS
+// certificate comes from, for browsers and agents to trust. It is a
+// public certificate, so it needs no sign-in; check its fingerprint
+// against the one in the server log before trusting it.
+func (s *Server) handleCAPEM(w http.ResponseWriter, r *http.Request) {
+	ca := s.TLS.CAPEM()
+	if ca == nil {
+		msg := "Signalith does not serve HTTPS itself (server.tls.mode is off), so there is no certificate to download."
+		switch {
+		case s.TLS.PublicCA():
+			msg = "This server's certificate is from a certificate authority your computer already trusts, so there is nothing to download."
+		case s.TLS != nil:
+			msg = "This server's certificate file does not include the certificate authority that issued it. Ask whoever issued the certificate for it."
+		}
+		writeError(w, http.StatusNotFound, errors.New(msg))
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
+	w.Header().Set("Content-Disposition", `attachment; filename="signalith-ca.crt"`)
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(ca)
 }

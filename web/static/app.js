@@ -1976,7 +1976,12 @@ let agentServerGuess = ''; // known once the server has answered without server=
 let agentServerSent = null;
 let agentServerTimer = 0;
 let agentSetupPending = null; // the latest load, which Copy and Download may wait for
-try { agentServerEl.value = localStorage.getItem(agentServerKey) || ''; } catch (_) { /* storage may be blocked */ }
+try {
+  // An address saved while this server spoke plain HTTP: agents now send
+  // over HTTPS, on the same port.
+  const saved = localStorage.getItem(agentServerKey) || '';
+  agentServerEl.value = location.protocol === 'https:' && /^http:\/\//i.test(saved) ? 'https://' + saved.slice(7) : saved;
+} catch (_) { /* storage may be blocked */ }
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', () => loadDataSource()));
 $('linux-source').addEventListener('change', loadAgentConfig);
 $('sysmon').addEventListener('change', loadAgentConfig);
@@ -2072,7 +2077,7 @@ function agentServerWarn(a) {
   if (w.dataset.url === a.server_url) return; // unchanged: don't announce it again
   w.dataset.url = a.server_url;
   let host = 'localhost';
-  let example = 'http://192.168.1.20:8080';
+  let example = 'https://192.168.1.20:8080';
   let port = '8080';
   try {
     const u = new URL(a.server_url);
@@ -2098,37 +2103,38 @@ function agentSetupRender(a) {
   pathEl.textContent = path.split(/[\\/]/).pop();
   pathEl.title = path;
   agentSetupEditor(agentSetupConfig);
-  let fileStep = null;
-  const items = (a.steps || []).map((s, i) => {
-    const li = agentSetupStep(s, i + 1, path);
-    if (!fileStep && path && s.includes(path)) fileStep = li;
-    return li;
-  });
+  const names = [path, a.ca_path, 'signalith-ca.pem', 'fluent-bit.conf', 'server.tls_cert'];
+  const items = (a.steps || []).map((s, i) => agentSetupStep(s, i + 1, names));
   $('agent-steps').replaceChildren(...items);
-  // The config file sits under the step that saves it, else after the list.
-  (fileStep ? fileStep.querySelector('.agent-step__body') : $('agent-body')).append(agentFileEl);
+  const stepBody = (n) => (n > 0 && items[n - 1] ? items[n - 1].querySelector('.agent-step__body') : null);
+  // The config file sits under the step that saves it, else after the
+  // list, and the CA certificate under its own step.
+  (stepBody(a.config_step) || $('agent-body')).append(agentFileEl);
   agentFileEl.classList.toggle('hidden', !agentSetupConfig);
+  if (a.ca && stepBody(a.ca_step)) stepBody(a.ca_step).append(caFile(a.ca, a.ca_fingerprint));
 }
 
 // agentSetupStep renders one numbered step. "Label: command" becomes the
 // label plus a command well.
-function agentSetupStep(text, n, path) {
+function agentSetupStep(text, n, names) {
   const body = el('div', { class: 'agent-step__body' });
   const cut = text.indexOf(': ');
   if (cut > 0 && cut < text.length - 2) {
-    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text.slice(0, cut), path)),
+    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text.slice(0, cut), names)),
       agentSetupCommand(text.slice(cut + 2)));
   } else {
-    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text, path)));
+    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text, names)));
   }
   return el('li', { class: 'agent-step' }, el('span', { class: 'agent-step__num' }, n), body);
 }
 
-// agentSetupInline turns URLs into links, the config path into code and
-// "Health page" into a link to that page.
-function agentSetupInline(text, path) {
+// agentSetupInline turns URLs into links, file names and paths into code
+// and "Health page" into a link to that page.
+function agentSetupInline(text, names = []) {
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp('(https?://[^\\s,;]*[^\\s,;.)])|(Health page)' + (path ? '|(' + esc(path) + ')' : ''), 'g');
+  // longest first, so a full path wins over the file name inside it
+  const lits = [...new Set(names.filter(Boolean))].sort((x, y) => y.length - x.length).map(esc);
+  const re = new RegExp('(https?://[^\\s,;]*[^\\s,;.)])|(Health page)' + (lits.length ? '|(' + lits.join('|') + ')' : ''), 'g');
   const parts = [];
   let last = 0;
   let m;
@@ -2141,6 +2147,29 @@ function agentSetupInline(text, path) {
   }
   if (last < text.length) parts.push(text.slice(last));
   return parts;
+}
+
+// caFile shows the CA certificate agents and devices check this server
+// with: its file name, Download and Copy, the certificate and its SHA-256
+// fingerprint, which matches the one Signalith logs when it starts.
+function caFile(pem, fingerprint) {
+  const name = 'signalith-ca.pem';
+  const btn = (ic, label) => el('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, icon(ic), el('span', {}, label));
+  const dl = btn('download', 'Download');
+  const copy = btn('copy', 'Copy');
+  dl.addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([pem], { type: 'application/x-pem-file' }));
+    const a = el('a', { href: url, download: name, class: 'hidden' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  copy.addEventListener('click', () => agentSetupCopy(pem, copy));
+  return el('div', { class: 'agent-file agent-ca' },
+    el('div', { class: 'agent-file__bar' }, icon('shield-check'), el('span', { class: 'agent-file__name mono' }, name), el('span', { class: 'spacer' }), dl, copy),
+    el('pre', { class: 'agent-ca__pem', tabindex: '0', 'aria-label': 'CA certificate' }, pem.trim()),
+    fingerprint ? el('p', { class: 'agent-ca__fp' }, el('span', {}, 'SHA-256 fingerprint'), el('code', {}, fingerprint)) : null);
 }
 
 function agentSetupCommand(cmd, label = 'Copy command') {
@@ -2265,7 +2294,7 @@ const syslogHostEl = $('syslog-host');
 const syslogVendorKey = 'signalith.syslogVendor';
 const syslogHostKey = 'signalith.syslogHost';
 const syslogState = {
-  h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', vendor: 'rsyslog', hostTimer: 0, tabsObserver: null,
+  h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', vendor: 'rsyslog', hostTimer: 0, tabsObserver: null, ca: null,
   // since the panel opened: when, the counts then, new senders announced, and what the live box says
   opened: 0, base: null, announced: new Set(), liveKey: '',
 };
@@ -2401,11 +2430,32 @@ async function syslogPoll() {
   try {
     st.h = await api('api/health');
     renderHealthCard(st.h);
+    await syslogLoadCA(st.h);
     syslogRender();
   } catch (e) {
     if (!st.h) syslogFailed(e);
   } finally {
     st.busy = false;
+  }
+}
+
+// syslogLoadCA fetches, once per certificate, the CA certificate devices
+// check Signalith with over TLS. Without it, servers send over TCP or UDP.
+async function syslogLoadCA(h) {
+  const st = syslogState;
+  const fp = h.tls && h.tls.ca_sha256;
+  const tls = ((h.syslog && h.syslog.listeners) || []).some((l) => l.protocol === 'tls');
+  if (!fp || !tls) {
+    st.ca = null;
+    return;
+  }
+  if (st.ca && st.ca.fp === fp) return;
+  try {
+    const resp = await fetch('api/tls/ca.pem');
+    if (!resp.ok) throw new Error(resp.statusText);
+    st.ca = { fp, own: !!h.tls.own_ca, pem: await resp.text() };
+  } catch (_) {
+    st.ca = null; // the setups fall back to TCP or UDP
   }
 }
 
@@ -2426,7 +2476,7 @@ function syslogTick() {
 // syslogDest is where devices send: the host and, per protocol, the port
 // they use (0 when that listener is off) and the address listened on.
 function syslogDest(sl) {
-  const d = { host: syslogState.host, udp: 0, tcp: 0, tls: 0, listen: {} };
+  const d = { host: syslogState.host, udp: 0, tcp: 0, tls: 0, listen: {}, ca: syslogState.ca };
   for (const l of sl.listeners || []) {
     d[l.protocol] = l.port || +String(l.address).split(':').pop() || 0;
     d.listen[l.protocol] = l.address;
@@ -2448,7 +2498,7 @@ function syslogRender() {
   if (!st.h) return;
   const sl = st.h.syslog || {};
   $('syslog-body').removeAttribute('aria-busy');
-  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file, st.h.config_has_syslog, st.h.runtime]);
+  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.config_file, st.h.config_has_syslog, st.h.runtime, st.ca && st.ca.fp]);
   if (shape !== st.shape) {
     st.shape = shape;
     st.liveKey = '';
@@ -2783,14 +2833,54 @@ function syslogVendors(d, ips) {
   const v6 = d.host.includes(':');
   const none = () => [slNote('Only syslog over TLS is on, and this setup needs UDP or TCP. Set syslog.udp or syslog.tcp to turn one on.')];
   const udpOnly = (name) => [slNote(name + ' sends over UDP only, and UDP is off here. Set syslog.udp to turn it on.')];
+  // Servers send over TLS when it is on and Signalith has a CA to give
+  // them: they check the server with it, and nobody on the network can
+  // read the logs.
+  const tls = d.tls && d.ca;
+  // A note when Signalith's certificate does not name the host devices
+  // send to, so the device would refuse to connect.
+  const names = ((syslogState.h && syslogState.h.tls && syslogState.h.tls.names) || []).map((n) => n.toLowerCase());
+  const host = d.host.toLowerCase();
+  const covered = names.some((n) => n === host || (n.startsWith('*.') && host.endsWith(n.slice(1)) && !host.slice(0, host.length - n.length + 1).includes('.')));
+  const notCovered = (who) => (covered ? null : el('p', { class: 'hint', 'data-tone': 'warning' }, icon('triangle-alert'), el('span', {},
+    `Signalith’s certificate doesn’t cover ${d.host}, so ${who} won’t connect. Add it under `, slCode('server.tls.names'),
+    ' in signalith.yaml and restart Signalith', ...(names.length ? [', or send to a name it covers: ', names.slice(0, 4).join(', ')] : []), '.')));
+  const saveCA = (dir) => [
+    slText('Save the CA certificate below as ', slCode('signalith-ca.pem'), ' on each server. It checks it is sending to this server with it.'),
+    caFile(d.ca.pem, d.ca.fp),
+    slText('From the folder you saved it in, run:'),
+    `sudo install -m 644 signalith-ca.pem ${dir}/signalith-ca.pem\n`,
+  ];
   return [
     { id: 'rsyslog', label: 'rsyslog', title: 'rsyslog: most Linux servers', render() {
+      if (tls) {
+        // Signalith's own CA issues certificates for this server only, so
+        // checking the CA is enough. Another CA's certificate must also
+        // name the host; rsyslog can only match host names, not IPs.
+        const ip = syslogIsIP(d.host);
+        const byName = !d.ca.own && !ip;
+        const auth = byName ? `StreamDriverAuthMode="x509/name" StreamDriverPermittedPeers="${d.host}"` : 'StreamDriverAuthMode="x509/certvalid"';
+        const [t1, ca, t2, install] = saveCA('/etc/rsyslog.d');
+        return [t1, ca, t2,
+          agentSetupCommand('sudo apt-get install -y rsyslog-gnutls || sudo dnf install -y rsyslog-gnutls\n' + install +
+            `sudo tee /etc/rsyslog.d/90-signalith.conf <<'EOF'\nglobal(DefaultNetstreamDriverCAFile="/etc/rsyslog.d/signalith-ca.pem")\n` +
+            `*.* action(type="omfwd" target="${d.host}" port="${d.tls}" protocol="tcp" StreamDriver="gtls" StreamDriverMode="1" ${auth})\nEOF\nsudo systemctl restart rsyslog`),
+          ip && !d.ca.own ? slNote('rsyslog can’t check an IP address against the certificate, only that the CA issued it. Use this computer’s host name for a full check.') : null,
+          byName ? notCovered('rsyslog') : null];
+      }
       const p = pick('tcp', 'udp');
       if (!p) return none();
       return [slText('On each Linux server, run:'),
         agentSetupCommand(`echo '*.* ${p === 'tcp' ? '@@' : '@'}${hp(p)}' | sudo tee /etc/rsyslog.d/90-signalith.conf\nsudo systemctl restart rsyslog`)];
     } },
     { id: 'syslog-ng', label: 'syslog-ng', render() {
+      if (tls) {
+        const [t1, ca, t2, install] = saveCA('/etc/syslog-ng');
+        return [t1, ca, t2,
+          agentSetupCommand(install + `sudo tee /etc/syslog-ng/conf.d/signalith.conf <<'EOF'\ndestination d_signalith { network("${d.host}" transport("tls") port(${d.tls})${v6 ? ' ip-protocol(6)' : ''} ` +
+            'tls(ca-file("/etc/syslog-ng/signalith-ca.pem") peer-verify(required-trusted))); };\nlog { source(s_src); destination(d_signalith); };\nEOF\nsudo systemctl restart syslog-ng'),
+          slNote('On RHEL and Fedora the source is ', slCode('s_sys'), ', not ', slCode('s_src'), '.'), notCovered('syslog-ng')];
+      }
       const p = pick('tcp', 'udp');
       if (!p) return none();
       return [slText('On each Linux server, run:'),

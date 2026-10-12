@@ -23,8 +23,10 @@ ProtectHome=true
 PrivateTmp=true
 ReadOnlyPaths=/etc/signalith
 # Custom detections, asset and identity lists, dashboards, retention
-# settings and archived days are saved here.
+# settings, archived days and the HTTPS certificate Signalith makes for
+# itself (tls/) are saved here.
 StateDirectory=signalith
+Environment=SIGNALITH_STATE_DIR=/var/lib/signalith
 Environment=SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
 Environment=SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
 Environment=SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards

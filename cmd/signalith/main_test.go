@@ -130,3 +130,44 @@ func TestSyslogSummary(t *testing.T) {
 		}
 	}
 }
+
+// A new config serves HTTPS with Signalith's own certificate, refuses
+// agents over plain HTTP and receives syslog over TLS on 6514.
+func TestInitTurnsOnHTTPS(t *testing.T) {
+	t.Setenv("SIGNALITH_PUBLIC_URL", "")
+	path := filepath.Join(t.TempDir(), "signalith.yaml")
+	out := captureStdout(t, func() {
+		if err := cmdInit([]string{"-c", path, "-admin-password", "first-password", "-listen", "0.0.0.0:8080"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "Web UI:    https://") || !strings.Contains(out, "docs/https.md") {
+		t.Errorf("init output does not point to HTTPS:\n%s", out)
+	}
+	raw, _ := os.ReadFile(path)
+	for _, want := range []string{"mode: auto", "plaintext_ingest: deny", "tls: 0.0.0.0:6514"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("config lacks %q:\n%s", want, raw)
+		}
+	}
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.TLSMode() != config.TLSAuto || c.Server.PlaintextIngest() || c.Syslog.TLS != "0.0.0.0:6514" {
+		t.Errorf("mode %s, plaintext %v, syslog.tls %q", c.Server.TLSMode(), c.Server.PlaintextIngest(), c.Syslog.TLS)
+	}
+	if got := httpsSummary(c); !strings.Contains(got, "own certificate") || !strings.Contains(got, "Agents must send over HTTPS") {
+		t.Errorf("summary %q", got)
+	}
+	// -syslog-tls "" leaves it off.
+	path2 := filepath.Join(t.TempDir(), "signalith.yaml")
+	captureStdout(t, func() {
+		if err := cmdInit([]string{"-c", path2, "-admin-password", "first-password", "-syslog-tls="}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if c2, err := config.Load(path2); err != nil || c2.Syslog.TLS != "" {
+		t.Errorf("syslog.tls %v %v", c2, err)
+	}
+}

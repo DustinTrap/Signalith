@@ -27,7 +27,7 @@ func TestInitSaveLoadRoundTrip(t *testing.T) {
 	if !got.CheckPassword("admin", "correct horse") || got.CheckPassword("admin", "wrong") {
 		t.Error("password check failed")
 	}
-	if got.Server.PublicURL != "http://127.0.0.1:8080" {
+	if got.Server.PublicURL != "https://127.0.0.1:8080" {
 		t.Errorf("public url = %s", got.Server.PublicURL)
 	}
 }
@@ -77,7 +77,9 @@ func TestPublicURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Server.PublicURL != "http://192.168.1.20:8080" {
+	// A config from before HTTPS was the default: the same port serves
+	// HTTPS now, so the address is upgraded.
+	if c.Server.PublicURL != "https://192.168.1.20:8080" {
 		t.Errorf("SIGNALITH_PUBLIC_URL not applied: %s", c.Server.PublicURL)
 	}
 	// The environment value is checked like the file's, so a line break
@@ -257,7 +259,7 @@ syslog:
 	}
 	for _, want := range []string{
 		`syslog.udp "514" must be host:port`, `syslog.tcp port "99999"`, "server.listen and syslog.tls both use 0.0.0.0:6514",
-		"syslog.tls needs server.tls_cert and server.tls_key", `syslog.allow[0] "10.0.0.0/33"`, `syslog.allow[1] "not-an-ip"`,
+		`syslog.allow[0] "10.0.0.0/33"`, `syslog.allow[1] "not-an-ip"`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
@@ -306,7 +308,7 @@ func TestSavedFileExplainsSyslog(t *testing.T) {
 	}
 	data, _ := os.ReadFile(path)
 	text := string(data)
-	for _, want := range []string{"# syslog.udp, .tcp", "# appliances, servers). Point them at this server on UDP or TCP port 514.", "sender.\nsyslog:\n", "udp: 0.0.0.0:514"} {
+	for _, want := range []string{"# syslog.udp, .tcp", "# appliances, servers). Point them at this server on UDP or TCP port 514, or\n# TLS port 6514", "sender.\nsyslog:\n", "udp: 0.0.0.0:514"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("saved file lacks %q:\n%s", want, text)
 		}

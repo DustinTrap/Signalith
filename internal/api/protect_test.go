@@ -65,10 +65,24 @@ func TestHSTSWhenServingHTTPS(t *testing.T) {
 	if got := resp.Header.Get("Strict-Transport-Security"); !strings.HasPrefix(got, "max-age=") {
 		t.Errorf("HSTS over TLS = %q", got)
 	}
-	// Behind a TLS proxy, with an https public_url.
-	proxied, _ := newTestServerWith(t, func(s *Server) { s.Config.Server.PublicURL = "https://siem.example.com" })
-	if got := send(t, "GET", proxied.URL+"/api/health", "", nil).Header.Get("Strict-Transport-Security"); got == "" {
-		t.Error("no HSTS with an https public_url")
+	// An https public_url alone does not make a plain HTTP request
+	// secure.
+	byURL, _ := newTestServerWith(t, func(s *Server) { s.Config.Server.PublicURL = "https://siem.example.com" })
+	if got := send(t, "GET", byURL.URL+"/api/health", "", nil).Header.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS over plain HTTP with an https public_url: %q", got)
+	}
+	// Behind a TLS proxy: only one listed in server.trusted_proxies is
+	// believed.
+	xfp := map[string]string{"X-Forwarded-Proto": "https"}
+	if got := send(t, "GET", byURL.URL+"/api/health", "", xfp).Header.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS from an untrusted X-Forwarded-Proto: %q", got)
+	}
+	proxied, _ := newTestServerWith(t, func(s *Server) { s.Config.Server.TrustedProxies = []string{"127.0.0.0/8"} })
+	if got := send(t, "GET", proxied.URL+"/api/health", "", xfp).Header.Get("Strict-Transport-Security"); got == "" {
+		t.Error("no HSTS behind a trusted proxy")
+	}
+	if got := send(t, "GET", proxied.URL+"/api/health", "", map[string]string{"X-Forwarded-Proto": "http"}).Header.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS for a proxy that says http: %q", got)
 	}
 }
 

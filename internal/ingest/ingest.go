@@ -86,6 +86,9 @@ type Pipeline struct {
 	warnMu  sync.Mutex
 	warned  map[string]time.Time
 
+	// plaintext lists the agents that sent over plain HTTP.
+	plaintext plaintextSenders
+
 	// recvUsed is the receive budget in use, and recvBy each sender's
 	// part of it (see ReadBody).
 	recvMu   sync.Mutex

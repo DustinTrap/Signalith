@@ -159,7 +159,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 // authenticate checks the session cookie, then Basic credentials. It
 // returns nil without an error when the request is not signed in.
 func (s *Server) authenticate(r *http.Request) (*principal, error) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
+	if c, err := r.Cookie(s.cookieName(r)); err == nil {
 		if ss, ok := s.sessions().Lookup(c.Value); ok {
 			if p := s.principalFor(ss.User); p != nil {
 				p.Method, p.token = "session", c.Value
