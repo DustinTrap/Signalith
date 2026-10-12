@@ -341,10 +341,10 @@ tags: [attack.t1059.001]
 		t.Fatal(err)
 	}
 	rr := run1(t, eng, `datamodel=Risk | stats sum(risk_score) as score by risk_object | sort -score`)
-	want := map[string]float64{"web1": 160, "alice": 90, "bob": 40, "203.0.113.9": 30, "WS1": 20}
-	scores := map[string]float64{}
+	want := map[string]string{"web1": "160", "alice": "90", "bob": "40", "203.0.113.9": "30", "WS1": "20"}
+	scores := map[string]string{}
 	for _, r := range rr.Rows {
-		scores[fmt.Sprint(r["risk_object"])], _ = r["score"].(float64)
+		scores[fmt.Sprint(r["risk_object"])] = fmt.Sprint(r["score"])
 	}
 	if fmt.Sprint(scores) != fmt.Sprint(want) {
 		t.Errorf("risk by object = %v, want %v", scores, want)
