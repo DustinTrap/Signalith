@@ -252,14 +252,24 @@ func cmdValidate(args []string) error {
 		return err
 	}
 	fmt.Printf("%d assets and %d identities loaded from %s.\n", len(lists.Assets()), len(lists.Identities()), c.LookupsDir())
-	if feeds := intelFeeds(c); len(feeds) > 0 {
-		on := 0
-		for _, f := range feeds {
-			if f.Enabled {
+	feeds := newFeeds(c, nil, nil)
+	if err := feeds.Load(); err != nil {
+		fmt.Println("Warning:", err)
+	}
+	if list := feeds.Status(); len(list) > 0 {
+		on, page := 0, 0
+		for _, f := range list {
+			if f.Enabled && f.Problem == "" {
 				on++
 			}
+			if f.Source == intel.SourceUI {
+				page++
+			}
+			if f.Problem != "" {
+				fmt.Printf("Warning: threat intel feed %s (added on the Threat intel page): %s\n", f.Name, f.Problem)
+			}
 		}
-		fmt.Printf("%d threat intel feeds configured, %d enabled.\n", len(feeds), on)
+		fmt.Printf("%d threat intel feeds (%d in signalith.yaml, %d added on the Threat intel page), %d enabled.\n", len(list), len(list)-page, page, on)
 	}
 	if s := syslogSummary(c); s != "" {
 		allow := "any sender"
@@ -532,8 +542,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
-	feeds := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
-		StatusFile: filepath.Join(c.LookupsDir(), "intel_feeds.json")}
+	feeds := newFeeds(c, indicators, log)
+	if err := feeds.Load(); err != nil {
+		log.Error("threat intel feeds added on the Threat intel page cannot be used until the file is fixed", "err", err)
+	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -586,8 +598,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
 			go indicators.Watch(ctx, time.Minute, log)
-			if c.Detections.Scheduler && len(feeds.List) > 0 {
-				log.Info("threat intel feeds will download on their schedules", "feeds", len(feeds.List))
+			if c.Detections.Scheduler {
+				// Feeds can be added on the page at any time, so the
+				// downloader runs even with none yet.
+				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
 				go feeds.Start(ctx)
 			}
 		}
@@ -632,20 +646,29 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 }
 
-// intelFeeds converts the configured feeds; the config is already
+// intelFeeds converts the feeds in signalith.yaml; the config is already
 // validated, so durations parse.
 func intelFeeds(c *config.Config) []intel.Feed {
 	var out []intel.Feed
 	for _, f := range c.Intel.Feeds {
-		iv, _ := config.ParseFeedDuration(f.Interval)
-		age, _ := config.ParseFeedDuration(f.MaxAge)
-		out = append(out, intel.Feed{
-			Name: f.Name, URL: f.URL, Format: f.Format, Type: f.Type, Column: f.Column,
-			Interval: iv, MaxAge: age, Weight: f.Weight, Description: f.Description, Tags: f.Tags,
-			Headers: f.Headers, Enabled: f.IsEnabled(),
-		})
+		out = append(out, f.Feed(intel.SourceConfig))
 	}
 	return out
+}
+
+// newFeeds returns the feed downloader: the feeds in signalith.yaml and
+// those added on the Threat intel page.
+func newFeeds(c *config.Config, indicators *intel.Store, log *slog.Logger) *intel.Feeds {
+	f := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
+		File:          c.IntelFeedsFile(),
+		StatusFile:    filepath.Join(c.LookupsDir(), "intel_feeds.json"),
+		AllowLoopback: c.Intel.AllowLoopbackFeeds}
+	// Feed downloads never reach Signalith's own OpenSearch, which may
+	// accept requests without a password on the local network.
+	if p := intel.ProtectedAddr(c.OpenSearch.URL); p != "" {
+		f.Protected = []string{p}
+	}
+	return f
 }
 
 // reloadLookups picks up edits to the CSV files made outside the UI.

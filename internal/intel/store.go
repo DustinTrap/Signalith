@@ -258,6 +258,31 @@ func (s *Store) ReplaceSource(ctx context.Context, source string, inds []Indicat
 	return len(inds) - existing, len(gone), nil
 }
 
+// MergeSource adds and updates indicators from a source without removing
+// any, for a download that read only part of a feed. It returns how many
+// were added.
+func (s *Store) MergeSource(ctx context.Context, source string, inds []Indicator) (int, error) {
+	now := s.now()
+	for i := range inds {
+		inds[i].Source = source
+		inds[i].LastSeen = now
+	}
+	s.prepare(inds, now)
+	s.mu.RLock()
+	added := 0
+	for _, ind := range inds {
+		if _, ok := s.all[ind.ID]; !ok {
+			added++
+		}
+	}
+	s.mu.RUnlock()
+	if err := s.Backend.Put(ctx, inds); err != nil {
+		return 0, err
+	}
+	s.afterWrite(ctx, inds, nil)
+	return added, nil
+}
+
 // RemoveSources deletes every indicator whose source is not in keep, so
 // a feed that is removed or disabled stops matching. Manual indicators
 // are always kept.
@@ -520,4 +545,15 @@ func (m *Memory) Version(context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return fmt.Sprint(m.gen), nil
+}
+
+// DeleteSource deletes every indicator from one source.
+func (s *Store) DeleteSource(ctx context.Context, source string) (int, error) {
+	var gone []string
+	for _, ind := range s.snapshot() {
+		if ind.Source == source {
+			gone = append(gone, ind.ID)
+		}
+	}
+	return len(gone), s.Delete(ctx, gone)
 }

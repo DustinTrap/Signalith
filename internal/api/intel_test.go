@@ -38,7 +38,7 @@ func TestIntelAPI(t *testing.T) {
 	ts, _ := newTestServerWith(t, func(s *Server) {
 		s.Intel = store
 		s.Engine.Intel = store
-		s.Feeds = &intel.Feeds{Store: store, Log: s.Log, List: []intel.Feed{
+		s.Feeds = &intel.Feeds{Store: store, Log: s.Log, AllowLoopback: true, List: []intel.Feed{
 			{Name: "test-feed", URL: feed.URL, Format: "lines", Type: "auto", Interval: time.Hour, MaxAge: 24 * time.Hour, Weight: 2, Enabled: true,
 				Headers: map[string]string{"Authorization": "secret"}},
 		}}
@@ -50,8 +50,13 @@ func TestIntelAPI(t *testing.T) {
 		t.Fatalf("overview = %d %v", code, out)
 	}
 	f0 := feeds[0].(map[string]any)
-	if f0["interval"] != "1h" || f0["has_headers"] != true || f0["headers"] != nil {
-		t.Errorf("feed view = %v (headers must never be shown)", f0)
+	hdrs, _ := f0["headers"].([]any)
+	if f0["interval"] != "1h" || f0["has_headers"] != true || f0["source"] != "config" || len(hdrs) != 1 ||
+		hdrs[0].(map[string]any)["name"] != "Authorization" || hdrs[0].(map[string]any)["set"] != true {
+		t.Errorf("feed view = %v", f0)
+	}
+	if raw := getRaw(t, ts, "/api/intel"); strings.Contains(raw, "secret") {
+		t.Errorf("a header value was shown: %s", raw)
 	}
 
 	code, out = do(t, ts, "POST", "/api/intel/feeds/test-feed/refresh", "", true)

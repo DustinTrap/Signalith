@@ -13,14 +13,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -257,141 +256,54 @@ type Assistant struct {
 	APIKey string `yaml:"api_key,omitempty"`
 }
 
-// Intel configures threat intel feeds. Nothing is downloaded unless a
-// feed is listed here.
+// Intel configures threat intel feeds. Nothing is downloaded until a
+// feed is listed here or added on the Threat intel page.
 type Intel struct {
 	Feeds []IntelFeed `yaml:"feeds"`
+	// FeedsFile keeps the feeds added on the Threat intel page. Default:
+	// intel_feeds.yaml in lookups.dir. A relative path is relative to the
+	// folder this config file is in.
+	FeedsFile string `yaml:"feeds_file,omitempty"`
+	// AllowLoopbackFeeds lets feeds download from this machine (127.0.0.1
+	// or ::1), for a feed server on the same host. Off by default.
+	AllowLoopbackFeeds bool `yaml:"allow_loopback_feeds,omitempty"`
 }
 
-// IntelFeed is one feed the server downloads on a schedule.
-type IntelFeed struct {
-	// Name identifies the feed; indicators show it as their source.
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
-	// Format is lines (one indicator per line, # comments), csv or stix
-	// (a STIX 2.1 bundle). Default lines.
-	Format string `yaml:"format,omitempty"`
-	// Type is the indicator type (ip, cidr, domain, url, md5, sha1, sha256,
-	// hash, email) or auto to detect each value. Default auto.
-	Type string `yaml:"type,omitempty"`
-	// Column picks the CSV column, by header name or number from 1.
-	Column string `yaml:"column,omitempty"`
-	// Interval is how often to download. Default 1h, at least 5m.
-	Interval string `yaml:"interval,omitempty"`
-	// MaxAge is how long indicators stay after the feed stops updating
-	// (downloads fail). Indicators dropped from the feed are removed at the
-	// next download. Default 7d.
-	MaxAge string `yaml:"max_age,omitempty"`
-	// Weight multiplies the risk a match adds: 1 is normal, 2 doubles it.
-	Weight      float64  `yaml:"weight,omitempty"`
-	Description string   `yaml:"description,omitempty"`
-	Tags        []string `yaml:"tags,omitempty"`
-	// Headers are sent with the download, for feeds that need an API key.
-	// Values may use ${ENV_VAR} to keep keys out of this file.
-	Headers map[string]string `yaml:"headers,omitempty"`
-	// Enabled defaults to true; set false to stop using a feed without
-	// deleting its settings. Its indicators are removed.
-	Enabled *bool `yaml:"enabled,omitempty"`
-}
-
-// IsEnabled reports whether a feed is on.
-func (f IntelFeed) IsEnabled() bool { return f.Enabled == nil || *f.Enabled }
-
-// defaults fills empty optional feed settings.
-func (f *IntelFeed) defaults() {
-	if f.Format == "" {
-		f.Format = "lines"
-	}
-	if f.Type == "" {
-		f.Type = "auto"
-	}
-	if f.Interval == "" {
-		f.Interval = "1h"
-	}
-	if f.MaxAge == "" {
-		f.MaxAge = "7d"
-	}
-	if f.Weight == 0 {
-		f.Weight = 1
-	}
-}
-
-var (
-	feedNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{1,63}$`)
-	feedDurPattern  = regexp.MustCompile(`^(\d+)\s*(m|h|d|w)$`)
-	feedFormats     = []string{"lines", "csv", "stix"}
-	feedTypes       = []string{"auto", "hash", "ip", "cidr", "domain", "url", "md5", "sha1", "sha256", "email"}
-	envRef          = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-)
+// IntelFeed is one feed the server downloads on a schedule. Feeds added on
+// the Threat intel page use the same settings and rules.
+type IntelFeed = intel.FeedSpec
 
 // ParseFeedDuration parses 30m, 12h, 7d or 2w.
-func ParseFeedDuration(s string) (time.Duration, error) {
-	m := feedDurPattern.FindStringSubmatch(strings.ToLower(strings.TrimSpace(s)))
-	if m == nil {
-		return 0, fmt.Errorf("%q is not a duration; use a number and a unit, like 30m, 1h, 7d or 2w", s)
-	}
-	n, _ := strconv.Atoi(m[1])
-	unit := map[string]time.Duration{"m": time.Minute, "h": time.Hour, "d": 24 * time.Hour, "w": 7 * 24 * time.Hour}[m[2]]
-	return time.Duration(n) * unit, nil
-}
+func ParseFeedDuration(s string) (time.Duration, error) { return intel.ParseDuration(s) }
 
 func (in *Intel) problems() []string {
 	var p []string
 	seen := map[string]bool{}
 	for i := range in.Feeds {
 		f := &in.Feeds[i]
-		f.defaults()
+		f.Defaults()
 		at := fmt.Sprintf("intel.feeds[%d]", i)
 		if f.Name != "" {
 			at = fmt.Sprintf("intel.feeds[%d] (%s)", i, f.Name)
 		}
-		switch {
-		case !feedNamePattern.MatchString(f.Name):
-			p = append(p, at+": name must be 2-64 lowercase letters, digits, -, _ or ., for example feodo-tracker")
-		case f.Name == "manual":
-			p = append(p, at+`: name "manual" is reserved for indicators added by hand`)
-		case seen[f.Name]:
+		if seen[f.Name] && f.Name != "" {
 			p = append(p, at+": name is used by another feed")
 		}
 		seen[f.Name] = true
-		if u, err := url.Parse(f.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			p = append(p, fmt.Sprintf("%s: url %q must be an http(s) address", at, f.URL))
-		}
-		if !slices.Contains(feedFormats, f.Format) {
-			p = append(p, fmt.Sprintf("%s: format %q must be one of %s", at, f.Format, strings.Join(feedFormats, ", ")))
-		}
-		if !slices.Contains(feedTypes, f.Type) {
-			p = append(p, fmt.Sprintf("%s: type %q must be one of %s", at, f.Type, strings.Join(feedTypes, ", ")))
-		}
-		if f.Format == "csv" && strings.TrimSpace(f.Column) == "" {
-			p = append(p, at+": csv feeds need a column, by header name or number from 1")
-		}
-		if f.Format != "csv" && f.Column != "" {
-			p = append(p, at+": column only applies to format: csv")
-		}
-		iv, err := ParseFeedDuration(f.Interval)
-		if err != nil {
-			p = append(p, at+": interval: "+err.Error())
-		} else if iv < 5*time.Minute {
-			p = append(p, at+": interval must be at least 5m; feeds update far less often")
-		}
-		if age, err := ParseFeedDuration(f.MaxAge); err != nil {
-			p = append(p, at+": max_age: "+err.Error())
-		} else if iv > 0 && age < iv {
-			p = append(p, at+": max_age must be at least the interval, or indicators expire between downloads")
-		}
-		if f.Weight < 0 || f.Weight > 10 {
-			p = append(p, at+": weight must be above 0 and at most 10 (1 is normal)")
-		}
-		for k, v := range f.Headers {
-			for _, m := range envRef.FindAllStringSubmatch(v, -1) {
-				if os.Getenv(m[1]) == "" {
-					p = append(p, fmt.Sprintf("%s: headers.%s uses ${%s}, which is not set in the environment", at, k, m[1]))
-				}
-			}
+		for _, pr := range f.Problems(true) {
+			p = append(p, at+": "+pr.Msg)
 		}
 	}
 	return p
+}
+
+// IntelFeedsFile returns the file that keeps the feeds added on the
+// Threat intel page.
+func (c *Config) IntelFeedsFile() string {
+	if c.Intel.FeedsFile != "" {
+		return c.resolve(c.Intel.FeedsFile)
+	}
+	return filepath.Join(c.LookupsDir(), "intel_feeds.yaml")
 }
 
 // LookupsDir returns the absolute lookups folder.
@@ -509,6 +421,9 @@ func (c *Config) applyEnv() error {
 	}
 	if v := os.Getenv("SIGNALITH_DASHBOARDS_DIR"); v != "" {
 		c.Dashboards.Dir = v
+	}
+	if v := os.Getenv("SIGNALITH_INTEL_FEEDS_FILE"); v != "" {
+		c.Intel.FeedsFile = v
 	}
 	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
 		c.Assistant.APIKey = v
@@ -740,9 +655,11 @@ const header = `# Signalith configuration.
 # dashboards.stale_after  how long a host can go quiet before the posture dashboard flags it
 # assistant.*        optional AI model for "Ask in English" (provider: anthropic or openai);
 #                    off by default, and only the question and field names are sent
-# intel.feeds        threat intel feeds to download (none by default), for example:
+# intel.feeds        threat intel feeds to download (none by default). The easiest way
+#                    is the Threat intel page (Add feed), which keeps its feeds in
+#                    lookups.dir/intel_feeds.yaml (intel.feeds_file). Or list them here:
 #                      - name: feodo-tracker
 #                        url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
-#                    format: lines, csv (with column:) or stix; see docs/threat-intel.md
+#                    format: lines, csv (with column:), stix or auto; see docs/threat-intel.md
 
 `
