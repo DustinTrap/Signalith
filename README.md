@@ -68,6 +68,14 @@ Supported sources in Phase 1:
 | Linux useradd, userdel, usermod, gpasswd | Change |
 | Anything else | Other (searchable by text and fields) |
 
+### Sign in
+
+The web UI has its own sign-in page. Sessions end after `auth.session_timeout` without
+activity (12 hours by default) or when you sign out; tick **Keep me signed in** to stay
+signed in for up to 7 days. Ten wrong passwords from one address within 15 minutes lock
+that address out for 15 minutes. Scripts and API clients can keep using HTTP Basic auth
+with the same username and password.
+
 ## Configuration
 
 Everything lives in one YAML file (`/etc/signalith/signalith.yaml` or
@@ -86,6 +94,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `search.default_earliest` | `-24h` | Time range when a query sets none |
 | `retention.days` | `90` | Days of events to keep; `0` keeps everything |
 | `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` |
+| `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
@@ -357,6 +366,7 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
+| `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |
 | `internal/api` | REST API, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
 | `deploy/` | Docker Compose, systemd unit, Windows installer script |

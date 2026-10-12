@@ -3,241 +3,503 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Signalith</title>
-<link rel="stylesheet" href="style.css">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/css/app.css">
+<script src="assets/theme.js"></script>
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">Signalith</div>
-  <nav>
-    <button class="tab active" data-page="search">Search</button>
-    <button class="tab" data-page="dashboards">Dashboards</button>
-    <button class="tab" data-page="findings">Findings <span id="open-count" class="count-badge hidden"></span></button>
-    <button class="tab" data-page="cases">Investigations <span id="case-count" class="count-badge hidden"></span></button>
-    <button class="tab" data-page="risk">Risk</button>
-    <button class="tab" data-page="detections">Detections</button>
-    <button class="tab" data-page="coverage">ATT&amp;CK coverage</button>
-    <button class="tab" data-page="assets">Assets &amp; identities</button>
-    <button class="tab" data-page="intel">Threat intel</button>
-    <button class="tab" data-page="data">Add data</button>
-    <button class="tab" data-page="health">Health</button>
-    <button class="tab" data-page="help">Query guide</button>
+<svg class="sprite" width="0" height="0" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false">
+<!-- Signalith logo. Icons: Lucide (https://lucide.dev), ISC License, see assets/licenses/Lucide-ISC.txt. One symbol per line, sorted. -->
+<symbol id="logo-lockup" viewBox="6 2 156.53 28"><path fill="currentColor" d="M6 4.5A2.5 2.5 0 0 1 8.5 2H22A4 4 0 0 1 26 6V6H16A6 6 0 0 0 10 12A6 6 0 0 0 16 18A2 2 0 0 1 18 20A2 2 0 0 1 16 22H6Z"/><path style="fill:var(--brand-signal)" d="M26 27.5A2.5 2.5 0 0 1 23.5 30H10A4 4 0 0 1 6 26V26H16A6 6 0 0 0 22 20A6 6 0 0 0 16 14A2 2 0 0 1 14 12A2 2 0 0 1 16 10H26Z"/><g transform="translate(42.196 23.594) scale(0.014493)"><path fill="currentColor" d="M673 23Q500 23 372 -31Q245 -85 173 -188Q101 -291 95 -438H358Q365 -360 407 -308Q449 -256 518 -231Q587 -205 671 -205Q759 -205 826 -232Q894 -259 932 -308Q970 -356 970 -420Q970 -478 937 -516Q903 -554 842 -581Q782 -607 701 -627L532 -671Q345 -719 241 -816Q136 -913 136 -1071Q136 -1203 207 -1302Q278 -1401 401 -1455Q524 -1510 680 -1510Q839 -1510 959 -1455Q1079 -1400 1146 -1303Q1214 -1206 1217 -1082H958Q948 -1178 872 -1230Q797 -1283 676 -1283Q592 -1283 532 -1258Q471 -1232 438 -1188Q406 -1144 406 -1087Q406 -1025 444 -985Q483 -945 541 -921Q600 -897 660 -882L799 -846Q882 -826 960 -793Q1038 -760 1101 -709Q1163 -659 1200 -587Q1237 -515 1237 -418Q1237 -287 1170 -188Q1103 -88 977 -32Q851 23 673 23Z M1429 0V-1118H1689V0Z M2406 442Q2272 442 2172 408Q2073 374 2010 315Q1946 257 1918 183L2139 104Q2156 135 2187 168Q2219 201 2272 223Q2324 244 2405 244Q2526 244 2599 188Q2672 131 2672 11V-200H2650Q2631 -160 2594 -117Q2557 -75 2494 -46Q2432 -17 2335 -17Q2207 -17 2102 -77Q1998 -138 1936 -259Q1875 -380 1875 -562Q1875 -746 1937 -873Q1999 -1000 2104 -1066Q2208 -1132 2337 -1132Q2436 -1132 2500 -1099Q2564 -1066 2602 -1019Q2640 -973 2660 -933H2674V-1118H2929V3Q2929 152 2861 250Q2793 347 2675 395Q2557 442 2406 442ZM2408 -222Q2493 -222 2552 -263Q2611 -303 2642 -380Q2673 -457 2673 -564Q2673 -670 2643 -750Q2612 -829 2553 -874Q2494 -918 2408 -918Q2320 -918 2261 -872Q2201 -825 2171 -746Q2141 -666 2141 -564Q2141 -461 2172 -384Q2202 -307 2261 -264Q2321 -222 2408 -222Z M3424 -655V0H3164V-1118H3410L3414 -842H3394Q3440 -987 3531 -1059Q3622 -1132 3759 -1132Q3874 -1132 3960 -1083Q4046 -1034 4094 -940Q4141 -846 4141 -711V0H3882V-671Q3882 -783 3823 -847Q3765 -911 3663 -911Q3594 -911 3540 -881Q3486 -851 3455 -794Q3424 -736 3424 -655Z M4689 23Q4582 23 4497 -15Q4412 -54 4363 -129Q4314 -204 4314 -314Q4314 -409 4349 -471Q4385 -533 4446 -570Q4506 -607 4582 -626Q4659 -645 4740 -653Q4838 -664 4898 -672Q4959 -680 4988 -698Q5016 -716 5016 -754V-759Q5016 -814 4994 -852Q4972 -891 4929 -911Q4885 -932 4821 -932Q4756 -932 4709 -912Q4661 -892 4631 -860Q4601 -828 4587 -791L4346 -840Q4379 -939 4448 -1004Q4517 -1068 4613 -1100Q4709 -1132 4820 -1132Q4899 -1132 4979 -1113Q5060 -1095 5127 -1051Q5194 -1007 5235 -933Q5276 -859 5276 -747V0H5028V-154H5017Q4993 -107 4949 -66Q4905 -26 4840 -1Q4776 23 4689 23ZM4755 -170Q4836 -170 4895 -202Q4953 -234 4986 -286Q5018 -339 5018 -401V-533Q5005 -523 4975 -514Q4945 -505 4907 -498Q4869 -491 4833 -486Q4797 -481 4771 -478Q4713 -470 4666 -452Q4619 -434 4592 -401Q4566 -369 4566 -317Q4566 -269 4590 -236Q4615 -204 4658 -187Q4700 -170 4755 -170Z M5771 -1490V0H5511V-1490Z M6006 0V-1118H6266V0Z M7018 -1118V-914H6383V-1118ZM6542 -1384H6802V-315Q6802 -254 6828 -226Q6854 -197 6914 -197Q6931 -197 6960 -202Q6990 -206 7008 -210L7049 -9Q7006 4 6961 10Q6917 15 6875 15Q6714 15 6628 -65Q6542 -145 6542 -293Z M7447 -655V0H7187V-1490H7443V-842H7417Q7463 -987 7554 -1059Q7646 -1132 7782 -1132Q7898 -1132 7984 -1083Q8070 -1034 8118 -940Q8165 -846 8165 -711V0H7905V-671Q7905 -783 7846 -847Q7788 -911 7686 -911Q7617 -911 7563 -881Q7509 -851 7478 -794Q7447 -736 7447 -655Z M1559 -1276Q1497 -1276 1452 -1318Q1408 -1360 1408 -1418Q1408 -1478 1452 -1520Q1497 -1561 1559 -1561Q1622 -1561 1666 -1520Q1711 -1478 1711 -1419Q1711 -1360 1666 -1318Q1622 -1276 1559 -1276Z"/><path style="fill:var(--brand-cyan)" d="M6136 -1276Q6074 -1276 6030 -1318Q5985 -1360 5985 -1418Q5985 -1478 6030 -1520Q6074 -1561 6136 -1561Q6199 -1561 6244 -1520Q6288 -1478 6288 -1419Q6288 -1360 6244 -1318Q6199 -1276 6136 -1276Z"/></g></symbol>
+<symbol id="logo-mark" viewBox="6 2 20 28"><path fill="currentColor" d="M6 4.5A2.5 2.5 0 0 1 8.5 2H22A4 4 0 0 1 26 6V6H16A6 6 0 0 0 10 12A6 6 0 0 0 16 18A2 2 0 0 1 18 20A2 2 0 0 1 16 22H6Z"/><path style="fill:var(--brand-signal)" d="M26 27.5A2.5 2.5 0 0 1 23.5 30H10A4 4 0 0 1 6 26V26H16A6 6 0 0 0 22 20A6 6 0 0 0 16 14A2 2 0 0 1 14 12A2 2 0 0 1 16 10H26Z"/></symbol>
+<symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+<symbol id="i-archive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></symbol>
+<symbol id="i-arrow-big-up-dash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16a1 1 0 0 0 1-1v-2a1 1 0 0 1 1-1h3.293a.707.707 0 0 0 .5-1.207l-6.939-6.939a1.207 1.207 0 0 0-1.708 0l-6.94 6.94a.707.707 0 0 0 .5 1.206H8a1 1 0 0 1 1 1v2a1 1 0 0 0 1 1z"/><path d="M9 20h6"/></symbol>
+<symbol id="i-arrow-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></symbol>
+<symbol id="i-arrow-down-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m7 7 10 10"/><path d="M17 7v10H7"/></symbol>
+<symbol id="i-arrow-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></symbol>
+<symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+<symbol id="i-arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
+<symbol id="i-arrow-up-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></symbol>
+<symbol id="i-arrow-up-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+<symbol id="i-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></symbol>
+<symbol id="i-book-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v16"/><path d="M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z"/></symbol>
+<symbol id="i-bookmark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2 2 0 0 1 2 2v15a1 1 0 0 1-1.496.868l-4.512-2.578a2 2 0 0 0-1.984 0l-4.512 2.578A1 1 0 0 1 5 20V5a2 2 0 0 1 2-2z"/></symbol>
+<symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
+<symbol id="i-braces" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/></symbol>
+<symbol id="i-briefcase" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></symbol>
+<symbol id="i-bug" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-9"/><path d="M14 7a4 4 0 0 1 4 4v3a6 6 0 0 1-12 0v-3a4 4 0 0 1 4-4z"/><path d="M14.12 3.88 16 2"/><path d="M21 21a4 4 0 0 0-3.81-4"/><path d="M21 5a4 4 0 0 1-3.55 3.97"/><path d="M22 13h-4"/><path d="M3 21a4 4 0 0 1 3.81-4"/><path d="M3 5a4 4 0 0 0 3.55 3.97"/><path d="M6 13H2"/><path d="m8 2 1.88 1.88"/><path d="M9 7.13V6a3 3 0 1 1 6 0v1.13"/></symbol>
+<symbol id="i-building-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12h4"/><path d="M10 8h4"/><path d="M14 21v-3a2 2 0 0 0-4 0v3"/><path d="M6 10H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/><path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v3"/><path d="M16 2v3"/><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></symbol>
+<symbol id="i-chart-area" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 11.207a.5.5 0 0 1 .146-.353l2-2a.5.5 0 0 1 .708 0l3.292 3.292a.5.5 0 0 0 .708 0l4.292-4.292a.5.5 0 0 1 .854.353V16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-chart-bar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 16h8"/><path d="M7 11h12"/><path d="M7 6h3"/></symbol>
+<symbol id="i-chart-column" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></symbol>
+<symbol id="i-chart-line" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-chevron-left" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
+<symbol id="i-chevron-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></symbol>
+<symbol id="i-chevrons-up-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></symbol>
+<symbol id="i-circle-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></symbol>
+<symbol id="i-circle-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m16 9-5.5 5.5L8 12"/></symbol>
+<symbol id="i-circle-dot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="12" r="10"/></symbol>
+<symbol id="i-circle-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></symbol>
+<symbol id="i-clipboard-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+<symbol id="i-cloud-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+<symbol id="i-cpu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></symbol>
+<symbol id="i-crosshair" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="22" x2="18" y1="12" y2="12"/><line x1="6" x2="2" y1="12" y2="12"/><line x1="12" x2="12" y1="6" y2="2"/><line x1="12" x2="12" y1="22" y2="18"/></symbol>
+<symbol id="i-database" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
+<symbol id="i-ellipsis" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+<symbol id="i-ellipsis-vertical" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></symbol>
+<symbol id="i-external-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></symbol>
+<symbol id="i-file-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 12.5 8 15l2 2.5"/><path d="m14 12.5 2 2.5-2 2.5"/></symbol>
+<symbol id="i-file-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M9 15h6"/><path d="M12 18v-6"/></symbol>
+<symbol id="i-file-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><circle cx="11.5" cy="14.5" r="2.5"/><path d="M13.3 16.3 15 18"/></symbol>
+<symbol id="i-file-spreadsheet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></symbol>
+<symbol id="i-file-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+<symbol id="i-filter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></symbol>
+<symbol id="i-filter-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12.531 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14v6a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341l.427-.473"/><path d="m16.5 3.5 5 5"/><path d="m21.5 3.5-5 5"/></symbol>
+<symbol id="i-fingerprint" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
+<symbol id="i-flag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.528"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+<symbol id="i-folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+<symbol id="i-grid-3x3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></symbol>
+<symbol id="i-grip-vertical" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="12" r="1"/><circle cx="9" cy="5" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="19" r="1"/></symbol>
+<symbol id="i-hard-drive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 16h.01"/><path d="M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M21.946 12.013H2.054"/><path d="M6 16h.01"/></symbol>
+<symbol id="i-hash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></symbol>
+<symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+<symbol id="i-hourglass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></symbol>
+<symbol id="i-key-round" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+<symbol id="i-laptop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/><path d="M20.054 15.987H3.946"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></symbol>
+<symbol id="i-layout-dashboard" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></symbol>
+<symbol id="i-layout-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
+<symbol id="i-lightbulb" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+<symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h.01"/><path d="M3 12h.01"/><path d="M3 19h.01"/><path d="M8 5h13"/><path d="M8 12h13"/><path d="M8 19h13"/></symbol>
+<symbol id="i-list-checks" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M13 5h8"/><path d="M13 12h8"/><path d="M13 19h8"/><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/></symbol>
+<symbol id="i-list-filter" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5h20"/><path d="M6 12h12"/><path d="M9 19h6"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="i-log-in" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m10 17 5-5-5-5"/><path d="M15 12H3"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/></symbol>
+<symbol id="i-log-out" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/></symbol>
+<symbol id="i-mail" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7"/><rect x="2" y="4" width="20" height="16" rx="2"/></symbol>
+<symbol id="i-map-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/></symbol>
+<symbol id="i-message-square-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h10"/><path d="M7 15h6"/><path d="M7 7h8"/></symbol>
+<symbol id="i-minus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></symbol>
+<symbol id="i-monitor" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></symbol>
+<symbol id="i-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></symbol>
+<symbol id="i-notebook-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7.4"/><path d="M2 6h4"/><path d="M2 10h4"/><path d="M2 14h4"/><path d="M2 18h4"/><path d="M21.378 5.626a1 1 0 1 0-3.004-3.004l-5.01 5.012a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506z"/></symbol>
+<symbol id="i-pencil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></symbol>
+<symbol id="i-radar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
+<symbol id="i-refresh-cw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+<symbol id="i-rotate-ccw" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+<symbol id="i-router" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6.01 18H6"/><path d="M10.01 18H10"/><path d="M15 10v4"/><path d="M17.84 7.17a4 4 0 0 0-5.66 0"/><path d="M20.66 4.34a8 8 0 0 0-11.31 0"/></symbol>
+<symbol id="i-rss" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></symbol>
+<symbol id="i-save" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
+<symbol id="i-scan-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/></symbol>
+<symbol id="i-scroll-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></symbol>
+<symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-settings-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 17H5"/><path d="M19 7h-9"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></symbol>
+<symbol id="i-shield-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+<symbol id="i-shield-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+<symbol id="i-shield-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m14.5 9.5-5 5"/><path d="m9.5 9.5 5 5"/></symbol>
+<symbol id="i-sigma" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 7V5a1 1 0 0 0-1-1H6.5a.5.5 0 0 0-.4.8l4.5 6a2 2 0 0 1 0 2.4l-4.5 6a.5.5 0 0 0 .4.8H17a1 1 0 0 0 1-1v-2"/></symbol>
+<symbol id="i-sliders-horizontal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 5H3"/><path d="M12 19H3"/><path d="M14 3v4"/><path d="M16 17v4"/><path d="M21 12h-9"/><path d="M21 19h-5"/><path d="M21 5h-7"/><path d="M8 10v4"/><path d="M8 12H3"/></symbol>
+<symbol id="i-smartphone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></symbol>
+<symbol id="i-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/><path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/></symbol>
+<symbol id="i-square-pen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></symbol>
+<symbol id="i-square-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+<symbol id="i-table" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18"/><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/></symbol>
+<symbol id="i-tag" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+<symbol id="i-target" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19h8"/><path d="m4 17 6-6-6-6"/></symbol>
+<symbol id="i-timer" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></symbol>
+<symbol id="i-trash-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+<symbol id="i-trending-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 17h6v-6"/><path d="m22 17-8.5-8.5-5 5L2 7"/></symbol>
+<symbol id="i-trending-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 7h6v6"/><path d="m22 7-8.5 8.5-5-5L2 17"/></symbol>
+<symbol id="i-triangle-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+<symbol id="i-undo-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/></symbol>
+<symbol id="i-unlink" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m18.84 12.25 1.72-1.71h-.02a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71"/><path d="m5.17 11.75-1.71 1.71a5.004 5.004 0 0 0 .12 7.07 5.006 5.006 0 0 0 6.95 0l1.71-1.71"/><line x1="8" x2="8" y1="2" y2="5"/><line x1="2" x2="5" y1="8" y2="8"/><line x1="16" x2="16" y1="19" y2="22"/><line x1="19" x2="22" y1="16" y2="16"/></symbol>
+<symbol id="i-upload" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m17 8-5-5-5 5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/></symbol>
+<symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+<symbol id="i-user-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m16 11 2 2 4-4"/><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></symbol>
+<symbol id="i-user-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></symbol>
+<symbol id="i-user-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="22" y1="8" y2="13"/><line x1="22" x2="17" y1="8" y2="13"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></symbol>
+<symbol id="i-wand-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+<symbol id="i-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"/></symbol>
+</svg>
+<div class="app" id="app">
+<aside class="sidebar" id="sidebar" aria-label="Primary">
+  <div class="sidebar__head">
+    <a class="brand" href="#dashboards" data-page="dashboards" aria-label="Signalith: go to Dashboards"><svg viewBox="0 0 156.53 28" width="111.8" height="20" role="img" aria-label="Signalith"><use href="#logo-lockup"/></svg></a>
+    <button class="btn btn--ghost btn--icon btn--sm sidebar__close" type="button" data-nav-close aria-label="Close navigation"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  </div>
+  <label class="jump" title="Jump to a page"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="jump" type="search" placeholder="Jump to…" autocomplete="off" spellcheck="false" aria-label="Jump to a page" aria-controls="nav"><kbd id="jump-key">/</kbd></label>
+  <nav class="nav" id="nav" aria-label="Main">
+    <div class="nav__group" data-group="Monitor">
+      <div class="nav__label">Monitor</div>
+      <a class="nav__item" href="#dashboards" data-page="dashboards"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Dashboards</span></a>
+      <a class="nav__item" href="#findings" data-page="findings"><svg class="icon" aria-hidden="true"><use href="#i-shield-alert"/></svg><span>Findings</span><span id="open-count" class="nav__count hidden"></span></a>
+      <a class="nav__item" href="#cases" data-page="cases"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Investigations</span><span id="case-count" class="nav__count hidden"></span></a>
+      <a class="nav__item" href="#risk" data-page="risk"><svg class="icon" aria-hidden="true"><use href="#i-gauge"/></svg><span>Risk</span></a>
+    </div>
+    <div class="nav__group" data-group="Hunt">
+      <div class="nav__label">Hunt</div>
+      <a class="nav__item" href="#search" data-page="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span>Search</span></a>
+      <a class="nav__item" href="#intel" data-page="intel"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg><span>Threat intel</span></a>
+    </div>
+    <div class="nav__group" data-group="Detect">
+      <div class="nav__label">Detect</div>
+      <a class="nav__item" href="#detections" data-page="detections"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Detections</span></a>
+      <a class="nav__item" href="#coverage" data-page="coverage"><svg class="icon" aria-hidden="true"><use href="#i-grid-3x3"/></svg><span>ATT&amp;CK coverage</span></a>
+    </div>
+    <div class="nav__group" data-group="Configure">
+      <div class="nav__label">Configure</div>
+      <a class="nav__item" href="#assets" data-page="assets"><svg class="icon" aria-hidden="true"><use href="#i-fingerprint"/></svg><span>Assets &amp; identities</span></a>
+      <a class="nav__item" href="#data" data-page="data"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
+    </div>
+    <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
   </nav>
+  <div class="sidebar__foot">
+      <a class="nav__item" href="#help" data-page="help"><svg class="icon" aria-hidden="true"><use href="#i-book-open"/></svg><span>Query guide</span></a>
+    <a class="health hidden" id="health-card" href="#health" data-page="health">
+      <span class="health__row"><span class="pulse" id="health-pulse"></span><b id="health-title"></b></span>
+      <span class="health__meta" id="health-meta"></span>
+    </a>
+  </div>
+</aside>
+<div class="scrim" id="scrim"></div>
+<div class="main">
+<header class="topbar">
+  <button class="btn btn--ghost btn--icon nav-toggle" type="button" id="nav-toggle" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button>
+  <svg class="topbar__mark" viewBox="0 0 20 28" width="14.3" height="20" aria-hidden="true"><use href="#logo-mark"/></svg>
+  <div class="topbar__title"><span class="topbar__crumb" id="crumb-group">Hunt</span><span class="topbar__sep" aria-hidden="true">/</span><h1 id="crumb-page">Search</h1></div>
+  <div class="topbar__actions">
+    <button class="btn btn--ghost btn--icon theme-toggle" type="button" data-theme-toggle aria-label="Switch between light and dark theme" title="Switch theme"><svg class="icon when-light" aria-hidden="true"><use href="#i-moon"/></svg><svg class="icon when-dark" aria-hidden="true"><use href="#i-sun"/></svg></button>
+    <details class="menu" id="user-menu">
+      <summary class="user-btn" aria-label="Account menu"><span class="avatar" id="user-avatar" aria-hidden="true"></span><span class="user-name" id="user-name"></span><svg class="icon" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+      <div class="menu__panel">
+        <div class="menu__header"><span class="avatar avatar--lg" id="user-avatar-lg" aria-hidden="true"></span><div><b id="user-menu-name"></b><span id="user-menu-meta">Signed in</span></div></div>
+        <div class="menu__sep"></div>
+        <div class="menu__row"><span>Theme</span><div class="seg seg--sm" role="group" aria-label="Theme"><button type="button" data-set-theme="light" aria-label="Light" title="Light"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button><button type="button" data-set-theme="dark" aria-label="Dark" title="Dark"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button><button type="button" data-set-theme="" aria-label="Match system" title="Match system"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></button></div></div>
+        <div class="menu__sep"></div>
+        <button class="menu__item menu__item--danger" type="button" id="sign-out"><svg class="icon" aria-hidden="true"><use href="#i-log-out"/></svg>Sign out</button>
+        <p class="menu__note hidden" id="basic-note">Signed in with HTTP Basic auth. Close the browser to sign out.</p>
+      </div>
+    </details>
+  </div>
 </header>
-
-<main>
+<main class="content" id="content">
   <!-- Search -->
   <section id="page-search" class="page active">
     <div class="search-layout">
-      <aside class="sidebar">
-        <h3>Fields</h3>
-        <input id="field-filter" type="search" placeholder="Filter fields">
-        <ul id="field-list" class="field-list"></ul>
-        <div id="field-values" class="field-values hidden"></div>
-      </aside>
-
       <div class="workspace">
-        <form id="ask-form" class="ask-row" autocomplete="off">
-          <input id="ask" type="search" placeholder="Ask in plain English, for example: top 10 users with failed logins today" aria-label="Ask in plain English">
-          <button id="ask-go" type="submit">Write query</button>
-          <label id="ask-ai-wrap" class="inline hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"> Use AI</label>
-        </form>
-        <div id="ask-result" class="ask-result hidden"></div>
-        <div class="editor-row">
-          <div class="editor-wrap">
-            <textarea id="query" spellcheck="false" rows="4" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
-            <ul id="suggest" class="suggest hidden"></ul>
+        <div class="card query">
+          <form id="ask-form" class="ask" role="search" autocomplete="off">
+            <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
+            <input id="ask" type="search" placeholder="Ask in plain English, e.g. top 10 users with failed logins today" aria-label="Ask in plain English" enterkeyhint="go">
+            <label id="ask-ai-wrap" class="switch hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"><span>Use AI</span></label>
+            <button id="ask-go" class="btn btn--ghost btn--sm hide-sm" type="submit">Write query<kbd aria-hidden="true">↵</kbd></button>
+          </form>
+          <div id="ask-try" class="try hidden"><span>Try</span><span id="ask-examples" class="try__list"></span></div>
+          <div id="ask-result" class="ask-read hidden" aria-live="polite"></div>
+          <div class="editor" id="editor">
+            <div class="editor__hl" id="query-hl" aria-hidden="true"></div>
+            <textarea id="query" class="editor__input" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Query" aria-describedby="query-error" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
+            <ul id="suggest" class="suggest hidden" role="listbox" aria-label="Suggestions"></ul>
           </div>
-          <div class="editor-controls">
-            <select id="time" title="Time range">
-              <option value="-15m">Last 15 minutes</option>
-              <option value="-1h">Last hour</option>
-              <option value="-4h">Last 4 hours</option>
-              <option value="-24h" selected>Last 24 hours</option>
-              <option value="-7d">Last 7 days</option>
-              <option value="-30d">Last 30 days</option>
-              <option value="0">All time</option>
-            </select>
-            <button id="run" class="primary" title="Ctrl+Enter">Search</button>
-            <button id="explain">Explain</button>
-            <button id="save-detection" title="Run this query on a schedule and raise findings">Save as detection</button>
-            <button id="add-to-dashboard" title="Show this query as a panel on a dashboard">Add to dashboard</button>
-            <button id="search-to-case" title="Save this search and a snapshot of its results to an investigation">Add to case</button>
-          </div>
-        </div>
-        <div id="query-error" class="error hidden"></div>
-
-        <details id="builder" open>
-          <summary>Query builder <span id="builder-note" class="muted"></span></summary>
-          <div class="builder">
-            <label>Data
-              <select id="b-datamodel"><option value="">All data</option></select>
-            </label>
-            <label>Contains text
-              <input id="b-text" type="text" placeholder="optional, e.g. powershell">
-            </label>
-            <div class="b-filters">
-              <div class="b-label">Where</div>
-              <div id="b-filter-rows"></div>
-              <button id="b-add-filter" class="link">+ Add condition</button>
+          <div id="query-error" class="alert query-error hidden" data-tone="danger" role="alert"></div>
+          <div class="query__bar">
+            <button id="explain" class="btn btn--ghost btn--sm" type="button" title="Explain this query in plain English" aria-pressed="false" aria-controls="explanation"><svg class="icon" aria-hidden="true"><use href="#i-book-open"/></svg><span>Explain</span></button>
+            <button id="save-detection" class="btn btn--ghost btn--sm" type="button" title="Run this query on a schedule and raise findings"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Save as detection</span></button>
+            <button id="add-to-dashboard" class="btn btn--ghost btn--sm" type="button" title="Show this query as a panel on a dashboard"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Add to dashboard</span></button>
+            <button id="search-to-case" class="btn btn--ghost btn--sm" type="button" title="Save this search and a snapshot of its results to an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Add to case</span></button>
+            <div class="run">
+              <span class="hint" aria-hidden="true"><kbd class="mod-key">Ctrl</kbd><kbd>↵</kbd></span>
+              <select id="time" class="select" aria-label="Time range">
+                <option value="-15m">Last 15 minutes</option>
+                <option value="-1h">Last hour</option>
+                <option value="-4h">Last 4 hours</option>
+                <option value="-24h" selected>Last 24 hours</option>
+                <option value="-7d">Last 7 days</option>
+                <option value="-30d">Last 30 days</option>
+                <option value="0">All time</option>
+              </select>
+              <button id="run" class="btn btn--primary" type="button" title="Search (Ctrl+Enter)"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Search</button>
             </div>
-            <label>Show
-              <select id="b-mode">
-                <option value="events">Matching events</option>
-                <option value="stats">A table of</option>
-                <option value="timechart">A chart over time of</option>
-              </select>
-            </label>
-            <span id="b-agg-group" class="b-inline hidden">
-              <select id="b-agg">
-                <option value="count">count</option>
-                <option value="dc">distinct count of</option>
-                <option value="sum">sum of</option>
-                <option value="avg">average of</option>
-                <option value="min">minimum of</option>
-                <option value="max">maximum of</option>
-              </select>
-              <input id="b-agg-field" type="text" list="field-names" placeholder="field" class="hidden">
-              <label class="inline">split by <input id="b-by" type="text" list="field-names" placeholder="e.g. src, user"></label>
-            </span>
-            <label>Sort by <input id="b-sort" type="text" placeholder="e.g. -count"></label>
-            <label>Limit <input id="b-limit" type="number" min="0" placeholder="none"></label>
+          </div>
+          <div id="explanation" class="explain hidden" aria-live="polite"></div>
+        </div>
+
+        <details id="builder" class="disclosure">
+          <summary><svg class="icon" aria-hidden="true"><use href="#i-wand-sparkles"/></svg>Query builder<span id="builder-note" class="builder-note"></span><span class="subtle builder-sub hide-sm">Pick data, filters and a summary without writing a query</span><svg class="icon chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+          <div class="disclosure__body">
+            <div class="builder">
+              <div class="field">
+                <label class="label" for="b-datamodel">Data</label>
+                <select id="b-datamodel" class="select select--block"><option value="">All data</option></select>
+              </div>
+              <div class="field">
+                <label class="label" for="b-text">Contains text</label>
+                <input id="b-text" class="input" type="text" placeholder="Optional, e.g. powershell">
+              </div>
+              <div class="field">
+                <label class="label" for="b-sort">Sort by</label>
+                <input id="b-sort" class="input" type="text" placeholder="e.g. -count">
+              </div>
+              <div class="field">
+                <label class="label" for="b-limit">Limit</label>
+                <input id="b-limit" class="input" type="number" min="0" placeholder="None">
+              </div>
+              <div class="field b-where">
+                <span class="label" id="b-where-label">Where</span>
+                <div id="b-filter-rows" class="b-rows" role="group" aria-labelledby="b-where-label"></div>
+                <div><button id="b-add-filter" class="btn btn--ghost btn--sm" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add condition</button></div>
+              </div>
+              <div class="field">
+                <label class="label" for="b-mode">Show</label>
+                <select id="b-mode" class="select select--block">
+                  <option value="events">Matching events</option>
+                  <option value="stats">A table of</option>
+                  <option value="timechart">A chart over time of</option>
+                </select>
+              </div>
+              <div id="b-agg-group" class="b-agg hidden">
+                <div class="field">
+                  <label class="label" for="b-agg">Calculate</label>
+                  <select id="b-agg" class="select select--block">
+                    <option value="count">count</option>
+                    <option value="dc">distinct count of</option>
+                    <option value="sum">sum of</option>
+                    <option value="avg">average of</option>
+                    <option value="min">minimum of</option>
+                    <option value="max">maximum of</option>
+                  </select>
+                </div>
+                <div class="field hidden" id="b-agg-field-wrap">
+                  <label class="label" for="b-agg-field">Of field</label>
+                  <input id="b-agg-field" class="input" type="text" list="field-names" placeholder="field">
+                </div>
+                <div class="field">
+                  <label class="label" for="b-by">Split by</label>
+                  <input id="b-by" class="input" type="text" list="field-names" placeholder="e.g. src, user">
+                </div>
+              </div>
+            </div>
           </div>
         </details>
         <datalist id="field-names"></datalist>
 
-        <div id="explanation" class="explanation hidden"></div>
+        <div id="results-card" class="card results-card hidden">
+          <div class="results-head">
+            <div class="tabs" role="tablist" aria-label="Results" id="result-tabs"></div>
+            <div class="stats" id="status"></div>
+          </div>
+          <div id="histogram" class="histogram hidden"></div>
+          <div id="chart" class="results-chart hidden" role="tabpanel"></div>
+          <div id="results" role="tabpanel"></div>
+        </div>
 
-        <div id="status" class="status muted"></div>
-        <div id="chart"></div>
-        <div id="results" class="results"></div>
-        <div id="starter" class="starter">
-          <h3>Ask a question</h3>
-          <ul id="ask-examples"></ul>
-          <h3>Start with a common hunt</h3>
-          <ul id="starter-list"></ul>
+        <div id="starter" class="card starter">
+          <div class="card__head"><div><div class="card__title">Start with a common hunt</div><div class="card__sub">Pick one to fill in the query and run it.</div></div></div>
+          <ul id="starter-list" class="hunts" role="list"></ul>
         </div>
       </div>
+
+      <aside class="card fields" aria-label="Fields">
+        <div class="fields__head"><b>Fields</b><span class="count hidden" id="field-count"></span></div>
+        <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="field-filter" class="input input--sm" type="search" placeholder="Filter fields" aria-label="Filter fields"></div>
+        <div id="field-list" class="fields__list"></div>
+        <div id="field-values" class="field-values hidden"></div>
+      </aside>
     </div>
-    <div id="cell-menu" class="cell-menu hidden"></div>
+    <div id="cell-menu" class="cell-menu hidden" role="menu" aria-label="Cell actions"></div>
   </section>
 
   <!-- Dashboards -->
   <section id="page-dashboards" class="page">
     <div class="page-head">
-      <select id="db-select" class="db-select" aria-label="Dashboard"></select>
-      <div class="toolbar">
-        <select id="db-range" title="Time range" aria-label="Time range">
-          <option value="1h">Last hour</option>
-          <option value="4h">Last 4 hours</option>
-          <option value="24h" selected>Last 24 hours</option>
-          <option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option>
-        </select>
-        <select id="db-refresh" title="Auto-refresh" aria-label="Auto-refresh">
-          <option value="0">Auto-refresh off</option>
-          <option value="60">Every minute</option>
-          <option value="300">Every 5 minutes</option>
-          <option value="900">Every 15 minutes</option>
-        </select>
-        <button id="db-reload">Refresh</button>
-        <button id="db-new">New dashboard</button>
+      <div class="db-head">
+        <details class="menu db-switch" id="db-switch">
+          <summary class="dash-switch" title="Switch dashboard"><span class="dash-switch__icon"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg></span><b id="db-name">Security posture</b><span class="badge" id="db-builtin">Built-in</span><svg class="icon" aria-hidden="true"><use href="#i-chevrons-up-down"/></svg><span class="sr-only">Switch dashboard</span></summary>
+          <div class="menu__panel" id="db-menu"></div>
+        </details>
+        <p id="db-desc" class="page-head__desc"></p>
+      </div>
+      <div class="page-head__actions">
+        <div class="seg" id="db-range" role="group" aria-label="Time range">
+          <button type="button" data-range="1h" title="Last hour" aria-pressed="false">1h</button>
+          <button type="button" data-range="4h" title="Last 4 hours" aria-pressed="false">4h</button>
+          <button type="button" data-range="24h" title="Last 24 hours" aria-pressed="true">24h</button>
+          <button type="button" data-range="7d" title="Last 7 days" aria-pressed="false">7d</button>
+          <button type="button" data-range="30d" title="Last 30 days" aria-pressed="false">30d</button>
+        </div>
+        <label class="switch db-auto" title="Reload the dashboard while this page is open"><input type="checkbox" id="db-auto">Auto-refresh</label>
+        <div class="db-tools hidden" id="db-tools">
+          <button class="btn btn--ghost" type="button" id="db-edit" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
+          <a class="btn btn--ghost btn--icon" id="db-yaml" href="#" download title="Download YAML" aria-label="Download YAML"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></a>
+          <button class="btn btn--secondary" type="button" id="db-add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add panel</button>
+        </div>
+        <button class="btn btn--secondary" type="button" id="db-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New dashboard</button>
       </div>
     </div>
-    <p id="db-desc" class="muted db-desc"></p>
-    <div id="db-tools" class="toolbar hidden">
-      <button id="db-add" class="primary">Add panel</button>
-      <button id="db-edit">Edit dashboard</button>
-      <a id="db-yaml" class="button-link" href="#">Download YAML</a>
+    <div id="db-problems" class="alert hidden" data-tone="warning" role="status"></div>
+    <div id="db-body" class="dash" aria-busy="false"></div>
+    <div class="db-foot">
+      <span class="db-live hidden" id="db-live"><span class="pulse" aria-hidden="true"></span>Live</span>
+      <span id="db-updated"></span>
+      <details class="menu db-every hidden" id="db-every">
+        <summary class="btn btn--ghost btn--sm" title="How often to reload"><span id="db-every-text">every minute</span><svg class="icon" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+        <div class="menu__panel" id="db-every-menu"></div>
+      </details>
+      <button class="btn btn--ghost btn--sm" type="button" id="db-reload"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg>Refresh</button>
     </div>
-    <div id="db-problems" class="notice hidden"></div>
-    <div id="db-editor" class="panel hidden"></div>
-    <div id="db-body" class="dash-grid"></div>
-    <div id="db-updated" class="muted small db-updated"></div>
+    <dialog id="db-editor" class="modal" aria-labelledby="db-editor-title"></dialog>
   </section>
 
   <!-- Findings (incident review) -->
   <section id="page-findings" class="page">
-    <div class="page-head">
-      <h2>Findings</h2>
-      <div id="f-summary" class="sev-summary"></div>
+    <div class="split split--solo" id="f-split">
+      <section class="queue" aria-label="Findings queue">
+        <div class="pills" id="f-summary" role="group" aria-label="Filter by urgency"></div>
+        <div class="toolbar" id="f-toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input class="input" id="f-text" type="search" placeholder="Search title, host, user, IP" aria-label="Search findings" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></div>
+          <select class="select" id="f-status" aria-label="Status">
+            <option value="new,in_progress,pending" selected>Open</option>
+            <option value="new">New</option>
+            <option value="in_progress">In progress</option>
+            <option value="pending">Pending</option>
+            <option value="resolved,closed">Resolved or closed</option>
+            <option value="">Any status</option>
+          </select>
+          <select class="select" id="f-owner" aria-label="Owner">
+            <option value="" selected>Any owner</option>
+            <option value="__me">Assigned to me</option>
+            <option value="__none">Unassigned</option>
+          </select>
+          <div class="seg" id="f-since" role="group" aria-label="Created in the last">
+            <button type="button" data-since="24h" aria-pressed="false">24h</button>
+            <button type="button" data-since="7d" aria-pressed="true">7d</button>
+            <button type="button" data-since="30d" aria-pressed="false">30d</button>
+            <button type="button" data-since="" aria-pressed="false" title="All time">All</button>
+          </div>
+          <span class="fnd-filter hidden" id="f-detection"></span>
+          <span class="spacer hide-sm"></span>
+          <button class="btn btn--ghost btn--icon hide-sm hidden" type="button" id="f-clear" aria-label="Clear filters" title="Clear filters"><svg class="icon" aria-hidden="true"><use href="#i-filter-x"/></svg></button>
+          <button class="btn btn--ghost btn--icon hide-sm" type="button" id="f-export" aria-label="Export these findings as CSV" title="Export as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></button>
+        </div>
+        <div class="bulkbar hidden" id="f-bulk" role="toolbar" aria-label="Selected findings">
+          <button class="btn btn--ghost btn--icon btn--sm" type="button" id="f-bulk-clear" aria-label="Clear selection" title="Clear selection"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+          <b id="f-bulk-count" aria-live="polite"></b>
+          <span class="spacer"></span>
+          <button class="btn btn--ghost btn--sm" type="button" id="f-bulk-mine" title="Assign the selected findings to you"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"/></svg><span class="hide-sm">Assign to me</span></button>
+          <button class="btn btn--ghost btn--sm" type="button" id="f-bulk-case" title="Group the selected findings into an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span class="hide-sm">Add to case</span></button>
+          <button class="btn btn--ghost btn--sm" type="button" id="f-bulk-edit" title="Set status, disposition or owner, or add a note"><svg class="icon" aria-hidden="true"><use href="#i-pencil"/></svg><span class="hide-sm">Edit</span></button>
+          <button class="btn btn--primary btn--sm" type="button" id="f-bulk-resolve">Resolve</button>
+        </div>
+        <div class="card fnd-card">
+          <div class="table-wrap" id="f-list"></div>
+          <div class="table-foot hidden" id="f-foot"></div>
+        </div>
+      </section>
+      <aside class="card inspector" id="f-detail" aria-label="Finding details" hidden></aside>
     </div>
-    <div class="toolbar">
-      <select id="f-status" title="Status">
-        <option value="new,in_progress,pending" selected>Open</option>
-        <option value="new">New</option>
-        <option value="in_progress">In progress</option>
-        <option value="pending">Pending</option>
-        <option value="resolved,closed">Resolved or closed</option>
-        <option value="">Any status</option>
-      </select>
-      <select id="f-severity" title="Urgency: severity adjusted for how critical the assets and users are">
-        <option value="">Any urgency</option>
-        <option value="critical">Critical</option>
-        <option value="high,critical">High and above</option>
-        <option value="medium,high,critical">Medium and above</option>
-      </select>
-      <input id="f-owner" type="search" placeholder="Owner">
-      <input id="f-text" type="search" placeholder="Search title, user, host, IP">
-      <select id="f-since" title="Created">
-        <option value="24h">Last 24 hours</option>
-        <option value="7d" selected>Last 7 days</option>
-        <option value="30d">Last 30 days</option>
-        <option value="">All time</option>
-      </select>
-      <button id="f-refresh">Refresh</button>
-    </div>
-    <div id="f-bulk" class="bulk hidden">
-      <span id="f-bulk-count"></span>
-      <select id="f-bulk-status">
-        <option value="">Set status...</option>
-        <option value="in_progress">In progress</option>
-        <option value="pending">Pending</option>
-        <option value="resolved">Resolved</option>
-        <option value="closed">Closed</option>
-      </select>
-      <select id="f-bulk-disposition">
-        <option value="">Disposition...</option>
-        <option value="true_positive">True positive</option>
-        <option value="benign_true_positive">Benign true positive</option>
-        <option value="false_positive">False positive</option>
-        <option value="undetermined">Undetermined</option>
-      </select>
-      <input id="f-bulk-owner" type="text" placeholder="Assign to">
-      <input id="f-bulk-comment" type="text" placeholder="Comment (optional)">
-      <button id="f-bulk-apply" class="primary">Apply</button>
-      <button id="f-bulk-case" title="Group the selected findings into an investigation">Add to case</button>
-    </div>
-    <div class="split">
-      <div id="f-list" class="results"></div>
-      <aside id="f-detail" class="detail hidden"></aside>
-    </div>
+    <datalist id="f-owner-list"></datalist>
+    <dialog class="modal" id="f-bulk-dialog" aria-labelledby="f-bulk-title">
+      <form method="dialog" id="f-bulk-form">
+        <div class="modal__head">
+          <div><h2 class="modal__title" id="f-bulk-title">Update findings</h2><p class="modal__desc">Fields you leave as they are do not change.</p></div>
+          <button class="btn btn--ghost btn--icon btn--sm dx-close" type="button" value="cancel" formnovalidate aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div class="alert hidden" data-tone="danger" id="f-bulk-error" role="alert"><svg class="icon" aria-hidden="true"><use href="#i-circle-alert"/></svg><div><b>Nothing was changed.</b><p id="f-bulk-error-text"></p></div></div>
+          <div class="form-grid">
+            <div class="field"><label class="label" for="f-bulk-status">Status</label>
+              <select class="select select--block" id="f-bulk-status">
+                <option value="">Leave as is</option>
+                <option value="new">New</option>
+                <option value="in_progress">In progress</option>
+                <option value="pending">Pending</option>
+                <option value="resolved">Resolved</option>
+                <option value="closed">Closed</option>
+              </select></div>
+            <div class="field"><label class="label" for="f-bulk-disposition">Disposition</label>
+              <select class="select select--block" id="f-bulk-disposition">
+                <option value="">Leave as is</option>
+                <option value="true_positive">True positive</option>
+                <option value="benign_true_positive">Benign true positive</option>
+                <option value="false_positive">False positive</option>
+                <option value="undetermined">Undetermined</option>
+              </select></div>
+          </div>
+          <div class="field"><label class="label" for="f-bulk-owner">Owner</label><input class="input" id="f-bulk-owner" type="text" placeholder="Leave as is" list="f-owner-list" autocomplete="off"></div>
+          <div class="field"><label class="label" for="f-bulk-comment">Note</label><textarea class="textarea" id="f-bulk-comment" rows="3" placeholder="Optional. Added to each finding's activity."></textarea></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" value="cancel" id="f-bulk-cancel">Cancel</button>
+          <button class="btn btn--primary" type="submit" id="f-bulk-apply">Apply</button>
+        </div>
+      </form>
+    </dialog>
   </section>
 
   <!-- Investigations -->
   <section id="page-cases" class="page">
     <div id="c-list-view">
       <div class="page-head">
-        <h2>Investigations</h2>
-        <button id="c-new" class="primary">New case</button>
+        <div>
+          <h2 class="page-head__title">Investigations</h2>
+          <p class="page-head__desc">Cases group related findings with your notes, searches and pinned events.</p>
+        </div>
+        <div class="page-head__actions">
+          <button id="c-new" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New case</button>
+        </div>
       </div>
-      <div class="toolbar">
-        <select id="c-status" title="Status">
-          <option value="new,in_progress,pending" selected>Open</option>
-          <option value="new">New</option>
-          <option value="in_progress">In progress</option>
-          <option value="pending">Pending</option>
-          <option value="resolved,closed">Resolved or closed</option>
-          <option value="">Any status</option>
-        </select>
-        <select id="c-owner" title="Owner">
-          <option value="">Anyone's</option>
-          <option value="me">Mine</option>
-        </select>
-        <input id="c-text" type="search" placeholder="Search title, case ID, user, host, IP">
-        <button id="c-refresh">Refresh</button>
+      <div class="queue">
+        <div class="toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="c-text" class="input" type="search" placeholder="Search title, case ID, user, host, IP" aria-label="Search cases" autocomplete="off"><kbd aria-hidden="true">/</kbd></div>
+          <select id="c-status" class="select" aria-label="Status">
+            <option value="new,in_progress,pending" selected>Open</option>
+            <option value="new">New</option>
+            <option value="in_progress">In progress</option>
+            <option value="pending">Pending</option>
+            <option value="resolved,closed">Resolved or closed</option>
+            <option value="">Any status</option>
+          </select>
+          <select id="c-owner" class="select" aria-label="Owner">
+            <option value="">Any owner</option>
+            <option value="me">Assigned to me</option>
+          </select>
+        </div>
+        <div id="c-list" class="card c-list"></div>
       </div>
-      <div id="c-list" class="results"></div>
     </div>
     <div id="c-view" class="hidden"></div>
   </section>
@@ -245,76 +507,227 @@
   <!-- Risk -->
   <section id="page-risk" class="page">
     <div class="page-head">
-      <h2>Risk</h2>
-      <div class="toolbar">
-        <select id="r-type">
-          <option value="">Users and systems</option>
-          <option value="user">Users</option>
-          <option value="system">Systems</option>
-          <option value="other">Other</option>
-        </select>
-        <select id="r-since">
-          <option value="24h" selected>Last 24 hours</option>
-          <option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option>
-        </select>
-        <button id="r-refresh">Refresh</button>
+      <div>
+        <h2 class="page-head__title">Risk</h2>
+        <p class="page-head__desc">Detections add risk to users and systems, weighted by priority; 100 in 24 hours raises a finding.</p>
       </div>
     </div>
-    <p class="muted">Detections add risk to the users and systems in their results. Scores are multiplied by asset and identity priority (critical &times;2, high or watchlisted &times;1.5, low &times;0.5). The risk incident detections raise a finding when an object passes 100 in a day or spans three ATT&amp;CK tactics in a week.</p>
+    <div class="toolbar" role="search">
+      <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="r-find" class="input" type="search" placeholder="Find a user or system" aria-label="Find a user or system" autocomplete="off" spellcheck="false"></div>
+      <select id="r-type" class="select" aria-label="Type">
+        <option value="">Users and systems</option>
+        <option value="user">Users</option>
+        <option value="system">Systems</option>
+        <option value="other">Other</option>
+      </select>
+      <div id="r-since" class="seg" role="group" aria-label="Time range">
+        <button type="button" data-since="24h" aria-pressed="true">24h</button>
+        <button type="button" data-since="7d" aria-pressed="false">7d</button>
+        <button type="button" data-since="30d" aria-pressed="false">30d</button>
+      </div>
+      <span class="spacer"></span>
+      <button id="r-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
+    </div>
     <div class="split">
-      <div id="r-list" class="results"></div>
-      <aside id="r-detail" class="detail hidden"></aside>
+      <div class="card">
+        <div id="r-list" class="table-wrap"></div>
+        <div id="r-foot" class="table-foot hidden"></div>
+      </div>
+      <aside id="r-detail" class="card inspector hidden" aria-label="Risk details"></aside>
     </div>
   </section>
 
   <!-- Assets and identities -->
   <section id="page-assets" class="page">
-    <h2>Assets &amp; identities</h2>
-    <p class="muted">Tell Signalith which hosts and accounts matter. Priority raises the urgency of findings and multiplies risk; owner and category show next to findings and in search with <code>| enrich</code>. Export these from your CMDB or directory as CSV. Separate multiple values in one cell with <code>|</code>.</p>
-    <div class="lists">
-      <div class="panel" data-kind="assets">
-        <div class="detail-head"><h3>Assets <span class="muted l-count"></span></h3><a class="button-link" href="/api/lookups/assets.csv">Download CSV</a></div>
-        <p class="muted small">Columns: <code>host, ip, cidr, owner, priority, category, bunit, location</code>. Each row needs a host, ip or cidr. Priority is low, medium, high or critical.</p>
-        <pre class="code small">host,ip,cidr,owner,priority,category,bunit,location
-DC01.corp.local|DC01,10.0.0.10,,it-ops,critical,domain_controller|pci,IT,HQ
-,,10.20.0.0/16,,low,workstation,Corp,</pre>
-        <div class="row"><input type="file" accept=".csv,text/csv" class="l-file"><button class="primary l-upload">Upload and replace</button></div>
-        <div class="l-msg"></div>
-        <div class="l-table results"></div>
-      </div>
-      <div class="panel" data-kind="identities">
-        <div class="detail-head"><h3>Identities <span class="muted l-count"></span></h3><a class="button-link" href="/api/lookups/identities.csv">Download CSV</a></div>
-        <p class="muted small">Columns: <code>identity, name, email, manager, priority, category, bunit, watchlist</code>. List every username form in identity, for example <code>bob|CORP\bob|bob@corp.com</code>. Watchlisted users count as high priority.</p>
-        <pre class="code small">identity,name,email,manager,priority,category,bunit,watchlist
-bob|CORP\bob,Bob Smith,bob@corp.com,alice,high,admin,IT,true
-svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
-        <div class="row"><input type="file" accept=".csv,text/csv" class="l-file"><button class="primary l-upload">Upload and replace</button></div>
-        <div class="l-msg"></div>
-        <div class="l-table results"></div>
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Assets &amp; identities</h2>
+        <p class="page-head__desc">Tell Signalith which hosts and accounts matter; priority raises urgency and risk.</p>
       </div>
     </div>
+    <div class="tabs" role="tablist" aria-label="Lists">
+      <button class="tab" type="button" role="tab" id="l-tab-assets" data-kind="assets" aria-selected="true" aria-controls="l-panel">Assets <span class="count l-count hidden" data-kind="assets"></span></button>
+      <button class="tab" type="button" role="tab" id="l-tab-identities" data-kind="identities" aria-selected="false" aria-controls="l-panel" tabindex="-1">Identities <span class="count l-count hidden" data-kind="identities"></span></button>
+    </div>
+    <div class="toolbar" id="l-toolbar" role="search">
+      <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="l-find" class="input" type="search" placeholder="Find a host, IP or owner" aria-label="Find in this list" autocomplete="off" spellcheck="false"></div>
+      <span class="spacer"></span>
+      <a id="l-download" class="btn btn--ghost" href="api/lookups/assets.csv" download aria-label="Download CSV" title="Download the list as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span class="hide-sm">Download CSV</span></a>
+      <button id="l-upload-open" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload CSV</button>
+    </div>
+    <div class="card" id="l-panel" role="tabpanel" aria-labelledby="l-tab-assets">
+      <div id="l-table" class="table-wrap"></div>
+      <div id="l-foot" class="table-foot hidden"></div>
+    </div>
+    <dialog id="l-dialog" class="modal" aria-labelledby="l-dialog-title" aria-describedby="l-dialog-desc">
+      <form id="l-form" method="dialog" novalidate>
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="l-dialog-title">Replace the asset list</h3>
+            <p class="modal__desc" id="l-dialog-desc">The file replaces the whole list. If any line has a problem, nothing changes.</p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="l-msg"></div>
+          <div class="field">
+            <label class="label" for="l-file">CSV file</label>
+            <input id="l-file" class="file" type="file" accept=".csv,text/csv">
+          </div>
+          <div class="field">
+            <span class="label">Columns</span>
+            <p class="hint l-columns" id="l-columns"></p>
+            <pre class="code-block" id="l-example" aria-label="Example file"></pre>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="l-upload">Upload and replace</button>
+        </div>
+      </form>
+    </dialog>
   </section>
 
   <!-- Threat intel -->
   <section id="page-intel" class="page">
     <div class="page-head">
-      <h2>Threat intel</h2>
-      <div class="toolbar">
-        <div id="ti-summary" class="sev-summary"></div>
-        <button id="ti-hunt" title="Search the last 24 hours for events that match any indicator">Find matching events</button>
-        <button id="ti-refresh">Refresh</button>
+      <div>
+        <h2 class="page-head__title">Threat intel</h2>
+        <p class="page-head__desc">Known-bad IPs, domains, URLs, hashes and email addresses, from feeds and your own lists.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="ti-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
+        <button id="ti-add-open" class="btn btn--secondary" type="button" aria-label="Add indicators"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="hide-sm">Add indicators</span></button>
+        <button id="ti-hunt" class="btn btn--primary" type="button" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg>Find matching events</button>
       </div>
     </div>
-    <p class="muted">Indicators are known-bad IP addresses and networks, domains, URLs, file hashes and email addresses. Signalith downloads them from the feeds in signalith.yaml and you can add your own. The <b>Threat intel match</b> detection checks new events every 5 minutes and adds risk scaled by each indicator's weight. In Search, <code>| threatmatch</code> keeps only matching events and <code>| intel</code> adds intel columns to any result.</p>
 
-    <div class="panel">
-      <h3>Feeds</h3>
-      <div id="ti-feeds"></div>
-      <details id="ti-examples">
-        <summary>Example feed settings</summary>
-        <p class="muted small">Paste into signalith.yaml, run <code>signalith validate</code>, and restart. Feeds download right away, then on their interval. Check each provider's terms of use.</p>
-        <pre class="code small">intel:
+    <div id="ti-error" class="card hidden"></div>
+
+    <div id="ti-main">
+      <div class="card ti-feeds">
+        <div class="card__head">
+          <div>
+            <h3 class="card__title">Feeds</h3>
+            <p class="card__sub" id="ti-feeds-sub"></p>
+          </div>
+          <div class="card__actions"><button id="ti-examples-open" class="btn btn--ghost btn--sm hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>Example settings</button></div>
+        </div>
+        <div id="ti-feeds" class="ti-feeds__body"></div>
+      </div>
+
+      <div class="ti-ind">
+        <div class="ti-ind__head">
+          <h3 class="card__title">Indicators</h3>
+          <div id="ti-type" class="pills" role="group" aria-label="Filter by type"></div>
+        </div>
+        <div class="toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="ti-q" class="input" type="search" placeholder="Find a value, description or tag" aria-label="Find indicators" autocomplete="off" spellcheck="false"></div>
+          <select id="ti-source" class="select" aria-label="Source"><option value="">Any source</option></select>
+        </div>
+        <div class="split">
+          <div class="card">
+            <div id="ti-list" class="table-wrap"></div>
+            <div class="table-foot" id="ti-foot">
+              <span id="ti-count"></span>
+              <span class="spacer"></span>
+              <button id="ti-prev" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Previous page" title="Previous page" disabled><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
+              <button id="ti-next" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Next page" title="Next page" disabled><svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+            </div>
+          </div>
+          <aside id="ti-detail" class="card inspector hidden" aria-label="Indicator details"></aside>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="ti-add-dialog" class="modal" aria-labelledby="ti-add-title">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="ti-add-title">Add indicators</h3>
+          <p class="modal__desc">Searches and the threat detection use them right away.</p>
+        </div>
+        <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="tabs ti-add-tabs" role="tablist" aria-label="How to add">
+        <button class="tab" type="button" role="tab" id="ti-tab-one" aria-controls="ti-add" aria-selected="true">One indicator</button>
+        <button class="tab" type="button" role="tab" id="ti-tab-upload" aria-controls="ti-upload-panel" aria-selected="false" tabindex="-1">Upload a list</button>
+      </div>
+      <form id="ti-add" role="tabpanel" aria-labelledby="ti-tab-one" autocomplete="off" novalidate>
+        <div class="modal__body">
+          <div id="ti-add-msg"></div>
+          <div class="field">
+            <label class="label" for="ti-value">Value</label>
+            <input id="ti-value" class="input mono" type="text" required spellcheck="false" placeholder="203.0.113.9, evil.example, a hash or URL">
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label" for="ti-add-type">Type</label>
+              <select id="ti-add-type" class="select select--block">
+                <option value="auto">Detect automatically</option>
+                <option value="ip">IP address or network</option>
+                <option value="domain">Domain</option>
+                <option value="url">URL</option>
+                <option value="hash">File hash</option>
+                <option value="email">Email address</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label" for="ti-weight">Weight</label>
+              <input id="ti-weight" class="input" type="text" inputmode="decimal" placeholder="1 (2 doubles the risk)">
+            </div>
+          </div>
+          <div class="field">
+            <label class="label" for="ti-desc">Description</label>
+            <input id="ti-desc" class="input" type="text" placeholder="Why it is bad, or a ticket number">
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="label" for="ti-expires">Expires</label>
+              <input id="ti-expires" class="input" type="text" placeholder="never, 30d or 2026-12-31">
+            </div>
+            <div class="field">
+              <label class="label" for="ti-tags">Tags</label>
+              <input id="ti-tags" class="input" type="text" placeholder="phishing, incident-42">
+            </div>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="ti-add-submit">Add indicator</button>
+        </div>
+      </form>
+      <div id="ti-upload-panel" role="tabpanel" aria-labelledby="ti-tab-upload" hidden>
+        <div class="modal__body">
+          <div id="ti-upload-msg"></div>
+          <div class="field">
+            <label class="label" for="ti-file">CSV or text file</label>
+            <input id="ti-file" class="file" type="file" accept=".csv,.txt,text/csv,text/plain">
+          </div>
+          <div class="field">
+            <span class="label">Format</span>
+            <p class="hint ti-format">A CSV with <code>value, type, description, weight, expires, tags</code> (only value is required), or one value per line.</p>
+            <pre class="code-block" aria-label="Example file">value,description,weight,expires,tags
+203.0.113.9,Scanner seen in incident 42,2,30d,scanner|ssh
+login-bank.example,Phishing site,,2026-12-31,phishing</pre>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="button" id="ti-upload">Upload and add</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="ti-examples" class="modal ti-examples" aria-labelledby="ti-examples-title" aria-describedby="ti-examples-desc">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="ti-examples-title">Example feed settings</h3>
+          <p class="modal__desc" id="ti-examples-desc">Paste into signalith.yaml, run <code>signalith validate</code> and restart. Check each provider's terms of use.</p>
+        </div>
+        <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="modal__body">
+        <pre class="code-block" id="ti-example-yaml">intel:
   feeds:
     # Botnet command-and-control servers (abuse.ch Feodo Tracker)
     - name: feodo-tracker
@@ -341,174 +754,204 @@ svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
       url: https://misp.example.com/feeds/signalith.json
       format: stix
       headers: {Authorization: "${MISP_API_KEY}"}</pre>
-      </details>
-    </div>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" id="ti-example-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy</button>
+        <button class="btn btn--secondary" type="button" data-close>Close</button>
+      </div>
+    </dialog>
 
-    <div class="lists">
-      <form id="ti-add" class="panel" autocomplete="off">
-        <h3>Add an indicator</h3>
-        <div class="form-grid">
-          <label>Value <input id="ti-value" type="text" required placeholder="203.0.113.9, evil.example, a hash or URL"></label>
-          <label>Type
-            <select id="ti-add-type">
-              <option value="auto">Detect automatically</option>
-              <option value="ip">IP address or network</option>
-              <option value="domain">Domain</option>
-              <option value="url">URL</option>
-              <option value="hash">File hash</option>
-              <option value="email">Email address</option>
-            </select>
-          </label>
-          <label>Description <input id="ti-desc" type="text" placeholder="Why it is bad, or a ticket number"></label>
-          <label>Weight <input id="ti-weight" type="text" inputmode="decimal" placeholder="1 (2 doubles the risk)"></label>
-          <label>Expires <input id="ti-expires" type="text" placeholder="never, 30d or 2026-12-31"></label>
-          <label>Tags <input id="ti-tags" type="text" placeholder="phishing, incident-42"></label>
+    <dialog id="ti-confirm" class="modal" aria-labelledby="ti-confirm-title" aria-describedby="ti-confirm-desc">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="ti-confirm-title">Delete this indicator?</h3>
+          <p class="modal__desc" id="ti-confirm-desc"></p>
         </div>
-        <div class="row"><button class="primary" type="submit">Add</button></div>
-        <div id="ti-add-msg"></div>
-      </form>
-      <div class="panel">
-        <h3>Upload a list</h3>
-        <p class="muted small">CSV with the columns <code>value, type, description, weight, expires, tags</code> (only value is required; separate tags with <code>|</code>), or a plain list with one value per line. Defanged values like <code>evil[.]example</code> are fine. Nothing is saved unless every line is valid.</p>
-        <pre class="code small">value,description,weight,expires,tags
-203.0.113.9,Scanner seen in incident 42,2,30d,scanner|ssh
-login-bank.example,Phishing site,,2026-12-31,phishing</pre>
-        <div class="row"><input id="ti-file" type="file" accept=".csv,.txt,text/csv,text/plain"><button id="ti-upload" class="primary">Upload and add</button></div>
-        <div id="ti-upload-msg"></div>
       </div>
-    </div>
-
-    <div class="panel">
-      <div class="detail-head">
-        <h3>Indicators</h3>
-        <span id="ti-count" class="muted small"></span>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+        <button class="btn btn--danger" type="button" id="ti-confirm-delete">Delete</button>
       </div>
-      <div class="toolbar">
-        <input id="ti-q" type="search" placeholder="Find a value, description or tag">
-        <select id="ti-type">
-          <option value="">Any type</option>
-          <option value="ip">IP addresses and networks</option>
-          <option value="domain">Domains</option>
-          <option value="url">URLs</option>
-          <option value="hash">File hashes</option>
-          <option value="email">Email addresses</option>
-        </select>
-        <select id="ti-source"><option value="">Any source</option></select>
-        <button id="ti-prev">Previous</button>
-        <button id="ti-next">Next</button>
-      </div>
-      <div id="ti-list" class="results"></div>
-    </div>
+    </dialog>
   </section>
-
   <!-- Detections -->
   <section id="page-detections" class="page">
     <div class="page-head">
-      <h2>Detections</h2>
-      <div class="toolbar">
-        <input id="d-filter" type="search" placeholder="Filter by name, ATT&amp;CK ID or tag">
-        <select id="d-show">
-          <option value="">All</option>
-          <option value="enabled">Enabled</option>
-          <option value="disabled">Disabled</option>
-          <option value="custom">Custom or edited</option>
-          <option value="errors">Failing</option>
-        </select>
-        <button id="d-new" class="primary">New detection</button>
-        <button id="d-sigma">Import Sigma rule</button>
+      <div>
+        <h2 class="page-head__title">Detections</h2>
+        <p class="page-head__desc" id="d-desc">Scheduled searches that raise a finding for each result.</p>
+      </div>
+      <div class="page-head__actions">
+        <button class="btn btn--secondary" type="button" id="d-sigma"><svg class="icon" aria-hidden="true"><use href="#i-sigma"/></svg>Import Sigma rule</button>
+        <button class="btn btn--primary" type="button" id="d-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
       </div>
     </div>
-    <div id="d-scheduler-note" class="notice hidden">The scheduler is off on this server (detections.scheduler: false), so detections only run when you click Run now.</div>
-    <div id="d-sigma-box" class="panel hidden">
-      <h3>Import a Sigma rule</h3>
-      <p class="muted">Paste a rule from <a href="https://github.com/SigmaHQ/sigma" target="_blank" rel="noopener">SigmaHQ</a> or your own. Signalith converts it to a query you can review and test before saving. Imported rules start disabled.</p>
-      <textarea id="d-sigma-text" rows="12" spellcheck="false" placeholder="title: ...&#10;logsource: ...&#10;detection: ..."></textarea>
-      <div class="row"><button id="d-sigma-convert" class="primary">Convert</button><button id="d-sigma-cancel">Cancel</button></div>
-      <div id="d-sigma-error" class="error hidden"></div>
+    <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b>The scheduler is off on this server.</b><p>Detections only run when you choose Run now.</p></div></div>
+    <div class="split split--solo" id="d-split">
+      <section class="queue" aria-label="Detection list">
+        <div class="pills" id="d-show" role="group" aria-label="Show"></div>
+        <div class="toolbar" role="search">
+          <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input class="input" id="d-filter" type="search" placeholder="Filter by name, ATT&amp;CK ID or tag" aria-label="Filter detections" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></div>
+        </div>
+        <div class="card">
+          <div class="table-wrap" id="d-list"></div>
+          <div class="table-foot hidden" id="d-foot"></div>
+        </div>
+      </section>
+      <aside class="card inspector" id="d-detail" aria-label="Detection details" hidden></aside>
     </div>
-    <div id="d-editor" class="panel hidden"></div>
-    <div id="d-list" class="results"></div>
+    <dialog class="modal det-editor" id="d-editor" aria-labelledby="de-heading"></dialog>
+    <dialog class="modal" id="d-sigma-box" aria-labelledby="d-sigma-title">
+      <form method="dialog" id="d-sigma-form">
+        <div class="modal__head">
+          <div><h2 class="modal__title" id="d-sigma-title">Import a Sigma rule</h2><p class="modal__desc">Paste a <a href="https://github.com/SigmaHQ/sigma" target="_blank" rel="noopener">Sigma</a> rule to turn it into a detection. You review it before saving, and it starts turned off.</p></div>
+          <button class="btn btn--ghost btn--icon btn--sm dx-close" type="button" aria-label="Close" id="d-sigma-x"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div class="alert hidden" data-tone="danger" id="d-sigma-error" role="alert"><svg class="icon" aria-hidden="true"><use href="#i-circle-alert"/></svg><div><b>This rule could not be converted.</b><p id="d-sigma-error-text"></p></div></div>
+          <div class="field"><label class="label" for="d-sigma-text">Rule (YAML)</label><textarea class="textarea mono det-code" id="d-sigma-text" rows="14" spellcheck="false" placeholder="title: ...&#10;logsource: ...&#10;detection: ..."></textarea></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" id="d-sigma-cancel">Cancel</button>
+          <button class="btn btn--primary" type="submit" id="d-sigma-convert">Convert</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog class="modal" id="d-confirm" aria-labelledby="d-confirm-title"></dialog>
   </section>
 
   <!-- ATT&CK coverage -->
   <section id="page-coverage" class="page">
-    <div class="page-head">
-      <h2>MITRE ATT&amp;CK coverage</h2>
-      <div class="toolbar">
-        <label><input type="checkbox" id="c-only"> Only techniques with detections</label>
+    <div class="kpis cov-kpis" id="c-summary" aria-live="polite"></div>
+    <div class="alert hidden" data-tone="warning" id="cov-unknown"><svg class="icon" aria-hidden="true"><use href="#i-triangle-alert"/></svg><div><b>Some techniques are not in this ATT&amp;CK version.</b><p id="cov-unknown-text"></p></div></div>
+    <div class="toolbar cov-toolbar">
+      <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input class="input" id="cov-filter" type="search" placeholder="Find a technique" aria-label="Find a technique by ID or name" autocomplete="off" spellcheck="false"><kbd aria-hidden="true">/</kbd></div>
+      <label class="switch"><input type="checkbox" id="c-only">Only techniques with detections</label>
+      <span class="spacer"></span>
+      <div class="legend cov-legend" aria-label="Cell colours">
+        <span><i data-level="0"></i>None</span>
+        <span><i data-level="off"></i>Turned off</span>
+        <span><i data-level="1"></i>1 detection</span>
+        <span><i data-level="2"></i>2</span>
+        <span><i data-level="3"></i>3 or more</span>
       </div>
     </div>
-    <div id="c-summary" class="health"></div>
-    <div class="legend-row"><span class="cov-cell enabled">Enabled detection</span><span class="cov-cell available">Detection available, disabled</span><span class="cov-cell">No detection</span></div>
-    <div id="c-matrix" class="matrix"></div>
-    <p class="muted small">ATT&amp;CK® is a registered trademark of The MITRE Corporation. Matrix data © The MITRE Corporation, used under the ATT&amp;CK terms of use.</p>
+    <div class="cov" id="c-matrix" tabindex="0" aria-label="ATT&amp;CK matrix: one column per tactic"></div>
+    <p class="cov-note">ATT&amp;CK® is a registered trademark of The MITRE Corporation. Matrix data © The MITRE Corporation, used under the ATT&amp;CK terms of use.</p>
   </section>
 
   <!-- Add data -->
   <section id="page-data" class="page">
-    <h2>Add data</h2>
-    <p class="muted">Install Fluent Bit on each host, paste this configuration, and restart it. Events show up in Search within a minute.</p>
-    <div class="agent-options">
-      <label><input type="radio" name="os" value="linux" checked> Linux</label>
-      <label><input type="radio" name="os" value="windows"> Windows</label>
-      <span id="linux-opts">
-        <select id="linux-source">
-          <option value="file">Read /var/log/auth.log or /var/log/secure</option>
-          <option value="journal">Read the systemd journal (no auth.log)</option>
-        </select>
-      </span>
-      <label id="windows-opts" class="hidden"><input type="checkbox" id="sysmon" checked> Include Sysmon</label>
+    <header class="page-head">
+      <div>
+        <h2 class="page-head__title">Add data</h2>
+        <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent.</p>
+      </div>
+    </header>
+    <div class="agent">
+      <fieldset class="agent-os">
+        <legend class="sr-only">Operating system</legend>
+        <label class="card agent-os__card">
+          <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-square-terminal"/></svg></span>
+          <span class="agent-os__text"><b>Linux</b><span>SSH, sudo and account changes</span></span>
+          <input type="radio" name="os" value="linux" checked>
+        </label>
+        <label class="card agent-os__card">
+          <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></span>
+          <span class="agent-os__text"><b>Windows</b><span>Security event log and Sysmon</span></span>
+          <input type="radio" name="os" value="windows">
+        </label>
+      </fieldset>
+
+      <div class="card agent-setup">
+        <div class="card__head">
+          <div>
+            <h3 class="card__title" id="agent-title">Set up the agent</h3>
+            <p class="card__sub">Do this on each host you want to collect from.</p>
+          </div>
+          <div class="card__actions">
+            <label id="linux-opts" class="agent-opt"><span>Read from</span>
+              <select id="linux-source" class="select select--sm">
+                <option value="file">auth.log or secure</option>
+                <option value="journal">systemd journal</option>
+              </select>
+            </label>
+            <label id="windows-opts" class="switch hidden"><input type="checkbox" id="sysmon" checked> Include Sysmon</label>
+          </div>
+        </div>
+        <div class="card__body" id="agent-body">
+          <ol id="agent-steps" class="agent-steps" role="list" aria-busy="true"></ol>
+          <div id="agent-file" class="agent-file hidden">
+            <div class="agent-file__bar">
+              <svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>
+              <span id="agent-path" class="mono"></span>
+              <span class="spacer"></span>
+              <button class="btn btn--ghost btn--sm" type="button" id="agent-download"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span>Download</span></button>
+              <button class="btn btn--ghost btn--sm" type="button" id="copy-config"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy</span></button>
+            </div>
+            <pre id="agent-config" class="editor"></pre>
+          </div>
+        </div>
+      </div>
     </div>
-    <ol id="agent-steps"></ol>
-    <div class="code-head"><span id="agent-path" class="muted"></span><button id="copy-config">Copy</button></div>
-    <pre id="agent-config" class="code"></pre>
+    <p class="sr-only" id="agent-status" role="status"></p>
   </section>
 
   <!-- Health -->
   <section id="page-health" class="page">
-    <h2>Health</h2>
-    <div id="health" class="health"></div>
+    <div id="health" class="health-page"></div>
   </section>
 
   <!-- Help -->
-  <section id="page-help" class="page help">
-    <h2>Query guide</h2>
-    <p>A query is a search followed by commands joined with <code>|</code>. The search picks events; each command reshapes the results.</p>
-    <h3>Search</h3>
-    <table class="ref">
-      <tr><td><code>datamodel=Authentication</code></td><td>Only events of one data model (Authentication, Endpoint, Network_Traffic, Change, Other, Risk)</td></tr>
-      <tr><td><code>user=admin</code></td><td>Field equals a value (case-insensitive)</td></tr>
-      <tr><td><code>user=adm*</code></td><td>Wildcards with <code>*</code></td></tr>
-      <tr><td><code>dest_port&gt;=1024</code></td><td>Comparisons: <code>= != &lt; &lt;= &gt; &gt;=</code></td></tr>
-      <tr><td><code>src IN (10.0.0.1, 10.0.0.2)</code></td><td>Any of several values</td></tr>
-      <tr><td><code>"failed password"</code></td><td>Text anywhere in the raw event</td></tr>
-      <tr><td><code>a=1 b=2 OR c=3</code></td><td>Terms are ANDed; OR binds tighter, as in SPL; use NOT and parentheses as needed</td></tr>
-      <tr><td><code>earliest=-7d@d latest=now</code></td><td>Time range; overrides the time picker</td></tr>
-    </table>
-    <h3>Commands</h3>
-    <table class="ref">
-      <tr><td><code>| stats count, dc(user) as users by src</code></td><td>Aggregate: count, dc, sum, avg, min, max</td></tr>
-      <tr><td><code>| timechart span=1h count by action</code></td><td>Series over time</td></tr>
-      <tr><td><code>| top limit=10 process_name</code></td><td>Most common values with percentages</td></tr>
-      <tr><td><code>| where count &gt; 20</code></td><td>Filter rows; uses AND/OR like most languages</td></tr>
-      <tr><td><code>| sort -count, src</code></td><td>Sort; <code>-</code> for descending</td></tr>
-      <tr><td><code>| head 10</code></td><td>Keep the first N rows</td></tr>
-      <tr><td><code>| table _time, user, src</code></td><td>Choose columns</td></tr>
-      <tr><td><code>| rename src as source_ip</code></td><td>Rename columns</td></tr>
-      <tr><td><code>| enrich</code></td><td>Add owner, priority and category from the asset and identity lists, as <code>dest_owner</code>, <code>user_priority</code> and so on</td></tr>
-      <tr><td><code>| threatmatch</code></td><td>Keep only events whose IP, domain, URL, hash or email fields match threat intel, with <code>threat_match_value</code>, <code>threat_source</code> and <code>threat_weight</code> columns. Name fields to check only those: <code>| threatmatch src, dest</code>. Put it right after the search</td></tr>
-      <tr><td><code>| intel src, dest</code></td><td>Check any result against threat intel: adds <code>src_intel_source</code>, <code>src_intel_type</code>, <code>src_intel_weight</code> and <code>src_intel_description</code> where a value is a known indicator</td></tr>
-    </table>
-    <h3>Tips</h3>
-    <ul>
-      <li>Click a field on the left to see its top values; click a value to filter on it.</li>
-      <li>Click any cell in the results to filter, exclude, or count by that value.</li>
-      <li>Use the builder to write a query, then edit the text; the builder follows along when it can.</li>
-      <li>Explain turns any query into plain English and shows the OpenSearch request it runs.</li>
-    </ul>
+  <section id="page-help" class="page">
+    <article class="card guide">
+      <p class="guide__lead">A query is a search followed by commands joined with <code>|</code>. The search picks events; each command reshapes the results.</p>
+      <figure class="guide__example">
+        <div class="editor" data-query="datamodel=Authentication action=failure&#10;| stats count, dc(user) as users by src&#10;| where count &gt; 10&#10;| sort -count"></div>
+        <figcaption><span>Sources with more than 10 failed sign-ins, busiest first.</span><button class="btn btn--ghost btn--sm" type="button" id="guide-try"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Run in Search</button></figcaption>
+      </figure>
+
+      <h2>Search</h2>
+      <dl class="guide__ref">
+        <div><dt data-query="datamodel=Authentication"></dt><dd>Only events of one data model: Authentication, Endpoint, Network_Traffic, Change, Other or Risk.</dd></div>
+        <div><dt data-query="user=admin"></dt><dd>A field equals a value. Matching ignores case.</dd></div>
+        <div><dt data-query="user=adm*"></dt><dd>Wildcards with <code>*</code>.</dd></div>
+        <div><dt data-query="dest_port&gt;=1024"></dt><dd>Comparisons: <code>= != &lt; &lt;= &gt; &gt;=</code>.</dd></div>
+        <div><dt data-query="src IN (10.0.0.1, 10.0.0.2)"></dt><dd>Any of several values.</dd></div>
+        <div><dt data-query="&quot;failed password&quot;"></dt><dd>Text anywhere in the raw event.</dd></div>
+        <div><dt data-query="a=1 b=2 OR c=3"></dt><dd>Terms are ANDed. OR binds tighter, as in SPL. Use NOT and parentheses as needed.</dd></div>
+        <div><dt data-query="earliest=-7d@d latest=now"></dt><dd>Time range. It overrides the time picker.</dd></div>
+      </dl>
+
+      <h2>Commands</h2>
+      <dl class="guide__ref">
+        <div><dt data-query="| stats count, dc(user) as users by src"></dt><dd>Aggregate with count, dc, sum, avg, min and max.</dd></div>
+        <div><dt data-query="| timechart span=1h count by action"></dt><dd>A series over time.</dd></div>
+        <div><dt data-query="| top limit=10 process_name"></dt><dd>The most common values, with percentages.</dd></div>
+        <div><dt data-query="| where count &gt; 20"></dt><dd>Filter rows. Uses AND and OR like most languages.</dd></div>
+        <div><dt data-query="| sort -count, src"></dt><dd>Sort. Put <code>-</code> before a field for descending.</dd></div>
+        <div><dt data-query="| head 10"></dt><dd>Keep the first N rows.</dd></div>
+        <div><dt data-query="| table _time, user, src"></dt><dd>Choose the columns.</dd></div>
+        <div><dt data-query="| rename src as source_ip"></dt><dd>Rename columns.</dd></div>
+        <div><dt data-query="| enrich"></dt><dd>Add owner, priority and category from the asset and identity lists, as <code>dest_owner</code>, <code>user_priority</code> and so on.</dd></div>
+        <div><dt data-query="| threatmatch"></dt><dd>Keep only events whose IP, domain, URL, hash or email fields match threat intel, with <code>threat_match_value</code>, <code>threat_source</code> and <code>threat_weight</code> columns. Name fields to check only those, as in <code>| threatmatch src, dest</code>. Put it right after the search.</dd></div>
+        <div><dt data-query="| intel src, dest"></dt><dd>Check any result against threat intel. Adds <code>src_intel_source</code>, <code>src_intel_type</code>, <code>src_intel_weight</code> and <code>src_intel_description</code> where a value is a known indicator.</dd></div>
+      </dl>
+
+      <h2>Tips</h2>
+      <ul class="guide__tips">
+        <li>Click a field in the Fields list to see its top values, then click a value to filter on it.</li>
+        <li>Click any cell in the results to filter, exclude, or count by that value.</li>
+        <li>Use the query builder to write a query, then edit the text. The builder follows along when it can.</li>
+        <li>Explain turns any query into plain English and shows the OpenSearch request it runs.</li>
+        <li>Press <kbd class="mod-key">Ctrl</kbd> <kbd>Enter</kbd> in the query box to run the search.</li>
+      </ul>
+    </article>
   </section>
 </main>
-<dialog id="case-picker" class="case-picker"></dialog>
+</div>
+</div>
+<dialog id="case-picker" class="modal" aria-labelledby="cp-title"></dialog>
 <div id="toast" class="toast hidden" role="status"></div>
 <script src="app.js"></script>
 <script src="detections.js"></script>

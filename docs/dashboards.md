@@ -50,7 +50,7 @@ way to show its result.
 | Table | `table` | Any result |
 | Bar chart | `bar` | `| stats count by field`, `| top field`; one bar per row |
 | Line chart | `line` | `| timechart ...` |
-| Area chart | `area` | `| timechart ...`, filled |
+| Stacked columns | `area` | `| timechart ...`; one column per time bucket, series stacked |
 
 Ways to add a panel:
 

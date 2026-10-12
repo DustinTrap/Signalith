@@ -25,7 +25,7 @@ func (s *Server) routeDetections(api *http.ServeMux) {
 	api.HandleFunc("POST /api/detections/{id}/run", s.handleRunDetection)
 	api.HandleFunc("GET /api/coverage", s.handleCoverage)
 	api.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"user": userOf(r)})
+		writeJSON(w, http.StatusOK, map[string]string{"user": userOf(r), "auth": authMethod(r)})
 	})
 
 	api.HandleFunc("GET /api/findings", s.handleListFindings)
@@ -474,11 +474,4 @@ func (s *Server) handleFindingsSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, sum)
-}
-
-func userOf(r *http.Request) string {
-	if u, _, ok := r.BasicAuth(); ok {
-		return u
-	}
-	return "unknown"
 }

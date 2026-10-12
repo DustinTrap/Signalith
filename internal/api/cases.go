@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
@@ -211,7 +212,25 @@ func (s *Server) handleGetCase(w http.ResponseWriter, r *http.Request) {
 			linked = append(linked, f)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"case": c, "findings": linked, "missing_findings": missing})
+	writeJSON(w, http.StatusOK, map[string]any{"case": c, "findings": linked, "missing_findings": missing,
+		"entity_context": s.entityContext(c.Entities)})
+}
+
+// entityContext looks each case entity up in the asset and identity
+// lists, so the case page can describe them without a request per entity.
+// The list lines up with the entities; an entry is null when the value is
+// not listed. It is nil when there are no lists.
+func (s *Server) entityContext(ents []cases.Entity) []*assets.Context {
+	if s.Assets == nil || len(ents) == 0 {
+		return nil
+	}
+	out := make([]*assets.Context, len(ents))
+	for i, e := range ents {
+		if c, ok := s.Assets.Lookup(e.Field, e.Value); ok {
+			out[i] = c
+		}
+	}
+	return out
 }
 
 func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {

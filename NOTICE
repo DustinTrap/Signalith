@@ -5,3 +5,15 @@ This product includes data from MITRE ATT&CK® (https://attack.mitre.org),
 © The MITRE Corporation. ATT&CK® is a registered trademark of The MITRE
 Corporation. Reproduced and distributed under the ATT&CK terms of use:
 https://attack.mitre.org/resources/legal-and-branding/terms-of-use/
+
+The web UI bundles the Inter and JetBrains Mono typefaces, licensed under the
+SIL Open Font License 1.1 (https://openfontlicense.org).
+Inter: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter).
+JetBrains Mono: Copyright 2020 The JetBrains Mono Project Authors
+(https://github.com/JetBrains/JetBrainsMono).
+Full license texts are in web/static/assets/licenses/.
+
+The web UI includes icons from Lucide (https://lucide.dev), Copyright (c) 2026
+Lucide Icons and Contributors, licensed under the ISC License. Some Lucide icons
+derive from Feather, Copyright (c) 2013-present Cole Bemis, licensed under the
+MIT License. Full license texts are in web/static/assets/licenses/.

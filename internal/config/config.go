@@ -78,6 +78,17 @@ type Retention struct {
 type Auth struct {
 	AdminUser         string `yaml:"admin_user"`
 	AdminPasswordHash string `yaml:"admin_password_hash"`
+	// SessionTimeout signs the web UI out after this long without use,
+	// unless "keep me signed in" was ticked. Default 12h.
+	SessionTimeout string `yaml:"session_timeout,omitempty"`
+}
+
+// SessionIdle returns auth.session_timeout as a duration.
+func (c *Config) SessionIdle() time.Duration {
+	if d, err := detect.ParseDuration(c.Auth.SessionTimeout); err == nil && d > 0 {
+		return d
+	}
+	return 12 * time.Hour
 }
 
 // Ingest controls agent access.
@@ -419,6 +430,11 @@ func (c *Config) Validate() error {
 	} else if _, err := bcrypt.Cost([]byte(c.Auth.AdminPasswordHash)); err != nil {
 		p = append(p, "auth.admin_password_hash is not a bcrypt hash; generate one with signalith passwd")
 	}
+	if c.Auth.SessionTimeout != "" {
+		if d, err := detect.ParseDuration(c.Auth.SessionTimeout); err != nil || d < 5*time.Minute {
+			p = append(p, fmt.Sprintf("auth.session_timeout %q must be a duration of at least 5m, for example 12h or 1d", c.Auth.SessionTimeout))
+		}
+	}
 	if c.Detections.Dir == "" {
 		p = append(p, "detections.dir is required, for example: detections")
 	}
@@ -533,6 +549,7 @@ const header = `# Signalith configuration.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server
+# auth.session_timeout  sign the web UI out after this long idle (default 12h)
 # opensearch.*       where events are stored
 # search.*           default time range and result limits
 # retention.days     days of events to keep (0 = forever)

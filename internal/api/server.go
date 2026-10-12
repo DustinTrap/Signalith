@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -21,6 +20,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
+	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
@@ -67,6 +67,11 @@ type Server struct {
 	Log       *slog.Logger
 	Version   string
 
+	// Sessions and Limiter back the sign-in page; nil uses defaults.
+	Sessions *auth.Sessions
+	Limiter  *auth.Limiter
+
+	authOnce  sync.Once
 	authCache sync.Map   // sha256(user:pass) -> struct{}
 	caseMu    sync.Mutex // serializes case changes
 }
@@ -94,10 +99,21 @@ func (s *Server) Handler() http.Handler {
 	s.routeDashboards(api)
 	s.routeCases(api)
 	if s.UI != nil {
-		api.Handle("GET /", http.FileServerFS(s.UI))
+		api.Handle("GET /", revalidate(http.FileServerFS(s.UI)))
 	}
+	s.routeLogin(mux)
 	mux.Handle("/", s.requireAdmin(api))
 	return securityHeaders(mux)
+}
+
+// revalidate makes browsers check with the server before reusing a cached
+// copy of a signed-in page, so after signing out the app sends them to the
+// sign-in page instead of showing a stale copy.
+func revalidate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -108,28 +124,6 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		next.ServeHTTP(w, r)
-	})
-}
-
-// requireAdmin enforces HTTP Basic auth for the UI and API. Successful
-// credentials are cached by hash so bcrypt runs once per password.
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if ok {
-			key := sha256.Sum256([]byte(user + "\x00" + pass + "\x00" + s.Config.Auth.AdminPasswordHash))
-			if _, hit := s.authCache.Load(key); hit {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if s.Config.CheckPassword(user, pass) {
-				s.authCache.Store(key, struct{}{})
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-		w.Header().Set("WWW-Authenticate", `Basic realm="Signalith", charset="UTF-8"`)
-		writeError(w, http.StatusUnauthorized, errors.New("sign in required"))
 	})
 }
 
