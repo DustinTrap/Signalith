@@ -40,6 +40,10 @@ function ago(t) {
   return Math.floor(s / 86400) + 'd ago';
 }
 
+// looksLikeIP says whether a value is an IPv4 or IPv6 address, so pages
+// draw the same globe icon for an address wherever it appears.
+const looksLikeIP = (v) => /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(v);
+
 // api calls the Signalith API. Paths are relative to the page so the UI
 // works behind a proxy; a signed-out session goes to the sign-in page and
 // comes back here afterwards.
@@ -100,7 +104,11 @@ function showPage(name, opts = {}) {
   // inert while showing nothing (for example after Back), so close it.
   if (switching) document.querySelectorAll(`.page:not(#page-${name}) dialog[open]`).forEach((d) => d.close());
   selectPage(name);
+  // Picking a page in the phone drawer: focus goes to the new page's title,
+  // not to the drawer that just closed.
+  const fromDrawer = narrow.matches && appEl.hasAttribute('data-nav-open');
   setNavOpen(false);
+  if (fromDrawer) $('crumb-page').focus({ preventScroll: true });
   if (location.hash !== '#' + name) {
     try { history[opts.replace ? 'replaceState' : 'pushState'](null, '', '#' + name); } catch (_) { /* sandboxed */ }
   }
@@ -141,9 +149,11 @@ function setNavOpen(open) {
 const mainEl = document.querySelector('.main');
 function syncDrawer() {
   const open = appEl.hasAttribute('data-nav-open');
-  $('sidebar').inert = narrow.matches && !open;
+  // an open slide-over inspector keeps the sidebar inert too (see below)
+  $('sidebar').inert = (narrow.matches && !open) || $('sidebar').hasAttribute('data-inspect-inert');
   mainEl.inert = narrow.matches && open;
 }
+$('crumb-page').tabIndex = -1;
 narrow.addEventListener('change', () => { if (!narrow.matches) setNavOpen(false); syncDrawer(); });
 syncDrawer();
 $('nav-toggle').addEventListener('click', () => {
@@ -161,6 +171,30 @@ $('scrim').addEventListener('click', () => {
   setNavOpen(false);
   appEl.removeAttribute('data-inspect');
 });
+
+// ---------- app shell: slide-over inspectors ----------
+// Below 1360px an open inspector (.app[data-inspect]) slides over the page
+// behind a scrim, so it is modal: everything around it is made inert and
+// Tab stays in the panel. Dialogs (and the toast, outside .app) stay usable.
+const slideOver = matchMedia('(max-width: 1359px)');
+function syncInspectInert() {
+  document.querySelectorAll('[data-inspect-inert]').forEach((n) => { n.inert = false; n.removeAttribute('data-inspect-inert'); });
+  const panel = slideOver.matches && appEl.hasAttribute('data-inspect') && document.querySelector('.page.active .inspector:not([hidden]):not(.hidden)');
+  if (panel) {
+    const mark = (n) => {
+      if (n.inert || n.matches('dialog, .scrim, script, template, datalist')) return;
+      if (n.querySelector('dialog')) { for (const c of n.children) mark(c); return; }
+      n.inert = true;
+      n.setAttribute('data-inspect-inert', '');
+    };
+    for (let n = panel; n !== appEl && n.parentElement; n = n.parentElement) {
+      for (const sib of n.parentElement.children) if (sib !== n) mark(sib);
+    }
+  }
+  syncDrawer();
+}
+new MutationObserver(syncInspectInert).observe(appEl, { attributes: true, attributeFilter: ['data-inspect'] });
+slideOver.addEventListener('change', syncInspectInert);
 
 // ---------- app shell: page jumper ----------
 // Typing in the sidebar box filters the nav; Enter opens the first match.
@@ -242,9 +276,21 @@ document.querySelectorAll('[data-set-theme]').forEach((b) => b.addEventListener(
 syncThemeButtons();
 
 // ---------- app shell: menus and keys ----------
-// details.menu closes on a click outside it and on Esc.
+// details.menu closes on a click outside it, on Esc, and when Tab moves
+// focus out of it (a click on its plain header moves focus nowhere, so a
+// focusout without a new target leaves it open).
 document.addEventListener('click', (ev) => {
   document.querySelectorAll('details.menu[open]').forEach((d) => { if (!d.contains(ev.target)) d.removeAttribute('open'); });
+});
+document.addEventListener('focusout', (ev) => {
+  const menu = ev.target.closest && ev.target.closest('details.menu[open]');
+  if (menu && ev.relatedTarget && !menu.contains(ev.relatedTarget)) menu.removeAttribute('open');
+});
+// On a phone the pill rows scroll sideways; a pill that gets focus is
+// brought fully into view (browsers leave a half-visible one where it is).
+document.addEventListener('focusin', (ev) => {
+  const pill = ev.target.parentElement && ev.target.parentElement.classList.contains('pills') ? ev.target : null;
+  if (pill && pill.parentElement.scrollWidth > pill.parentElement.clientWidth) pill.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 });
 document.addEventListener('keydown', (ev) => {
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === 'k') {
@@ -1122,7 +1168,7 @@ function renderEvents(box, res, opts) {
     if (r._time != null) {
       time.append(...(isNaN(d) ? [fmtValue(r._time)] : [
         el('span', { class: 'ev-date' }, d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })),
-        el('span', { class: 'ev-clock' }, d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }))]));
+        el('span', { class: 'ev-clock' }, d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }))]));
       time.title = fmtTime(r._time);
       time.addEventListener('click', (ev) => showCellMenu(ev, '_time', r._time, 'events', r, opts.sortable));
     }
@@ -1316,25 +1362,60 @@ function drawHistogram(box, rows, range) {
   const total = bars.reduce((a, b) => a + b.c, 0);
   const t0 = bars[0].t0;
   const t1 = bars[bars.length - 1].t1;
-  const long = t1 - t0 > 3 * 86400e3;
   const day = (d) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  const hm = (d) => d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const hm = (d) => d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   const tip = (b) => {
     const a = new Date(b.t0);
     const z = new Date(b.t1);
     const same = a.toDateString() === z.toDateString();
     return `${day(a)}, ${hm(a)} – ${same ? '' : day(z) + ', '}${hm(z)} · ${b.c.toLocaleString()} event${b.c === 1 ? '' : 's'}`;
   };
-  const label = (f, i) => {
-    const d = new Date(t0 + f * (t1 - t0));
-    const text = long ? day(d) : (i === 0 || i === 4 || d.getHours() + d.getMinutes() === 0) && t1 - t0 >= 12 * 3600e3 ? `${day(d)}, ${hm(d)}` : hm(d);
-    return el('span', i % 2 ? { class: 'hide-sm' } : {}, text);
+  // Axis labels sit at round times (every 6 hours, every day...), placed by
+  // time, about one per 110px; midnight shows the date.
+  const label = (t) => {
+    const d = new Date(t);
+    const pos = (100 * (t - t0)) / (t1 - t0);
+    const attrs = { style: `left:${pos.toFixed(2)}%` };
+    if (pos < 4) attrs['data-edge'] = 'start';
+    else if (pos > 96) attrs['data-edge'] = 'end';
+    return el('span', attrs, d.getHours() + d.getMinutes() === 0 && t1 - t0 >= 6 * 3600e3 ? day(d) : hm(d));
   };
   box.replaceChildren(
     el('div', { class: 'histogram__bars', role: 'img', 'aria-label': `Events over time: ${total.toLocaleString()} events from ${new Date(t0).toLocaleString()} to ${new Date(t1).toLocaleString()}` },
       ...bars.map((b) => el('span', b.c ? { title: tip(b), style: `--h:${Math.max(4, 100 * b.c / max).toFixed(1)}%` } : { title: tip(b), 'data-zero': '' }))),
-    el('div', { class: 'histogram__axis', 'aria-hidden': 'true' }, ...[0, 0.25, 0.5, 0.75, 1].map(label)));
+    el('div', { class: 'histogram__axis', 'aria-hidden': 'true' }, ...timeTicks(t0, t1, Math.max(2, Math.min(5, Math.floor(width / 110)))).map(label)));
   box.classList.remove('hidden');
+}
+
+// timeTicks picks at most max round times between t0 and t1 (local time):
+// whole minutes, hours or days with the smallest step that fits.
+function timeTicks(t0, t1, max) {
+  const M = 60e3, H = 3600e3, D = 86400e3;
+  const steps = [M, 2 * M, 5 * M, 10 * M, 15 * M, 30 * M, H, 2 * H, 3 * H, 6 * H, 12 * H, D, 2 * D, 7 * D, 14 * D, 30 * D];
+  const step = steps.find((s) => (t1 - t0) / s <= max) || 30 * D;
+  const d = new Date(t0);
+  if (step < H) {
+    d.setSeconds(0, 0);
+    const m = step / M;
+    d.setMinutes(Math.ceil((d.getMinutes() + (+d < t0 ? 1 : 0)) / m) * m);
+  } else if (step < D) {
+    d.setMinutes(0, 0, 0);
+    if (+d < t0) d.setHours(d.getHours() + 1);
+    const h = step / H;
+    while (d.getHours() % h) d.setHours(d.getHours() + 1);
+  } else {
+    d.setHours(0, 0, 0, 0);
+    if (+d < t0) d.setDate(d.getDate() + 1);
+  }
+  const out = [];
+  // add by calendar fields, so a daylight-saving change keeps ticks on the hour
+  for (let i = 0; i < 64 && +d <= t1; i++) {
+    out.push(+d);
+    if (step < H) d.setMinutes(d.getMinutes() + step / M);
+    else if (step < D) d.setHours(d.getHours() + step / H);
+    else d.setDate(d.getDate() + step / D);
+  }
+  return out;
 }
 
 // ---------- cell actions ----------
@@ -1479,8 +1560,8 @@ function drawTimeChart(box, res, opts = {}) {
   const spanMs = times.length > 1 ? times[times.length - 1] - times[0] : 0;
   const fmtX = (d) => (isNaN(d) ? '' : spanMs >= 2 * 86400e3
     ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }));
-  const fmtTip = (d) => (isNaN(d) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }));
+    : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }));
+  const fmtTip = (d) => (isNaN(d) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }));
   const values = rows.flatMap((r) => series.map((s) => Number(r[s]) || 0));
   // Whole-number data (counts) gets whole-number ticks.
   const whole = values.every(Number.isInteger);
@@ -1978,7 +2059,7 @@ function healthPageRender(h) {
     healthPageKpi('inbox', 'Events received', healthPageNum(received), 'Since the server started'),
     healthPageKpi('database', 'Indexed', healthPageNum(indexed), received ? Math.floor((indexed / received) * 1000) / 10 + '% of received' : 'Stored in OpenSearch'),
     healthPageKpi('circle-x', 'Failed', healthPageNum(failed), failed ? 'Not stored' : 'None since start', failed ? 'warning' : ''),
-    healthPageKpi('clock', 'Last event', lastAgo ? cap(lastAgo) : 'None', ing.last_seen ? new Date(ing.last_seen).toLocaleString() : 'No events since start'));
+    healthPageKpi('clock', 'Last event', lastAgo ? cap(lastAgo) : el('span', { class: 'kpi__none' }, el('span', { 'aria-hidden': 'true' }, '–'), el('span', { class: 'sr-only' }, 'None')), ing.last_seen ? new Date(ing.last_seen).toLocaleString() : 'No events since start'));
 
   const osRow = {
     green: ['', 'Healthy', 'Cluster status green.'],

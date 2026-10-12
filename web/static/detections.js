@@ -68,11 +68,39 @@ const SEVERITY_FULL = { critical: 'Critical', high: 'High', medium: 'Medium', lo
 // Below 1360px the inspectors are slide-overs (.app[data-inspect]).
 const dxSlideOver = matchMedia('(max-width: 1359px)');
 
+// Redrawing an inspector replaces its controls, which would drop keyboard
+// focus to the page. dxRedraw draws, then puts focus back on the new copy of
+// the control that had it (by data-action or id), or else on the title.
+// dxKeep marks a button before its handler disables it, because a disabled
+// button loses focus before the redraw can see it.
+const dxFocusKey = (n) => (n && (n.dataset.action || (n.id ? '#' + n.id : ''))) || '';
+function dxKeep(btn) {
+  const box = btn.closest('.inspector');
+  if (box && document.activeElement === btn) box.dataset.refocus = dxFocusKey(btn);
+}
+function dxRedraw(box, titleId, draw) {
+  const a = document.activeElement;
+  const lost = !a || a === document.body;
+  const inBox = !lost && box.contains(a);
+  const pending = box.dataset.refocus;
+  delete box.dataset.refocus;
+  const key = pending && (lost || a.id === titleId || inBox) ? pending : inBox ? dxFocusKey(a) : '';
+  draw();
+  if (!key) return;
+  const again = key[0] === '#' ? document.getElementById(key.slice(1)) : box.querySelector(`[data-action="${CSS.escape(key)}"]`);
+  if (again && box.contains(again) && !again.disabled) { again.focus({ preventScroll: true }); return; }
+  // still loading, or busy (Run now while it runs): come back to it on the next draw
+  if (!again || (again.disabled && key !== 'prev' && key !== 'next')) box.dataset.refocus = key;
+  const t = document.getElementById(titleId);
+  if (t && box.contains(t)) t.focus({ preventScroll: true });
+}
+
 function dxBtn(kind, label, onclick, opts = {}) {
   const attrs = { class: `btn btn--${kind}${opts.sm ? ' btn--sm' : ''}${label ? '' : ' btn--icon'}${opts.cls ? ' ' + opts.cls : ''}`, type: opts.type || 'button' };
   if (opts.title) attrs.title = opts.title;
   if (!label && opts.title) attrs['aria-label'] = opts.title;
   if (opts.id) attrs.id = opts.id;
+  if (opts.action) attrs['data-action'] = opts.action;
   const b = el('button', attrs, opts.icon ? icon(opts.icon) : null, label || null);
   if (onclick) b.addEventListener('click', onclick);
   if (opts.disabled) b.disabled = true;
@@ -163,8 +191,8 @@ function dxInspectorBar(o) {
     el('span', { class: 'mono dx-insp-id', title: o.id }, o.id),
     o.index >= 0 ? el('span', { class: 'dx-insp-pos' }, `${o.index + 1} of ${o.count}`) : null,
     el('span', { class: 'spacer' }),
-    dxBtn('ghost', '', () => o.step(-1), { sm: true, icon: 'chevron-up', title: `Previous ${o.noun} (K)`, disabled: !(o.index > 0) }),
-    dxBtn('ghost', '', () => o.step(1), { sm: true, icon: 'chevron-down', title: `Next ${o.noun} (J)`, disabled: !(o.count > 0 && o.index < o.count - 1) }),
+    dxBtn('ghost', '', () => o.step(-1), { sm: true, icon: 'chevron-up', title: `Previous ${o.noun} (K)`, disabled: !(o.index > 0), action: 'prev' }),
+    dxBtn('ghost', '', () => o.step(1), { sm: true, icon: 'chevron-down', title: `Next ${o.noun} (J)`, disabled: !(o.count > 0 && o.index < o.count - 1), action: 'next' }),
     dxBtn('ghost', '', o.close, { sm: true, icon: 'x', title: 'Close details' }));
 }
 
@@ -736,6 +764,7 @@ function closeFindingInspector(opts = {}) {
   fnd.detailSeq++;
   if (!opts.keepState) fnd.closed = true;
   appEl.removeAttribute('data-inspect');
+  syncInspectInert();   // now, so the row can take focus back below
   $('f-detail').hidden = true;
   $('f-split').classList.add('split--solo');
   markRows('f-list', null);
@@ -761,11 +790,11 @@ async function showFinding(id, opts = {}) {
     id, index: findingsList.findIndex((f) => f.id === id), count: findingsList.length,
     noun: 'finding', step: stepFinding, close: () => closeFindingInspector(),
   });
-  fill(box, bar(),
+  dxRedraw(box, 'fd-title', () => fill(box, bar(),
     el('div', { class: 'inspector__head', 'aria-busy': 'true' },
-      known ? el('h2', { class: 'inspector__title' }, known.title) : dxSkel('85%'),
+      known ? el('h2', { class: 'inspector__title', id: 'fd-title', tabindex: '-1' }, known.title) : dxSkel('85%'),
       known ? el('div', { class: 'row dx-tags' }, sevBadge(urgencyOf(known)), statusBadge(known.status)) : dxSkel('40%')),
-    el('div', { class: 'inspector__body', 'aria-busy': 'true' }, dxSkel('92%'), dxSkel('80%'), dxSkel('60%'), dxSkel('100%'), dxSkel('70%')));
+    el('div', { class: 'inspector__body', 'aria-busy': 'true' }, dxSkel('92%'), dxSkel('80%'), dxSkel('60%'), dxSkel('100%'), dxSkel('70%'))));
   let data;
   try {
     data = await api('api/findings/' + encodeURIComponent(id));
@@ -775,7 +804,7 @@ async function showFinding(id, opts = {}) {
     return;
   }
   if (seq !== fnd.detailSeq) return;
-  renderFindingDetail(box, data, opts);
+  dxRedraw(box, 'fd-title', () => renderFindingDetail(box, data, opts));
   if (dxSlideOver.matches && opts.focus !== false) { const t = $('fd-title'); if (t) t.focus(); }
 }
 
@@ -844,8 +873,9 @@ function renderFindingDetail(box, data, opts = {}) {
   const err = el('div', { class: 'alert hidden', 'data-tone': 'danger', role: 'alert' }, icon('circle-alert'), el('div', {}, el('b', {}, 'Couldn’t save.'), errText));
   const fail = (e) => { errText.textContent = e.message; err.classList.remove('hidden'); err.scrollIntoView({ block: 'nearest' }); };
 
-  const save = dxBtn('primary', 'Save', null, { title: 'Save (Ctrl+Enter)' });
+  const save = dxBtn('primary', 'Save', null, { title: 'Save (Ctrl+Enter)', action: 'save' });
   save.addEventListener('click', async () => {
+    dxKeep(save);
     err.classList.add('hidden');
     const prev = { status: f.status, severity: f.severity, disposition: f.disposition || '', owner: f.owner || '' };
     const next = { status: status.value, severity: severity.value, disposition: disposition.value, owner: owner.value.trim() };
@@ -861,9 +891,10 @@ function renderFindingDetail(box, data, opts = {}) {
   });
   comment.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); save.click(); } });
 
-  const mine = currentUser && f.owner !== currentUser ? dxBtn('secondary', 'Assign to me', null, { icon: 'user-plus', title: 'Assign to you and start work on it' }) : null;
+  const mine = currentUser && f.owner !== currentUser ? dxBtn('secondary', 'Assign to me', null, { icon: 'user-plus', title: 'Assign to you and start work on it', action: 'assign' }) : null;
   if (mine) {
     mine.addEventListener('click', async () => {
+      dxKeep(mine);
       const prev = { owner: f.owner || '', status: f.status };
       mine.disabled = true;
       try {
@@ -1032,8 +1063,8 @@ function detectionsHead() {
 function lastRunCell(st) {
   if (st.running) return [el('div', { class: 'dx-line' }, 'Running…')];
   if (!st.last_run) return [el('div', { class: 'dx-line muted' }, 'Not yet')];
-  const second = st.last_error ? el('span', { class: 'cell-det dx-fail', title: st.last_error }, 'Failed')
-    : el('span', { class: 'cell-det' }, st.last_findings ? dxPlural(st.last_findings, 'new finding') : st.last_results ? dxPlural(st.last_results, 'result') : 'No results');
+  const second = st.last_error ? el('span', { class: 'dx-meta dx-fail', title: st.last_error }, 'Failed')
+    : el('span', { class: 'dx-meta' }, st.last_findings ? dxPlural(st.last_findings, 'new finding') : st.last_results ? dxPlural(st.last_results, 'result') : 'No results');
   return [el('div', { class: 'dx-line', title: fmtTime(st.last_run) }, ago(st.last_run)), second];
 }
 
@@ -1052,7 +1083,7 @@ function detectionRow(d) {
     el('td', { 'data-col': 'title' },
       el('div', { class: 'cell-title', title: plainTitle(d.title) }, el('button', { class: 'dx-rowlink', type: 'button' }, ...detTitle(d.title))),
       el('div', { class: 'cell-sub' }, ...sub)),
-    el('td', { 'data-col': 'sched' }, el('div', { class: 'dx-line' }, 'Every ' + d.schedule), el('span', { class: 'cell-det' }, 'looks back ' + d.lookback)),
+    el('td', { 'data-col': 'sched' }, el('div', { class: 'dx-line' }, 'Every ' + d.schedule), el('span', { class: 'dx-meta' }, 'looks back ' + d.lookback)),
     el('td', { 'data-col': 'last' }, ...lastRunCell(st)),
     el('td', { 'data-col': 'n24', class: 'num', title: n24 == null ? 'Couldn’t count findings' : `${dxPlural(n24, 'finding')} in the last 24 hours` }, n24 == null ? '–' : String(n24)),
     el('td', { 'data-col': 'on' }, el('label', { class: 'switch', title: d.enabled ? 'On: runs on schedule' : 'Off' }, sw)));
@@ -1100,11 +1131,29 @@ function renderDetections() {
 $('d-filter').addEventListener('input', renderDetections);
 
 async function setDetectionEnabled(d, on, input) {
+  // the list and inspector are redrawn, so note where focus was to put it back
+  const inList = document.activeElement === input && !!input.closest('#d-list');
+  dxKeep(input);
   input.disabled = true;
   try {
     const { state, ...body } = d;
     await api('api/detections/' + encodeURIComponent(d.id), { ...body, enabled: on }, 'PUT');
     await loadDetections();
+    if (inList) {
+      const again = $('d-list').querySelector(`tr[data-id="${CSS.escape(d.id)}"] input[role="switch"]`);
+      if (again) again.focus({ preventScroll: true });
+    }
+    // Undo puts back exactly what was there: a built-in comes back by
+    // removing the saved copy, anything else by saving it as it was.
+    const undo = async () => {
+      try {
+        if (d.source === 'builtin') await api('api/detections/' + encodeURIComponent(d.id), undefined, 'DELETE');
+        else await api('api/detections/' + encodeURIComponent(d.id), body, 'PUT');
+        await loadDetections();
+        dxNotify('Change undone.');
+      } catch (e) { dxNotify('Couldn’t undo: ' + e.message, null, { tone: 'danger' }); }
+    };
+    dxNotify(`${plainTitle(d.title)} is ${on ? 'on' : 'off'}.`, { label: 'Undo', run: undo });
   } catch (e) {
     input.checked = !on;
     dxNotify(`Couldn’t turn ${on ? 'on' : 'off'} ${plainTitle(d.title)}: ${e.message}`, null, { tone: 'danger' });
@@ -1136,6 +1185,7 @@ function closeDetectionInspector(opts = {}) {
   const was = det.open;
   if (!opts.keepState) { det.closed = true; det.open = null; }
   appEl.removeAttribute('data-inspect');
+  syncInspectInert();   // now, so the row can take focus back below
   $('d-detail').hidden = true;
   $('d-split').classList.add('split--solo');
   markRows('d-list', opts.keepState ? det.open : null);
@@ -1187,9 +1237,10 @@ function renderDetectionInspector() {
   const thr = d.throttle || {};
   const n24 = det.counts24 ? (det.counts24[d.id] || 0) : null;
 
-  const edit = dxBtn('secondary', 'Edit', () => editDetection(d), { icon: 'pencil' });
-  const run = dxBtn('ghost', 'Run now', null, { icon: 'play', title: 'Run once now and raise findings', disabled: det.running === d.id });
+  const edit = dxBtn('secondary', 'Edit', () => editDetection(d), { icon: 'pencil', action: 'edit' });
+  const run = dxBtn('ghost', 'Run now', null, { icon: 'play', title: 'Run once now and raise findings', disabled: det.running === d.id, action: 'run' });
   run.addEventListener('click', async () => {
+    dxKeep(run);
     det.running = d.id;
     det.msg = { id: d.id, tone: 'info', title: 'Running…', text: `Searching the last ${d.lookback}.` };
     renderDetectionInspector();
@@ -1207,8 +1258,9 @@ function renderDetectionInspector() {
     det.running = null;
     await loadDetections();
   });
-  const test = dxBtn('ghost', 'Test', null, { icon: 'scan-search', title: 'Search the lookback window without raising findings' });
+  const test = dxBtn('ghost', 'Test', null, { icon: 'scan-search', title: 'Search the lookback window without raising findings', action: 'test' });
   test.addEventListener('click', async () => {
+    dxKeep(test);
     test.disabled = true;
     det.test = { id: d.id, busy: true };
     renderDetectionInspector();
@@ -1239,7 +1291,7 @@ function renderDetectionInspector() {
   }
   const next = d.enabled && schedulerOn && st.next_run ? dxUntil(st.next_run) : null;
 
-  fill(box,
+  dxRedraw(box, 'dd-title', () => fill(box,
     dxInspectorBar({ id: d.id, index: idx, count: det.list.length, noun: 'detection', step: stepDetection, close: () => closeDetectionInspector() }),
     el('div', { class: 'inspector__head' },
       el('h2', { class: 'inspector__title', id: 'dd-title', tabindex: '-1' }, ...detTitle(d.title)),
@@ -1271,7 +1323,7 @@ function renderDetectionInspector() {
         ['Risk', risk ? `+${risk.score} to ${(risk.objects || []).map((o) => o.field).join(', ') || 'nothing'}${risk.only ? ', no findings' : ''}` : 'None'],
         (d.tags || []).length ? ['Tags', d.tags.join(', ')] : null,
       ]))),
-    el('div', { class: 'inspector__foot' }, edit, run, test, el('span', { class: 'spacer' }), more));
+    el('div', { class: 'inspector__foot' }, edit, run, test, el('span', { class: 'spacer' }), more)));
   const link = box.querySelector('.dx-kv .link-btn');
   if (link) link.addEventListener('click', () => viewDetectionFindings(d.id));
 }
@@ -1543,8 +1595,8 @@ function renderCoverage() {
   const review = s.available ? el('button', { class: 'link-btn', type: 'button' }, 'Review turned-off detections', icon('arrow-right', 'icon--sm')) : null;
   if (review) review.addEventListener('click', () => { $('d-filter').value = ''; det.show = 'disabled'; det.open = null; det.closed = false; showPage('detections'); });
   fill($('c-summary'),
-    covKpi('Covered techniques', s.enabled, `/ ${s.techniques}`, `${pct}% of ATT&CK v${c.version}`),
-    covKpi('Tactics with coverage', covered, `/ ${c.tactics.length}`, none ? `${none} with no detection yet` : 'Every tactic has a detection'),
+    covKpi('Covered techniques', s.enabled, ` of ${s.techniques}`, `${pct}% of ATT&CK v${c.version}`),
+    covKpi('Tactics with coverage', covered, ` of ${c.tactics.length}`, none ? `${none} with no detection yet` : 'Every tactic has a detection'),
     covKpi('Ready to turn on', s.available, null, review || 'No turned-off detection would add coverage'));
   const unknown = Object.entries(c.unknown || {});
   $('cov-unknown').classList.toggle('hidden', !unknown.length);

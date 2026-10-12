@@ -616,10 +616,10 @@
     const kpi = () => el('div', { class: 'card kpi', 'aria-hidden': 'true' }, sk('55%'), el('div', { class: 'db-sk-value' }, sk('40%', 28)), sk('70%'));
     return [
       el('div', { class: 'kpis' }, ...Array.from({ length: 6 }, kpi)),
-      card({ title: 'New findings by urgency', sub: lastRange(dash.range) }, el('div', { class: 'chart' }, skChart())),
+      card({ title: 'New findings by urgency', sub: sk('8em') }, el('div', { class: 'chart' }, skChart())),
       el('div', { class: 'grid-2' },
-        card({ title: 'Top detections firing', sub: lastRange(dash.range) }, skRank(5)),
-        card({ title: 'Top risk objects', sub: lastRange(dash.range) }, skRank(5))),
+        card({ title: 'Top detections firing', sub: 'Findings and risk events' }, skRank(5)),
+        card({ title: 'Top risk objects', sub: 'Accumulated risk score' }, skRank(5))),
     ];
   }
 
@@ -702,7 +702,8 @@
       legend = ch.legend;
       if (ch.bucket) title = 'New findings by ' + ch.bucket;
     }
-    return card({ title, sub: err ? range : `${plural(total, 'finding', 'findings')} · by urgency · ${range}`, legend, actions: [pageLink('Open queue', 'findings')] }, content);
+    // the time range is in the header's segment, so card subtitles leave it out
+    return card({ title, sub: err ? '' : `${plural(total, 'finding', 'findings')} · by urgency`, legend, actions: [pageLink('Open queue', 'findings')] }, content);
   }
 
   function detectionsCard(rep) {
@@ -717,12 +718,11 @@
     if (items.length) content = rankList(items.slice(0, TOP));
     else if (err) content = errorState('Couldn’t count detections', err, retry());
     else content = emptyState('crosshair', 'No detection fired', `Detections that raise findings or risk in the ${lastRange(rep.range)} show here.`);
-    return card({ title: 'Top detections firing', sub: 'Findings and risk events · ' + lastRange(rep.range), actions: [pageLink('All detections', 'detections')] },
+    return card({ title: 'Top detections firing', sub: 'Findings and risk events', actions: [pageLink('All detections', 'detections')] },
       items.length && err ? cardAlert('danger', err) : null, content);
   }
 
   // riskBand comes from risk.js, so a score has the same colour here and on the Risk page.
-  const looksLikeIP = (v) => /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(v);
   function riskCard(rep) {
     const err = sectionError(rep, 'risk_objects');
     const q = rep.queries || {};
@@ -741,7 +741,7 @@
     else if (!items.length) content = emptyState('gauge', 'No risk in this period', 'Risk builds up when detections with a risk score match a user or system.');
     else content = rankList(items.slice(0, TOP), { min: 100 });
     return card({
-      title: 'Top risk objects', sub: 'Accumulated risk score · ' + lastRange(rep.range),
+      title: 'Top risk objects', sub: 'Accumulated risk score',
       actions: [searchButton(q.risk_objects, '-' + rep.range, 'Open the risk query in Search'), pageLink('Open Risk', 'risk')],
     }, content);
   }
@@ -757,7 +757,7 @@
     else if (err) content = errorState('Couldn’t load ATT&CK tactics', err, retry());
     else content = emptyState('grid-3x3', 'No ATT&CK activity', 'Findings and risk events mapped to ATT&CK show here by tactic.');
     const shown = items.length > TOP ? `Top ${TOP} of ${items.length} · ` : '';
-    return card({ title: 'ATT&CK tactics seen', sub: shown + 'Findings and risk events · ' + lastRange(rep.range), actions: [pageLink('Coverage', 'coverage')] },
+    return card({ title: 'ATT&CK tactics seen', sub: shown + 'Findings and risk events', actions: [pageLink('Coverage', 'coverage')] },
       items.length && err ? cardAlert('danger', err) : null, content);
   }
 
@@ -797,7 +797,7 @@
     if (err) content = errorState('Couldn’t count events', err, retry());
     else if (!res || !total) content = emptyState('database', 'No events in this period', 'Check the Health page to confirm data is arriving.', smallButton('Open Health', null, () => showPage('health')));
     else content = columnChart(res, { unit: ['event', 'events'], now: true, labels: 5, label: 'Events by data model, ' + lastRange(rep.range) }).node;
-    return card({ title: 'Events by data model', sub: `${err ? '' : plural(total, 'event', 'events') + ' · '}${lastRange(rep.range)}`, actions: [searchButton(q.events_by_datamodel, '-' + rep.range)] }, content);
+    return card({ title: 'Events by data model', sub: err ? '' : plural(total, 'event', 'events'), actions: [searchButton(q.events_by_datamodel, '-' + rep.range)] }, content);
   }
 
   function sourcetypeCard(rep) {
@@ -814,7 +814,7 @@
     if (err) content = errorState('Couldn’t count events', err, retry());
     else if (!items.length) content = emptyState('database', 'No events in this period', 'Check the Health page to confirm data is arriving.');
     else content = rankList(items);
-    return card({ title: 'Events by source type', sub: `${err ? '' : plural(names.length, 'source type', 'source types') + ' · '}${lastRange(rep.range)}`, actions: [searchButton(q.events_by_sourcetype, '-' + rep.range)] }, content);
+    return card({ title: 'Events by source type', sub: err ? '' : plural(names.length, 'source type', 'source types'), actions: [searchButton(q.events_by_sourcetype, '-' + rep.range)] }, content);
   }
 
   // ---------- custom dashboards ----------

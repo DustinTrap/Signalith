@@ -332,6 +332,7 @@ function showIndicator(id) {
   const wasOpen = !box.classList.contains('hidden');
   riShowPanel(box);
   if (riSlideOver.matches && !wasOpen) title.focus();
+  if (!wasOpen) riReveal(box);
 }
 
 // ---------- delete ----------

@@ -78,10 +78,22 @@ function riShowPanel(panel) {
   panel.classList.remove('hidden');
   if (riSlideOver.matches) appEl.setAttribute('data-inspect', '');
 }
+// riReveal scrolls a just-opened side inspector up to its sticky place when
+// its foot (the actions) would start below the window, as on Threat intel
+// where the indicators come after the feeds.
+function riReveal(panel) {
+  if (riSlideOver.matches) return;
+  const r = panel.getBoundingClientRect();
+  if (r.bottom <= innerHeight) return;
+  const bar = document.querySelector('.topbar');
+  const top = (bar ? bar.getBoundingClientRect().bottom : 0) + 16;
+  const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  window.scrollBy({ top: r.top - top, behavior: smooth ? 'smooth' : 'auto' });
+}
 function riHidePanel(panel) {
   if (panel.classList.contains('hidden')) return;
   panel.classList.add('hidden');
-  if (riSlideOver.matches) appEl.removeAttribute('data-inspect');
+  if (riSlideOver.matches) { appEl.removeAttribute('data-inspect'); syncInspectInert(); }
 }
 new MutationObserver(() => {
   if (appEl.hasAttribute('data-inspect') || !riSlideOver.matches) return;
@@ -129,6 +141,8 @@ const RISK_COLS = [['User or system', 'r-c-obj'], ['Risk', 'num r-c-risk', '100 
   ['Detections', 'num hide-sm'], ['Tactics', 'num hide-md hide-sm r-c-tac', 'ATT&CK tactics'], ['Events', 'num hide-md hide-sm r-c-events'],
   ['Last seen', 'hide-sm r-c-seen'], ['Context', 'hide-sm r-c-ctx']];
 const riskKey = (o) => o.risk_object_type + ':' + o.risk_object;
+// an address gets the globe, as on Dashboards and in finding entities
+const riskIcon = (type, name) => (looksLikeIP(String(name)) ? 'globe' : RISK_TYPE_ICON[type] || 'circle-dot');
 const isRiskOpen = (o) => !!riskOpen && riskOpen.object === o.risk_object && riskOpen.type === o.risk_object_type;
 
 async function loadRisk() {
@@ -185,7 +199,7 @@ function renderRisk() {
     const open = () => showRiskObject(o.risk_object, type);
     const tr = el('tr', { 'data-key': riskKey(o), onclick: open },
       el('td', { class: 'r-c-obj' }, el('span', { class: 'r-obj', title: o.risk_object },
-        el('span', { class: 'r-obj__icon', title: type, role: 'img', 'aria-label': type }, icon(RISK_TYPE_ICON[type] || 'circle-dot')),
+        el('span', { class: 'r-obj__icon', title: type, role: 'img', 'aria-label': type }, icon(riskIcon(type, o.risk_object))),
         el('span', { class: 'mono' }, o.risk_object))),
       el('td', { class: 'num r-c-risk' }, riskScore(o.risk_score, top)),
       el('td', { class: 'num hide-sm' }, String(o.detections ?? '')),
@@ -243,7 +257,16 @@ function closeRiskObject() {
 }
 riInspectors.push({ page: 'risk', panel: $('r-detail'), close: closeRiskObject });
 
-const tacticLabel = (t) => String(t).replace(/[-_]/g, ' ').replace(/^./, (c) => c.toUpperCase());
+// tacticName gives the MITRE name of a tactic (credential-access ->
+// Credential Access), as Findings, Dashboards and Coverage show it. The
+// names come from the ATT&CK data once loaded; until then the slug is
+// spelled out the same way (only "and" stays lower case).
+function tacticName(t) {
+  const s = String(t);
+  const known = coverage && (coverage.tactics || []).find((x) => x.short === s || x.name === s);
+  if (known) return known.name;
+  return s.split(/[-_\s]+/).map((w, i) => (i && w === 'and' ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
+}
 
 // showRiskObject opens one user or system in the inspector. Dashboards
 // call it too, right after showPage('risk').
@@ -258,7 +281,7 @@ async function showRiskObject(object, type) {
   const row = idx >= 0 ? shown[idx] : null;
   const step = (d) => { const o = shown[idx + d]; if (o) showRiskObject(o.risk_object, o.risk_object_type); };
   const bar = el('div', { class: 'inspector__bar' },
-    icon(RISK_TYPE_ICON[type] || 'circle-dot', 'icon--sm'), el('span', {}, type === 'user' ? 'User' : type === 'system' ? 'System' : 'Other'),
+    icon(riskIcon(type, object), 'icon--sm'), el('span', {}, type === 'user' ? 'User' : type === 'system' ? 'System' : 'Other'),
     idx >= 0 ? el('span', {}, `· ${idx + 1} of ${shown.length}`) : null,
     el('span', { class: 'spacer' }),
     riIconBtn('chevron-up', 'Previous', () => step(-1), idx <= 0),
@@ -309,9 +332,12 @@ async function showRiskObject(object, type) {
     stat('Events', el('span', { class: 'r-stat__value num' }, evs.length >= 500 ? '500+' : String(evs.length))))];
   sections.push(riskContextSection(res.context, type));
   if (tactics.size) {
+    const chips = el('div', { class: 'chips r-tactics' });
+    const drawTactics = () => fill(chips, ...[...tactics].map((t) => el('span', { class: 'tech tech--plain' }, tacticName(t))));
+    drawTactics();
+    if (!coverage && typeof loadAttackIndex === 'function') loadAttackIndex().then(() => { if (chips.isConnected) drawTactics(); });
     sections.push(el('section', { class: 'section', 'aria-label': 'ATT&CK tactics' },
-      el('h3', { class: 'section-title' }, 'ATT&CK tactics', el('span', { class: 'count' }, String(tactics.size))),
-      el('div', { class: 'chips' }, ...[...tactics].map((t) => el('span', { class: 'badge' }, tacticLabel(t))))));
+      el('h3', { class: 'section-title' }, 'ATT&CK tactics', el('span', { class: 'count' }, String(tactics.size))), chips));
   }
   sections.push(el('section', { class: 'section', 'aria-label': 'What added risk' },
     el('h3', { class: 'section-title' }, 'What added risk', el('span', { class: 'count' }, String(evs.length))),
@@ -462,7 +488,9 @@ function renderList() {
     el('tbody', {}, ...shown.map((it) => el('tr', {}, ...cols.map((c) => {
       const content = listCell(c, it[c]);
       const td = el('td', { class: listColClass(c), 'data-label': LIST_COL_LABEL[c] || c }, content);
-      if (Array.isArray(it[c]) && it[c].length > 1) td.title = it[c].join(', ');
+      // the full value on hover, since long values end in an ellipsis
+      const text = Array.isArray(it[c]) ? it[c].join(', ') : c === 'priority' || c === 'watchlist' || it[c] == null ? '' : String(it[c]);
+      if (text) td.title = text;
       return td;
     }))))));
   const total = res.count;

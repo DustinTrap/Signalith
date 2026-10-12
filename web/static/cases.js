@@ -80,24 +80,64 @@ function busy(btn, label) {
 
 // ---------- toast ----------
 // toast shows one message bottom right for 5 seconds (longer while the
-// pointer is on it). action is {label, run}; opts.tone is success or danger.
+// pointer or keyboard focus is on it). action is {label, run}; opts.tone is
+// success or danger. If the toast hides while it holds focus, focus goes back
+// to where it came from.
 let toastTimer = null;
+let toastNow = null; // { from, arm } of the toast on screen
 function toast(msg, action, opts = {}) {
   const t = $('toast');
   const tone = opts.tone || 'success';
+  const a = document.activeElement;
+  const inside = !t.classList.contains('hidden') && t.contains(a);
+  const now = { from: inside ? toastNow.from : a && a !== document.body && !t.contains(a) ? a : null, arm: null };
+  toastNow = now;
   t.dataset.tone = tone;
   t.setAttribute('role', tone === 'danger' ? 'alert' : 'status');
-  const hide = () => { clearTimeout(toastTimer); t.classList.add('hidden'); };
+  const hide = () => {
+    clearTimeout(toastTimer);
+    const hadFocus = t.contains(document.activeElement);
+    t.classList.add('hidden');
+    if (hadFocus) toastReturn(now.from);
+  };
   fill(t, icon(tone === 'danger' ? 'circle-alert' : 'circle-check'),
     el('div', { class: 'toast__body' },
       opts.title ? el('div', { class: 'toast__title' }, opts.title) : null,
       el('div', { class: opts.title ? 'toast__text' : 'toast__title' }, msg)),
     action ? el('button', { type: 'button', onclick: () => { hide(); action.run(); } }, action.label) : null);
   t.classList.remove('hidden');
-  const arm = () => { clearTimeout(toastTimer); toastTimer = setTimeout(hide, tone === 'danger' ? 8000 : 5000); };
-  t.onmouseenter = () => clearTimeout(toastTimer);
-  t.onmouseleave = arm;
-  arm();
+  // a toast that replaces a focused one keeps the focus on its button
+  if (inside) { const b = t.querySelector('button'); if (b) b.focus({ preventScroll: true }); else toastReturn(now.from); }
+  now.arm = () => { clearTimeout(toastTimer); toastTimer = setTimeout(hide, tone === 'danger' ? 8000 : 5000); };
+  if (!toast.wired) {
+    toast.wired = true;
+    const held = () => t.matches(':hover') || t.contains(document.activeElement);
+    t.addEventListener('mouseenter', () => clearTimeout(toastTimer));
+    t.addEventListener('mouseleave', () => { if (!held() && !t.classList.contains('hidden')) toastNow.arm(); });
+    t.addEventListener('focusin', (ev) => {
+      clearTimeout(toastTimer);
+      if (ev.relatedTarget && !t.contains(ev.relatedTarget)) toastNow.from = ev.relatedTarget;
+    });
+    t.addEventListener('focusout', (ev) => {
+      if (!t.contains(ev.relatedTarget) && !t.matches(':hover') && !t.classList.contains('hidden')) toastNow.arm();
+    });
+  }
+  now.arm();
+}
+// toastReturn puts focus back after a focused toast hides. The control may
+// have been redrawn meanwhile: then its new copy (same id, or same action in
+// the open inspector) takes focus, else the open inspector's title, else the
+// page name.
+function toastReturn(from) {
+  const live = (n) => n && n.isConnected && !n.disabled && n.getClientRects().length ? n : null;
+  const box = document.querySelector('.page.active .inspector:not([hidden]):not(.hidden)');
+  const act = from && from.dataset && from.dataset.action;
+  const back = live(from)
+    || live(from && from.id ? document.getElementById(from.id) : null)
+    || live(box && act ? box.querySelector(`[data-action="${CSS.escape(act)}"]`) : null)
+    || live(box && box.querySelector('h2[tabindex="-1"]'))
+    || $('crumb-page');
+  back.focus({ preventScroll: true });
 }
 // sentence makes a server message read as a sentence: capital first, full stop last.
 const sentence = (m) => { m = String(m || 'Something went wrong').trim(); m = m.charAt(0).toUpperCase() + m.slice(1); return /[.!?]$/.test(m) ? m : m + '.'; };
@@ -147,14 +187,21 @@ pageHooks.push((name) => {
   else loadCases();
 });
 
-function showCaseList() {
+async function showCaseList() {
+  const was = caseState.open;
   caseState.open = null;
   caseState.data = null;
   $('c-view').classList.add('hidden');
   $('c-list-view').classList.remove('hidden');
   document.title = 'Investigations · Signalith';
   window.scrollTo(0, 0);
-  loadCases();
+  await loadCases();
+  // Back to the list: keyboard focus goes to the case you came from.
+  const a = document.activeElement;
+  if (caseState.open || (a && a !== document.body && !$('c-view').contains(a))) return;
+  const rows = $('c-list').querySelectorAll('tr.case-row');
+  const tr = [...rows].find((r) => r.dataset.id === was) || rows[0];
+  if (tr) tr.focus();
 }
 
 function openCase(id) {
@@ -191,7 +238,7 @@ async function loadCases({ quiet = false } = {}) {
 }
 
 const CASE_COLS = [
-  ['sev', 'Severity'], ['title', 'Case'], ['status', 'Status'], ['owner', 'Owner'], ['findings', 'Findings', 'num hide-sm'], ['age', 'Updated', 'num'],
+  ['sev', 'Severity'], ['title', 'Case'], ['status', 'Status'], ['owner', 'Owner'], ['findings', 'Findings', 'num hide-md hide-sm'], ['age', 'Updated', 'num'],
 ];
 function casesTable(rows, busyState) {
   return el('div', { class: 'table-wrap' }, el('table', { class: 'table table--stack c-table', 'aria-busy': busyState ? 'true' : 'false' },
@@ -206,7 +253,7 @@ function renderCasesLoading() {
     el('td', { 'data-col': 'title' }, sk('70%'), el('div', { class: 'c-sk-gap' }), sk('40%')),
     el('td', { 'data-col': 'status' }, sk('96px')),
     el('td', { 'data-col': 'owner' }, sk('64px')),
-    el('td', { 'data-col': 'findings', class: 'num hide-sm' }, sk('16px')),
+    el('td', { 'data-col': 'findings', class: 'num hide-md hide-sm' }, sk('16px')),
     el('td', { 'data-col': 'age', class: 'num' }, sk('28px'))));
   fill($('c-list'), casesTable(rows, true));
 }
@@ -238,7 +285,7 @@ function caseRow(c) {
   el('td', { 'data-col': 'status' }, statusBadge(c.status), el('span', { class: 'cell-det', title: 'Case ' + c.id }, c.id)),
   el('td', { 'data-col': 'owner' }, el('span', { class: 'owner', title: c.owner || 'Unassigned' }, caseAvatar(c.owner),
     el('span', { class: c.owner ? 'owner__name' : 'owner__name c-unassigned' }, c.owner || 'Unassigned'))),
-  el('td', { 'data-col': 'findings', class: 'num hide-sm', title: plural(n, 'finding') }, String(n)),
+  el('td', { 'data-col': 'findings', class: 'num hide-md hide-sm', title: plural(n, 'finding') }, String(n)),
   el('td', { 'data-col': 'age', class: 'num age', title: `Updated ${fullTime(c.updated)}\nOpened ${fullTime(c.created)}` }, shortAgo(c.updated)));
 }
 
@@ -307,10 +354,13 @@ setInterval(() => {
 // ---------- one case ----------
 async function showCase(id) {
   caseState.open = id;
-  $('c-list-view').classList.add('hidden');
   const box = $('c-view');
-  box.classList.remove('hidden');
   const first = !caseState.data || caseState.data.case.id !== id;
+  // Opening a case (Enter on a row, Open case elsewhere) takes keyboard focus
+  // to its title once it is drawn; a refresh of the open case leaves focus be.
+  const takeFocus = first && !box.contains(document.activeElement);
+  $('c-list-view').classList.add('hidden');
+  box.classList.remove('hidden');
   if (first) {
     window.scrollTo(0, 0);
     renderCaseLoading();
@@ -331,6 +381,11 @@ async function showCase(id) {
   if (caseState.open !== id) return;
   caseState.data = data;
   renderCase();
+  if (takeFocus && $('page-cases').classList.contains('active')) {
+    const a = document.activeElement;
+    // unless you have moved on to something still on screen
+    if (!a || a === document.body || box.contains(a) || !a.getClientRects().length) box.querySelector('.c-title')?.focus({ preventScroll: true });
+  }
 }
 
 const backButton = () => el('button', { type: 'button', class: 'btn btn--ghost btn--sm c-back', onclick: showCaseList }, icon('arrow-left'), 'Investigations');

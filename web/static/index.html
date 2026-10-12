@@ -355,13 +355,13 @@
       </div>
       <div class="page-head__actions">
         <div class="seg" id="db-range" role="group" aria-label="Time range">
-          <button type="button" data-range="1h" title="Last hour">1h</button>
-          <button type="button" data-range="4h" title="Last 4 hours">4h</button>
+          <button type="button" data-range="1h" title="Last hour" aria-pressed="false">1h</button>
+          <button type="button" data-range="4h" title="Last 4 hours" aria-pressed="false">4h</button>
           <button type="button" data-range="24h" title="Last 24 hours" aria-pressed="true">24h</button>
-          <button type="button" data-range="7d" title="Last 7 days">7d</button>
-          <button type="button" data-range="30d" title="Last 30 days">30d</button>
+          <button type="button" data-range="7d" title="Last 7 days" aria-pressed="false">7d</button>
+          <button type="button" data-range="30d" title="Last 30 days" aria-pressed="false">30d</button>
         </div>
-        <label class="switch hide-sm" title="Reload the dashboard while this page is open"><input type="checkbox" id="db-auto">Auto-refresh</label>
+        <label class="switch db-auto" title="Reload the dashboard while this page is open"><input type="checkbox" id="db-auto">Auto-refresh</label>
         <div class="db-tools hidden" id="db-tools">
           <button class="btn btn--ghost" type="button" id="db-edit" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
           <a class="btn btn--ghost btn--icon" id="db-yaml" href="#" download title="Download YAML" aria-label="Download YAML"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></a>
