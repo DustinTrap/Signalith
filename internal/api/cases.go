@@ -451,7 +451,7 @@ func (s *Server) handleAddCaseEntry(w http.ResponseWriter, r *http.Request) {
 		res, err := s.Engine.Execute(ctx, q)
 		cancel()
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			writeSearchError(w, err)
 			return
 		}
 		e.Query, e.Earliest, e.Latest = qs, req.Earliest, req.Latest

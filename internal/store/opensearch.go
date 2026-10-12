@@ -148,6 +148,10 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 type BulkItemError struct {
 	Index  string
 	Reason string
+	// Pos is the document's position in the request, from 0, and Type the
+	// OpenSearch error type, such as mapper_parsing_exception.
+	Pos  int    `json:"-"`
+	Type string `json:"-"`
 }
 
 // Bulk indexes documents. docs maps each document to its target index.
@@ -181,10 +185,10 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 	}
 	var errs []BulkItemError
 	if out.Errors {
-		for _, item := range out.Items {
+		for i, item := range out.Items {
 			for _, r := range item {
 				if r.Error != nil {
-					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason})
+					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason, Pos: i, Type: r.Error.Type})
 				}
 			}
 		}

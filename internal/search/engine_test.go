@@ -265,7 +265,7 @@ func TestWhereWildcardAndIn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := evalExpr(q.Commands[0].(*query.Where).Expr, r); got != want {
+		if got := (&matcher{}).eval(q.Commands[0].(*query.Where).Expr, r); got != want {
 			t.Errorf("%s = %v, want %v", src, got, want)
 		}
 	}
@@ -309,11 +309,11 @@ func TestEnrichAddsAssetAndIdentityContext(t *testing.T) {
 
 func TestDefaultPatternExcludesRisk(t *testing.T) {
 	e := &Engine{Opt: Options{IndexPrefix: "sig"}}
-	if got := e.IndexPattern(&query.Query{}); got != "sig-*,-sig-risk-*" {
-		t.Errorf("pattern = %s", got)
+	if got, err := e.IndexPattern(&query.Query{}); got != "sig-*,-sig-risk-*" || err != nil {
+		t.Errorf("pattern = %s %v", got, err)
 	}
-	if got := e.IndexPattern(&query.Query{Datamodel: "Risk"}); got != "sig-risk-*" {
-		t.Errorf("risk pattern = %s", got)
+	if got, err := e.IndexPattern(&query.Query{Datamodel: "Risk"}); got != "sig-risk-*" || err != nil {
+		t.Errorf("risk pattern = %s %v", got, err)
 	}
 }
 

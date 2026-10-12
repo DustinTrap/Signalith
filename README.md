@@ -78,6 +78,29 @@ Supported sources in Phase 1:
 | Syslog from any device (see below), including CEF | Authentication, Change, Network_Traffic or Other |
 | Anything else | Other (searchable by text and fields) |
 
+#### Ingest limits
+
+Agents send batches to `/api/ingest`. One request can be up to 16 MB, with up to 200,000
+records of at most 1 MB each, nested at most 32 levels deep; Fluent Bit's requests are
+far smaller. A request over a limit is refused with 413 (400 for broken JSON) and a
+message saying what to change, and nothing from it is stored. When many agents send at
+once, the extra requests wait their turn and then get 503, so Fluent Bit sends them again.
+
+Each event keeps its own time unless that is older than `ingest.max_event_age` (a week
+by default, or `retention.days` if shorter) or more than an hour ahead. Then it is filed
+under the time it arrived and its own time is kept in `device_time`, so a wrong clock or
+a forged date cannot create indices for other days. Search `device_time=*` to find these
+events.
+
+Field names that senders choose (JSON keys, syslog structured data, CEF extensions) are
+limited so they cannot fill OpenSearch's mapping: at most 200 fields per event, names of
+up to 128 letters, digits and `_ - @ : /` in at most 5 dot-separated parts, and at most
+1,000 new names per daily index each time Signalith starts. Fields Signalith itself
+produces are always kept, so an event is never lost to extra fields. Fields left out are
+counted in the event's `dropped_fields` (search `dropped_fields>0`), their values stay in
+`_raw`, and the Health page and `/api/health` show the totals under `ingest`
+(`retimed`, `fields_dropped`).
+
 #### Syslog
 
 Firewalls, switches, routers, appliances and servers without an agent can send syslog.
@@ -97,9 +120,9 @@ syslog (including the usual variations, such as Cisco IOS, IOS XR, NX-OS and ASA
 land in Authentication and Change like agent data, so the built-in detections apply.
 Events have `sourcetype=syslog` (or `cef`), `host` from the message, `dvc` set to the
 sender's address, and `facility` and `severity`. The event time is the one in the message,
-unless it is more than a week old (or older than `retention.days`) or more than a day
+unless it is older than `ingest.max_event_age` (a week by default) or more than an hour
 ahead; then it is the time Signalith received the message, and the device's own time is
-kept in `device_time`.
+kept in `device_time`, as for agent data (see [Ingest limits](#ingest-limits)).
 
 To accept syslog only from known senders, list them under `syslog.allow`:
 
@@ -147,6 +170,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` |
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
+| `ingest.max_event_age` | `7d` (or `retention.days` if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
 | `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
 | `syslog.tls` | off | Address for syslog over TLS, such as `0.0.0.0:6514`; uses `server.tls_cert` and `server.tls_key` |
 | `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |

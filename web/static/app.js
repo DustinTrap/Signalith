@@ -2200,6 +2200,11 @@ function healthPageRender(h) {
   else if (recent) ingRow = ['', 'Receiving', `Last event ${lastAgo}.`];
   else if (ing.last_seen) ingRow = ['idle', 'Quiet', `Last event ${lastAgo}.`];
   else ingRow = ['idle', 'Waiting', ['No events since the server started. ', el('a', { href: '#data', 'data-page': 'data' }, 'Add data')]];
+  // Events kept, but adjusted: say so, so it is never silent.
+  const adjusted = [];
+  if (ing.retimed) adjusted.push(`${healthPageNum(ing.retimed)} ${ing.retimed === 1 ? 'event was' : 'events were'} dated too far back or ahead and filed under the time ${ing.retimed === 1 ? 'it' : 'they'} arrived (search device_time=* to find them).`);
+  if (ing.fields_dropped) adjusted.push(`${healthPageNum(ing.fields_dropped)} ${ing.fields_dropped === 1 ? 'field was' : 'fields were'} not indexed: invalid names, too many fields, or too many new field names in a day (search dropped_fields>0; the values stay in _raw).`);
+  if (adjusted.length) ingRow[2] = [].concat(ingRow[2], ' ', adjusted.join(' '));
 
   const table = el('table', { class: 'table hp-table' },
     el('thead', {}, el('tr', {}, el('th', { scope: 'col', 'data-col': 'name' }, 'Component'), el('th', { scope: 'col', 'data-col': 'state' }, 'Status'), el('th', { scope: 'col' }, 'Details'))),

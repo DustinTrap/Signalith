@@ -145,7 +145,11 @@ func TestParseFormats(t *testing.T) {
 		{"PRI only", "<13>", map[string]any{"facility": "user", "message": "<13>"}},
 		{"clock never set", "<13>1 1970-01-01T00:00:00Z h a - - - boot", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "1970-01-01T00:00:00Z"}},
 		{"clock far ahead", "<13>1 2099-01-01T00:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2099-01-01T00:00:00Z"}},
-		{"a day ahead", "<13>1 2026-10-13T14:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-13T14:00:00Z"}},
+		{"an hour ahead", "<13>1 2026-10-12T15:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T15:00:00Z", "device_time": nil}},
+		// A clock or time zone off by hours: filed under the receive time,
+		// so it cannot reach tomorrow's index.
+		{"two hours ahead", "<13>1 2026-10-12T16:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2026-10-12T16:00:00Z"}},
+		{"a day ahead", "<13>1 2026-10-13T14:00:00Z h a - - - x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z", "device_time": "2026-10-13T14:00:00Z"}},
 		{"impossible date", "<13>Feb 30 13:59:00 h app: x", map[string]any{"@timestamp": "2026-10-12T14:00:00Z"}},
 	}
 	for _, c := range cases {
@@ -223,8 +227,8 @@ func TestCEF(t *testing.T) {
 			map[string]any{"@timestamp": "2026-10-12T13:00:00.123Z"}},
 		{"rt with a numeric zone", "<134>Oct 12 13:59:00 fw1 CEF:0|V|P|1|1|N|3|rt=Oct 12 2026 10:00:00.123 +0200 src=10.0.0.1",
 			map[string]any{"@timestamp": "2026-10-12T08:00:00.123Z"}},
-		{"yearless rt with a numeric zone", "CEF:0|V|P|1|1|N|3|rt=Oct 12 13:30:00 -07:00 src=10.0.0.1",
-			map[string]any{"@timestamp": "2026-10-12T20:30:00Z", "device_time": nil}},
+		{"yearless rt with a numeric zone", "CEF:0|V|P|1|1|N|3|rt=Oct 12 06:30:00 -07:00 src=10.0.0.1",
+			map[string]any{"@timestamp": "2026-10-12T13:30:00Z", "device_time": nil}},
 		{"implausible rt keeps the header time", "<134>Oct 12 13:59:00 fw1 CEF:0|V|P|1|1|N|3|rt=1 src=10.0.0.1",
 			map[string]any{"@timestamp": "2026-10-12T13:59:00Z", "cef_rt": "1", "device_time": nil}},
 		{"old rt and no header time", "CEF:0|V|P|1|1|N|3|rt=978307200000 src=10.0.0.1",
@@ -312,5 +316,32 @@ func TestFieldNameBudget(t *testing.T) {
 	b.limit(ev("Other", now.Add(30*24*time.Hour), "cef_z"), a, now.Add(30*24*time.Hour), DefaultMaxAge)
 	if len(b.indices) != 1 {
 		t.Errorf("%d indices remembered", len(b.indices))
+	}
+}
+
+// TestEmittedFieldsAreKnown keeps the ingest template and field budget in
+// step with the receiver: every field it names itself is a known field
+// (mapped up front and always kept); only vendor extras (cef_*, sd_*) are
+// sender-chosen and go through the budget.
+func TestEmittedFieldsAreKnown(t *testing.T) {
+	for key, cf := range cefFields {
+		if !ingest.KnownField(cf.name) {
+			t.Errorf("CEF key %s maps to %s, which is not an ingest known field", key, cf.name)
+		}
+	}
+	for _, line := range []string{
+		`<134>Oct 12 13:59:00 fw1 CEF:0|Palo Alto Networks|PAN-OS|10.1|end|TRAFFIC|3|rt=Oct 12 2026 13:58:59 UTC src=10.0.0.5 dst=203.0.113.9 spt=50000 dpt=443 proto=6 act=allow deviceDirection=1 in=100 out=200 suser=alice duser=bob smac=00:11:22:33:44:55 dmac=66:77:88:99:aa:bb sntdom=CORP dntdom=EXT sourceTranslatedAddress=198.51.100.1 destinationTranslatedAddress=198.51.100.2 sourceTranslatedPort=1 destinationTranslatedPort=2 deviceInboundInterface=eth0 deviceOutboundInterface=eth1 request=http://x/ requestMethod=GET requestClientApplication=curl fname=a.exe filePath=C:\\a.exe fileHash=abc fsize=10 dproc=a.exe dpid=4 cat=net reason=ok dvchost=fw1 shost=ws1 dhost=web cs1=custom cs1Label=Rule`,
+		`<165>1 2026-10-12T13:59:00.000Z host1 app 123 ID47 [exampleSDID@32473 iut="3" eventSource="App"] hello`,
+		`<187>12345: *Oct 12 13:59:00.123: %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down`,
+		`<38>Oct 12 13:59:00 web1 sshd[811]: Failed password for invalid user oracle from 192.0.2.4 port 40122 ssh2`,
+		`<86>Oct 12 13:59:00 web1 sudo:    alice : TTY=pts/0 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/id`,
+	} {
+		m := Parse([]byte(line), now)
+		ev := m.Event(sender, now, 0)
+		for k := range ev.Document() {
+			if !ingest.KnownField(k) && !isExtra(k) {
+				t.Errorf("%.30s...: field %q is neither a known field nor a vendor extra", line, k)
+			}
+		}
 	}
 }

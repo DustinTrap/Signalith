@@ -88,14 +88,21 @@ func (p *parser) parseSearch(q *Query) error {
 			case "datamodel", "index", "earliest", "latest":
 				p.next()
 				p.next()
+				at := p.peek().pos
 				v, err := p.value()
 				if err != nil {
 					return err
 				}
 				switch strings.ToLower(t.text) {
 				case "datamodel":
+					if err := CheckDatamodel(v); err != nil {
+						return &Error{Pos: at, Msg: err.Error()}
+					}
 					q.Datamodel = v
 				case "index":
+					if err := CheckIndex(v); err != nil {
+						return &Error{Pos: at, Msg: err.Error()}
+					}
 					q.Index = v
 				case "earliest":
 					q.Earliest = v

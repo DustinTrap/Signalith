@@ -3,9 +3,11 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
@@ -19,9 +21,19 @@ type Options struct {
 	IndexPrefix     string // default "signalith"
 	DefaultEarliest string // used when a query has no earliest=; "" means all time
 	DefaultEvents   int    // events returned when no head is given (default 100)
-	MaxEvents       int    // events fetched for in-memory post-processing (default 10000)
+	MaxEvents       int    // events fetched for in-memory post-processing (default 10000, at most 100000)
 	MaxBuckets      int    // stats rows fetched before truncating (default 50000)
+	// MaxSearches caps the searches running at once (default 8), apart
+	// from the detection scheduler's (see Background). Each can hold up to
+	// MaxEvents rows in memory and keep a CPU busy.
+	MaxSearches int
+	// QueueWait is how long a search waits for its turn before failing
+	// with ErrBusy (default 15s).
+	QueueWait time.Duration
 }
+
+// maxEventsLimit bounds MaxEvents however it is set.
+const maxEventsLimit = 100000
 
 // Engine runs queries.
 type Engine struct {
@@ -31,6 +43,60 @@ type Engine struct {
 	Assets *assets.Store
 	// Intel backs the intel and threatmatch commands; nil makes them errors.
 	Intel *intel.Store
+
+	slotsMu sync.Mutex
+	slots   chan struct{}
+}
+
+// ErrBusy is returned when MaxSearches searches are already running and
+// none finished within QueueWait.
+var ErrBusy = errors.New("Signalith is busy running other searches; try again in a few seconds")
+
+// QueryError is a query that cannot run as written, such as one naming an
+// index outside Signalith's events, as opposed to OpenSearch failing; the
+// API answers it with 400.
+type QueryError struct{ Msg string }
+
+func (e *QueryError) Error() string { return e.Msg }
+
+type backgroundKey struct{}
+
+// Background marks ctx as the detection scheduler's own work. Those
+// searches do not count against MaxSearches: the scheduler runs a bounded
+// number of them itself, and busy analysts must not hold up detections.
+func Background(ctx context.Context) context.Context {
+	return context.WithValue(ctx, backgroundKey{}, true)
+}
+
+// acquire waits for one of MaxSearches slots and returns the function
+// that frees it.
+func (e *Engine) acquire(ctx context.Context) (func(), error) {
+	if bg, _ := ctx.Value(backgroundKey{}).(bool); bg {
+		return func() {}, nil
+	}
+	o := e.opts()
+	e.slotsMu.Lock()
+	if e.slots == nil {
+		e.slots = make(chan struct{}, o.MaxSearches)
+	}
+	slots := e.slots
+	e.slotsMu.Unlock()
+	release := func() { <-slots }
+	select {
+	case slots <- struct{}{}:
+		return release, nil
+	default:
+	}
+	t := time.NewTimer(o.QueueWait)
+	defer t.Stop()
+	select {
+	case slots <- struct{}{}:
+		return release, nil
+	case <-t.C:
+		return nil, ErrBusy
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Row is one result row.
@@ -72,20 +138,44 @@ func (e *Engine) opts() Options {
 	if o.MaxBuckets <= 0 {
 		o.MaxBuckets = 50000
 	}
+	o.MaxEvents = min(o.MaxEvents, maxEventsLimit)
+	if o.MaxSearches <= 0 {
+		o.MaxSearches = 8
+	}
+	if o.QueueWait <= 0 {
+		o.QueueWait = 15 * time.Second
+	}
 	return o
 }
 
-// IndexPattern returns the index pattern for a query.
-func (e *Engine) IndexPattern(q *query.Query) string {
+// IndexPattern returns the index pattern for a query. Searches only reach
+// Signalith's daily event and risk indices, "<prefix>-<model>-<day>":
+// datamodel= must be a built-in data model, and index= one pattern under
+// "<prefix>-". Everything else OpenSearch holds (Signalith's own findings,
+// cases and intel in "<prefix>_*", other applications' indices, system
+// indices, other clusters) is refused with a *QueryError, whoever asks and
+// however the query arrived (search, dashboards, detections, the API).
+func (e *Engine) IndexPattern(q *query.Query) (string, error) {
 	o := e.opts()
-	if q.Index != "" {
-		return q.Index
+	if q.Index != "" && q.Index != "*" {
+		v := strings.ToLower(q.Index)
+		if err := query.CheckIndex(v); err != nil {
+			return "", &QueryError{Msg: err.Error()}
+		}
+		if !strings.HasPrefix(v, o.IndexPrefix+"-") {
+			return "", &QueryError{Msg: fmt.Sprintf("index=%q is outside Signalith's events: index patterns must start with %q, for example %s-* or %s-authentication-*", q.Index, o.IndexPrefix+"-", o.IndexPrefix, o.IndexPrefix)}
+		}
+		return v, nil
 	}
 	if q.Datamodel != "" {
-		return o.IndexPrefix + "-" + strings.ToLower(q.Datamodel) + "-*"
+		if err := query.CheckDatamodel(q.Datamodel); err != nil {
+			return "", &QueryError{Msg: err.Error()}
+		}
+		return o.IndexPrefix + "-" + strings.ToLower(q.Datamodel) + "-*", nil
 	}
-	// All data except risk events, which are derived from other events.
-	return o.IndexPrefix + "-*,-" + o.IndexPrefix + "-risk-*"
+	// All data except risk events, which are derived from other events;
+	// index=* means the same.
+	return o.IndexPrefix + "-*,-" + o.IndexPrefix + "-risk-*", nil
 }
 
 // Compile builds the OpenSearch request for a query without running it.
@@ -155,7 +245,14 @@ func (e *Engine) Compile(q *query.Query) (*Plan, error) {
 		dsl = boolQuery("filter", fs)
 	}
 
-	p := &Plan{Index: e.IndexPattern(q), threat: threat}
+	index, err := e.IndexPattern(q)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPatterns(q); err != nil {
+		return nil, err
+	}
+	p := &Plan{Index: index, threat: threat}
 	body := map[string]any{"query": dsl, "track_total_hits": true}
 	p.Body = body
 
@@ -313,13 +410,20 @@ func (e *Engine) Run(ctx context.Context, src string) (*Result, error) {
 	return e.Execute(ctx, q)
 }
 
-// Execute runs a parsed query.
+// Execute runs a parsed query. It waits for a turn when MaxSearches are
+// running (ErrBusy after QueueWait), and stops when ctx ends, including
+// during the commands that run over results in memory.
 func (e *Engine) Execute(ctx context.Context, q *query.Query) (*Result, error) {
 	start := time.Now()
 	p, err := e.Compile(q)
 	if err != nil {
 		return nil, err
 	}
+	release, err := e.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	res, err := e.fetch(ctx, p)
 	if err != nil {
 		return nil, err
@@ -328,6 +432,9 @@ func (e *Engine) Execute(ctx context.Context, q *query.Query) (*Result, error) {
 		e.threatAnnotate(res, p.threat, p.Mode == "events")
 	}
 	for _, c := range p.post {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var err error
 		switch c := c.(type) {
 		case *query.Enrich:
@@ -335,7 +442,7 @@ func (e *Engine) Execute(ctx context.Context, q *query.Query) (*Result, error) {
 		case *query.Intel:
 			err = e.intelEnrich(res, c)
 		default:
-			err = applyCommand(res, c)
+			err = applyCommand(ctx, res, c)
 		}
 		if err != nil {
 			return nil, err

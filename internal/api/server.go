@@ -2,12 +2,11 @@
 package api
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -149,6 +148,22 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, body)
 }
 
+// writeSearchError answers a failed search: 400 for a query that cannot
+// run as written, 503 (retry shortly) when too many searches are running,
+// and 502 when OpenSearch failed.
+func writeSearchError(w http.ResponseWriter, err error) {
+	var qe *search.QueryError
+	switch {
+	case errors.As(err, &qe):
+		writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, search.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, err)
+	default:
+		writeError(w, http.StatusBadGateway, err)
+	}
+}
+
 func readJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := dec.Decode(v); err != nil {
@@ -171,13 +186,24 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	// A sender gets a while to send its batch, not forever, since it holds
+	// one of the pipeline's slots meanwhile.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(ingestReadTimeout))
+	release, err := s.Pipeline.Admit(r.Context(), ingestQueueWait)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		// 503 makes Fluent Bit retry later instead of dropping data.
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	records, err := decodeRecords(body)
+	defer release()
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, ingest.MaxBodyBytes))
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20))
+			return
+		}
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -185,18 +211,30 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if tag == "" {
 		tag = r.URL.Query().Get("tag")
 	}
-	res, err := s.Pipeline.Ingest(r.Context(), tag, records)
+	res, err := s.Pipeline.IngestBody(r.Context(), tag, body)
 	if err != nil {
-		s.Log.Error("ingest failed", "err", err, "records", len(records))
+		var bad *ingest.BodyError
+		if errors.As(err, &bad) {
+			writeError(w, bad.Status, bad)
+			return
+		}
+		s.Log.Error("ingest failed", "err", err, "bytes", len(body))
 		// 503 makes Fluent Bit retry later instead of dropping data.
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
 	if len(res.Errors) > 0 {
-		s.Log.Warn("some events were rejected", "rejected", len(res.Errors), "first", res.Errors[0].Reason)
+		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "first", res.Errors[0].Reason)
 	}
 	writeJSON(w, http.StatusOK, res)
 }
+
+// ingestReadTimeout is how long a sender has to send one request body,
+// and ingestQueueWait how long a request waits for a free pipeline slot
+// before the sender is told to retry (a variable so tests can shorten it).
+const ingestReadTimeout = 2 * time.Minute
+
+var ingestQueueWait = 15 * time.Second
 
 func (s *Server) validToken(r *http.Request) bool {
 	tok := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
@@ -209,49 +247,6 @@ func (s *Server) validToken(r *http.Request) bool {
 		}
 	}
 	return false
-}
-
-// decodeRecords accepts a JSON array, a single object, or NDJSON.
-func decodeRecords(body []byte) ([]map[string]any, error) {
-	body = bytes.TrimSpace(body)
-	if len(body) == 0 {
-		return nil, nil
-	}
-	dec := func(b []byte, v any) error {
-		d := json.NewDecoder(bytes.NewReader(b))
-		d.UseNumber()
-		return d.Decode(v)
-	}
-	switch body[0] {
-	case '[':
-		var arr []map[string]any
-		if err := dec(body, &arr); err != nil {
-			return nil, errors.New("invalid JSON array: " + err.Error())
-		}
-		return arr, nil
-	case '{':
-		var out []map[string]any
-		sc := bufio.NewScanner(bytes.NewReader(body))
-		sc.Buffer(make([]byte, 1<<20), 16<<20)
-		for sc.Scan() {
-			line := bytes.TrimSpace(sc.Bytes())
-			if len(line) == 0 {
-				continue
-			}
-			var m map[string]any
-			if err := dec(line, &m); err != nil {
-				// Maybe one pretty-printed object.
-				var single map[string]any
-				if err2 := dec(body, &single); err2 == nil {
-					return []map[string]any{single}, nil
-				}
-				return nil, errors.New("invalid JSON lines: " + err.Error())
-			}
-			out = append(out, m)
-		}
-		return out, sc.Err()
-	}
-	return nil, errors.New("body must be a JSON array or JSON lines")
 }
 
 // ---- search ----
@@ -294,7 +289,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -355,6 +350,11 @@ type fieldInfo struct {
 
 func (s *Server) handleFields(w http.ResponseWriter, r *http.Request) {
 	dm := r.URL.Query().Get("datamodel")
+	pattern, err := s.Engine.IndexPattern(&query.Query{Datamodel: dm})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	out := map[string]*fieldInfo{}
 	var order []string
 	for _, f := range datamodel.FieldsFor(dm) {
@@ -362,7 +362,6 @@ func (s *Server) handleFields(w http.ResponseWriter, r *http.Request) {
 		order = append(order, f.Name)
 	}
 	if s.Backend != nil {
-		pattern := s.Engine.IndexPattern(&query.Query{Datamodel: dm})
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		if mapping, err := s.Backend.Mapping(ctx, pattern); err == nil {
@@ -417,7 +416,7 @@ func (s *Server) handleFieldValues(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res.Rows)

@@ -4,19 +4,9 @@ import (
 	"io"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
 )
-
-func TestSyslogMaxAge(t *testing.T) {
-	day := 24 * time.Hour
-	for days, want := range map[int]time.Duration{0: 7 * day, 90: 7 * day, 7: 7 * day, 3: 3 * day, 1: day} {
-		if got := syslogMaxAge(days); got != want {
-			t.Errorf("retention %d days: %v, want %v", days, got, want)
-		}
-	}
-}
 
 func TestPrintSyslogPorts(t *testing.T) {
 	out := func(c *config.Config) string {

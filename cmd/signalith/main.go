@@ -166,16 +166,6 @@ func cmdInit(args []string) error {
 	return nil
 }
 
-// syslogMaxAge is how old a syslog message's own timestamp may be and still
-// be its event time: a week, or the retention period when that is shorter,
-// since older events would only land in indices about to be deleted.
-func syslogMaxAge(retentionDays int) time.Duration {
-	if d := time.Duration(retentionDays) * 24 * time.Hour; d > 0 && d < syslog.DefaultMaxAge {
-		return d
-	}
-	return syslog.DefaultMaxAge
-}
-
 // syslogSummary describes the syslog listeners, or "" when syslog is off.
 func syslogSummary(c *config.Config) string {
 	var parts []string
@@ -478,7 +468,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cl := newStore(c)
-	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix}
+	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: c.MaxEventAge(), Log: log}
 	// Closed once the index template is in place, so syslog does not
 	// create the day's first indices with the wrong field types.
 	templateReady := make(chan struct{})
@@ -488,7 +478,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
-			MaxAge: syslogMaxAge(c.Retention.Days),
+			MaxAge: c.MaxEventAge(),
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err

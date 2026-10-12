@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -140,11 +141,14 @@ func TestLibraryOverrideAndDelete(t *testing.T) {
 
 type fakeRunner struct {
 	rows []search.Row
+	mu   sync.Mutex // the scheduler runs detections in parallel
 	last *query.Query
 }
 
 func (f *fakeRunner) Execute(_ context.Context, q *query.Query) (*search.Result, error) {
+	f.mu.Lock()
 	f.last = q
+	f.mu.Unlock()
 	return &search.Result{Kind: "table", Rows: f.rows}, nil
 }
 

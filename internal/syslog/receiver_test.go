@@ -515,6 +515,7 @@ type sink struct {
 	delay   time.Duration
 	hang    bool
 	fail    error
+	reject  bool // OpenSearch refuses every event
 }
 
 func (s *sink) IngestEvents(ctx context.Context, events []ingest.Event) (*ingest.Result, error) {
@@ -529,7 +530,28 @@ func (s *sink) IngestEvents(ctx context.Context, events []ingest.Event) (*ingest
 	if s.fail != nil {
 		return nil, s.fail
 	}
+	if s.reject {
+		// The result lists only the first few errors.
+		res := &ingest.Result{Received: len(events), Rejected: len(events)}
+		for i := range min(len(events), 10) {
+			res.Errors = append(res.Errors, store.BulkItemError{Pos: i, Reason: "mapper_parsing_exception"})
+		}
+		return res, nil
+	}
 	return &ingest.Result{Received: len(events), Indexed: len(events)}, nil
+}
+
+// TestRejectedEventsAreAllCounted: a result lists only the first few
+// rejected events, so the not-written count uses the full count.
+func TestRejectedEventsAreAllCounted(t *testing.T) {
+	sk := &sink{reject: true}
+	r, _ := startWith(t, Config{UDP: "127.0.0.1:0"}, sk, nil)
+	var msgs []string
+	for i := range 25 {
+		msgs = append(msgs, fmt.Sprintf("<13>1 - h app - - - event %d", i))
+	}
+	sendUDP(t, addr(t, r, "udp"), msgs...)
+	waitFor(t, "all 25 counted as not written", func() bool { return r.Stats().WriteFailed == 25 })
 }
 
 func (s *sink) sizes() []int {

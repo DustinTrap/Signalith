@@ -1063,7 +1063,7 @@ function detectionsHead() {
 function lastRunCell(st) {
   if (st.running) return [el('div', { class: 'dx-line' }, 'Running…')];
   if (!st.last_run) return [el('div', { class: 'dx-line muted' }, 'Not yet')];
-  const second = st.last_error ? el('span', { class: 'dx-meta dx-fail', title: st.last_error }, 'Failed')
+  const second = st.last_error ? el('span', { class: 'dx-meta dx-fail', title: st.last_error }, st.timed_out ? 'Timed out' : 'Failed')
     : el('span', { class: 'dx-meta' }, st.last_findings ? dxPlural(st.last_findings, 'new finding') : st.last_results ? dxPlural(st.last_results, 'result') : 'No results');
   return [el('div', { class: 'dx-line', title: fmtTime(st.last_run) }, ago(st.last_run)), second];
 }
@@ -1303,7 +1303,7 @@ function renderDetectionInspector() {
         next ? el('span', {}, 'next run ' + next) : null))),
     el('div', { class: 'inspector__body dx-detbody' },
       msg,
-      st.last_error ? dxAlert('danger', 'The last run failed.', st.last_error) : null,
+      st.last_error ? dxAlert('danger', st.timed_out ? 'The last run timed out.' : 'The last run failed.', st.last_error) : null,
       d.description ? el('p', { class: 'dx-lede' }, d.description) : null,
       d.guidance ? el('div', { class: 'callout' }, icon('lightbulb'), el('div', {}, el('b', {}, 'How to triage. '), d.guidance)) : null,
       (d.mitre || []).length ? techRow(d.mitre) : null,

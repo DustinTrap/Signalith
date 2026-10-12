@@ -764,9 +764,10 @@ func (r *Receiver) send(batch []ingest.Event) {
 		r.warn("write", "could not write syslog events to OpenSearch; they were dropped", "events", len(batch), "err", err)
 		return
 	}
-	if len(res.Errors) > 0 {
-		r.writeFailed.Add(int64(len(res.Errors)))
-		r.warn("rejected", "OpenSearch rejected some syslog events", "rejected", len(res.Errors), "first", res.Errors[0].Reason)
+	// Errors lists only the first few; Rejected counts them all.
+	if res.Rejected > 0 && len(res.Errors) > 0 {
+		r.writeFailed.Add(int64(res.Rejected))
+		r.warn("rejected", "OpenSearch rejected some syslog events", "rejected", res.Rejected, "first", res.Errors[0].Reason)
 	}
 }
 

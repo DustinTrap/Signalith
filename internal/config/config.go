@@ -100,6 +100,27 @@ type Ingest struct {
 	// Tokens agents present in the Authorization header. Rotate by adding a
 	// new token, updating agents, then removing the old one.
 	Tokens []string `yaml:"tokens"`
+	// MaxEventAge is how old an event's own time (from an agent or syslog)
+	// may be and still be its event time, such as 7d. Older events, and
+	// ones more than an hour ahead, are filed under the time they arrived,
+	// with their own time kept in device_time. Empty means 7 days, or
+	// retention.days when that is shorter. Raise it to load old logs.
+	MaxEventAge string `yaml:"max_event_age,omitempty"`
+}
+
+// MaxEventAge returns ingest.max_event_age as a duration: the setting, or
+// a week (the retention period when that is shorter, since older events
+// would land in indices about to be deleted). Each day in this window can
+// get its own daily indices, so it bounds how many a sender can create.
+func (c *Config) MaxEventAge() time.Duration {
+	if d, err := detect.ParseDuration(c.Ingest.MaxEventAge); err == nil && d > 0 {
+		return d
+	}
+	week := 7 * 24 * time.Hour
+	if d := time.Duration(c.Retention.Days) * 24 * time.Hour; d > 0 && d < week {
+		return d
+	}
+	return week
 }
 
 // Syslog receives syslog from systems that cannot run an agent: firewalls,
@@ -604,6 +625,11 @@ func (c *Config) Validate() error {
 			p = append(p, fmt.Sprintf("ingest.tokens[%d] is shorter than 16 characters", i))
 		}
 	}
+	if c.Ingest.MaxEventAge != "" {
+		if d, err := detect.ParseDuration(c.Ingest.MaxEventAge); err != nil || d < time.Hour || d > 3650*24*time.Hour {
+			p = append(p, fmt.Sprintf("ingest.max_event_age %q must be a duration from 1h to 3650d, for example 7d or 30d (empty: 7 days)", c.Ingest.MaxEventAge))
+		}
+	}
 	p = append(p, c.Syslog.problems(c.Server)...)
 	if len(p) > 0 {
 		return &ValidationError{Problems: p}
@@ -707,6 +733,8 @@ const header = `# Signalith configuration.
 # search.*           default time range and result limits
 # retention.days     days of events to keep (0 = forever)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
+# ingest.max_event_age  events older than this (default 7d) are filed under the time
+#                    they arrived, with their own time in device_time
 # syslog.udp, .tcp   receive syslog from devices without an agent, e.g. 0.0.0.0:514
 #                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)
 # syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses server.tls_cert and tls_key
