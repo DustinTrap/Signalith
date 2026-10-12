@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -184,7 +185,8 @@ func TestSetAdminPasswordHashChangesOnlyTheHash(t *testing.T) {
 			t.Errorf("%q from the environment was written to the file", secret)
 		}
 	}
-	if st, _ := os.Stat(path); st.Mode().Perm() != 0o640 {
+	// Windows has no Unix permission bits; Stat reports 0666 for any file.
+	if st, _ := os.Stat(path); runtime.GOOS != "windows" && st.Mode().Perm() != 0o640 {
 		t.Errorf("mode %v", st.Mode())
 	}
 	t.Setenv("SIGNALITH_LOOKUPS_DIR", "")

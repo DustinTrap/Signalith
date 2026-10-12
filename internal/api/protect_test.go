@@ -138,14 +138,22 @@ func rawRequest(t *testing.T, ts *httptest.Server, head, body string, pause time
 	}
 	defer c.Close()
 	start := time.Now()
+	c.SetReadDeadline(start.Add(10 * time.Second))
 	io.WriteString(c, head)
+	// Read while the body is still to come, so a reply sent before it
+	// arrives is seen: once the server has closed the connection, writing
+	// the body resets it, and Windows then drops what was received.
+	lines := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(c).ReadString('\n')
+		lines <- strings.TrimSpace(line)
+	}()
 	if pause > 0 {
 		time.Sleep(pause)
 	}
 	io.WriteString(c, body)
-	c.SetReadDeadline(time.Now().Add(10 * time.Second))
-	line, _ := bufio.NewReader(c).ReadString('\n')
-	return strings.TrimSpace(line), time.Since(start)
+	line := <-lines
+	return line, time.Since(start)
 }
 
 func TestSlowRequestBodyIsCutOff(t *testing.T) {
