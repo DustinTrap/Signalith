@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -28,6 +29,8 @@ type Engine struct {
 	Opt   Options
 	// Assets backs the enrich command; nil makes enrich an error.
 	Assets *assets.Store
+	// Intel backs the intel and threatmatch commands; nil makes them errors.
+	Intel *intel.Store
 }
 
 // Row is one result row.
@@ -52,6 +55,7 @@ type Plan struct {
 
 	transform query.Command
 	post      []query.Command
+	threat    *query.ThreatMatch
 }
 
 func (e *Engine) opts() Options {
@@ -103,6 +107,22 @@ func (e *Engine) Compile(q *query.Query) (*Plan, error) {
 		filters = append(filters, w.Expr)
 		cmds = cmds[1:]
 	}
+	// threatmatch right after the search becomes a filter too.
+	var threat *query.ThreatMatch
+	var threatDSL map[string]any
+	if len(cmds) > 0 {
+		if tm, ok := cmds[0].(*query.ThreatMatch); ok {
+			var err error
+			if threatDSL, err = e.threatFilter(tm); err != nil {
+				return nil, err
+			}
+			threat = tm
+			cmds = cmds[1:]
+		}
+	}
+	if err := checkThreatMatch(cmds); err != nil {
+		return nil, err
+	}
 	earliest := q.Earliest
 	if earliest == "" {
 		earliest = o.DefaultEarliest
@@ -114,6 +134,9 @@ func (e *Engine) Compile(q *query.Query) (*Plan, error) {
 			return nil, err
 		}
 		fs = append(fs, c)
+	}
+	if threatDSL != nil {
+		fs = append(fs, threatDSL)
 	}
 	timeRange := map[string]any{}
 	if earliest != "" && earliest != "0" {
@@ -132,7 +155,7 @@ func (e *Engine) Compile(q *query.Query) (*Plan, error) {
 		dsl = boolQuery("filter", fs)
 	}
 
-	p := &Plan{Index: e.IndexPattern(q)}
+	p := &Plan{Index: e.IndexPattern(q), threat: threat}
 	body := map[string]any{"query": dsl, "track_total_hits": true}
 	p.Body = body
 
@@ -231,7 +254,7 @@ func leadingHead(cmds []query.Command) (int, bool) {
 		switch c := c.(type) {
 		case *query.Head:
 			return c.N, true
-		case *query.Table, *query.Rename, *query.Enrich:
+		case *query.Table, *query.Rename, *query.Enrich, *query.Intel:
 			continue
 		}
 		return 0, false
@@ -301,11 +324,17 @@ func (e *Engine) Execute(ctx context.Context, q *query.Query) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.threat != nil {
+		e.threatAnnotate(res, p.threat, p.Mode == "events")
+	}
 	for _, c := range p.post {
 		var err error
-		if en, ok := c.(*query.Enrich); ok {
-			err = e.enrich(res, en)
-		} else {
+		switch c := c.(type) {
+		case *query.Enrich:
+			err = e.enrich(res, c)
+		case *query.Intel:
+			err = e.intelEnrich(res, c)
+		default:
 			err = applyCommand(res, c)
 		}
 		if err != nil {

@@ -9,7 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
@@ -52,6 +56,7 @@ func setup(t *testing.T) (*store.Client, *search.Engine, string) {
 		}
 		_ = cl.Do(ctx, http.MethodDelete, "/_index_template/"+prefix, nil, nil)
 		_ = cl.DeleteIndex(ctx, prefix+"_findings")
+		_ = cl.DeleteIndex(ctx, prefix+"_intel")
 	})
 	eng := &search.Engine{Store: cl, Opt: search.Options{IndexPrefix: prefix, DefaultEarliest: "-24h"}}
 	return cl, eng, prefix
@@ -416,3 +421,161 @@ func mustGet(t *testing.T, lib *detect.Library, id, lookback string) *detect.Det
 }
 
 func run1(t *testing.T, eng *search.Engine, q string) *search.Result { return run(t, eng, q) }
+
+// evilHash is the SHA-256 of a made-up dropper in the threat intel test.
+var evilHash = strings.Repeat("ab", 32)
+
+func TestThreatIntelEndToEnd(t *testing.T) {
+	cl, eng, prefix := setup(t)
+	load(t, cl, prefix)
+	ctx := context.Background()
+
+	// A Sysmon process event with hashes, which ingest splits into
+	// process_md5 and process_sha256.
+	msg := "Process Create:\r\nImage: C:\\Users\\bob\\dropper.exe\r\nCommandLine: dropper.exe -q\r\nUser: CORP\\bob\r\nHashes: MD5=0123456789ABCDEF0123456789ABCDEF,SHA256=" + strings.ToUpper(evilHash)
+	ts := time.Now().Add(-3 * time.Minute).UTC().Format("2006-01-02 15:04:05 -0700")
+	p := &ingest.Pipeline{Store: cl, Prefix: prefix}
+	if res, err := p.Ingest(ctx, "win.sysmon", []map[string]any{{"Channel": "Microsoft-Windows-Sysmon/Operational", "Computer": "WS1",
+		"EventID": json.Number("1"), "TimeCreated": ts, "Message": msg}}); err != nil || len(res.Errors) > 0 {
+		t.Fatalf("sysmon ingest: %v %+v", err, res)
+	}
+	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-*/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := intel.NewOpenSearch(cl, prefix)
+	if err := backend.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.EnsureIndex(ctx); err != nil {
+		t.Fatalf("second EnsureIndex: %v", err)
+	}
+	store := intel.NewStore(backend)
+	if err := store.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A feed with the brute-force source, downloaded over HTTP.
+	var mu sync.Mutex
+	feedBody := "# test blocklist\n203.0.113.9\n192.0.2.200\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Write([]byte(feedBody))
+	}))
+	defer srv.Close()
+	feeds := &intel.Feeds{Store: store, List: []intel.Feed{{Name: "test-blocklist", URL: srv.URL, Format: "lines", Type: "auto",
+		Interval: time.Hour, MaxAge: 24 * time.Hour, Weight: 1.5, Description: "Known scanner", Enabled: true}}}
+	if st, err := feeds.Refresh(ctx, "test-blocklist"); err != nil || st.Count != 2 {
+		t.Fatalf("feed refresh = %+v %v", st, err)
+	}
+	if err := store.Add(ctx, []intel.Indicator{{Type: intel.TypeSHA256, Value: evilHash, Source: intel.ManualSource, Weight: 2, Description: "Dropper"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Indicators are stored in OpenSearch: a second server sees them.
+	other := intel.NewStore(backend)
+	if err := other.Load(ctx); err != nil || other.Summary().Total != 3 || len(other.Lookup("203.0.113.9")) != 1 {
+		t.Fatalf("second server sees %+v %v", other.Summary(), err)
+	}
+	// ...and event searches never do.
+	if res := run(t, eng, `*`); res.Matched != 23 {
+		t.Errorf("events matched %d; indicators may be leaking into searches", res.Matched)
+	}
+
+	eng.Intel = store
+	t.Run("threatmatch filters inside OpenSearch", func(t *testing.T) {
+		res := run(t, eng, `datamodel=Authentication | threatmatch src | stats count by src`)
+		if len(res.Rows) != 1 || res.Rows[0]["src"] != "203.0.113.9" || fmt.Sprint(res.Rows[0]["count"]) != "13" {
+			t.Errorf("rows = %v", res.Rows)
+		}
+		res = run(t, eng, `* | threatmatch`)
+		if res.Matched != 14 || len(res.Rows) != 14 {
+			t.Errorf("all matches = %d rows %d", res.Matched, len(res.Rows))
+		}
+		res = run(t, eng, `datamodel=Endpoint | threatmatch`)
+		if len(res.Rows) != 1 || res.Rows[0]["threat_type"] != "sha256" || res.Rows[0]["threat_match_field"] != "process_sha256" ||
+			res.Rows[0]["threat_target"] != "WS1" || fmt.Sprint(res.Rows[0]["threat_weight"]) != "2" {
+			t.Errorf("hash match = %v", res.Rows)
+		}
+	})
+	t.Run("intel adds columns", func(t *testing.T) {
+		res := run(t, eng, `datamodel=Authentication action=failure | stats count by src | intel src | sort -count`)
+		if res.Rows[0]["src_intel_source"] != "test-blocklist" || res.Rows[0]["src_intel_description"] != "Known scanner" {
+			t.Errorf("top row = %v", res.Rows[0])
+		}
+		if _, ok := res.Rows[1]["src_intel_source"]; ok {
+			t.Errorf("198.51.100.23 is not an indicator: %v", res.Rows[1])
+		}
+	})
+
+	// The threat activity detection raises findings and risk.
+	fs := findings.NewOpenSearch(cl, prefix)
+	if err := fs.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	lib, _, err := detect.NewLibrary("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := &risk.Store{Client: cl, Prefix: prefix}
+	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Risk: rs}
+	d := mustGet(t, lib, "threat-activity", "1h")
+	res, err := sched.Run(ctx, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// web1 (12 sshd failures), DC01 (one 4625) and the dropper on WS1.
+	if len(res.Findings) != 3 {
+		t.Fatalf("threat activity raised %d findings (results %d, throttled %d)", len(res.Findings), res.Results, res.Throttled)
+	}
+	titles := map[string]bool{}
+	for _, f := range res.Findings {
+		titles[f.Title] = true
+		if f.Result["threat_source"] == nil || f.Result["threat_indicator"] == nil {
+			t.Errorf("finding lacks the matched indicator: %v", f.Result)
+		}
+	}
+	if !titles["Threat intel match on src 203.0.113.9 (test-blocklist)"] || !titles["Threat intel match on process_sha256 "+strings.ToLower(evilHash)+" (manual)"] {
+		t.Errorf("titles = %v", titles)
+	}
+	for _, f := range res.Findings {
+		if f.Entities["dest"] == "web1" {
+			dq := f.Query + " earliest=" + f.Earliest
+			if r, err := eng.Run(ctx, dq); err != nil || r.Matched != 13 {
+				t.Errorf("drilldown %q: %v matched %v", dq, err, r)
+			}
+		}
+	}
+	if res, err := sched.Run(ctx, d); err != nil || len(res.Findings) != 0 {
+		t.Errorf("rerun should be throttled: %+v %v", res, err)
+	}
+	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-risk-*/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	rr := run(t, eng, `datamodel=Risk detection_id=threat-activity | stats sum(risk_score) as score by risk_object`)
+	scores := map[string]string{}
+	for _, r := range rr.Rows {
+		scores[fmt.Sprint(r["risk_object"])] = fmt.Sprint(r["score"])
+	}
+	// 60 times the indicator weight: 1.5 for the feed, 2 for the hash.
+	for obj, want := range map[string]string{"web1": "90", "DC01": "90", "oracle": "90", "WS1": "120"} {
+		if scores[obj] != want {
+			t.Errorf("risk for %s = %q, want %s (all: %v)", obj, scores[obj], want, scores)
+		}
+	}
+
+	// An indicator dropped from the feed is removed from OpenSearch too.
+	mu.Lock()
+	feedBody = "192.0.2.200\n"
+	mu.Unlock()
+	if st, err := feeds.Refresh(ctx, "test-blocklist"); err != nil || st.Removed != 1 {
+		t.Fatalf("second refresh = %+v %v", st, err)
+	}
+	if reloaded, err := other.Sync(ctx); err != nil || !reloaded || len(other.Lookup("203.0.113.9")) != 0 || other.Summary().Total != 2 {
+		t.Errorf("after the feed dropped it: reloaded %v %v, %+v", reloaded, err, other.Summary())
+	}
+	if res := run(t, eng, `datamodel=Authentication | threatmatch src`); len(res.Rows) != 0 {
+		t.Errorf("dropped indicator still matches: %d rows", len(res.Rows))
+	}
+}

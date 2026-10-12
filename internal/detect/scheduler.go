@@ -363,6 +363,15 @@ func NewID(now time.Time) string {
 	return now.UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b)
 }
 
+func withTerm(q *query.Query, t query.Expr) *query.Query {
+	if q.Search == nil {
+		q.Search = t
+	} else {
+		q.Search = &query.And{Children: []query.Expr{q.Search, t}}
+	}
+	return q
+}
+
 // Drilldown returns the search that shows the events behind a result row:
 // the detection's filter plus the row's group-by values, without the
 // transforming commands. Event queries drill down to themselves.
@@ -374,6 +383,14 @@ func Drilldown(q *query.Query, row map[string]any) *query.Query {
 			by = c.By
 		case *query.Top:
 			by = append(append(by, c.Fields...), c.By...)
+		case *query.ThreatMatch:
+			// The events behind a threat match are those with the matched value.
+			out := &query.Query{Search: q.Search, Datamodel: q.Datamodel, Index: q.Index}
+			f, _ := row["threat_match_field"].(string)
+			if v, ok := row["threat_match_value"]; ok && v != nil && f != "" {
+				return withTerm(out, &query.Compare{Field: f, Op: "=", Value: fmt.Sprint(v)})
+			}
+			return out
 		default:
 			return &query.Query{Search: q.Search, Datamodel: q.Datamodel, Index: q.Index}
 		}

@@ -50,6 +50,16 @@ kept as typed, so Windows paths work without doubling.
 | `table` | `table _time, user, src` | Also `fields`; wildcards allowed |
 | `rename` | `rename src as source_ip` | |
 | `enrich` | `enrich` or `enrich user, dest` | Adds asset and identity context: `<field>_priority`, `_category`, `_bunit`, plus `_owner`, `_location` for assets and `_name`, `_email`, `_manager`, `_watchlist` for users. With no fields it enriches `user`, `src_user`, `src`, `dest`, `host`, `src_host`, `dest_host` and `risk_object` |
+| `threatmatch` | `threatmatch` or `threatmatch src, dest` | Keeps only events where a field equals a threat intel indicator. Runs inside OpenSearch, so it must come right after the search (before `stats` and other commands). Adds `threat_match_field`, `threat_match_value`, `threat_indicator`, `threat_type`, `threat_source`, `threat_weight`, `threat_description` and `threat_target` (the system on your side) to each event |
+| `intel` | `intel` or `intel src, url` | Adds `<field>_intel_source`, `_intel_type`, `_intel_weight` and `_intel_description` where a value is a known indicator. Works on any result, including after `stats` |
+
+With no fields, `threatmatch` and `intel` check `src`, `dest`, `src_ip`, `dest_ip`,
+`dest_host`, `domain`, `query`, `url_domain`, `url`, the hash fields
+(`process_sha256`, `process_sha1`, `process_md5`, `process_hash`, `file_hash`, `hash`,
+`md5`, `sha1`, `sha256`) and the email fields (`sender`, `recipient`, `src_user`,
+`user`). The `threat_*` columns are added after OpenSearch returns events, so
+aggregate on event fields and add intel afterwards:
+`* | threatmatch src | stats count by src, dest | intel src`.
 
 Columns produced by `stats` are referenced by name in later commands, for example
 `sort -dc(user)` or `where avg(bytes) > 1000`.
@@ -83,6 +93,8 @@ model is configured, questions with unknown words go to it; see the README.
   or `top` run inside OpenSearch, so they scale with the cluster.
 - `stats` and `top` use composite aggregations and page through every group (up to
   50,000 groups, then results are marked truncated).
+- `threatmatch` becomes `terms` filters of indicator values (10,000 per clause) and
+  prefix filters for networks, so matching runs inside OpenSearch too.
 - Commands after that run in the Signalith server on the aggregated rows.
 - An event search without `stats` returns the newest 100 events, or up to
   `search.max_events` when later commands need to sort or filter them all.

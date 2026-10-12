@@ -69,7 +69,10 @@ var Models = []Model{
 			{Name: "parent_process", Type: "string", Description: "Parent command line"},
 			{Name: "parent_process_name", Type: "string", Description: "Parent executable file name"},
 			{Name: "parent_process_path", Type: "string", Description: "Parent executable path"},
-			{Name: "process_hash", Type: "string", Description: "Hashes of the executable"},
+			{Name: "process_hash", Type: "string", Description: "Hashes of the executable, as Sysmon lists them"},
+			{Name: "process_md5", Type: "string", Description: "MD5 hash of the executable, lower case"},
+			{Name: "process_sha1", Type: "string", Description: "SHA-1 hash of the executable, lower case"},
+			{Name: "process_sha256", Type: "string", Description: "SHA-256 hash of the executable, lower case"},
 		},
 	},
 	{

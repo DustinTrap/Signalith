@@ -63,6 +63,15 @@ func TestWindowsProcessCreation(t *testing.T) {
 	})
 }
 
+func TestSysmonProcessHashes(t *testing.T) {
+	msg := "Process Create:\r\nImage: C:\\Users\\bob\\evil.exe\r\nCommandLine: evil.exe\r\nUser: CORP\\bob\r\nHashes: SHA1=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,MD5=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB,SHA256=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC,IMPHASH=DD"
+	b, _ := json.Marshal(map[string]any{"Channel": "Microsoft-Windows-Sysmon/Operational", "Computer": "WS1", "EventID": 1, "Message": msg})
+	ev := Normalize("win.sysmon", decode(t, string(b)), now)
+	expect(t, ev.Document(), map[string]any{
+		"process_md5": strings.Repeat("b", 32), "process_sha1": strings.Repeat("a", 40), "process_sha256": strings.Repeat("c", 64),
+	})
+}
+
 func TestSysmonNetwork(t *testing.T) {
 	msg := "Network connection detected:\r\nRuleName: -\r\nImage: C:\\Tools\\nc.exe\r\nUser: CORP\\bob\r\nProtocol: tcp\r\nSourceIp: 10.0.0.5\r\nSourcePort: 50000\r\nDestinationIp: 198.51.100.7\r\nDestinationHostname: -\r\nDestinationPort: 4444"
 	b, _ := json.Marshal(map[string]any{"Channel": "Microsoft-Windows-Sysmon/Operational", "Computer": "WS1", "EventID": 3, "Message": msg})

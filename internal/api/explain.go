@@ -178,6 +178,20 @@ func describeCommand(c query.Command) string {
 			what = strings.Join(c.Fields, ", ")
 		}
 		return "Add owner, priority and category from the asset and identity lists for " + what + "."
+	case *query.Intel:
+		what, col := "the IP, domain, URL, hash and email fields", "src_intel_source"
+		if len(c.Fields) > 0 {
+			what, col = strings.Join(c.Fields, ", "), c.Fields[0]+"_intel_source"
+		}
+		return "Check " + what + " against threat intel and add the source, type, weight and description of any match (as " +
+			col + " and so on)."
+	case *query.ThreatMatch:
+		what := "an IP, domain, URL, hash or email field"
+		if len(c.Fields) > 0 {
+			what = "any of " + strings.Join(c.Fields, ", ")
+		}
+		return "Keep only events where " + what + " matches a threat intel indicator, and add threat_match_field, " +
+			"threat_match_value, threat_source and threat_weight describing the match."
 	}
 	return query.CommandString(c)
 }

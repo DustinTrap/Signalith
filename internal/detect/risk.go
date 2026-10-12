@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,10 @@ type Risk struct {
 	// Only records risk without raising a finding per result. Use it for
 	// noisy signals that matter only in combination.
 	Only bool `yaml:"only,omitempty" json:"only,omitempty"`
+	// WeightField names a result column holding a number the score is
+	// multiplied by, such as threat_weight from threatmatch, so stronger
+	// evidence adds more risk.
+	WeightField string `yaml:"weight_field,omitempty" json:"weight_field,omitempty"`
 }
 
 // RiskObject names a result field that holds a user or system.
@@ -143,6 +148,12 @@ func RiskEvents(d *Detection, row map[string]any, key string, a *assets.Store, n
 	ents := entities(row)
 	title := RenderTitle(d.Title, row)
 	tactics := Tactics(d.MITRE)
+	base := float64(d.Risk.Score)
+	if d.Risk.WeightField != "" {
+		if w, ok := toWeight(row[d.Risk.WeightField]); ok {
+			base = math.Round(base*w*10) / 10
+		}
+	}
 	var out []RiskEvent
 	seen := map[string]bool{}
 	for _, o := range d.Risk.Objects {
@@ -156,7 +167,7 @@ func RiskEvents(d *Detection, row map[string]any, key string, a *assets.Store, n
 		}
 		seen[o.Type+"\x00"+strings.ToLower(val)] = true
 		ev := RiskEvent{
-			Time: now, Object: val, ObjectType: o.Type, BaseScore: d.Risk.Score, Score: float64(d.Risk.Score),
+			Time: now, Object: val, ObjectType: o.Type, BaseScore: d.Risk.Score, Score: base,
 			Message: title, DetectionID: d.ID, MITRE: d.MITRE, Tactics: tactics, GroupKey: key, Fields: ents,
 		}
 		if c, ok := lookupAs(a, o.Type, val); ok {
@@ -165,11 +176,37 @@ func RiskEvents(d *Detection, row map[string]any, key string, a *assets.Store, n
 			if c.Watchlist && mult < 1.5 {
 				mult = 1.5
 			}
-			ev.Score = math.Round(float64(d.Risk.Score)*mult*10) / 10
+			ev.Score = math.Round(base*mult*10) / 10
 		}
 		out = append(out, ev)
 	}
 	return out
+}
+
+// toWeight reads a risk weight from a result cell. Weights are between 0
+// and 10; anything else is ignored.
+func toWeight(v any) (float64, bool) {
+	var w float64
+	switch n := v.(type) {
+	case float64:
+		w = n
+	case int64:
+		w = float64(n)
+	case int:
+		w = float64(n)
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		if err != nil {
+			return 0, false
+		}
+		w = f
+	default:
+		return 0, false
+	}
+	if w <= 0 || w > 10 {
+		return 0, false
+	}
+	return w, true
 }
 
 // Urgency combines a finding's severity with the priority of the assets

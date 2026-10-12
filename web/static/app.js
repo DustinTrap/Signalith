@@ -132,7 +132,7 @@ async function showFieldValues(f, li) {
 }
 
 // ---------- autocomplete ----------
-const lang = { commands: ['stats', 'timechart', 'top', 'where', 'sort', 'head', 'table', 'rename'], functions: ['count', 'dc', 'sum', 'avg', 'min', 'max'] };
+const lang = { commands: ['stats', 'timechart', 'top', 'where', 'sort', 'head', 'table', 'rename', 'enrich', 'threatmatch', 'intel'], functions: ['count', 'dc', 'sum', 'avg', 'min', 'max'] };
 let suggestions = [];
 let suggestIndex = 0;
 
@@ -480,6 +480,7 @@ const starters = [
   ['sudo to root by user', 'datamodel=Authentication app=sudo action=success\n| top limit=20 src_user'],
   ['Connections to uncommon ports', 'datamodel=Network_Traffic dest_port>1024\n| stats count by dest, dest_port, process_name\n| sort -count'],
   ['Authentication activity over time', 'datamodel=Authentication\n| timechart count by action'],
+  ['Events matching threat intel', '* | threatmatch\n| table _time, threat_match_field, threat_match_value, threat_source, threat_target, user, sourcetype'],
 ];
 $('starter-list').replaceChildren(...starters.map(([title, q]) => el('li', {},
   el('a', { onclick: () => { setQuery(q); runSearch(); } }, title))));

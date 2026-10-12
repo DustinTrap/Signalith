@@ -87,3 +87,71 @@ func TestAssistantSettings(t *testing.T) {
 		t.Errorf("env key: %v %+v", err, c)
 	}
 }
+
+func TestIntelFeeds(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	good := filepath.Join(dir, "good.yaml")
+	os.WriteFile(good, []byte(`intel:
+  feeds:
+    - name: feodo-tracker
+      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+    - name: urlhaus
+      url: https://urlhaus.abuse.ch/downloads/csv_recent/
+      format: csv
+      column: url
+      type: url
+      interval: 30m
+      weight: 1.5
+      enabled: false
+`), 0o600)
+	c, err := Load(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := c.Intel.Feeds[0]
+	if f.Format != "lines" || f.Type != "auto" || f.Interval != "1h" || f.MaxAge != "7d" || f.Weight != 1 || !f.IsEnabled() {
+		t.Errorf("defaults = %+v", f)
+	}
+	if c.Intel.Feeds[1].IsEnabled() {
+		t.Error("enabled: false ignored")
+	}
+	if d, err := ParseFeedDuration("2w"); err != nil || d.Hours() != 336 {
+		t.Errorf("2w = %v %v", d, err)
+	}
+
+	bad := filepath.Join(dir, "bad.yaml")
+	os.WriteFile(bad, []byte(`intel:
+  feeds:
+    - name: Bad Name
+      url: ftp://x
+      format: xml
+      type: ipv4
+    - name: csvfeed
+      url: https://example.com/a.csv
+      format: csv
+      interval: 1m
+      max_age: 30s
+      weight: 20
+      headers: {Authorization: "Bearer ${SIGNALITH_TEST_UNSET_KEY}"}
+    - name: csvfeed
+      url: https://example.com/b
+    - name: manual
+      url: https://example.com/c
+      column: "2"
+`), 0o600)
+	_, err = Load(bad)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	for _, want := range []string{
+		"intel.feeds[0] (Bad Name): name must be", `url "ftp://x"`, `format "xml"`, `type "ipv4"`,
+		"csv feeds need a column", "interval must be at least 5m", "max_age:", "weight must be",
+		"${SIGNALITH_TEST_UNSET_KEY}", "intel.feeds[2] (csvfeed): name is used", `name "manual" is reserved`,
+		"column only applies to format: csv",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q:\n%v", want, err)
+		}
+	}
+}

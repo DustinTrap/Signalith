@@ -165,6 +165,7 @@ func parseSysmon(eventID string, kv map[string]string, ev *Event) {
 		f["process_name"] = baseName(kv["Image"])
 		f["process_id"] = atoi(kv["ProcessId"])
 		f["process_hash"] = kv["Hashes"]
+		splitHashes(kv["Hashes"], f)
 		f["parent_process"] = kv["ParentCommandLine"]
 		f["parent_process_path"] = kv["ParentImage"]
 		f["parent_process_name"] = baseName(kv["ParentImage"])
@@ -181,6 +182,26 @@ func parseSysmon(eventID string, kv map[string]string, ev *Event) {
 		f["dest_port"] = atoi(kv["DestinationPort"])
 		f["process_name"] = baseName(kv["Image"])
 		f["process_path"] = kv["Image"]
+	}
+}
+
+// splitHashes copies each hash of a Sysmon "SHA256=..,MD5=.." list into
+// process_md5, process_sha1 and process_sha256 in lower case, so threat
+// intel and searches can match one hash exactly.
+func splitHashes(v string, f map[string]any) {
+	for _, part := range strings.Split(v, ",") {
+		k, h, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || h == "" {
+			continue
+		}
+		switch strings.ToUpper(k) {
+		case "MD5":
+			f["process_md5"] = strings.ToLower(h)
+		case "SHA1":
+			f["process_sha1"] = strings.ToLower(h)
+		case "SHA256":
+			f["process_sha256"] = strings.ToLower(h)
+		}
 	}
 }
 
