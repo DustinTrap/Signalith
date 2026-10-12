@@ -18,10 +18,12 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/risk"
@@ -41,6 +43,7 @@ Usage:
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
+  signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith version
 
@@ -80,6 +83,8 @@ func main() {
 		err = cmdPasswd(args)
 	case "query":
 		err = cmdQuery(args)
+	case "ask":
+		err = cmdAsk(args)
 	case "service":
 		err = cmdService(args)
 	case "version", "-v", "--version":
@@ -297,6 +302,64 @@ func cmdQuery(args []string) error {
 	return enc.Encode(res)
 }
 
+func newAssistant(c *config.Config) *assistant.Client {
+	a := c.Assistant
+	return assistant.New(a.Provider, a.URL, a.Model, a.APIKey)
+}
+
+// cmdAsk prints the query for a plain-English question, with how each
+// part was understood.
+func cmdAsk(args []string) error {
+	fs := flag.NewFlagSet("ask", flag.ExitOnError)
+	path := configFlag(fs)
+	useAI := fs.Bool("ai", false, "ask the configured AI model instead of the built-in translator")
+	fs.Parse(args)
+	question := strings.Join(fs.Args(), " ")
+	if question == "" {
+		return errors.New(`usage: signalith ask "failed logins from 203.0.113.9 in the last 24 hours"`)
+	}
+	c, err := config.Load(*path)
+	if err != nil {
+		if *useAI {
+			return err
+		}
+		c = config.Default() // the built-in translator needs no server
+	}
+	var hints nlq.Hints
+	if lists, err := assets.NewStore(c.LookupsDir()); err == nil {
+		hints = api.AssetHints{A: lists}
+	}
+	res, err := nlq.Translate(question, hints)
+	if err != nil {
+		return err
+	}
+	if *useAI {
+		ai := newAssistant(c)
+		if ai == nil {
+			return errors.New("no AI model is configured; set assistant.provider in the config file")
+		}
+		q, err := ai.Translate(context.Background(), question, res.Query)
+		if err != nil {
+			return err
+		}
+		fmt.Println(q)
+		return nil
+	}
+	fmt.Println(res.Query)
+	fmt.Println()
+	for _, s := range res.Steps {
+		if s.Phrase != "" {
+			fmt.Printf("  %-28s %s\n", "\""+s.Phrase+"\"", s.Meaning)
+		} else {
+			fmt.Printf("  %-28s %s\n", "", s.Meaning)
+		}
+	}
+	if len(res.Unknown) > 0 {
+		fmt.Printf("\nNot understood: %s\n", strings.Join(res.Unknown, ", "))
+	}
+	return nil
+}
+
 // cmdServe runs until interrupted (or until the Windows service stops).
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
@@ -344,6 +407,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Scheduler:  sched,
 		Findings:   fstore,
 		Assets:     lists,
+		Assistant:  newAssistant(c),
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,

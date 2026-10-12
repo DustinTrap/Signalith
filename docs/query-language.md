@@ -53,6 +53,29 @@ kept as typed, so Windows paths work without doubling.
 Columns produced by `stats` are referenced by name in later commands, for example
 `sort -dc(user)` or `where avg(bytes) > 1000`.
 
+## Asking in plain English
+
+The box above the query editor (and `signalith ask "..."`) turns a question into a
+query. It understands:
+
+| You write | It adds |
+| --- | --- |
+| logins, processes, connections, account changes, risk | `datamodel=...` |
+| failed, successful, blocked, allowed, created, deleted | `action=...` |
+| from 10.0.0.5, to web1, on dc01, by alice, port 22, user bob | field filters; `not`/`except` negates |
+| powershell, cmd, certutil, mimikatz.exe, spawned by winword | `process_name`, `parent_process_name` |
+| containing mimikatz, "quoted text" | `process=*...*` for processes, text search otherwise |
+| last 4 hours, past 7 days, today, yesterday, this week | `earliest=` and `latest=` |
+| how many, distinct users, total bytes, average bytes | `stats count`, `dc()`, `sum()`, `avg()` |
+| per user, by source ip, for each host | `by ...` |
+| top 10 users, most common processes, rare processes | `top` or `stats ... \| sort \| head` |
+| more than 5, at least 3 hosts | `where count>5`; `stats dc(dest) as distinct_dest ... \| where distinct_dest>=3` |
+| per hour, over time, daily | `timechart` |
+| show user, src and dest | `table _time, user, src, dest` |
+
+Names from the asset and identity lists are recognized as users or hosts. When an AI
+model is configured, questions with unknown words go to it; see the README.
+
 ## How queries run
 
 - The search and any `where` commands that come before the first `stats`, `timechart`

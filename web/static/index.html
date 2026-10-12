@@ -34,6 +34,12 @@
       </aside>
 
       <div class="workspace">
+        <form id="ask-form" class="ask-row" autocomplete="off">
+          <input id="ask" type="search" placeholder="Ask in plain English, for example: top 10 users with failed logins today" aria-label="Ask in plain English">
+          <button id="ask-go" type="submit">Write query</button>
+          <label id="ask-ai-wrap" class="inline hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"> Use AI</label>
+        </form>
+        <div id="ask-result" class="ask-result hidden"></div>
         <div class="editor-row">
           <div class="editor-wrap">
             <textarea id="query" spellcheck="false" rows="4" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
@@ -101,6 +107,8 @@
         <div id="chart"></div>
         <div id="results" class="results"></div>
         <div id="starter" class="starter">
+          <h3>Ask a question</h3>
+          <ul id="ask-examples"></ul>
           <h3>Start with a common hunt</h3>
           <ul id="starter-list"></ul>
         </div>

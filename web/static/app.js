@@ -484,6 +484,50 @@ const starters = [
 $('starter-list').replaceChildren(...starters.map(([title, q]) => el('li', {},
   el('a', { onclick: () => { setQuery(q); runSearch(); } }, title))));
 
+// ---------- ask in plain English ----------
+let askInfo = { ai_available: false, examples: [] };
+
+async function ask(question, mode) {
+  question = question.trim();
+  if (!question) return;
+  $('ask').value = question;
+  const box = $('ask-result');
+  box.classList.remove('hidden');
+  box.replaceChildren(el('span', { class: 'muted' }, mode === 'ai' || $('ask-ai').checked ? 'Asking the AI model...' : 'Writing the query...'));
+  let res;
+  try {
+    res = await api('/api/ask', { question, mode: mode || ($('ask-ai').checked ? 'ai' : 'auto') });
+  } catch (e) {
+    box.replaceChildren(el('div', { class: 'error' }, e.message));
+    return;
+  }
+  setQuery(res.query);
+  const steps = (res.steps || []).filter((s) => s.meaning);
+  const head = res.source === 'ai'
+    ? el('div', {}, el('b', {}, 'Query written by ' + (res.ai_model || 'the AI model')), el('span', { class: 'muted' }, '. Check it before relying on the results.'))
+    : el('div', {}, el('b', {}, 'Here is how I read that:'));
+  const understood = res.source === 'ai' ? null : el('ul', { class: 'ask-steps' }, ...steps.map((s) => el('li', {},
+    s.phrase ? el('span', { class: 'ask-phrase' }, s.phrase) : null, s.phrase ? ' → ' : '', s.meaning)));
+  const unknown = res.source !== 'ai' && (res.unknown || []).length
+    ? el('div', { class: 'muted' }, 'Not understood: ', ...res.unknown.map((w) => el('code', {}, w + ' ')), askInfo.ai_available ? null : '. Try field names from the list on the left, or edit the query.')
+    : null;
+  const actions = el('div', { class: 'row' },
+    res.source !== 'ai' && askInfo.ai_available ? el('button', { class: 'link', onclick: () => ask(question, 'ai') }, 'Ask the AI model instead') : null,
+    res.source === 'ai' ? el('button', { class: 'link', onclick: () => ask(question, 'rules') }, 'Use the built-in translator instead') : null,
+    el('button', { class: 'link', onclick: () => box.classList.add('hidden') }, 'Hide'));
+  fill(box, head, understood, unknown,
+    res.ai_error ? el('div', { class: 'error' }, 'The AI model failed, so this is the built-in translation: ' + res.ai_error) : null, actions);
+  if (res.source === 'ai' || res.confidence > 0) runSearch();
+}
+$('ask-form').addEventListener('submit', (ev) => { ev.preventDefault(); ask($('ask').value); });
+
+async function loadAskInfo() {
+  try { askInfo = await api('/api/ask'); } catch (_) { return; }
+  $('ask-ai-wrap').classList.toggle('hidden', !askInfo.ai_available);
+  if (askInfo.ai_model) $('ask-ai-wrap').title += ' (' + askInfo.ai_model + ')';
+  $('ask-examples').replaceChildren(...askInfo.examples.map((q) => el('li', {}, el('a', { onclick: () => ask(q) }, q))));
+}
+
 // ---------- add data ----------
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', loadAgentConfig));
 $('linux-source').addEventListener('change', loadAgentConfig);
@@ -546,5 +590,6 @@ async function loadHealth() {
   if (saved) setQuery(saved);
   updateBuilderVisibility();
   loadFields();
+  loadAskInfo();
   if (page && page !== 'search') showPage(page);
 })();

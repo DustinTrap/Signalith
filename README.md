@@ -3,9 +3,10 @@
 An open-source SIEM for Windows and Linux, modeled on Splunk Enterprise Security.
 Signalith stores events in [OpenSearch](https://opensearch.org), collects them with
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
-query language that reads like SPL, a visual query builder, CIM-style data models,
-scheduled detections with a findings queue for triage, Sigma rule import, a
-MITRE ATT&CK coverage map, and risk-based alerting with asset and identity context.
+query language that reads like SPL, plain-English questions that become queries, a
+visual query builder, CIM-style data models, scheduled detections with a findings
+queue for triage, Sigma rule import, a MITRE ATT&CK coverage map, and risk-based
+alerting with asset and identity context.
 Threat intel and investigations come in later phases.
 
 The server is a single Go binary with the web UI embedded. It runs as a Windows
@@ -88,10 +89,12 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
+| `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
+| `assistant.url`, `assistant.model`, `assistant.api_key` | per provider | Endpoint, model name and key; `anthropic` defaults to `claude-sonnet-5-5` |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`).
+`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_ASSISTANT_API_KEY`).
 
 ## Detections and findings
 
@@ -175,15 +178,36 @@ datamodel=Authentication action=failure earliest=-24h
 
 Ways to build one without memorizing syntax:
 
+- **Ask in plain English.** Type a question above the query box, such as
+  *top 10 users with failed logins today*, *users who logged in to more than 3 hosts*
+  or *powershell spawned by winword on dc01*. Signalith writes the query, runs it, and
+  lists how it read each phrase, so you can see why the query looks the way it does
+  and edit it. The built-in translator works offline and knows the data models, CIM
+  field names, common Windows and Linux tools, time ranges, counting, top and rare
+  values, thresholds and charts, and recognizes names from your asset and identity
+  lists. Words it does not understand are listed rather than guessed at.
 - **Query builder.** Pick the data, add conditions, choose events, a table or a chart. The query text is written as you click, and typing in the text updates the builder when it can represent the query.
 - **Fields sidebar.** Click a field for its top values; click a value to filter on it.
 - **Click any result cell** to filter to it, exclude it, count by that field, or chart it over time.
 - **Autocomplete** for fields, commands and functions as you type.
 - **Explain** turns any query into plain-English steps and shows the OpenSearch request it runs.
+- **AI model (optional).** For questions the translator only partly understands, set
+  `assistant.provider` and Signalith asks the model instead, or always when you tick
+  **Use AI**. Only the question and the field list are sent, never your events, and
+  the model's query is checked by the parser before you see it. Point
+  `assistant.url` at a local Ollama or LM Studio server to keep everything on site:
+
+  ```yaml
+  assistant:
+    provider: openai
+    url: http://localhost:11434/v1
+    model: llama3.1
+  ```
 - **Starter hunts** on the empty search page cover brute force, new accounts, encoded PowerShell and more.
 
 From the shell: `signalith query "datamodel=Authentication | top user"` or add
-`-explain` to see the compiled request. The full reference is in
+`-explain` to see the compiled request, and `signalith ask "failed logins from
+203.0.113.9 today"` prints the query for a question. The full reference is in
 [docs/query-language.md](docs/query-language.md).
 
 ## Architecture
@@ -207,6 +231,8 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/findings` | Findings model and its OpenSearch store |
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
 | `internal/risk` | Risk event store |
+| `internal/nlq` | Plain-English question to query translator |
+| `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
 | `internal/api` | REST API, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
@@ -226,7 +252,7 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 
 1. **Search foundation**: agents, parsing, data models, query language, builder, installers.
 2. **Detect and triage**: scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
-3. **ES depth** (in progress): risk-based alerting and asset and identity context are in; threat intel feeds, posture dashboards and plain-English to query are next.
+3. **ES depth** (in progress): risk-based alerting, asset and identity context, and plain-English to query are in; threat intel feeds and posture dashboards are next.
 4. **Respond and scale**: investigation cases, response actions, playbooks, multi-node deployments.
 
 ## License

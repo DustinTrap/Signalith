@@ -173,3 +173,14 @@ table.kv td { padding: 3px 0; word-break: break-all; font-family: var(--mono); f
 @media (max-width: 600px) { .lists { grid-template-columns: 1fr; } }
 .lists pre.code { font-size: 11.5px; }
 .lists .l-table { max-height: 420px; }
+
+/* ask in plain English */
+.ask-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.ask-row input[type=search] { flex: 1; min-width: 0; padding: 8px 10px; font-size: 15px; }
+.ask-result { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+.ask-steps { margin: 4px 0; padding-left: 18px; }
+.ask-steps li { margin: 2px 0; }
+.ask-phrase { font-weight: 600; }
+.ask-result .row { margin-top: 4px; }
+@media (max-width: 600px) { .ask-row { flex-wrap: wrap; } .ask-row input[type=search] { flex-basis: 100%; } }
+.ask-row label { display: flex; gap: 4px; align-items: center; white-space: nowrap; font-size: 14px; }
