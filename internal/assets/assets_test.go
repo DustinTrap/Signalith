@@ -114,3 +114,32 @@ func TestFilesAndReload(t *testing.T) {
 		t.Errorf("broken edit: %v, %d assets", err, len(s2.Assets()))
 	}
 }
+
+func TestCSVDownloadIsSafeInSpreadsheets(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := "identity,name,email,manager,priority,category,bunit,watchlist\n" +
+		"mallory,\"=HYPERLINK(\"\"http://evil.example\"\")\",m@x.test,+1-555,low,,@IT,\n"
+	if _, err := s.SetIdentities([]byte(in)); err != nil {
+		t.Fatal(err)
+	}
+	out := string(s.CSV("identities"))
+	for _, want := range []string{`"'=HYPERLINK(""http://evil.example"")"`, "'+1-555", "'@IT"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("download lacks %s:\n%s", want, out)
+		}
+	}
+	// Uploading the download again gives the same values back.
+	if _, err := s.SetIdentities([]byte(out)); err != nil {
+		t.Fatal(err)
+	}
+	id, ok := s.Identity("mallory")
+	if !ok || id.Name != `=HYPERLINK("http://evil.example")` || id.Manager != "+1-555" || id.BUnit != "@IT" {
+		t.Errorf("round trip: %+v", id)
+	}
+	if got := SafeCell("10.0.0.1"); got != "10.0.0.1" {
+		t.Errorf("SafeCell changed a plain value: %q", got)
+	}
+}

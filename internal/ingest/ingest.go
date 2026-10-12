@@ -7,9 +7,13 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +26,33 @@ type Event struct {
 	Time   time.Time
 	Model  string
 	Fields map[string]any
+	// DeviceTime is the event's own time when it could not be the event
+	// time (too old, or too far ahead); the event is then filed under the
+	// time it arrived and this is stored as device_time.
+	DeviceTime time.Time
+}
+
+// DefaultMaxEventAge is how old an event's own time may be and still be
+// its event time, when ingest.max_event_age is not set (or the retention
+// period, when that is shorter). Events go to one index per day, so
+// without a bound a sender could create an index for every day it names
+// and use up the cluster's shards, which stops all ingestion; older events
+// are filed under the time they arrived instead.
+const DefaultMaxEventAge = 7 * 24 * time.Hour
+
+// MaxEventAhead is how far ahead of this server's clock an event's own
+// time may be (clock skew) and still be its event time.
+const MaxEventAhead = time.Hour
+
+// TimeUsable reports whether t can be the event time of an event received
+// at recv: set, no older than maxAge (zero: DefaultMaxEventAge) and at most
+// MaxEventAhead ahead. Keeping event times in this window bounds the daily
+// indices senders can make Signalith create.
+func TimeUsable(t, recv time.Time, maxAge time.Duration) bool {
+	if maxAge <= 0 {
+		maxAge = DefaultMaxEventAge
+	}
+	return !t.IsZero() && !t.Before(recv.Add(-maxAge)) && !t.After(recv.Add(MaxEventAhead))
 }
 
 // Bulker writes documents in bulk.
@@ -34,8 +65,32 @@ type Pipeline struct {
 	Store  Bulker
 	Prefix string
 	Now    func() time.Time
+	// MaxEventAge is how old an event's own time may be and still be its
+	// event time (zero: DefaultMaxEventAge); see TimeUsable.
+	MaxEventAge time.Duration
+	// MaxConcurrent caps the ingest requests Admit lets in at once
+	// (default 8), which bounds the memory decoding and writing use.
+	MaxConcurrent int
+	// MaxReceiving caps the memory request bodies hold, from their first
+	// byte until they have been written (default DefaultMaxReceiving); one
+	// sender may hold a quarter of it. See ReadBody.
+	MaxReceiving int64
+	// Log, when set, gets a warning (at most once a minute per kind) when
+	// events are refiled under their arrival time or lose fields.
+	Log *slog.Logger
 
-	stats Stats
+	stats   Stats
+	names   fieldBudget
+	slots   chan struct{}
+	slotsMu sync.Mutex
+	warnMu  sync.Mutex
+	warned  map[string]time.Time
+
+	// recvUsed is the receive budget in use, and recvBy each sender's
+	// part of it (see ReadBody).
+	recvMu   sync.Mutex
+	recvUsed int64
+	recvBy   map[netip.Addr]int64
 }
 
 // Stats counts what the pipeline has processed since start, for the health page.
@@ -44,22 +99,32 @@ type Stats struct {
 	Indexed  atomic.Int64
 	Failed   atomic.Int64
 	LastSeen atomic.Int64 // unix seconds
+	// Retimed counts events whose own time was too old or too far ahead,
+	// so they were filed under the time they arrived.
+	Retimed atomic.Int64
+	// FieldsDropped counts fields left out of events: invalid names, too
+	// many fields, or names over an index's budget.
+	FieldsDropped atomic.Int64
 }
 
 // Snapshot is a JSON-friendly copy of Stats.
 type Snapshot struct {
-	Received int64     `json:"received"`
-	Indexed  int64     `json:"indexed"`
-	Failed   int64     `json:"failed"`
-	LastSeen time.Time `json:"last_seen,omitzero"`
+	Received      int64     `json:"received"`
+	Indexed       int64     `json:"indexed"`
+	Failed        int64     `json:"failed"`
+	Retimed       int64     `json:"retimed"`
+	FieldsDropped int64     `json:"fields_dropped"`
+	LastSeen      time.Time `json:"last_seen,omitzero"`
 }
 
 // Stats returns current counters.
 func (p *Pipeline) Stats() Snapshot {
 	s := Snapshot{
-		Received: p.stats.Received.Load(),
-		Indexed:  p.stats.Indexed.Load(),
-		Failed:   p.stats.Failed.Load(),
+		Received:      p.stats.Received.Load(),
+		Indexed:       p.stats.Indexed.Load(),
+		Failed:        p.stats.Failed.Load(),
+		Retimed:       p.stats.Retimed.Load(),
+		FieldsDropped: p.stats.FieldsDropped.Load(),
 	}
 	if ls := p.stats.LastSeen.Load(); ls > 0 {
 		s.LastSeen = time.Unix(ls, 0).UTC()
@@ -74,22 +139,59 @@ func (p *Pipeline) now() time.Time {
 	return time.Now()
 }
 
+func (p *Pipeline) maxAge() time.Duration {
+	if p.MaxEventAge > 0 {
+		return p.MaxEventAge
+	}
+	return DefaultMaxEventAge
+}
+
+// maxErrors caps the rejected documents a Result lists; Rejected has the
+// full count.
+const maxErrors = 10
+
 // Result reports one ingest call.
 type Result struct {
 	Received int                   `json:"received"`
 	Indexed  int                   `json:"indexed"`
+	Rejected int                   `json:"rejected,omitempty"`
 	Errors   []store.BulkItemError `json:"errors,omitempty"`
+	// Retimed and FieldsDropped are as in Stats, for this call.
+	Retimed       int `json:"retimed,omitempty"`
+	FieldsDropped int `json:"fields_dropped,omitempty"`
+}
+
+func (r *Result) add(o *Result) {
+	r.Indexed += o.Indexed
+	r.Rejected += o.Rejected
+	r.Retimed += o.Retimed
+	r.FieldsDropped += o.FieldsDropped
+	for _, e := range o.Errors {
+		if len(r.Errors) < maxErrors {
+			r.Errors = append(r.Errors, e)
+		}
+	}
 }
 
 // Ingest normalizes records sent with a Fluent Bit tag and writes them.
 func (p *Pipeline) Ingest(ctx context.Context, tag string, records []map[string]any) (*Result, error) {
 	p.stats.Received.Add(int64(len(records)))
 	p.stats.LastSeen.Store(p.now().Unix())
-	events := make([]Event, 0, len(records))
-	for _, r := range records {
-		events = append(events, Normalize(tag, r, p.now()))
+	total := &Result{Received: len(records)}
+	for start := 0; start < len(records); start += batchEvents {
+		end := min(start+batchEvents, len(records))
+		events := make([]Event, 0, end-start)
+		for _, r := range records[start:end] {
+			events = append(events, Normalize(tag, r, p.now()))
+		}
+		res, err := p.write(ctx, events)
+		if err != nil {
+			p.stats.Failed.Add(int64(len(records) - end))
+			return nil, err
+		}
+		total.add(res)
 	}
-	return p.write(ctx, events)
+	return total, nil
 }
 
 // IngestEvents writes events that are already normalized, such as syslog
@@ -99,35 +201,209 @@ func (p *Pipeline) Ingest(ctx context.Context, tag string, records []map[string]
 func (p *Pipeline) IngestEvents(ctx context.Context, events []Event) (*Result, error) {
 	p.stats.Received.Add(int64(len(events)))
 	p.stats.LastSeen.Store(p.now().Unix())
-	return p.write(ctx, events)
+	res, err := p.write(ctx, events)
+	if err != nil {
+		return nil, err
+	}
+	res.Received = len(events)
+	return res, nil
 }
 
+// write files events under their index and writes them. An event whose own
+// time is outside TimeUsable's window is filed under the time it arrived,
+// with its own time kept as device_time, and sender-chosen field names go
+// through the field budget. When OpenSearch turns an event away because of
+// one of its fields (a clash with how the index maps it, or a full
+// mapping), the event is written again with only its known fields, so junk
+// fields cannot cost a legitimate event.
 func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 	prefix := p.Prefix
 	if prefix == "" {
 		prefix = "signalith"
 	}
+	recv := p.now()
+	oldest := dayOf(recv.Add(-p.maxAge() - 24*time.Hour))
+	res := &Result{Received: len(events)}
 	docs := make([]store.IndexedDoc, 0, len(events))
-	for _, ev := range events {
+	for i := range events {
+		ev := &events[i]
 		if ev.Time.IsZero() {
-			ev.Time = p.now()
+			ev.Time = recv
+		} else if !TimeUsable(ev.Time, recv, p.maxAge()) {
+			ev.DeviceTime = ev.Time
+			ev.Time = recv
+		}
+		if !ev.DeviceTime.IsZero() {
+			res.Retimed++
 		}
 		if ev.Model == "" {
 			ev.Model = "Other"
 		}
-		docs = append(docs, store.IndexedDoc{
-			Index: datamodel.IndexName(prefix, ev.Model, ev.Time.UTC().Format("2006.01.02")),
-			Doc:   ev.Document(),
-		})
+		if ev.Fields == nil {
+			ev.Fields = map[string]any{}
+		}
+		day := dayOf(ev.Time)
+		index := datamodel.IndexName(prefix, ev.Model, day)
+		if n := p.names.limit(index, day, oldest, ev.Fields); n > 0 {
+			ev.Fields["dropped_fields"] = int64(n)
+			res.FieldsDropped += n
+		}
+		docs = append(docs, store.IndexedDoc{Index: index, Doc: ev.Document()})
 	}
 	errs, err := p.Store.Bulk(ctx, docs)
 	if err != nil {
 		p.stats.Failed.Add(int64(len(docs)))
 		return nil, err
 	}
-	p.stats.Indexed.Add(int64(len(docs) - len(errs)))
-	p.stats.Failed.Add(int64(len(errs)))
-	return &Result{Received: len(events), Indexed: len(docs) - len(errs), Errors: errs}, nil
+	if retry, pos, removed := retryable(errs, events, docs); len(retry) > 0 {
+		errs = keepOthers(errs, pos)
+		again, err := p.Store.Bulk(ctx, retry)
+		if err != nil {
+			again = make([]store.BulkItemError, len(retry))
+			for i, d := range retry {
+				again[i] = store.BulkItemError{Index: d.Index, Reason: err.Error(), Pos: i}
+			}
+		}
+		for i := range again {
+			// Positions in the retry are positions in events here.
+			again[i].Pos = pos[min(max(again[i].Pos, 0), len(pos)-1)]
+		}
+		errs = append(errs, again...)
+		res.FieldsDropped += removed
+	}
+	res.Rejected = len(errs)
+	res.Indexed = len(docs) - len(errs)
+	if len(errs) > maxErrors {
+		errs = errs[:maxErrors]
+	}
+	res.Errors = errs
+	p.stats.Indexed.Add(int64(res.Indexed))
+	p.stats.Failed.Add(int64(res.Rejected))
+	p.stats.Retimed.Add(int64(res.Retimed))
+	p.stats.FieldsDropped.Add(int64(res.FieldsDropped))
+	if res.Retimed > 0 {
+		p.warn("retimed", "some events had a time too old or too far ahead; they were filed under the time they arrived, with their own time in device_time",
+			"events", res.Retimed, "max_event_age", p.maxAge().String(), "max_ahead", MaxEventAhead.String())
+	}
+	if res.FieldsDropped > 0 {
+		p.warn("fields", "some event fields were not indexed (invalid names, too many fields, or too many new field names for one day); their values stay in the raw event",
+			"fields", res.FieldsDropped)
+	}
+	return res, nil
+}
+
+// retryable returns, for events OpenSearch rejected because of a field,
+// their documents with only known fields, their positions in events, and
+// how many fields that left out (also added to each event's
+// dropped_fields).
+func retryable(errs []store.BulkItemError, events []Event, docs []store.IndexedDoc) ([]store.IndexedDoc, []int, int) {
+	var retry []store.IndexedDoc
+	var pos []int
+	removed := 0
+	for _, e := range errs {
+		if !fieldRejection(e.Type) || e.Pos < 0 || e.Pos >= len(events) || containsInt(pos, e.Pos) {
+			continue
+		}
+		ev := &events[e.Pos]
+		n := onlyKnown(ev.Fields)
+		if n == 0 {
+			continue // nothing to leave out; the rejection stands
+		}
+		prev, _ := ev.Fields["dropped_fields"].(int64)
+		ev.Fields["dropped_fields"] = prev + int64(n)
+		removed += n
+		retry = append(retry, store.IndexedDoc{Index: docs[e.Pos].Index, Doc: ev.Document()})
+		pos = append(pos, e.Pos)
+	}
+	return retry, pos, removed
+}
+
+// fieldRejection reports whether OpenSearch turned a document away because
+// of one of its fields: a value the mapping cannot take, or a full mapping.
+func fieldRejection(errType string) bool {
+	switch errType {
+	case "mapper_parsing_exception", "illegal_argument_exception", "document_parsing_exception", "strict_dynamic_mapping_exception":
+		return true
+	}
+	return false
+}
+
+// keepOthers returns the errors not about the documents at pos.
+func keepOthers(errs []store.BulkItemError, pos []int) []store.BulkItemError {
+	var out []store.BulkItemError
+	for _, e := range errs {
+		if !containsInt(pos, e.Pos) || !fieldRejection(e.Type) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func containsInt(xs []int, x int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// warn logs at most once a minute per kind.
+func (p *Pipeline) warn(kind, msg string, args ...any) {
+	if p.Log == nil {
+		return
+	}
+	now := time.Now()
+	p.warnMu.Lock()
+	if p.warned == nil {
+		p.warned = map[string]time.Time{}
+	}
+	last, seen := p.warned[kind]
+	if seen && now.Sub(last) < time.Minute {
+		p.warnMu.Unlock()
+		return
+	}
+	p.warned[kind] = now
+	p.warnMu.Unlock()
+	p.Log.Warn(msg, args...)
+}
+
+// ErrBusy means too many ingest requests are being written already; the
+// sender should retry shortly (Fluent Bit does on a 503).
+var ErrBusy = errors.New("Signalith is busy writing other events; send again in a few seconds")
+
+// Admit waits up to wait for one of MaxConcurrent ingest slots and returns
+// the function that frees it, or ErrBusy. Take a slot once the request
+// body has arrived (see ReadBody) and hold it while the body is decoded
+// and written: that bounds the memory and OpenSearch writes ingest uses
+// however many agents send at once, and a slow sender cannot hold a slot.
+func (p *Pipeline) Admit(ctx context.Context, wait time.Duration) (func(), error) {
+	p.slotsMu.Lock()
+	if p.slots == nil {
+		n := p.MaxConcurrent
+		if n <= 0 {
+			n = 8
+		}
+		p.slots = make(chan struct{}, n)
+	}
+	slots := p.slots
+	p.slotsMu.Unlock()
+	release := func() { <-slots }
+	select {
+	case slots <- struct{}{}:
+		return release, nil
+	default:
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case slots <- struct{}{}:
+		return release, nil
+	case <-t.C:
+		return nil, ErrBusy
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // Document returns the OpenSearch document for an event, dropping empty
@@ -149,6 +425,9 @@ func (e Event) Document() map[string]any {
 			continue
 		}
 		doc[k] = v
+	}
+	if !e.DeviceTime.IsZero() {
+		doc["device_time"] = e.DeviceTime.UTC().Format(time.RFC3339Nano)
 	}
 	return doc
 }

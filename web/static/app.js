@@ -3,19 +3,96 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+// el builds an element. Text children and text attributes go through
+// showText and visibleText, so characters that hide or disguise text are
+// shown wherever data appears.
 const el = (tag, attrs = {}, ...children) => {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'class') n.className = v;
     else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
-    else n.setAttribute(k, v);
+    else n.setAttribute(k, TEXT_ATTRS.has(k) ? visibleText(v) : v);
   }
   for (const c of children) {
     if (c == null) continue;
-    n.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    n.append(c instanceof Node ? c : showText(String(c)));
   }
   return n;
 };
+const TEXT_ATTRS = new Set(['title', 'aria-label', 'data-label']);
+
+// ---------- hidden characters ----------
+// Some Unicode characters are invisible or reorder the text around them:
+// U+202E makes "invoice\u202Efdp.exe" look like "invoiceexe.pdf", and a
+// zero-width space makes "adm\u200Bin" look like "admin". Anyone who can get
+// text into a log can use them to disguise a file name, user or address, so
+// the UI shows them as a small visible marker such as ⟨U+202E⟩ instead. The
+// data itself is unchanged: searches and filters use the real value.
+const HIDDEN_CHAR = /[\0-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\xad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b-\u180f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\u2800\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb]|\ud834[\udd73-\udd7a]|\udb40[\udc00-\udc7f\udd00-\uddef]/;
+const HIDDEN_CHARS = new RegExp(HIDDEN_CHAR.source, 'g');
+const HIDDEN_NAMES = {
+  0x00: 'null', 0x08: 'backspace', 0x1b: 'escape', 0x7f: 'delete', 0xad: 'soft hyphen', 0x61c: 'Arabic letter mark',
+  0x200b: 'zero-width space', 0x200c: 'zero-width non-joiner', 0x200d: 'zero-width joiner',
+  0x200e: 'left-to-right mark', 0x200f: 'right-to-left mark', 0x2028: 'line separator', 0x2029: 'paragraph separator',
+  0x202a: 'left-to-right embedding', 0x202b: 'right-to-left embedding', 0x202c: 'pop directional formatting',
+  0x202d: 'left-to-right override', 0x202e: 'right-to-left override', 0x2060: 'word joiner',
+  0x2066: 'left-to-right isolate', 0x2067: 'right-to-left isolate', 0x2068: 'first strong isolate', 0x2069: 'pop directional isolate',
+  0x3164: 'Hangul filler', 0xfeff: 'zero-width no-break space',
+};
+const hiddenCode = (ch) => 'U+' + ch.codePointAt(0).toString(16).toUpperCase().padStart(4, '0');
+
+// splitHidden returns s as [text, hidden, text, hidden, ..., text], or
+// null when nothing in it needs showing. Joiners and variation selectors
+// are part of emoji and of Persian, Arabic and Indic writing, so they are
+// shown only next to plain ASCII text, where they have no business.
+function splitHidden(s) {
+  if (!HIDDEN_CHAR.test(s)) return null;
+  const parts = [];
+  let last = 0;
+  for (const m of s.matchAll(HIDDEN_CHARS)) {
+    const ch = m[0];
+    const i = m.index;
+    const c = ch.charCodeAt(0);
+    const prev = s.charCodeAt(i - 1);
+    const next = s.charCodeAt(i + ch.length);
+    if ((c === 0x200c || c === 0x200d) && prev > 0x7f && next > 0x7f) continue;
+    if (c >= 0xfe00 && c <= 0xfe0f && prev > 0x7f) continue;
+    parts.push(s.slice(last, i), ch);
+    last = i + ch.length;
+  }
+  if (!parts.length) return null;
+  parts.push(s.slice(last));
+  return parts;
+}
+
+// visibleText returns s with hidden characters written as ⟨U+202E⟩, for
+// places that hold plain text only: tooltips, labels and the page title.
+function visibleText(s) {
+  const parts = splitHidden(String(s));
+  return parts ? parts.map((p, i) => (i % 2 ? '⟨' + hiddenCode(p) + '⟩' : p)).join('') : s;
+}
+
+// showText returns a text node for s, or a fragment with each hidden
+// character as a marked ⟨U+202E⟩ whose tooltip names it.
+function showText(s) {
+  const parts = splitHidden(s);
+  if (!parts) return document.createTextNode(s);
+  const frag = document.createDocumentFragment();
+  parts.forEach((p, i) => {
+    if (i % 2 === 0) {
+      if (p) frag.append(document.createTextNode(p));
+      return;
+    }
+    const code = hiddenCode(p);
+    const name = HIDDEN_NAMES[p.codePointAt(0)];
+    const mark = document.createElement('span');
+    mark.className = 'hidden-char';
+    mark.title = `Hidden character ${code}${name ? ' (' + name + ')' : ''}. It is shown because it can disguise text.`;
+    mark.textContent = '⟨' + code + '⟩';
+    frag.append(mark);
+  });
+  return frag;
+}
 
 // icon returns an inline SVG for symbol #i-NAME in the sprite at the top of
 // index.html, for example icon('search') or icon('x', 'icon--sm').
@@ -279,7 +356,8 @@ const JUMP_WORDS = {
   dashboards: 'home overview posture charts', findings: 'alerts incidents queue triage', cases: 'cases investigations',
   risk: 'risk scores', search: 'query events logs hunt', intel: 'threat intel ioc indicators feeds',
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
-  data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', health: 'status opensearch ingest', help: 'help syntax language commands',
+  data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', retention: 'retention rotation archive restore delete storage disk guard policies',
+  health: 'status opensearch ingest', help: 'help syntax language commands',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
   settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
 };
@@ -353,6 +431,21 @@ document.querySelectorAll('[data-theme-toggle]').forEach((b) => b.addEventListen
 document.querySelectorAll('[data-set-theme]').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.setTheme)));
 syncThemeButtons();
 
+// ---------- app shell: stored settings ----------
+// Display preferences stay in this browser after signing out. Everything
+// else stored under signalith.* (the last query, its time range, the last
+// page) belongs to whoever is signed in, so signing out removes it.
+const KEEP_ON_SIGN_OUT = new Set(['signalith.theme', 'signalith.builder', 'signalith.agentServer',
+  'signalith.dashRange', 'signalith.dashAuto', 'signalith.dashRefresh']);
+function clearUserStorage() {
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+    keys.filter((k) => k && k.startsWith('signalith.') && !KEEP_ON_SIGN_OUT.has(k)).forEach((k) => localStorage.removeItem(k));
+    sessionStorage.clear();
+  } catch (_) { /* storage may be blocked */ }
+}
+
 // ---------- app shell: menus and keys ----------
 // details.menu closes on a click outside it, on Esc, and when Tab moves
 // focus out of it (a click on its plain header moves focus nowhere, so a
@@ -418,6 +511,7 @@ function showUser(m) {
 }
 $('sign-out').addEventListener('click', async () => {
   $('sign-out').disabled = true;
+  clearUserStorage();
   try { await fetch('api/logout', { method: 'POST' }); } catch (_) { /* the session ends when it expires */ }
   location.replace('login?signedout');
 });
@@ -456,7 +550,7 @@ function renderHealthCard(h) {
   if (failed) meta.push(failed.toLocaleString() + ' failed');
   $('health-meta').textContent = meta.join(' · ');
   const card = $('health-card');
-  card.title = ['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n');
+  card.title = visibleText(['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n'));
   card.setAttribute('aria-label', `Health: ${title}, OpenSearch ${os.status || 'unknown'}, ${meta.join(', ')}`);
   card.classList.remove('hidden');
   if (h.version) $('user-menu-version').textContent = 'Signalith ' + h.version;
@@ -1253,7 +1347,7 @@ function renderEvents(box, res, opts) {
     const d = new Date(r._time);
     const time = el('td', { class: 'time' });
     if (r._time != null) {
-      time.append(...(isNaN(d) ? [fmtValue(r._time)] : [
+      time.append(...(isNaN(d) ? [showText(fmtValue(r._time))] : [
         el('span', { class: 'ev-date' }, d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })),
         el('span', { class: 'ev-clock' }, d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }))]));
       time.title = fmtTime(r._time);
@@ -1305,7 +1399,7 @@ function renderTable(box, res, opts) {
   const head = cols.map((c) => {
     const th = el('th', { scope: 'col' });
     if (numCols.has(c)) th.className = 'num';
-    if (!opts.sortable) { th.append(c); return th; }
+    if (!opts.sortable) { th.append(showText(String(c))); return th; }
     const on = sort && sort.col === c;
     th.setAttribute('aria-sort', on ? (sort.desc ? 'descending' : 'ascending') : 'none');
     th.append(
@@ -1328,7 +1422,7 @@ function renderTable(box, res, opts) {
     } else if (kind) {
       td.append(el('span', { class: 'chip', 'data-kind': kind, title: text }, el('span', {}, text)));
     } else {
-      td.append(text);
+      td.append(showText(text));
     }
     return td;
   })));
@@ -1586,8 +1680,8 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 
 function svgEl(parent, tag, attrs, text) {
   const n = document.createElementNS(SVGNS, tag);
-  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v);
-  if (text !== undefined) n.textContent = text;
+  for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, TEXT_ATTRS.has(k) ? visibleText(v) : v);
+  if (text !== undefined) n.textContent = visibleText(text);
   if (parent) parent.append(n);
   return n;
 }
@@ -2899,6 +2993,11 @@ function healthPageRender(h) {
   else if (recent) ingRow = ['', 'Receiving', `Last event ${lastAgo}.`];
   else if (ing.last_seen) ingRow = ['idle', 'Quiet', `Last event ${lastAgo}.`];
   else ingRow = ['idle', 'Waiting', ['No events since the server started. ', el('a', { href: '#data', 'data-page': 'data', 'data-min-role': 'admin' }, 'Add data')]];
+  // Events kept, but adjusted: say so, so it is never silent.
+  const adjusted = [];
+  if (ing.retimed) adjusted.push(`${healthPageNum(ing.retimed)} ${ing.retimed === 1 ? 'event was' : 'events were'} dated too far back or ahead and filed under the time ${ing.retimed === 1 ? 'it' : 'they'} arrived (search device_time=* to find them).`);
+  if (ing.fields_dropped) adjusted.push(`${healthPageNum(ing.fields_dropped)} ${ing.fields_dropped === 1 ? 'field was' : 'fields were'} not indexed: invalid names, too many fields, or too many new field names in a day (search dropped_fields>0; the values stay in _raw).`);
+  if (adjusted.length) ingRow[2] = [].concat(ingRow[2], ' ', adjusted.join(' '));
 
   const table = el('table', { class: 'table hp-table' },
     el('thead', {}, el('tr', {}, el('th', { scope: 'col', 'data-col': 'name' }, 'Component'), el('th', { scope: 'col', 'data-col': 'state' }, 'Status'), el('th', { scope: 'col' }, 'Details'))),
@@ -2906,7 +3005,7 @@ function healthPageRender(h) {
       healthPageRow('database', 'OpenSearch', os.url || '', osRow[0], osRow[1], osRow[2]),
       healthPageRow('inbox', 'Ingest', 'api/ingest', ingRow[0], ingRow[1], ingRow[2]),
       healthPageRow('server', 'Signalith server', h.version ? 'Version ' + h.version : '', '', 'Running',
-        h.config_file ? ['Config file ', el('code', {}, h.config_file)] : 'No config file.')));
+        h.config_file ? ['Config file ', el('code', {}, h.config_file)] : can('admin') ? 'No config file.' : '')));
   const card = el('div', { class: 'card' },
     el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Components'))),
     el('div', { class: 'table-wrap' }, table),

@@ -22,11 +22,17 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadOnlyPaths=/etc/signalith
-# Custom detections, asset and identity lists, and dashboards are saved here.
+# Custom detections, asset and identity lists, dashboards, retention
+# settings and archived days are saved here.
 StateDirectory=signalith
 Environment=SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
 Environment=SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
 Environment=SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards
+Environment=SIGNALITH_ARCHIVE_DIR=/var/lib/signalith/archive
+# To archive to another disk, point SIGNALITH_ARCHIVE_DIR there and allow it:
+# ReadWritePaths=/mnt/archive/signalith
+# The archive CLI does not see these variables; give it the folder:
+#   sudo -u signalith signalith archive list -c /etc/signalith/signalith.yaml -dir /var/lib/signalith/archive
 
 [Install]
 WantedBy=multi-user.target

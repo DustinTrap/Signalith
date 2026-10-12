@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/auth"
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -260,10 +261,21 @@ func lockedOut(wait time.Duration) error {
 	return &signInError{status: http.StatusTooManyRequests, code: "locked_out", retryAfter: wait, msg: msg}
 }
 
+// limitKey is the client a sign-in attempt counts against: its IPv4
+// address, or its IPv6 /64 network, since an IPv6 host can usually pick
+// any address in its /64 and would otherwise get a fresh allowance of
+// guesses with each one.
+func limitKey(r *http.Request) string {
+	if a := clientaddr.Parse(r.RemoteAddr); a.IsValid() {
+		return clientaddr.Key(a).String()
+	}
+	return clientIP(r)
+}
+
 // beginAttempt starts a password check that counts toward the sign-in
 // limits (see auth.Limiter), or returns the locked-out error.
 func (s *Server) beginAttempt(r *http.Request, account string) (*auth.Attempt, error) {
-	a, ok, wait := s.limiter().Begin(clientIP(r), users.LoginName(account))
+	a, ok, wait := s.limiter().Begin(limitKey(r), users.LoginName(account))
 	if !ok {
 		return nil, lockedOut(wait)
 	}

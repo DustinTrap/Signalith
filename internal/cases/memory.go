@@ -28,6 +28,9 @@ func clone(c *Case) *Case {
 func (m *Memory) Create(_ context.Context, c *Case) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.byID[c.ID]; ok {
+		return ErrExists
+	}
 	m.byID[c.ID] = clone(c)
 	return nil
 }

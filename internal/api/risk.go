@@ -73,6 +73,7 @@ func (s *Server) handlePutLookup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("unknown list; use assets or identities"))
 		return
 	}
+	allowSlowUpload(w)
 	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -154,7 +155,7 @@ func (s *Server) handleRiskObjects(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	for _, row := range res.Rows {
@@ -194,7 +195,7 @@ func (s *Server) handleRiskObject(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		writeSearchError(w, err)
 		return
 	}
 	total := 0.0

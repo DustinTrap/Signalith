@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -845,5 +846,41 @@ func TestCasesEndToEnd(t *testing.T) {
 	}
 	if out = call("GET", "/api/cases/summary", nil, 200); out["open"] != float64(0) {
 		t.Errorf("summary = %v", out)
+	}
+
+	// Creating a case with an ID that is taken changes nothing.
+	dup := &cases.Case{ID: id, Title: "Should not replace the closed case", Status: findings.StatusNew}
+	if err := cs.Create(ctx, dup); !errors.Is(err, cases.ErrExists) {
+		t.Fatalf("create with a taken ID: %v", err)
+	}
+	if kept, err := cs.Get(ctx, id); err != nil || kept.Status != findings.StatusClosed || len(kept.Entries) != 5 {
+		t.Errorf("case after a clashing create: %v %+v", err, kept)
+	}
+	if len(id) != len("CASE-20261012-")+16 {
+		t.Errorf("case id %q is not 64 random bits", id)
+	}
+}
+
+// TestStoreErrorsHideCredentials checks that credentials in the
+// OpenSearch URL still sign in but never appear in errors or health.
+func TestStoreErrorsHideCredentials(t *testing.T) {
+	base := os.Getenv("SIGNALITH_TEST_OPENSEARCH")
+	if base == "" {
+		t.Skip("SIGNALITH_TEST_OPENSEARCH not set")
+	}
+	withCreds := strings.Replace(strings.Replace(base, "https://", "https://signalith:S3cr3tPass@", 1), "http://", "http://signalith:S3cr3tPass@", 1)
+	cl := store.New(store.Config{URL: withCreds})
+	if _, err := cl.Health(context.Background()); err != nil {
+		t.Fatalf("health with URL credentials: %v", err)
+	}
+	err := cl.Do(context.Background(), http.MethodGet, "/no-such-index-"+config.RandomToken(4)+"/_doc/1", nil, nil)
+	if err == nil || strings.Contains(err.Error(), "S3cr3tPass") {
+		t.Errorf("error = %v", err)
+	}
+	// Proxy variables do not apply to OpenSearch, even pointing nowhere.
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	if _, err := store.New(store.Config{URL: base}).Health(context.Background()); err != nil {
+		t.Errorf("health with proxy variables set: %v", err)
 	}
 }

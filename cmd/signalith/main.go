@@ -2,11 +2,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,13 +33,16 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/risk"
+	"github.com/jrsamsanchez/signalith/internal/safelog"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
+	"golang.org/x/term"
 )
 
 // version is set at build time with -ldflags "-X main.version=..."
@@ -53,6 +58,7 @@ Usage:
   signalith settings  list|reset [-c file] [key...]   show or undo changes made on the Settings page
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
+  signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith version
 
@@ -98,6 +104,8 @@ func main() {
 		err = cmdAsk(args)
 	case "service":
 		err = cmdService(args)
+	case "archive":
+		err = cmdArchive(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -123,6 +131,7 @@ func cmdInit(args []string) error {
 	publicURL := fs.String("public-url", "", "URL agents use to reach this server (default: derived from -listen)")
 	osURL := fs.String("opensearch", "http://127.0.0.1:9200", "OpenSearch URL")
 	osUser := fs.String("opensearch-user", "", "OpenSearch username")
+	osInsecure := fs.Bool("opensearch-allow-insecure-http", false, "allow the OpenSearch username and password over plain http to another machine (sets opensearch.allow_insecure_http; prefer https)")
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
 	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
 	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
@@ -137,6 +146,7 @@ func cmdInit(args []string) error {
 	c.Server.PublicURL = *publicURL
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
+	c.OpenSearch.AllowInsecureHTTP = *osInsecure
 	// New installs receive syslog right away; existing configs without a
 	// syslog section keep it off.
 	c.Syslog.UDP = *syslogUDP
@@ -169,16 +179,6 @@ func cmdInit(args []string) error {
 	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
-}
-
-// syslogMaxAge is how old a syslog message's own timestamp may be and still
-// be its event time: a week, or the retention period when that is shorter,
-// since older events would only land in indices about to be deleted.
-func syslogMaxAge(retentionDays int) time.Duration {
-	if d := time.Duration(retentionDays) * 24 * time.Hour; d > 0 && d < syslog.DefaultMaxAge {
-		return d
-	}
-	return syslog.DefaultMaxAge
 }
 
 // syslogSummary describes the syslog listeners, or "" when syslog is off.
@@ -320,13 +320,16 @@ func cmdValidate(args []string) error {
 		}
 		fmt.Printf("%d custom dashboards loaded from %s.\n", len(list), c.DashboardsDir())
 	}
+	for _, w := range c.Warnings() {
+		fmt.Println("Warning:", w)
+	}
 	cl := newStore(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if status, err := cl.Health(ctx); err != nil {
 		fmt.Printf("Warning: OpenSearch is not reachable yet: %v\n", err)
 	} else {
-		fmt.Printf("OpenSearch at %s is %s.\n", c.OpenSearch.URL, status)
+		fmt.Printf("OpenSearch at %s is %s.\n", redact.URL(c.OpenSearch.URL), status)
 	}
 	return nil
 }
@@ -335,27 +338,68 @@ func cmdPasswd(args []string) error {
 	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
 	path := configFlag(fs)
 	fs.Parse(args)
-	c, err := loadForEdit(*path)
-	if err != nil {
-		return err
+	if _, err := os.Stat(*path); err != nil {
+		return fmt.Errorf("config file %s: %w", *path, err)
 	}
 	pw := os.Getenv("SIGNALITH_NEW_PASSWORD")
 	if pw == "" {
-		fmt.Print("New admin password (input is visible): ")
-		if _, err := fmt.Scanln(&pw); err != nil {
-			return errors.New("no password entered")
+		var err error
+		if pw, err = readNewPassword(os.Stdin, os.Stderr); err != nil {
+			return err
 		}
 	}
-	h, err := config.HashPassword(strings.TrimSpace(pw))
+	h, err := config.HashPassword(pw)
 	if err != nil {
 		return err
 	}
-	c.Auth.AdminPasswordHash = h
-	if err := c.Save(*path); err != nil {
+	// Only the hash changes in the file; settings from the environment
+	// (such as SIGNALITH_OPENSEARCH_PASSWORD) are not written into it.
+	if err := config.SetAdminPasswordHash(*path, h); err != nil {
 		return err
 	}
 	fmt.Println("Password updated. Restart the server to apply it.")
+	if os.Getenv("SIGNALITH_ADMIN_PASSWORD") != "" {
+		fmt.Println("Note: SIGNALITH_ADMIN_PASSWORD is set in this environment, and wherever it is set for the server it replaces the password in the file.")
+	}
 	return nil
+}
+
+// readNewPassword asks for the new password twice without showing it.
+// When input is not a terminal (a script piping it in), it reads one line.
+func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
+	fd := int(in.Fd())
+	if !term.IsTerminal(fd) {
+		line, err := bufio.NewReader(in).ReadString('\n')
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			if err != nil && !errors.Is(err, io.EOF) {
+				return "", err
+			}
+			return "", errors.New("no password entered")
+		}
+		return line, nil
+	}
+	read := func(label string) (string, error) {
+		fmt.Fprint(prompt, label)
+		b, err := term.ReadPassword(fd)
+		fmt.Fprintln(prompt)
+		return string(b), err
+	}
+	pw, err := read("New admin password: ")
+	if err != nil {
+		return "", err
+	}
+	if pw == "" {
+		return "", errors.New("no password entered")
+	}
+	again, err := read("Type it again: ")
+	if err != nil {
+		return "", err
+	}
+	if again != pw {
+		return "", errors.New("the passwords do not match; nothing was changed")
+	}
+	return pw, nil
 }
 
 // openUsers opens the users file and the directory sign-in settings.
@@ -376,109 +420,17 @@ func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
 	return people, dir, nil
 }
 
-// loadForEdit loads a config without failing on a missing password hash,
-// which is exactly what passwd fixes, or on a missing directory bind
-// password, which usually comes from the service's environment
-// (SIGNALITH_LDAP_BIND_PASSWORD) rather than the operator's shell. The
-// placeholders are never written to the file.
-func loadForEdit(path string) (*config.Config, error) {
-	// Without the Settings page's changes, so they stay in their own file.
-	c, err := config.LoadFile(path)
-	if err == nil {
-		return c, nil
-	}
-	var ve *config.ValidationError
-	if !errors.As(err, &ve) {
-		return nil, err
-	}
-	for _, name := range []string{"SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_LDAP_BIND_PASSWORD"} {
-		if os.Getenv(name) == "" {
-			os.Setenv(name, "placeholder-to-load")
-			defer os.Unsetenv(name)
-		}
-	}
-	return config.LoadFile(path)
-}
-
-// cmdSettings shows or removes the changes made on the Settings page. It
-// is the way back when a change there locks people out: reset the
-// setting here, then restart Signalith.
-func cmdSettings(args []string) error {
-	const use = "usage: signalith settings list [-c file]\n       signalith settings reset [-c file] [key...]   (no key: every change made on the page)"
-	if len(args) == 0 || (args[0] != "list" && args[0] != "reset") {
-		return errors.New(use)
-	}
-	fs := flag.NewFlagSet("settings "+args[0], flag.ExitOnError)
-	path := configFlag(fs)
-	fs.Parse(args[1:])
-	file, err := config.SettingsFileFor(*path)
-	if err != nil {
-		return err
-	}
-	page, readErr := config.ReadPageSettings(file)
-	if args[0] == "list" {
-		if readErr != nil {
-			return fmt.Errorf("%v; remove it with: signalith settings reset", readErr)
-		}
-		if page.Empty() {
-			fmt.Printf("Nothing was changed on the Settings page (%s).\n", file)
-			return nil
-		}
-		fmt.Printf("Changed on the Settings page (%s):\n", file)
-		for _, key := range page.Keys() {
-			e := page.Settings[key]
-			value := "(hidden)"
-			if e.Secret == nil {
-				var v any
-				if e.Value.Decode(&v) == nil {
-					value = fmt.Sprint(v)
-				}
-			}
-			fmt.Printf("  %-34s %-28s by %s on %s\n", key, value, e.ChangedBy, e.ChangedAt.Local().Format("2006-01-02 15:04"))
-		}
-		return nil
-	}
-	keys := fs.Args()
-	if len(keys) == 0 {
-		if err := config.WritePageSettings(file, &config.PageSettings{}); err != nil {
-			return err
-		}
-		fmt.Printf("Removed every change made on the Settings page (%s).\n", file)
-		fmt.Println("Restart Signalith to use signalith.yaml alone.")
-		return nil
-	}
-	if readErr != nil {
-		return fmt.Errorf("%v; remove every change with: signalith settings reset", readErr)
-	}
-	for _, key := range keys {
-		if _, ok := config.Lookup(key); !ok {
-			return fmt.Errorf("%s is not a setting on the Settings page; see signalith settings list", key)
-		}
-	}
-	var removed []string
-	for _, key := range keys {
-		if page.Remove(key) {
-			removed = append(removed, key)
-		}
-	}
-	if len(removed) == 0 {
-		fmt.Println("None of these were changed on the Settings page; nothing to reset.")
-		return nil
-	}
-	if err := config.WritePageSettings(file, page); err != nil {
-		return err
-	}
-	fmt.Printf("Reset %s; signalith.yaml or the default applies again.\n", strings.Join(removed, ", "))
-	fmt.Println("Restart Signalith to apply it.")
-	return nil
-}
-
 func newStore(c *config.Config) *store.Client {
+	ca, cert, key := c.OpenSearchTLSFiles()
 	return store.New(store.Config{
 		URL:           c.OpenSearch.URL,
 		Username:      c.OpenSearch.Username,
 		Password:      c.OpenSearch.Password,
+		CAFile:        ca,
+		CertFile:      cert,
+		KeyFile:       key,
 		TLSSkipVerify: c.OpenSearch.TLSSkipVerify,
+		Proxy:         c.OpenSearch.Proxy,
 	})
 }
 
@@ -613,7 +565,14 @@ func cmdServe(args []string) error {
 	fs.Parse(args)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, *path, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return serve(ctx, *path, newLogger(os.Stderr))
+}
+
+// newLogger returns the server log. Values in it are cut to a sensible
+// length, since some come from whoever connects (such as the user name of
+// a failed sign-in).
+func newLogger(w io.Writer) *slog.Logger {
+	return slog.New(safelog.New(slog.NewTextHandler(w, nil)))
 }
 
 func serve(ctx context.Context, path string, log *slog.Logger) error {
@@ -632,16 +591,21 @@ type instance struct {
 	srv      *api.Server
 	handler  http.Handler
 	receiver *syslog.Receiver
-	cancel   context.CancelFunc
-	jobs     sync.WaitGroup // background jobs
-	log      *slog.Logger
+	// retention is the retention manager when this server runs retention.
+	retention *retention.Manager
+	cancel    context.CancelFunc
+	jobs      sync.WaitGroup // background jobs
+	log       *slog.Logger
 }
 
-// stop ends the background jobs and the syslog receiver, and waits for
-// them, so the next instance does not run them twice.
+// stop ends the background jobs, retention and the syslog receiver, and
+// waits for them, so the next instance does not run them twice.
 func (in *instance) stop() {
 	in.cancel()
 	in.jobs.Wait()
+	if in.retention != nil {
+		in.retention.Wait()
+	}
 	if in.receiver != nil {
 		// Stop receiving and write out what is queued.
 		in.receiver.Wait()
@@ -676,8 +640,13 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	if keys := c.PageKeys(); len(keys) > 0 {
 		log.Info("settings changed on the Settings page are in use", "settings", strings.Join(keys, ","), "file", c.SettingsFile())
 	}
+	for _, w := range c.Warnings() {
+		log.Warn(w)
+	}
 	cl := newStore(c)
-	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix}
+	ret := newRetention(c, cl, log)
+	maxAge := c.MaxEventAge(retentionKeepDays(ret))
+	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
 	// Closed once the index template is in place, so syslog does not
 	// create the day's first indices with the wrong field types.
 	templateReady := make(chan struct{})
@@ -687,7 +656,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
-			MaxAge: syslogMaxAge(c.Retention.Days), PublicPort: c.Syslog.PublicPort,
+			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return nil, err
@@ -760,6 +729,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
 	}
+	if saved, err := ret.Store.Get(); err != nil {
+		log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
+	} else if saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
+		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
+			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
+	}
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{
@@ -776,6 +751,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Feeds:      feeds,
 		Dashboards: boards,
 		Cases:      cstore,
+		Retention:  ret,
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
@@ -817,7 +793,14 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			log.Info("detection scheduler is off (detections.scheduler: false)")
 		}
 	})
-	in.jobs.Go(func() { retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log) })
+	if c.Detections.Scheduler {
+		// Like detections, retention runs on one server only.
+		in.retention = ret
+		in.jobs.Go(func() { ret.Start(ctx) })
+	} else {
+		log.Warn("retention does not run on this server: it runs on the server with detections.scheduler: true, " +
+			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
+	}
 	in.srv, in.handler = srv, srv.Handler()
 	started = true
 	return in, nil
@@ -846,6 +829,30 @@ func (r *runner) openUsers(c *config.Config) (*users.Store, *users.Directory, er
 		return nil, nil, err
 	}
 	return r.people, dir, nil
+}
+
+// newRetention returns the retention manager. Policies saved on the Data
+// retention page and the run history live next to the asset and identity
+// lists, which every install can write.
+func newRetention(c *config.Config, cl *store.Client, log *slog.Logger) *retention.Manager {
+	return &retention.Manager{
+		Cluster:     retention.NewOpenSearch(cl),
+		Prefix:      c.OpenSearch.IndexPrefix,
+		Config:      c.RetentionPolicies(),
+		Store:       retention.NewStore(filepath.Join(c.LookupsDir(), "retention.yaml")),
+		Archive:     &retention.Archive{Dir: c.ArchiveDir()},
+		HistoryFile: filepath.Join(c.LookupsDir(), "retention_history.json"),
+		Interval:    c.RetentionInterval(),
+		Log:         log,
+		ReadOnly:    !c.Detections.Scheduler,
+	}
+}
+
+// retentionKeepDays is the shortest time any event category is kept, in
+// days (0: forever), as the settings stand when the server starts.
+func retentionKeepDays(ret *retention.Manager) int {
+	s, _ := ret.Settings()
+	return s.ShortestKeepDays()
 }
 
 // intelFeeds converts the feeds in signalith.yaml; the config is already
@@ -898,10 +905,10 @@ func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log
 	for {
 		err := cl.PutIndexTemplate(ctx, c.OpenSearch.IndexPrefix, tmpl)
 		if err == nil {
-			log.Info("opensearch index template ready", "url", c.OpenSearch.URL)
+			log.Info("opensearch index template ready", "url", redact.URL(c.OpenSearch.URL))
 			return true
 		}
-		log.Warn("waiting for opensearch", "url", c.OpenSearch.URL, "err", err)
+		log.Warn("waiting for opensearch", "url", redact.URL(c.OpenSearch.URL), "err", err)
 		select {
 		case <-ctx.Done():
 			return false

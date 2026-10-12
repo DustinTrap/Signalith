@@ -17,6 +17,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
@@ -158,7 +159,7 @@ func (r *runner) open(ctx context.Context, c *config.Config) (*instance, net.Lis
 	if err != nil {
 		return nil, nil, err
 	}
-	ln, err := net.Listen("tcp", c.Server.Listen)
+	ln, err := httpserver.Listen(c.Server.Listen, webLimits(c), r.log)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot listen on %s: %w", c.Server.Listen, opError(err))
 	}
@@ -241,11 +242,11 @@ func (r *runner) restart(ctx context.Context, req restartRequest) error {
 	if err == nil && plan.moveWeb && plan.ln == nil {
 		// The new address takes the old one's port: free it, then listen.
 		r.web.close(5 * time.Second)
-		plan.ln, err = net.Listen("tcp", next.Server.Listen)
+		plan.ln, err = httpserver.Listen(next.Server.Listen, webLimits(next), r.log)
 		if err != nil {
 			in.stop()
 			err = fmt.Errorf("cannot listen on %s: %w", next.Server.Listen, err)
-			back, lerr := net.Listen("tcp", prev.Server.Listen)
+			back, lerr := httpserver.Listen(prev.Server.Listen, webLimits(prev), r.log)
 			if lerr != nil {
 				return fmt.Errorf("%v, and the previous address %s cannot be listened on again: %w", err, prev.Server.Listen, lerr)
 			}
@@ -313,7 +314,7 @@ func (r *runner) check(ctx context.Context, old, next *config.Config) (*plan, er
 	p.cert = cert
 	if webMoves(old, next) {
 		p.moveWeb = true
-		ln, err := net.Listen("tcp", next.Server.Listen)
+		ln, err := httpserver.Listen(next.Server.Listen, webLimits(next), r.log)
 		switch {
 		case err == nil:
 			p.ln = ln
@@ -401,7 +402,13 @@ func loadCert(c *config.Config) (*tls.Certificate, error) {
 // HTTPS turned on or off.
 func webMoves(old, next *config.Config) bool {
 	tlsOn := func(c *config.Config) bool { return c.Server.TLSCert != "" && c.Server.TLSKey != "" }
-	return old.Server.Listen != next.Server.Listen || tlsOn(old) != tlsOn(next)
+	return old.Server.Listen != next.Server.Listen || tlsOn(old) != tlsOn(next) ||
+		old.Server.MaxConnections != next.Server.MaxConnections || !slices.Equal(old.Server.SharedAddresses, next.Server.SharedAddresses)
+}
+
+// webLimits are the connection limits of the web listener.
+func webLimits(c *config.Config) httpserver.Limits {
+	return httpserver.Limits{Max: c.Server.MaxConnections, Shared: c.Server.SharedList()}
 }
 
 // openSearchMoves reports whether the OpenSearch connection changes.
@@ -442,12 +449,13 @@ type webServer struct {
 // serveWeb serves the front handler on ln, with HTTPS when c has a
 // certificate.
 func (r *runner) serveWeb(c *config.Config, ln net.Listener) *webServer {
-	w := &webServer{hs: &http.Server{Handler: r.front, ReadHeaderTimeout: 10 * time.Second}, errc: make(chan error, 1)}
+	w := &webServer{hs: httpserver.New(r.front, webLimits(c), r.log), errc: make(chan error, 1)}
 	useTLS := c.Server.TLSCert != "" && c.Server.TLSKey != ""
 	if useTLS {
-		w.hs.TLSConfig = &tls.Config{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		// The certificate is read again on each restart.
+		w.hs.TLSConfig.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 			return r.cert.Load(), nil
-		}}
+		}
 	}
 	go func() {
 		var err error

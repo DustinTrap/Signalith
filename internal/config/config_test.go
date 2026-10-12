@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInitSaveLoadRoundTrip(t *testing.T) {
@@ -382,5 +383,104 @@ func TestUsersAndDirectorySettings(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	if strings.Contains(string(raw), "bind-secret") || strings.Contains(string(raw), "sAMAccountName") {
 		t.Errorf("saved file has the env password or filled defaults:\n%s", raw)
+	}
+}
+
+func TestRetentionSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	os.WriteFile(path, []byte(`retention:
+  days: 30
+  interval: 30m
+  default:
+    keep_days: 60
+    compact_after_days: 7
+  policies:
+    authentication:
+      keep_days: 365
+      archive: true
+    findings:
+      keep_days: 730
+  guard:
+    max_disk_percent: 80
+`), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := c.RetentionPolicies()
+	if rc.Days != 30 || rc.Default.KeepDays != 60 || !rc.Policies["authentication"].Archive || rc.Policies["findings"].KeepDays != 730 ||
+		rc.Guard.MaxDiskPercent != 80 || !rc.Guard.IsEnabled() || c.RetentionInterval().Minutes() != 30 {
+		t.Errorf("retention = %+v interval %v", rc, c.RetentionInterval())
+	}
+	// The archive defaults to a folder next to the lookups folder.
+	if got, want := c.ArchiveDir(), filepath.Join(dir, "archive"); got != want {
+		t.Errorf("archive dir = %s, want %s", got, want)
+	}
+	state := filepath.Join(t.TempDir(), "signalith")
+	t.Setenv("SIGNALITH_LOOKUPS_DIR", filepath.Join(state, "lookups"))
+	if c, _ := Load(path); c.ArchiveDir() != filepath.Join(state, "archive") {
+		t.Errorf("archive dir next to lookups = %s", c.ArchiveDir())
+	}
+	cold := filepath.Join(t.TempDir(), "cold")
+	t.Setenv("SIGNALITH_ARCHIVE_DIR", cold)
+	if c, _ := Load(path); c.ArchiveDir() != cold {
+		t.Errorf("SIGNALITH_ARCHIVE_DIR = %s", c.ArchiveDir())
+	}
+
+	// Defaults: retention.days, hourly, no policies.
+	d := Default()
+	if d.RetentionInterval().Hours() != 1 || d.RetentionPolicies().Days != 90 || d.RetentionPolicies().Default != nil {
+		t.Errorf("defaults = %+v", d.Retention)
+	}
+
+	os.WriteFile(path, []byte(`retention:
+  interval: 1m
+  policies:
+    authentcation: {keep_days: 30}
+    intel: {keep_days: 30}
+    endpoint: {keep_days: 7, compact_after_days: 10}
+    cases: {keep_days: 30, archive: true}
+  guard: {max_disk_percent: 97}
+`), 0o600)
+	_, err = Load(path)
+	for _, want := range []string{"retention.interval", "retention.policies.authentcation: unknown category",
+		"retention.policies.intel", "retention.policies.endpoint.compact_after_days", "retention.policies.cases",
+		"retention.guard.max_disk_percent"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+	os.WriteFile(path, []byte("retention:\n  policies:\n    endpoint: {keep: 30}\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "keep") {
+		t.Errorf("unknown policy key: %v", err)
+	}
+}
+
+func TestMaxEventAge(t *testing.T) {
+	day := 24 * time.Hour
+	// Unset: a week, or the retention period when that is shorter.
+	for days, want := range map[int]time.Duration{0: 7 * day, 90: 7 * day, 7: 7 * day, 3: 3 * day, 1: day} {
+		if got := Default().MaxEventAge(days); got != want {
+			t.Errorf("retention %d days: %v, want %v", days, got, want)
+		}
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "age.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	os.WriteFile(path, []byte("ingest:\n  max_event_age: 30d\n"), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxEventAge(1) != 30*day {
+		t.Errorf("set: %v", c.MaxEventAge(1))
+	}
+	for _, bad := range []string{"soon", "10m", "4000d"} {
+		os.WriteFile(path, []byte("ingest:\n  max_event_age: "+bad+"\n"), 0o600)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "ingest.max_event_age") {
+			t.Errorf("%s: %v", bad, err)
+		}
 	}
 }

@@ -1,23 +1,33 @@
 package search
 
 import (
+	"context"
 	"fmt"
 	"math"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jrsamsanchez/signalith/internal/query"
 )
 
-// applyCommand runs one pipe command over rows held in memory.
-func applyCommand(res *Result, c query.Command) error {
+// checkEvery is how many rows the in-memory commands handle between checks
+// that the search has not been cancelled or timed out.
+const checkEvery = 512
+
+// applyCommand runs one pipe command over rows held in memory. It stops
+// with ctx's error when ctx ends.
+func applyCommand(ctx context.Context, res *Result, c query.Command) error {
 	switch c := c.(type) {
 	case *query.Where:
+		m := &matcher{}
 		out := res.Rows[:0:0]
-		for _, r := range res.Rows {
-			if evalExpr(c.Expr, r) {
+		for i, r := range res.Rows {
+			if i%checkEvery == 0 && ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if m.eval(c.Expr, r) {
 				out = append(out, r)
 			}
 		}
@@ -44,8 +54,9 @@ func applyCommand(res *Result, c query.Command) error {
 		var cols []string
 		for _, f := range c.Fields {
 			if strings.ContainsAny(f, "*?") {
+				g := compileGlob(f, false)
 				for _, col := range res.Columns {
-					if globMatch(f, col) {
+					if g.match(col) {
 						cols = append(cols, col)
 					}
 				}
@@ -81,13 +92,20 @@ func applyCommand(res *Result, c query.Command) error {
 			}
 		}
 	case *query.Stats:
-		res.Rows, res.Columns = goStats(res.Rows, c)
+		rows, cols, err := goStats(ctx, res.Rows, c)
+		if err != nil {
+			return err
+		}
+		res.Rows, res.Columns = rows, cols
 		res.Kind = "table"
 	case *query.Top:
 		var counted []Row
 		groups := map[string]Row{}
 		keys := append(append([]string{}, c.By...), c.Fields...)
-		for _, r := range res.Rows {
+		for i, r := range res.Rows {
+			if i%checkEvery == 0 && ctx.Err() != nil {
+				return ctx.Err()
+			}
 			k, ok := groupKey(r, keys)
 			if !ok {
 				continue
@@ -168,14 +186,17 @@ type aggState struct {
 }
 
 // goStats aggregates rows in memory, for stats after another transform.
-func goStats(rows []Row, st *query.Stats) ([]Row, []string) {
+func goStats(ctx context.Context, rows []Row, st *query.Stats) ([]Row, []string, error) {
 	type group struct {
 		keys   Row
 		states []*aggState
 	}
 	groups := map[string]*group{}
 	var order []string
-	for _, r := range rows {
+	for i, r := range rows {
+		if i%checkEvery == 0 && ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		k, ok := groupKey(r, st.By)
 		if !ok {
 			continue
@@ -258,7 +279,7 @@ func goStats(rows []Row, st *query.Stats) ([]Row, []string) {
 		}
 		out = []Row{row}
 	}
-	return out, append(append([]string{}, st.By...), aggColumns(st.Aggs)...)
+	return out, append(append([]string{}, st.By...), aggColumns(st.Aggs)...), nil
 }
 
 func asFloat(v any) (float64, bool) {
@@ -302,27 +323,35 @@ func compareValues(a, b any) int {
 	return strings.Compare(strings.ToLower(fmt.Sprint(a)), strings.ToLower(fmt.Sprint(b)))
 }
 
-func evalExpr(e query.Expr, r Row) bool {
+// matcher evaluates where expressions over rows. Each wildcard pattern is
+// compiled once and kept for the rows that follow, rather than once per
+// row.
+type matcher struct {
+	globs map[string]glob
+	lower map[string]string
+}
+
+func (m *matcher) eval(e query.Expr, r Row) bool {
 	switch e := e.(type) {
 	case *query.And:
 		for _, c := range e.Children {
-			if !evalExpr(c, r) {
+			if !m.eval(c, r) {
 				return false
 			}
 		}
 		return true
 	case *query.Or:
 		for _, c := range e.Children {
-			if evalExpr(c, r) {
+			if m.eval(c, r) {
 				return true
 			}
 		}
 		return false
 	case *query.Not:
-		return !evalExpr(e.Child, r)
+		return !m.eval(e.Child, r)
 	case *query.In:
 		for _, v := range e.Values {
-			if valueEquals(r[e.Field], v) {
+			if m.equals(r[e.Field], v) {
 				return true
 			}
 		}
@@ -334,9 +363,9 @@ func evalExpr(e query.Expr, r Row) bool {
 		}
 		switch e.Op {
 		case "=":
-			return valueEquals(v, e.Value)
+			return m.equals(v, e.Value)
 		case "!=":
-			return !valueEquals(v, e.Value)
+			return !m.equals(v, e.Value)
 		}
 		cmp := compareValues(v, e.Value)
 		switch e.Op {
@@ -350,8 +379,9 @@ func evalExpr(e query.Expr, r Row) bool {
 			return cmp >= 0
 		}
 	case *query.Text:
+		want := m.lowered(e.Value)
 		for _, v := range r {
-			if strings.Contains(strings.ToLower(fmt.Sprint(v)), strings.ToLower(e.Value)) {
+			if strings.Contains(strings.ToLower(fmt.Sprint(v)), want) {
 				return true
 			}
 		}
@@ -359,7 +389,19 @@ func evalExpr(e query.Expr, r Row) bool {
 	return false
 }
 
-func valueEquals(v any, want string) bool {
+func (m *matcher) lowered(s string) string {
+	if m.lower == nil {
+		m.lower = map[string]string{}
+	}
+	l, ok := m.lower[s]
+	if !ok {
+		l = strings.ToLower(s)
+		m.lower[s] = l
+	}
+	return l
+}
+
+func (m *matcher) equals(v any, want string) bool {
 	if v == nil {
 		return want == ""
 	}
@@ -367,26 +409,158 @@ func valueEquals(v any, want string) bool {
 		return true
 	}
 	if strings.ContainsAny(want, "*?") {
-		return globMatch(strings.ToLower(want), strings.ToLower(fmt.Sprint(v)))
+		if m.globs == nil {
+			m.globs = map[string]glob{}
+		}
+		g, ok := m.globs[want]
+		if !ok {
+			g = compileGlob(want, true)
+			m.globs[want] = g
+		}
+		return g.match(fmt.Sprint(v))
 	}
 	return compareValues(v, want) == 0
 }
 
-// globMatch matches * and ? wildcards against the whole string.
-func globMatch(pattern, s string) bool {
-	var b strings.Builder
-	b.WriteString("^")
-	for _, r := range pattern {
-		switch r {
-		case '*':
-			b.WriteString(".*")
-		case '?':
-			b.WriteString(".")
-		default:
-			b.WriteString(regexp.QuoteMeta(string(r)))
+// glob is a compiled * and ? pattern that must match a whole string: *
+// matches any run of characters (newlines too) and ? any one character.
+// It is matched without regular expressions, in time roughly linear in the
+// string for patterns without ?.
+type glob struct {
+	parts []string // the pattern split at each *
+	runes []int    // characters in each part
+	q     []bool   // whether each part has a ?
+	fold  bool     // match case-insensitively
+}
+
+func compileGlob(pattern string, fold bool) glob {
+	if fold {
+		pattern = strings.ToLower(pattern)
+	}
+	g := glob{parts: strings.Split(pattern, "*"), fold: fold}
+	for _, p := range g.parts {
+		g.runes = append(g.runes, utf8.RuneCountInString(p))
+		g.q = append(g.q, strings.Contains(p, "?"))
+	}
+	return g
+}
+
+func (g glob) match(s string) bool {
+	if g.fold {
+		s = strings.ToLower(s)
+	}
+	last := len(g.parts) - 1
+	if last == 0 {
+		n, ok := matchPart(g.parts[0], s)
+		return ok && n == len(s)
+	}
+	// The first part anchors the start and the last the end; the ones
+	// between go, in order, at their leftmost places, which leaves the
+	// most room for the rest.
+	n, ok := matchPart(g.parts[0], s)
+	if !ok {
+		return false
+	}
+	pos := n
+	for i := 1; i < last; i++ {
+		if g.parts[i] == "" {
+			continue
+		}
+		end, ok := g.find(i, s[pos:])
+		if !ok {
+			return false
+		}
+		pos += end
+	}
+	// The last part covers the final g.runes[last] characters.
+	tail := len(s)
+	for k := 0; k < g.runes[last]; k++ {
+		if tail <= pos {
+			return false
+		}
+		_, size := utf8.DecodeLastRuneInString(s[pos:tail])
+		tail -= size
+	}
+	n, ok = matchPart(g.parts[last], s[tail:])
+	return ok && tail+n == len(s)
+}
+
+// find returns where the first match of part i in s ends.
+func (g glob) find(i int, s string) (int, bool) {
+	p := g.parts[i]
+	if !g.q[i] {
+		at := strings.Index(s, p)
+		return at + len(p), at >= 0
+	}
+	for at := 0; at < len(s); {
+		if n, ok := matchPart(p, s[at:]); ok {
+			return at + n, true
+		}
+		_, size := utf8.DecodeRuneInString(s[at:])
+		at += size
+	}
+	return 0, false
+}
+
+// matchPart matches a part with no * (? stands for any one character) at
+// the start of s and returns how many bytes of s it covered.
+func matchPart(p, s string) (int, bool) {
+	n := 0
+	for _, pr := range p {
+		if n >= len(s) {
+			return 0, false
+		}
+		sr, size := utf8.DecodeRuneInString(s[n:])
+		if pr != '?' && pr != sr {
+			return 0, false
+		}
+		n += size
+	}
+	return n, true
+}
+
+// maxPatternLen caps a wildcard value in a search or where command, so a
+// pattern cannot be made big enough to make every comparison slow.
+const maxPatternLen = 1000
+
+// checkPatterns returns a *QueryError for a wildcard value longer than
+// maxPatternLen in the search or a where command.
+func checkPatterns(q *query.Query) error {
+	exprs := []query.Expr{q.Search}
+	for _, c := range q.Commands {
+		if w, ok := c.(*query.Where); ok {
+			exprs = append(exprs, w.Expr)
 		}
 	}
-	b.WriteString("$")
-	re, err := regexp.Compile(b.String())
-	return err == nil && re.MatchString(s)
+	var err error
+	var walk func(e query.Expr)
+	check := func(v string) {
+		if err == nil && strings.ContainsAny(v, "*?") && utf8.RuneCountInString(v) > maxPatternLen {
+			err = &QueryError{Msg: fmt.Sprintf("a wildcard pattern is %d characters long; the limit is %d", utf8.RuneCountInString(v), maxPatternLen)}
+		}
+	}
+	walk = func(e query.Expr) {
+		switch e := e.(type) {
+		case *query.And:
+			for _, c := range e.Children {
+				walk(c)
+			}
+		case *query.Or:
+			for _, c := range e.Children {
+				walk(c)
+			}
+		case *query.Not:
+			walk(e.Child)
+		case *query.In:
+			for _, v := range e.Values {
+				check(v)
+			}
+		case *query.Compare:
+			check(e.Value)
+		}
+	}
+	for _, e := range exprs {
+		walk(e)
+	}
+	return err
 }

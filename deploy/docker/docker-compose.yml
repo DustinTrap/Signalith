@@ -30,6 +30,10 @@ services:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 10s
       retries: 30
+    # Keep at most 5 log files of 10 MB, so the container log cannot fill the disk.
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
 
   signalith:
     build:
@@ -60,6 +64,13 @@ services:
     volumes:
       - ./signalith.yaml:/etc/signalith/signalith.yaml:ro
       - signalith-data:/var/lib/signalith
+      # Days archived before retention deletes them go to /var/lib/signalith/archive.
+      # To keep them on another disk, mount a folder there (writable by uid 65532):
+      # - /mnt/archive/signalith:/var/lib/signalith/archive
+    # Keep at most 5 log files of 10 MB, so the container log cannot fill the disk.
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
 
 volumes:
   opensearch-data:

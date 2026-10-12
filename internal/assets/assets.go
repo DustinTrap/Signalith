@@ -119,7 +119,7 @@ func readCSV(data []byte, known []string, required string) ([]map[string]string,
 		empty := true
 		for i, v := range rec {
 			if i < len(header) {
-				m[header[i]] = strings.TrimSpace(v)
+				m[header[i]] = strings.TrimSpace(unquoteCell(v))
 				if m[header[i]] != "" {
 					empty = false
 				}
@@ -468,29 +468,57 @@ func (s *Store) save(name string, data []byte) error {
 	return nil
 }
 
-// CSV returns a list as CSV, for download.
+// CSV returns a list as CSV, for download. Cells a spreadsheet would run
+// as a formula are written with a leading quote (see SafeCell), as the web
+// UI's exports do.
 func (s *Store) CSV(kind string) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
+	write := func(cells ...string) {
+		for i, c := range cells {
+			cells[i] = SafeCell(c)
+		}
+		w.Write(cells)
+	}
 	join := func(xs []string) string { return strings.Join(xs, "|") }
 	switch kind {
 	case "assets":
-		w.Write(AssetColumns)
+		write(AssetColumns...)
 		for _, a := range s.Assets() {
-			w.Write([]string{join(a.Host), join(a.IP), join(a.CIDR), a.Owner, a.Priority, join(a.Category), a.BUnit, a.Location})
+			write(join(a.Host), join(a.IP), join(a.CIDR), a.Owner, a.Priority, join(a.Category), a.BUnit, a.Location)
 		}
 	default:
-		w.Write(IdentityColumns)
+		write(IdentityColumns...)
 		for _, id := range s.Identities() {
 			wl := ""
 			if id.Watchlist {
 				wl = "true"
 			}
-			w.Write([]string{join(id.Identity), id.Name, id.Email, id.Manager, id.Priority, join(id.Category), id.BUnit, wl})
+			write(join(id.Identity), id.Name, id.Email, id.Manager, id.Priority, join(id.Category), id.BUnit, wl)
 		}
 	}
 	w.Flush()
 	return buf.Bytes()
+}
+
+// SafeCell returns a CSV cell that a spreadsheet will not run as a
+// formula: a value starting with =, +, -, @, a tab or a carriage return
+// gets a leading single quote, which spreadsheets show as text. Reading a
+// list back (unquoteCell) removes it again, so a downloaded list can be
+// edited and uploaded unchanged.
+func SafeCell(s string) string {
+	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
+		return "'" + s
+	}
+	return s
+}
+
+// unquoteCell undoes SafeCell.
+func unquoteCell(s string) string {
+	if len(s) > 1 && s[0] == '\'' && strings.ContainsRune("=+-@\t\r", rune(s[1])) {
+		return s[1:]
+	}
+	return s
 }
 
 // UserFields hold usernames; every other entity field is looked up as an asset.

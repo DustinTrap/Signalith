@@ -1,276 +1,186 @@
 package config
 
 import (
-	"crypto/tls"
+	"bytes"
 	"errors"
 	"fmt"
-	"reflect"
-	"sort"
+	"os"
+	"strconv"
 	"strings"
-	"time"
+	"unicode/utf8"
 
-	"github.com/jrsamsanchez/signalith/internal/search"
+	"gopkg.in/yaml.v3"
 )
 
-// Edit is a change made on the Settings page.
-type Edit struct {
-	// Values are new values by key, as JSON decoded them. An empty secret
-	// keeps the saved one.
-	Values map[string]any
-	// Clear lists secrets to remove.
-	Clear []string
-	// Reset lists settings to take off the page, so signalith.yaml or the
-	// default applies again.
-	Reset []string
-	// ResetAll takes every setting off the page, even when the page's
-	// file cannot be read.
-	ResetAll bool
-	By       string
-	At       time.Time
-}
-
-// EditResult is an edit checked against the whole configuration.
-type EditResult struct {
-	// Page is the Settings page's file with the edit; write it with
-	// WritePageSettings when there are no problems.
-	Page *PageSettings
-	// Config is the configuration the edit gives.
-	Config *Config
-	// Before is the configuration as saved before the edit.
-	Before *Config
-	// Changed lists the settings whose value changes, in page order.
-	Changed []string
-	// Fields holds the problems by setting, in plain words for the page.
-	Fields map[string]string
-	// Problems lists problems that are not about a setting on the page,
-	// such as a mistake in signalith.yaml.
-	Problems []string
-}
-
-// OK reports whether the edit can be saved.
-func (r *EditResult) OK() bool { return len(r.Fields) == 0 && len(r.Problems) == 0 }
-
-// ErrPageFile is returned by CheckEdit when the page's file cannot be read
-// and the edit would keep its settings.
-var ErrPageFile = errors.New("the settings file cannot be read")
-
-// CheckEdit applies an edit to the settings saved on the page and checks
-// the whole configuration it gives, as Validate does at startup, without
-// saving anything.
-func CheckEdit(path string, e Edit) (*EditResult, error) {
-	saved, err := LoadSaved(path)
+// SetAdminPasswordHash writes hash as auth.admin_password_hash in the
+// config file at path and changes nothing else. Comments, layout and the
+// other settings stay exactly as they are, and settings that came from
+// environment variables (such as SIGNALITH_OPENSEARCH_PASSWORD) are not
+// copied into the file, as they would be by loading and saving it.
+func SetAdminPasswordHash(path, hash string) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("config file %s not found; create one with: signalith init", path)
+		}
+		return err
+	}
+	out, err := setScalar(data, []string{"auth", "admin_password_hash"}, hash)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	// Written in place, so the file keeps its owner, permissions and (on
+	// Windows) access list.
+	return os.WriteFile(path, out, st.Mode().Perm())
+}
+
+// setScalar returns the YAML document data with the value at keys set to
+// value. An existing single-line value is replaced in the text itself, so
+// nothing else in the file moves; otherwise the key is added and the
+// document is written out again (keeping its comments).
+func setScalar(data []byte, keys []string, value string) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("not valid YAML: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}}
+	}
+	node := doc.Content[0]
+	if node.Kind != yaml.MappingNode {
+		return nil, errors.New("the file is not a YAML mapping of settings")
+	}
+	for i, key := range keys {
+		var next *yaml.Node
+		for j := 0; j+1 < len(node.Content); j += 2 {
+			if node.Content[j].Value == key {
+				next = node.Content[j+1]
+				break
+			}
+		}
+		last := i == len(keys)-1
+		if next == nil {
+			// Add the missing key, then write the whole document out.
+			next = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			if last {
+				next = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+			}
+			node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, next)
+			if last {
+				return encode(&doc)
+			}
+		} else if !last && next.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%s is not a section of settings", strings.Join(keys[:i+1], "."))
+		}
+		node = next
+	}
+	if node.Kind != yaml.ScalarNode {
+		return nil, fmt.Errorf("%s is not a single value", strings.Join(keys, "."))
+	}
+	if out, ok := replaceInLine(data, node, value); ok && valueAt(out, keys) == value {
+		return out, nil
+	}
+	node.Value, node.Tag, node.Style = value, "!!str", 0
+	return encode(&doc)
+}
+
+func encode(doc *yaml.Node) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(4)
+	if err := enc.Encode(doc); err != nil {
 		return nil, err
 	}
-	if saved.PageErr != nil && !e.ResetAll {
-		return nil, fmt.Errorf("%w: %v. Reset all settings to start the file again, or fix it on the server", ErrPageFile, saved.PageErr)
+	return buf.Bytes(), enc.Close()
+}
+
+// replaceInLine swaps a plain or quoted scalar that sits on one line for
+// value, double-quoted, keeping the rest of the line (such as a comment).
+func replaceInLine(data []byte, node *yaml.Node, value string) ([]byte, bool) {
+	if node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 || node.Line < 1 || node.Column < 1 {
+		return nil, false
 	}
-	before := saved.Config
-	page := saved.Page.Clone()
-	if e.ResetAll {
-		page = &PageSettings{}
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	if node.Line > len(lines) {
+		return nil, false
 	}
-	if e.At.IsZero() {
-		e.At = time.Now()
+	line := lines[node.Line-1]
+	// Column counts characters; the part before the value is the key and
+	// indentation, so find its byte offset by walking runes.
+	start := 0
+	for col := 1; col < node.Column && start < len(line); col++ {
+		_, size := utf8.DecodeRune(line[start:])
+		start += size
 	}
-	res := &EditResult{Before: before, Fields: map[string]string{}}
-	touched := map[string]bool{}
-	typed := map[string]string{}
-	locked := func(key string) bool {
-		if env := before.layers.env[key]; env != "" {
-			res.Fields[key] = LockedReason(env)
-			return true
+	rest := line[start:]
+	var end int
+	switch {
+	case node.Style&yaml.DoubleQuotedStyle != 0:
+		end = closingQuote(rest, '"', '\\')
+	case node.Style&yaml.SingleQuotedStyle != 0:
+		end = closingQuote(rest, '\'', 0)
+	default:
+		if !bytes.HasPrefix(rest, []byte(node.Value)) {
+			return nil, false
 		}
-		return false
+		end = len(node.Value)
 	}
-	for _, key := range sortedKeys(e.Values) {
-		s, ok := Lookup(key)
+	if end <= 0 {
+		return nil, false
+	}
+	var out bytes.Buffer
+	for i := 0; i < node.Line-1; i++ {
+		out.Write(lines[i])
+	}
+	out.Write(line[:start])
+	out.WriteString(strconv.Quote(value))
+	out.Write(rest[end:])
+	for i := node.Line; i < len(lines); i++ {
+		out.Write(lines[i])
+	}
+	return out.Bytes(), true
+}
+
+// valueAt returns the text value at keys in a YAML document, or "" when
+// there is none, to check an edit before trusting it.
+func valueAt(data []byte, keys []string) string {
+	var m map[string]any
+	if yaml.Unmarshal(data, &m) != nil {
+		return ""
+	}
+	var v any = m
+	for _, k := range keys {
+		mm, ok := v.(map[string]any)
 		if !ok {
-			res.Fields[key] = notOnPage(key)
-			continue
+			return ""
 		}
-		if locked(key) {
-			continue
-		}
-		v, err := ParseValue(s, e.Values[key])
-		if err == nil && s.check != nil {
-			err = s.check(v)
-		}
-		if err != nil {
-			res.Fields[key] = sentence(err.Error())
-			continue
-		}
-		touched[key] = true
-		if s.Type == TypeSecret {
-			if v.(string) != "" {
-				typed[key] = v.(string)
-			}
-			continue
-		}
-		if reflect.DeepEqual(before.Value(key), v) {
-			continue
-		}
-		if err := page.Set(key, v, e.By, e.At); err != nil {
-			return nil, err
-		}
+		v = mm[k]
 	}
-	for _, key := range e.Clear {
-		s, ok := Lookup(key)
-		switch {
-		case !ok:
-			res.Fields[key] = notOnPage(key)
-		case s.Type != TypeSecret:
-			res.Fields[key] = "Only passwords and keys can be cleared; use Reset instead."
-		case locked(key):
-		default:
-			touched[key] = true
-			delete(typed, key)
-			page.SetSecret(key, "", "", e.By, e.At)
-		}
-	}
-	for _, key := range e.Reset {
-		if _, ok := Lookup(key); !ok {
-			res.Fields[key] = notOnPage(key)
-			continue
-		}
-		touched[key] = true
-		delete(typed, key)
-		page.Remove(key)
-	}
-	if e.ResetAll {
-		for _, s := range Registry {
-			touched[s.Key] = true
-		}
-	}
-	// A secret typed now may be sent to the address the edited settings
-	// point at, and only there.
-	if len(typed) > 0 {
-		c, err := build(path, page)
-		if err != nil {
-			return nil, err
-		}
-		for _, key := range sortedKeys(typed) {
-			s, _ := Lookup(key)
-			page.SetSecret(key, typed[key], s.SentTo(c), e.By, e.At)
-		}
-	}
-	after, err := build(path, page)
-	if err != nil {
-		return nil, err
-	}
-	res.Page, res.Config = page, after
-	for _, p := range problemsOf(after) {
-		res.addProblem(p)
-	}
-	if touched["server.tls_cert"] || touched["server.tls_key"] {
-		if c, k := after.Server.TLSCert, after.Server.TLSKey; c != "" && k != "" {
-			if _, err := tls.LoadX509KeyPair(c, k); err != nil {
-				res.setField("server.tls_cert", "The certificate and key files cannot be used: "+err.Error())
-			}
-		}
-	}
-	// A saved secret that would now be sent somewhere else must be
-	// entered again.
-	for _, m := range after.layers.mismatch {
-		s, _ := Lookup(m.Key)
-		moved := touched[m.Key]
-		for _, k := range s.SentWith {
-			moved = moved || touched[k]
-		}
-		if !moved {
-			continue
-		}
-		what := s.Noun()
-		if env := after.layers.env[m.Key]; env != "" {
-			msg := fmt.Sprintf("The %s comes from the %s environment variable and is only sent to %s. To use another address, change it where that variable is set.", what, env, orNone(m.Bound))
-			for _, k := range s.SentWith {
-				if touched[k] {
-					res.setField(k, msg)
-				}
-			}
-			continue
-		}
-		res.setField(m.Key, fmt.Sprintf("Enter the %s again, or reset it: the saved one is only sent to %s.", what, orNone(m.Bound)))
-	}
-	for _, s := range Registry {
-		// A secret typed again counts as a change even when it is the same.
-		if !SameValue(before, after, s.Key) || typed[s.Key] != "" {
-			res.Changed = append(res.Changed, s.Key)
-		}
-	}
-	return res, nil
-}
-
-// addProblem puts a validation problem at the fields it is about, or in
-// the general list when it is about none on the page.
-func (r *EditResult) addProblem(p string) {
-	placed := false
-	for _, k := range ProblemKeys(p) {
-		if _, ok := Lookup(k); ok {
-			r.setField(k, PlainProblem(k, p))
-			placed = true
-		}
-	}
-	if !placed {
-		r.Problems = append(r.Problems, p)
-	}
-}
-
-// setField records a field's problem; the first one stays.
-func (r *EditResult) setField(key, msg string) {
-	if _, ok := r.Fields[key]; !ok {
-		r.Fields[key] = msg
-	}
-}
-
-// notOnPage explains why a key cannot be changed on the page.
-func notOnPage(key string) string {
-	if why, ok := Excluded[key]; ok {
-		return "This setting is not changed on this page. " + why
-	}
-	return "There is no setting called " + key + "."
-}
-
-// sentence makes an error message a sentence.
-func sentence(s string) string {
-	if s == "" {
-		return s
-	}
-	s = upperFirst(s)
-	if !strings.HasSuffix(s, ".") {
-		s += "."
-	}
+	s, _ := v.(string)
 	return s
 }
 
-// sortedKeys returns a map's keys in page order, then any others.
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// closingQuote returns the index just past the quote that closes the
+// quoted value at the start of b, or -1.
+func closingQuote(b []byte, quote, escape byte) int {
+	if len(b) == 0 || b[0] != quote {
+		return -1
 	}
-	order := map[string]int{}
-	for i, s := range Registry {
-		order[s.Key] = i
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		oi, iok := order[keys[i]]
-		oj, jok := order[keys[j]]
-		if iok != jok {
-			return iok
+	for i := 1; i < len(b); i++ {
+		switch {
+		case escape != 0 && b[i] == escape:
+			i++
+		case b[i] == quote:
+			if escape == 0 && i+1 < len(b) && b[i+1] == quote {
+				i++ // '' inside a single-quoted value
+				continue
+			}
+			return i + 1
 		}
-		if iok {
-			return oi < oj
-		}
-		return keys[i] < keys[j]
-	})
-	return keys
-}
-
-// checkEarliest checks a default time range.
-func checkEarliest(v any) error {
-	if err := search.ValidEarliest(v.(string)); err != nil {
-		return err
 	}
-	return nil
+	return -1
 }

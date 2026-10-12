@@ -552,6 +552,7 @@ type sink struct {
 	delay   time.Duration
 	hang    bool
 	fail    error
+	reject  bool // OpenSearch refuses every event
 }
 
 func (s *sink) IngestEvents(ctx context.Context, events []ingest.Event) (*ingest.Result, error) {
@@ -566,7 +567,28 @@ func (s *sink) IngestEvents(ctx context.Context, events []ingest.Event) (*ingest
 	if s.fail != nil {
 		return nil, s.fail
 	}
+	if s.reject {
+		// The result lists only the first few errors.
+		res := &ingest.Result{Received: len(events), Rejected: len(events)}
+		for i := range min(len(events), 10) {
+			res.Errors = append(res.Errors, store.BulkItemError{Pos: i, Reason: "mapper_parsing_exception"})
+		}
+		return res, nil
+	}
 	return &ingest.Result{Received: len(events), Indexed: len(events)}, nil
+}
+
+// TestRejectedEventsAreAllCounted: a result lists only the first few
+// rejected events, so the not-written count uses the full count.
+func TestRejectedEventsAreAllCounted(t *testing.T) {
+	sk := &sink{reject: true}
+	r, _ := startWith(t, Config{UDP: "127.0.0.1:0"}, sk, nil)
+	var msgs []string
+	for i := range 25 {
+		msgs = append(msgs, fmt.Sprintf("<13>1 - h app - - - event %d", i))
+	}
+	sendUDP(t, addr(t, r, "udp"), msgs...)
+	waitFor(t, "all 25 counted as not written", func() bool { return r.Stats().WriteFailed == 25 })
 }
 
 func (s *sink) sizes() []int {
@@ -798,5 +820,38 @@ func TestLinkLocalSenderMatchesAllowList(t *testing.T) {
 	from := remoteAddr(zonedConn{})
 	if from.Zone() != "" || !r.allowed(from) {
 		t.Errorf("%v not allowed", from)
+	}
+}
+
+// TestIPv6SendersCountedByNetwork: an IPv6 host can pick any address in
+// its /64, so the per-sender connection limit and field-name share count
+// the /64, not each address (as for the web server; see dos-2).
+func TestIPv6SendersCountedByNetwork(t *testing.T) {
+	r := New(Config{MaxConnections: 100, MaxConnectionsPerSender: 3}, &ingest.Pipeline{Store: &capture{}}, nil)
+	track := func(from string) trackResult {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close(); b.Close() })
+		return r.track(a, newConnState(netip.MustParseAddr(from)))
+	}
+	for i := range 3 {
+		if got := track(fmt.Sprintf("2001:db8:5:6::%x", i+1)); got != trackOK {
+			t.Fatalf("connection %d: %v", i, got)
+		}
+	}
+	if got := track("2001:db8:5:6:ffff::1"); got != trackSenderFull {
+		t.Errorf("a fourth address in the same /64: %v, want refused", got)
+	}
+	if got := track("2001:db8:5:7::1"); got != trackOK {
+		t.Errorf("the next /64: %v", got)
+	}
+
+	b := newNameBudget(10, 2)
+	now := time.Now()
+	for i, from := range []string{"2001:db8:5:6::1", "2001:db8:5:6::2", "2001:db8:5:6::3"} {
+		e := ingest.Event{Model: "Other", Time: now, Fields: map[string]any{fmt.Sprintf("cef_n%d", i): 1}}
+		b.limit(e, netip.MustParseAddr(from), now, DefaultMaxAge)
+		if kept := len(e.Fields); kept != map[bool]int{true: 1, false: 0}[i < 2] {
+			t.Errorf("name %d from %s kept: %v", i, from, e.Fields)
+		}
 	}
 }

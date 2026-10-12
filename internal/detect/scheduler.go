@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -39,10 +40,24 @@ type Scheduler struct {
 	// Tick is how often the scheduler checks for due detections (default 15s).
 	Tick time.Duration
 	Now  func() time.Time
+	// Workers is how many detections run at once (default 4), so one slow
+	// detection cannot hold up the others.
+	Workers int
+	// Timeout caps one run. Zero gives each detection its schedule
+	// interval, between MinRunTimeout and MaxRunTimeout, so a run cannot
+	// last into its next one.
+	Timeout time.Duration
 
 	mu    sync.Mutex
 	state map[string]*RunState
+	slots chan struct{}
 }
+
+// Bounds of the default run timeout.
+const (
+	MinRunTimeout = time.Minute
+	MaxRunTimeout = 5 * time.Minute
+)
 
 // RunState is what the UI shows about a detection's last run.
 type RunState struct {
@@ -52,7 +67,12 @@ type RunState struct {
 	LastResults  int       `json:"last_results"`
 	LastFindings int       `json:"last_findings"`
 	LastError    string    `json:"last_error,omitempty"`
-	Running      bool      `json:"running,omitempty"`
+	// TimedOut says the last run was stopped for taking longer than its
+	// timeout; LastError says how long that was.
+	TimedOut bool `json:"timed_out,omitempty"`
+	Running  bool `json:"running,omitempty"`
+
+	queued bool // waiting for a worker
 }
 
 // RunResult reports one run.
@@ -111,8 +131,10 @@ func (s *Scheduler) stateFor(id string) *RunState {
 	return st
 }
 
-// Start runs due detections until ctx is cancelled. Detections run one at
-// a time so a burst of schedules cannot overload OpenSearch.
+// Start runs due detections until ctx is cancelled, at most Workers at a
+// time so a burst of schedules cannot overload OpenSearch, while a slow
+// one leaves the other workers free. It returns once the runs it started
+// have stopped.
 func (s *Scheduler) Start(ctx context.Context) {
 	tick := s.Tick
 	if tick <= 0 {
@@ -120,8 +142,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}
 	t := time.NewTicker(tick)
 	defer t.Stop()
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
-		s.RunDue(ctx)
+		s.dispatch(ctx, &wg)
 		select {
 		case <-ctx.Done():
 			return
@@ -130,35 +154,83 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}
 }
 
-// RunDue runs every enabled detection whose next run time has passed.
+// RunDue runs every enabled detection whose next run time has passed, at
+// most Workers at a time, and waits for them.
 func (s *Scheduler) RunDue(ctx context.Context) {
+	var wg sync.WaitGroup
+	s.dispatch(ctx, &wg)
+	wg.Wait()
+}
+
+// dispatch starts every due detection that is not already running or
+// waiting; each waits for a free worker.
+func (s *Scheduler) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 	now := s.now()
 	var due []*Detection
 	s.mu.Lock()
+	if s.slots == nil {
+		n := s.Workers
+		if n <= 0 {
+			n = 4
+		}
+		s.slots = make(chan struct{}, n)
+	}
+	slots := s.slots
 	for _, d := range s.Library.List() {
 		if !d.Enabled {
 			continue
 		}
 		st := s.stateFor(d.ID)
-		if st.Running || (!st.NextRun.IsZero() && now.Before(st.NextRun)) {
+		if st.Running || st.queued || (!st.NextRun.IsZero() && now.Before(st.NextRun)) {
 			continue
 		}
+		st.queued = true
 		due = append(due, d)
 	}
 	s.mu.Unlock()
 	sort.Slice(due, func(i, j int) bool { return due[i].ID < due[j].ID })
 	for _, d := range due {
-		if ctx.Err() != nil {
-			return
-		}
-		if _, err := s.Run(ctx, d); err != nil {
-			s.log().Warn("detection failed", "detection", d.ID, "err", err)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				s.mu.Lock()
+				s.stateFor(d.ID).queued = false
+				s.mu.Unlock()
+			}()
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-slots }()
+			if ctx.Err() != nil {
+				return
+			}
+			// The scheduler bounds its own searches, so they do not wait
+			// behind analysts' searches.
+			if _, err := s.Run(search.Background(ctx), d); err != nil {
+				s.log().Warn("detection failed", "detection", d.ID, "err", err)
+			}
+		}()
 	}
 }
 
+// RunTimeout is how long one run of d may take.
+func (s *Scheduler) RunTimeout(d *Detection) time.Duration {
+	if s.Timeout > 0 {
+		return s.Timeout
+	}
+	sched, err := ParseDuration(d.Schedule)
+	if err != nil {
+		return MaxRunTimeout
+	}
+	return min(max(sched, MinRunTimeout), MaxRunTimeout)
+}
+
 // Run executes one detection now and raises findings. It also records
-// the run state and schedules the next run.
+// the run state and schedules the next run. A run that takes longer than
+// RunTimeout is stopped and reported as timed out.
 func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	start := s.now()
 	s.mu.Lock()
@@ -166,13 +238,23 @@ func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	st.Running = true
 	s.mu.Unlock()
 
-	res, err := s.run(ctx, d, start)
+	timeout := s.RunTimeout(d)
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	res, err := s.run(rctx, d, start)
+	// Failed after its own deadline passed (not the caller's): however the
+	// error reads, the run ran out of time.
+	timedOut := err != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+	cancel()
+	if timedOut {
+		err = fmt.Errorf("timed out after %s, so this run was stopped; narrow the query or shorten its lookback so it finishes in time", timeout)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st.Running = false
 	st.LastRun = start
 	st.LastDuration = s.now().Sub(start).Milliseconds()
+	st.TimedOut = timedOut
 	if sched, perr := ParseDuration(d.Schedule); perr == nil {
 		st.NextRun = start.Add(sched)
 	}
@@ -227,8 +309,6 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
 	res, err := s.Engine.Execute(ctx, q)
 	if err != nil {
 		return nil, err
