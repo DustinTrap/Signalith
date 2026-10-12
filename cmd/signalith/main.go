@@ -55,7 +55,7 @@ Usage:
   signalith serve     [-c file]           run the server
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
-  signalith settings  list|reset [-c file] [key...]   show or undo changes made on the Settings page
+  signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
@@ -64,6 +64,9 @@ Usage:
 
 The config file defaults to %s
 (override with -c or the SIGNALITH_CONFIG environment variable).
+On Linux the service keeps the Settings page's file in
+/var/lib/signalith/lookups/settings.yaml: give it to settings and
+validate with -file.
 `
 
 func defaultConfigPath() string {
@@ -225,7 +228,11 @@ func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	path := configFlag(fs)
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
+	fileFlag := settingsFileFlag(fs)
 	fs.Parse(args)
+	if err := useSettingsFile(*fileFlag); err != nil {
+		return err
+	}
 	c, err := config.Load(*path)
 	if err != nil {
 		return err
@@ -239,6 +246,14 @@ func cmdValidate(args []string) error {
 		fmt.Println("Warning:", p)
 	} else if keys := c.PageKeys(); len(keys) > 0 {
 		fmt.Printf("Changed on the Settings page (%s): %s.\n", c.SettingsFile(), strings.Join(keys, ", "))
+	}
+	for _, r := range c.Refused() {
+		fmt.Printf("Set aside on the Settings page, not used: %s (%s)\n", r.Key, strings.TrimSuffix(r.Reason, "."))
+	}
+	if *fileFlag == "" {
+		if note := serviceNote(c.SettingsFile(), *path, "validate", nil); strings.HasPrefix(note, "The Signalith service") {
+			fmt.Println("Note:", note)
+		}
 	}
 	for _, w := range c.SettingsWarnings() {
 		fmt.Println("Warning:", w+".")
@@ -421,17 +436,7 @@ func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
 }
 
 func newStore(c *config.Config) *store.Client {
-	ca, cert, key := c.OpenSearchTLSFiles()
-	return store.New(store.Config{
-		URL:           c.OpenSearch.URL,
-		Username:      c.OpenSearch.Username,
-		Password:      c.OpenSearch.Password,
-		CAFile:        ca,
-		CertFile:      cert,
-		KeyFile:       key,
-		TLSSkipVerify: c.OpenSearch.TLSSkipVerify,
-		Proxy:         c.OpenSearch.Proxy,
-	})
+	return store.New(c.OpenSearchConnection())
 }
 
 func newEngine(c *config.Config, s store.Searcher) *search.Engine {
@@ -659,7 +664,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
-			return nil, err
+			return nil, keyed(err, "syslog.udp", "syslog.tcp", "syslog.tls")
 		}
 		in.receiver = receiver
 		var addrs []any
@@ -673,9 +678,11 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		log.Info("syslog receiver listening", append(addrs, "allow", allow)...)
 	}
 	eng := newEngine(c, cl)
-	lists, err := assets.NewStore(c.LookupsDir())
+	// A damaged list must not keep Signalith from starting: it starts with
+	// empty lists, and picks the file up once it is fixed.
+	lists, err := assets.OpenStore(c.LookupsDir())
 	if err != nil {
-		return nil, err
+		log.Error("asset or identity list has errors; using empty lists until it is fixed", "err", err)
 	}
 	log.Info("asset and identity lists loaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()), "dir", c.LookupsDir())
 	eng.Assets = lists

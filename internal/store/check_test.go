@@ -37,6 +37,24 @@ func TestCheck(t *testing.T) {
 	defer secure.Close()
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"hello":"world"}`) }))
 	defer other.Close()
+	// Endless answers: a test must not read them into memory.
+	huge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := []byte(strings.Repeat("x", 64<<10))
+		for i := 0; i < 1<<10; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer huge.Close()
+	hugeHealth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			io.WriteString(w, `{"cluster_name":"prod","version":{"number":"2.15.0"}}`)
+			return
+		}
+		io.WriteString(w, `{"status":"`+strings.Repeat("g", 2<<20)+`"}`)
+	}))
+	defer hugeHealth.Close()
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	closed := ln.Addr().String()
 	ln.Close()
@@ -52,6 +70,9 @@ func TestCheck(t *testing.T) {
 		{"no password", Config{URL: plain.URL}, false, "auth", "asks for a username and password"},
 		{"wrong password", Config{URL: plain.URL, Username: "signalith", Password: "wrong"}, false, "auth", "refused the username and password"},
 		{"not opensearch", Config{URL: other.URL}, false, "not_opensearch", "it is not OpenSearch"},
+		{"endless answer", Config{URL: huge.URL}, false, "not_opensearch", "far more than OpenSearch would"},
+		{"endless health", Config{URL: hugeHealth.URL}, false, "not_opensearch", "far more than OpenSearch would"},
+		{"password in the address", Config{URL: strings.Replace(plain.URL, "http://", "http://signalith:right@", 1)}, true, "", "Health: yellow"},
 		{"nothing there", Config{URL: "http://" + closed}, false, "unreachable", "Nothing answered at " + closed},
 		{"self-signed", Config{URL: secure.URL}, false, "tls", "does not trust its certificate"},
 		{"skip verify", Config{URL: secure.URL, TLSSkipVerify: true}, true, "", "Health: yellow"},
@@ -65,6 +86,9 @@ func TestCheck(t *testing.T) {
 			}
 			if !rep.OK && rep.Message == "" {
 				t.Errorf("no message: %+v", rep)
+			}
+			if strings.Contains(rep.URL+rep.Message, "right") {
+				t.Errorf("the report shows the password: %+v", rep)
 			}
 		})
 	}

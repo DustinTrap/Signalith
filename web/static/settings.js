@@ -10,10 +10,12 @@
   // S.view is the last api/settings reply. S.drafts holds the unsaved
   // changes by setting: { kind: 'value', value, raw } for a new value,
   // 'clear' to remove a saved password or key, 'reset' to take a setting
-  // off the page. S.replacing marks secrets whose Replace box is open.
+  // off the page, 'retry' to use a change a restart set aside again.
+  // S.replacing marks secrets whose Replace box is open. S.localOK is the
+  // admin's yes, when saving, to a web address only the server reaches.
   const S = {
     view: null, seq: 0, drafts: {}, replacing: {}, fields: {}, sections: {}, controls: {},
-    saveErr: null, tests: {}, restart: null, restartErr: '', pinned: '', pinnedY: 0, focusKey: '',
+    saveErr: null, tests: {}, restart: null, restartErr: '', pinned: '', pinnedY: 0, focusKey: '', localOK: false,
   };
   const DEFAULT_AI_URL = { anthropic: 'https://api.anthropic.com', openai: 'https://api.openai.com/v1' };
   const RESTART_NOTE = 'signalith.settingsRestarted';
@@ -26,7 +28,8 @@
   // its result out of date.
   const TESTS = {
     opensearch: {
-      keys: ['opensearch.url', 'opensearch.username', 'opensearch.password', 'opensearch.tls_skip_verify'],
+      keys: ['opensearch.url', 'opensearch.username', 'opensearch.password', 'opensearch.ca_file', 'opensearch.cert_file',
+        'opensearch.key_file', 'opensearch.proxy', 'opensearch.allow_insecure_http', 'opensearch.tls_skip_verify'],
       path: 'api/settings/test/opensearch', button: 'Test connection', icon: 'network', busy: 'Connecting…',
       lead: 'Connects with the settings above, saved or not.',
     },
@@ -45,7 +48,12 @@
   const sectionOf = (key) => S.sections[key];
   const isShown = () => $('page-settings').classList.contains('active');
   const editable = () => !!(S.view && S.view.editable);
-  const readOnly = (f) => f.locked || !editable();
+  // While the settings file can't be read, nothing can be saved into it.
+  const fileBroken = () => !!(S.view && (S.view.settings_file || {}).error);
+  const readOnly = (f) => f.locked || !editable() || fileBroken();
+  const narrow = () => window.matchMedia('(max-width: 720px)').matches;
+  // Addresses that Docker publishes: a new port needs docker-compose.yml too.
+  const PORTS = new Set(['server.listen', 'syslog.udp', 'syslog.tcp', 'syslog.tls']);
 
   // origin is scheme://host:port of an address, with the default port
   // filled in, as the server compares them; '' for anything else.
@@ -66,6 +74,7 @@
     if (!f) return undefined;
     if (d && d.kind === 'value') return d.value;
     if (d && d.kind === 'reset') return f.reset_to ? f.reset_to.value : f.value;
+    if (d && d.kind === 'retry' && f.refused && f.type !== 'secret') return f.refused.value;
     return f.value;
   }
 
@@ -200,7 +209,7 @@
     for (const k of dirtyKeys()) {
       const f = S.fields[k];
       const d = S.drafts[k];
-      if (!f || readOnly(f) || (d.kind === 'value' && f.type !== 'secret' && same(d.value, f.value))) delete S.drafts[k];
+      if (!f || readOnly(f) || (d.kind === 'value' && f.type !== 'secret' && same(d.value, f.value)) || (d.kind === 'retry' && !f.refused)) delete S.drafts[k];
     }
     renderAlerts();
     renderNav();
@@ -253,8 +262,18 @@
     if (t) t.focus({ preventScroll: true });
   }
   function markActive(id) {
+    const nav = $('st-nav');
     document.querySelectorAll('#st-nav .st-nav__item').forEach((b) => {
-      if (b.dataset.sec === id) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+      if (b.dataset.sec !== id) { b.removeAttribute('aria-current'); return; }
+      b.setAttribute('aria-current', 'true');
+      // On a phone the sections are a row that scrolls sideways: keep the
+      // one marked in view.
+      if (nav && nav.scrollWidth > nav.clientWidth) {
+        const left = b.offsetLeft - 16;
+        const right = b.offsetLeft + b.offsetWidth + 16;
+        if (left < nav.scrollLeft) nav.scrollLeft = left;
+        else if (right > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = right - nav.clientWidth;
+      }
     });
   }
   // syncActive highlights the section at the top of the window, or the
@@ -269,7 +288,10 @@
     const cards = [...document.querySelectorAll('#st-main > .st-card[id]')];
     if (!cards.length) return;
     let cur = cards[0];
-    for (const c of cards) if (c.getBoundingClientRect().top <= 140) cur = c;
+    // Below the row of sections on a phone, below the top bar otherwise.
+    const nav = $('st-nav');
+    const edge = narrow() && nav ? nav.getBoundingClientRect().bottom + 24 : 140;
+    for (const c of cards) if (c.getBoundingClientRect().top <= edge) cur = c;
     if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4) cur = cards[cards.length - 1];
     markActive(cur.id.replace(/^st-sec-/, ''));
   }
@@ -412,6 +434,14 @@
       box.append(el('div', { class: 'st-secret__saved is-removing' }, icon('trash-2', 'icon--sm'), el('span', {}, 'Removed when you save'), undo()));
       return box;
     }
+    if (d && d.kind === 'retry') {
+      box.append(status('The one set aside is used again when you save', undo()));
+      return box;
+    }
+    if (d && d.kind === 'reset' && f.refused && f.source.kind !== 'page') {
+      box.append(status('The one set aside is removed when you save', undo()));
+      return box;
+    }
     if (d && d.kind === 'reset') {
       box.append(status('Back to the one in ' + SOURCE_FILE + ' when you save', undo()));
       return box;
@@ -462,8 +492,11 @@
     syncAll();
   }
 
-  // syncRow fills in a setting's notes: where its value comes from, and
-  // under the control any problem, warning, or what an empty value means.
+  // syncRow fills in a setting's notes: where its value comes from when
+  // that says something (changed here, set by the environment, set aside
+  // by a restart), and under the control any problem, warning, or what an
+  // empty value means. A value from signalith.yaml gets no note: the page
+  // says so once, at the top.
   function syncRow(key) {
     const f = S.fields[key];
     const id = idOf(key);
@@ -472,16 +505,38 @@
     if (!f || !meta || !notes) return;
     const d = S.drafts[key];
     const ro = readOnly(f);
+    const undo = (focus) => el('button', { type: 'button', class: 'link-btn', onclick: () => { delete S.drafts[key]; rerenderRow(key, focus); } }, 'Undo');
     const bits = [];
     if (f.locked) {
       const n = el('p', { class: 'st-source st-source--env', title: f.locked_reason || '' }, icon('lock', 'icon--xs'),
         el('span', {}, 'Set by ', el('code', {}, f.source.env), '. To change it, change Signalith’s environment and restart.'));
       bits.push(n);
+    } else if (d && d.kind === 'retry') {
+      // A secret's box says it already.
+      if (f.type !== 'secret') {
+        bits.push(el('p', { class: 'st-source st-source--reset' }, icon('rotate-ccw', 'icon--xs'),
+          el('span', {}, `Back to ${show(f, f.refused.value)} when you save. `), undo('.st-retry')));
+      }
+    } else if (d && d.kind === 'reset' && f.refused && f.source.kind !== 'page') {
+      if (f.type !== 'secret') {
+        bits.push(el('p', { class: 'st-source st-source--reset' }, icon('trash-2', 'icon--xs'),
+          el('span', {}, 'The change set aside is removed when you save. '), undo('.st-retry')));
+      }
     } else if (d && d.kind === 'reset' && f.type !== 'secret') {
       const to = f.reset_to || {};
       bits.push(el('p', { class: 'st-source st-source--reset' }, icon('undo-2', 'icon--xs'),
         el('span', {}, to.source === 'file' ? `Back to ${show(f, to.value)} from ${SOURCE_FILE} when you save. ` : `Back to the default, ${show(f, to.value)}, when you save. `),
-        el('button', { type: 'button', class: 'link-btn', onclick: () => { delete S.drafts[key]; rerenderRow(key, '.st-reset'); } }, 'Undo')));
+        undo('.st-reset')));
+    } else if (f.refused && !d) {
+      // A change a restart set aside: not used until it is tried again.
+      const val = f.type === 'secret' ? 'The ' + noun(f.label) + ' saved here' : show(f, f.refused.value);
+      const acts = ro ? [] : [
+        el('button', { type: 'button', class: 'link-btn st-retry', onclick: () => { S.drafts[key] = { kind: 'retry' }; rerenderRow(key, '.link-btn'); } }, 'Try it again'),
+        el('span', { class: 'st-dot', 'aria-hidden': 'true' }),
+        el('button', { type: 'button', class: 'link-btn', 'aria-label': 'Remove the ' + noun(f.label) + ' set aside', onclick: () => { S.drafts[key] = { kind: 'reset' }; rerenderRow(key, '.link-btn'); } }, 'Remove'),
+      ];
+      bits.push(el('p', { class: 'st-source st-source--refused' }, icon('triangle-alert', 'icon--xs'),
+        el('span', {}, 'Set aside: ', el('span', { class: f.type === 'secret' ? '' : 'mono' }, val), ' is not used.'), ...acts));
     } else if (f.source.kind === 'page') {
       const who = f.source.by ? `Changed here by ${f.source.by}` : 'Changed here';
       const when = f.source.at ? el('span', { class: 'age', title: new Date(f.source.at).toLocaleString() }, ago(f.source.at)) : null;
@@ -491,16 +546,28 @@
         onclick: () => { S.drafts[key] = { kind: 'reset' }; delete S.replacing[key]; if (S.saveErr) delete S.saveErr.fields[key]; rerenderRow(key, f.type === 'secret' ? '.st-secret__undo' : '.link-btn'); },
       }, 'Reset');
       bits.push(el('p', { class: 'st-source' }, el('span', {}, who, when ? ', ' : '', when), reset ? el('span', { class: 'st-dot', 'aria-hidden': 'true' }) : null, reset));
-    } else if (f.source.kind === 'file') {
-      bits.push(el('p', { class: 'st-source' }, 'From ' + SOURCE_FILE));
     }
-    if (f.pending && !d) bits.push(el('p', { class: 'st-source st-source--pending' }, icon('clock', 'icon--xs'), 'Saved. Waits for a restart.'));
+    if (f.pending && !d) {
+      bits.push(el('p', { class: 'st-source st-source--pending' }, icon('clock', 'icon--xs'), S.view.startup_problem && f.apply === 'live'
+        ? 'Not in use, since Signalith started without the settings saved here.'
+        : 'Saved. Waits for a restart.'));
+    }
     fill(meta, ...bits);
 
     const out = [];
     const problem = (S.saveErr && S.saveErr.fields[key]) || (!d ? f.problem : '');
     if (problem) out.push(el('p', { class: 'field-error', role: S.saveErr && S.saveErr.fields[key] ? 'alert' : null }, icon('circle-alert'), el('span', {}, sentence(problem))));
-    if (f.warning && !d) out.push(el('p', { class: 'st-warn' }, icon('triangle-alert'), el('span', {}, f.warning)));
+    if (!problem && !d && startupBlame().includes(key)) {
+      out.push(el('p', { class: 'field-error' }, icon('circle-alert'), el('span', {}, 'Signalith couldn’t start with this, so it started without the settings saved here. Change it or reset it, then restart.')));
+    }
+    if (f.refused && !d) out.push(el('p', { class: 'st-warn' }, icon('triangle-alert'), el('span', {}, sentence(f.refused.reason))));
+    if (f.warning && !d) {
+      const use = f.suggest && !ro ? el('button', { type: 'button', class: 'btn btn--secondary btn--sm st-use', onclick: () => {
+        edited(f, f.suggest);
+        rerenderRow(key, true);
+      } }, 'Use ', el('span', { class: 'mono' }, f.suggest)) : null;
+      out.push(el('div', { class: 'st-warn' }, icon('triangle-alert'), el('div', { class: 'st-warn__body' }, el('span', {}, f.warning), use)));
+    }
     // A saved secret is only sent to the address it was entered for.
     if (f.type === 'secret' && f.set && !ro && !d && f.sent_to && !(S.saveErr && S.saveErr.fields[key])) {
       const now = sentToNow(key);
@@ -514,9 +581,16 @@
         out.push(el('p', { class: 'st-hint' }, 'Only sent to ', el('span', { class: 'mono' }, f.sent_to), '.'));
       }
     }
-    if (f.empty_means && !ro && f.type !== 'number' && f.type !== 'secret' && f.type !== 'choice') {
+    if (key === 'assistant.model' && !ro) {
+      // Only Anthropic has a model to fall back on.
+      const v = current(key);
+      if (v === '' && current('assistant.provider') === 'anthropic') out.push(el('p', { class: 'st-hint' }, 'When empty: ' + f.empty_means + '.'));
+    } else if (f.empty_means && !ro && f.type !== 'number' && f.type !== 'secret' && f.type !== 'choice') {
       const v = current(key);
       if (v === '' || (Array.isArray(v) && !v.length)) out.push(el('p', { class: 'st-hint' }, 'When empty: ' + f.empty_means + '.'));
+    }
+    if (PORTS.has(key) && (S.view.about || {}).container && (d || f.pending)) {
+      out.push(el('p', { class: 'st-hint' }, 'In Docker, also publish the new port under ports: in docker-compose.yml.'));
     }
     fill(notes, ...out);
     const c = S.controls[key];
@@ -525,6 +599,19 @@
     }
     const row = notes.closest('.st-field');
     if (row) row.classList.toggle('is-changed', !!d);
+  }
+
+  // startupBlame lists the settings Signalith could not start with, while
+  // they are as they were then: changed since, they may work.
+  function startupBlame() {
+    const v = S.view;
+    if (!v || !v.startup_problem) return [];
+    const started = Date.parse((v.about || {}).started || '');
+    return (v.startup_keys || []).filter((k) => {
+      const f = S.fields[k];
+      if (!f || f.refused) return false;
+      return !(f.source.kind === 'page' && f.source.at && started && Date.parse(f.source.at) > started);
+    });
   }
 
   // syncAll updates what depends on every draft: the save bar, the marks
@@ -553,13 +640,14 @@
     document.querySelectorAll('#st-nav .st-nav__item').forEach((b) => {
       const sec = S.view.sections.find((s) => s.id === b.dataset.sec);
       const keys = sec ? sec.fields.map((f) => f.key) : [];
-      const bad = keys.some((k) => (S.saveErr && S.saveErr.fields[k]) || (!S.drafts[k] && S.fields[k].problem));
+      const blame = startupBlame();
+      const bad = keys.some((k) => (S.saveErr && S.saveErr.fields[k]) || (!S.drafts[k] && (S.fields[k].problem || S.fields[k].refused || blame.includes(k))));
       const changed = keys.some((k) => S.drafts[k]);
       const mark = b.querySelector('.st-nav__mark');
       mark.dataset.state = bad ? 'problem' : changed ? 'changed' : '';
       b.title = bad ? 'Needs fixing' : changed ? 'Unsaved changes' : '';
     });
-    for (const k of ['opensearch.password', 'assistant.api_key']) if (S.fields[k]) syncRow(k);
+    for (const k of ['opensearch.password', 'assistant.api_key', 'assistant.model']) if (S.fields[k]) syncRow(k);
     syncStale();
     syncRestartButton();
   }
@@ -588,37 +676,45 @@
     if (t) t.focus({ preventScroll: true });
   }
 
-  // needsConfirm returns what a dangerous change asks before saving.
-  function needsConfirm(key) {
-    const f = S.fields[key];
-    const d = S.drafts[key];
-    if (!f || !f.confirm || !d) return null;
-    const next = d.kind === 'reset' ? (f.reset_to ? f.reset_to.value : f.value) : d.value;
-    if (same(next, f.value)) return null;
-    if (f.confirm_when === 'on' && next !== true) return null;
-    if (f.confirm_when === 'off' && next !== false) return null;
-    return { f, next };
-  }
-
-  // confirmChanges asks once for every dangerous change, naming what each
-  // one does. It resolves to true or false.
+  // confirmChanges asks once about every change the server says needs a
+  // yes, naming what each one does; some offer another change to make
+  // with it. It resolves to null for Cancel, or to the changes to add.
   function confirmChanges(list) {
     const d = modalDialog('st-confirm');
     d.classList.add('st-dialog');
     return new Promise((resolve) => {
-      let answer = false;
+      let answer = null;
+      const boxes = [];
       const one = list.length === 1 ? list[0] : null;
       let title = 'Save these changes?';
       if (one) {
-        const short = shortName(one.f.key);
-        title = one.f.type === 'bool' ? `Turn ${one.next ? 'on' : 'off'} “${one.f.label}”?` : `Change the ${noun(short)}?`;
+        const f = S.fields[one.key];
+        title = one.title || (f && f.type === 'bool' ? `Turn ${current(one.key) ? 'on' : 'off'} “${f.label}”?` : `Change the ${noun(shortName(one.key))}?`);
       }
       const cancel = el('button', { type: 'button', class: 'btn btn--ghost', onclick: () => d.close() }, 'Cancel');
-      const ok = el('button', { type: 'button', class: 'btn btn--danger', onclick: () => { answer = true; d.close(); } }, 'Save changes');
-      const item = ({ f, next }) => el('li', { class: 'st-confirm__item' },
-        el('div', { class: 'st-confirm__what' }, el('b', {}, shortName(f.key)),
-          f.type !== 'bool' ? el('span', { class: 'st-confirm__change' }, el('span', { class: 'mono' }, show(f, f.value)), icon('arrow-right', 'icon--xs'), el('span', { class: 'mono' }, show(f, next))) : null),
-        el('p', {}, f.confirm));
+      const ok = el('button', { type: 'button', class: 'btn btn--danger', onclick: () => {
+        answer = {};
+        for (const [box, also] of boxes) if (box.checked) answer[also.key] = also.value;
+        d.close();
+      } }, 'Save changes');
+      const item = (c) => {
+        const f = S.fields[c.key];
+        const val = (v) => el('span', { class: 'mono' }, f ? show(f, v) : String(v));
+        let change = null;
+        // An empty old value is left out of the answer.
+        if (c.new !== undefined) change = el('span', { class: 'st-confirm__change' }, val(c.old === undefined ? '' : c.old), icon('arrow-right', 'icon--xs'), val(c.new));
+        else if (c.old !== undefined) change = el('span', { class: 'st-confirm__change' }, val(c.old));
+        let also = null;
+        if (c.also) {
+          const box = el('input', { type: 'checkbox' });
+          box.checked = true;
+          boxes.push([box, c.also]);
+          also = el('label', { class: 'check st-confirm__also' }, box, el('span', {}, c.also.label));
+        }
+        return el('li', { class: 'st-confirm__item' },
+          el('div', { class: 'st-confirm__what' }, el('b', {}, c.name || shortName(c.key)), change),
+          el('p', {}, c.text), also);
+      };
       fill(d, modalHead('st-confirm', title, one ? null : 'Some of them change how Signalith works:', () => d.close()),
         el('div', { class: 'modal__body' }, el('ul', { class: 'st-confirm__list', role: 'list' }, ...list.map(item))),
         el('div', { class: 'modal__foot' }, cancel, ok));
@@ -628,35 +724,51 @@
     });
   }
 
+  // showSaveProblems marks the settings a save or a check refused.
+  function showSaveProblems(e) {
+    const fields = {};
+    const problems = (e.problems || []).slice();
+    for (const [k, msg] of Object.entries(e.fields)) {
+      if (S.fields[k] && !readOnly(S.fields[k])) fields[k] = msg; else problems.push((S.fields[k] ? S.fields[k].label + ': ' : '') + msg);
+    }
+    if (!Object.keys(fields).length && !problems.length) problems.push(e.message);
+    S.saveErr = { fields, problems };
+    for (const k of Object.keys(S.fields)) syncRow(k);
+    syncAll();
+    focusFirstProblem();
+  }
+
+  // saveAll checks the changes with the server first, so problems show
+  // before anything is asked; then asks about the risky ones, and saves.
   async function saveAll() {
     const keys = dirtyKeys();
     if (!keys.length) return;
-    const risky = keys.map(needsConfirm).filter(Boolean);
-    if (risky.length && !(await confirmChanges(risky))) { $('st-save').focus(); return; }
-    const body = { values: {}, clear: [], reset: [] };
+    const body = { values: {}, clear: [], reset: [], retry: [] };
     for (const k of keys) {
       const d = S.drafts[k];
       if (d.kind === 'value') body.values[k] = d.value;
       else if (d.kind === 'clear') body.clear.push(k);
+      else if (d.kind === 'retry') body.retry.push(k);
       else body.reset.push(k);
     }
-    const restore = busy($('st-save'), 'Saving…');
+    let restore = busy($('st-save'), 'Saving…');
     let v;
     try {
+      const check = await api('api/settings', Object.assign({ check_only: true }, body), 'PUT');
+      const asks = check.confirm || [];
+      if (asks.length) {
+        restore();
+        const also = await confirmChanges(asks);
+        if (!also) { $('st-save').focus(); return; }
+        Object.assign(body.values, also);
+        if (asks.some((c) => c.code === 'local_only')) S.localOK = true;
+        restore = busy($('st-save'), 'Saving…');
+      }
       v = await api('api/settings', body, 'PUT');
     } catch (e) {
       restore();
       if (e.status === 400 && e.fields) {
-        const fields = {};
-        const problems = (e.problems || []).slice();
-        for (const [k, msg] of Object.entries(e.fields)) {
-          if (S.fields[k] && !readOnly(S.fields[k])) fields[k] = msg; else problems.push((S.fields[k] ? S.fields[k].label + ': ' : '') + msg);
-        }
-        if (!Object.keys(fields).length && !problems.length) problems.push(e.message);
-        S.saveErr = { fields, problems };
-        for (const k of Object.keys(S.fields)) syncRow(k);
-        syncAll();
-        focusFirstProblem();
+        showSaveProblems(e);
       } else if (e.code === 'settings_file') {
         S.saveErr = null;
         load();
@@ -840,7 +952,10 @@
     const changed = (file.keys || []).length;
     const pages = (v.elsewhere || []).filter((x) => $('page-' + x.page));
     const exportLink = el('a', { class: 'btn btn--secondary', href: 'api/settings/export?download=1', download: 'signalith-settings.yaml' }, icon('download'), 'Download settings as YAML');
-    const resetAll = changed && editable() ? el('button', { type: 'button', class: 'btn btn--ghost', id: 'st-reset-all', onclick: () => resetEverything() }, icon('undo-2'), 'Reset all') : null;
+    const resetAll = changed && editable() && !fileBroken() ? el('button', { type: 'button', class: 'btn btn--ghost', id: 'st-reset-all', onclick: () => resetEverything() }, icon('undo-2'), 'Reset all') : null;
+    let text = `Nothing is changed on this page yet. Every setting comes from ${SOURCE_FILE}, the environment or the defaults.`;
+    if (fileBroken()) text = 'The settings file can’t be read, so the settings saved on this page aren’t shown. See the note at the top of the page.';
+    else if (changed) text = `${changed === 1 ? '1 setting is' : changed + ' settings are'} changed on this page and kept in the settings file. Reset all puts back the values from ${SOURCE_FILE} or the defaults.`;
     return el('section', { class: 'card st-card st-about', id: 'st-sec-about', 'aria-labelledby': 'st-sec-about-title' },
       el('div', { class: 'st-card__head' }, el('div', { class: 'st-card__heading' },
         el('h3', { class: 'st-card__title', id: 'st-sec-about-title', tabindex: '-1' }, 'About this server'),
@@ -849,9 +964,7 @@
         kv(facts),
         el('div', { class: 'st-about__part' }, el('h4', { class: 'section-title' }, 'Files and folders'), kv((a.paths || []).map(pathRow))),
         el('div', { class: 'st-about__part' }, el('h4', { class: 'section-title' }, 'Changed on this page'),
-          el('p', { class: 'st-about__text' }, changed
-            ? `${changed === 1 ? '1 setting is' : changed + ' settings are'} changed on this page and kept in the settings page file. Reset all puts back the values from ${SOURCE_FILE} or the defaults.`
-            : `Nothing is changed on this page yet. Every setting comes from ${SOURCE_FILE}, the environment or the defaults.`),
+          el('p', { class: 'st-about__text' }, text),
           el('div', { class: 'btn-row' }, exportLink, resetAll),
           el('p', { class: 'st-hint' }, 'The download has the settings in the format of ' + SOURCE_FILE + ', for another server. Passwords and keys are left out.')),
         pages.length ? el('div', { class: 'st-about__part' }, el('h4', { class: 'section-title' }, 'Set up on other pages'),
@@ -868,11 +981,28 @@
       confirm: 'Reset all',
     });
     if (!ok) { const b = $('st-reset-all'); if (b) b.focus(); return; }
+    await resetAllNow('Nothing was reset');
+  }
+
+  // startNewFile replaces a settings file that can't be read with an
+  // empty one; the server keeps the old one next to it.
+  async function startNewFile(btn) {
+    const file = S.view.settings_file || {};
+    const ok = await caseConfirm({
+      title: 'Start a new settings file?',
+      text: `Every setting saved on this page is removed, including passwords. The current file is kept as ${file.backup || 'a copy next to it'}. To keep the settings, fix the file on the server instead.`,
+      confirm: 'Start a new file',
+    });
+    if (!ok) { if (btn) btn.focus(); return; }
+    await resetAllNow('No new file was started');
+  }
+
+  async function resetAllNow(failTitle) {
     let v;
     try {
       v = await api('api/settings', { reset_all: true }, 'PUT');
     } catch (e) {
-      if (e.code !== 'forbidden') toastError('Nothing was reset', e);
+      if (e.code !== 'forbidden') toastError(failTitle, e);
       return;
     }
     S.view = v;
@@ -880,6 +1010,10 @@
     S.replacing = {};
     S.saveErr = null;
     render();
+    if (v.backup) {
+      toast('The old one is kept as ' + v.backup + '.', null, { title: 'New settings file' });
+      return;
+    }
     toast((v.after_restart || []).length ? 'Some changes wait for a restart.' : 'Every setting is back to ' + SOURCE_FILE + ' or its default.', null, { title: 'Reset' });
   }
 
@@ -889,14 +1023,30 @@
     const out = [];
     const file = v.settings_file || {};
     if (file.error) {
-      out.push(dxAlert('danger', 'The settings page file can’t be read', file.error, el('div', { class: 'btn-row st-alert-actions' },
-        el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: () => resetEverything() }, 'Reset all settings'))));
+      // One note with both ways out; the startup note would only repeat it.
+      const btn = el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: () => startNewFile(btn) }, 'Start a new file');
+      out.push(dxAlert('danger', 'The settings file can’t be read', file.error, el('div', { class: 'st-alert-more' },
+        el('p', {}, 'Fix ', el('span', { class: 'mono' }, file.path), ' on the server and reload this page, or start a new file. Nothing can be changed here until then.'),
+        el('div', { class: 'btn-row st-alert-actions' }, btn))));
     }
-    if (v.startup_problem) out.push(dxAlert('warning', 'Signalith started without the settings saved here', v.startup_problem));
+    // A file that couldn't be read at the start has its own note while it
+    // still can't be; once fixed or new, the restart banner says the rest.
+    if (v.startup_problem && !v.startup_file) {
+      out.push(dxAlert('warning', 'Signalith started without the settings saved here', v.startup_problem, settingLink(startupBlame()[0])));
+    }
     if (!v.editable) out.push(dxAlert('info', 'These settings can’t be changed here', 'This server was started without a configuration file. Start it with one (signalith serve -c signalith.yaml) to change settings on this page.'));
     if ((v.problems || []).length) {
       out.push(dxAlert('danger', SOURCE_FILE + ' has problems', 'Fix them in the file on the server, then restart Signalith.',
         el('ul', { class: 'st-problems' }, ...v.problems.map((p) => el('li', {}, sentence(p))))));
+    }
+    // Changes a restart set aside: each setting says why.
+    const refused = (v.refused || []).filter((x) => S.fields[x.key]);
+    if (refused.length && !S.restart) {
+      const one = refused.length === 1 ? refused[0] : null;
+      out.push(dxAlert('warning', one ? `${shortName(one.key)}: the change was set aside` : `Changes set aside: ${listWords(refused.map((x) => shortName(x.key)))}`,
+        one ? sentence(one.reason) + ' Try it again, change it or remove it.'
+          : 'A restart couldn’t use them, so Signalith uses the settings from before. Each one says why.',
+        settingLink(refused[0].key)));
     }
     for (const w of v.warnings || []) out.push(dxAlert('warning', sentence(w)));
     const banner = restartBanner();
@@ -905,6 +1055,14 @@
     syncRestartButton();
   }
 
+  // changedSince reports whether a setting was saved again after at.
+  function changedSince(key, at) {
+    const f = S.fields[key];
+    return !!(f && f.source.kind === 'page' && f.source.at && Date.parse(f.source.at) > Date.parse(at));
+  }
+  const clock = (at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const pageAt = (addr) => String(addr).replace(/\/+$/, '') + '/#settings';
+
   function restartBanner() {
     const v = S.view;
     const r = v.restart || {};
@@ -912,25 +1070,31 @@
     const last = r.last;
     const st = S.restart;
     const box = (tone, ...kids) => el('div', { class: 'st-banner', 'data-tone': tone, id: 'st-restart', tabindex: '-1', role: 'region', 'aria-label': 'Restart' }, ...kids);
-    if (st) {
-      if (st.timedOut) {
-        return box('danger', icon('circle-alert'), el('div', { class: 'st-banner__body' },
-          el('b', {}, 'Signalith hasn’t come back yet'),
-          el('p', {}, 'It has not answered for 90 seconds. Check it on the server, for example with systemctl status signalith or docker compose logs signalith. If a saved setting stops it from starting, run signalith settings reset there.')),
-        el('div', { class: 'st-banner__actions' }, el('button', { type: 'button', class: 'btn btn--secondary', onclick: () => location.reload() }, icon('refresh-cw'), 'Reload the page')));
-      }
-      const moving = st.goTo ? el('p', {}, 'Signalith moves to ', el('span', { class: 'mono' }, st.goTo), '. This page follows it there.') : null;
-      return box('progress', el('span', { class: 'st-spinner', 'aria-hidden': 'true' }), el('div', { class: 'st-banner__body', role: 'status' },
-        el('b', {}, st.done ? 'Signalith is back. Reloading the page…' : st.external ? 'Signalith is restarting…' : 'Restarting Signalith…'),
-        st.done ? null : el('p', {}, 'It checks the new settings first, and keeps the current ones if they can’t work. This usually takes a few seconds; the page reloads when it is back.'),
-        moving, el('div', { class: 'st-progress', 'aria-hidden': 'true' }, el('span', {}))));
+    const body = (...kids) => el('div', { class: 'st-banner__body' }, ...kids);
+    const actions = (...kids) => el('div', { class: 'st-banner__actions' }, ...kids);
+    if (st) return progressBanner(st, box, body, actions);
+    // A move of the web page waits for someone to open it at the new address.
+    if (r.awaiting) {
+      const a = r.awaiting;
+      return box('info', icon('globe'), body(
+        el('b', {}, 'Open Signalith at its new address to keep it there'),
+        el('p', {}, 'Signalith now answers at ', el('span', { class: 'mono' }, a.to), `. If nobody opens it there by ${clock(a.until)}, it goes back to `,
+          el('span', { class: 'mono' }, a.from), '.')),
+      actions(el('a', { class: 'btn btn--primary', href: pageAt(a.to) }, icon('external-link'), 'Open the new address')));
     }
     if (!pending.length) {
-      if (S.restartErr) return box('danger', icon('circle-alert'), el('div', { class: 'st-banner__body' }, el('b', {}, 'Signalith didn’t restart'), el('p', {}, S.restartErr)));
+      if (S.restartErr) return box('danger', icon('circle-alert'), body(el('b', {}, 'Signalith didn’t restart'), el('p', {}, S.restartErr)));
       return null;
     }
-    const names = pending.map((p) => shortName(p.key));
-    const failed = last && !last.ok && same((last.keys || []).slice().sort(), pending.map((p) => p.key).sort());
+    const keys = pending.map((p) => p.key);
+    const names = keys.map(shortName);
+    // The last restart failed on changes still waiting, unchanged since.
+    const failed = !!(last && !last.ok && (last.keys || []).some((k) => keys.includes(k) && !changedSince(k, last.at)));
+    // A restart refused for a setting it did not set aside fails the same
+    // way again; one it set aside leaves the rest free to apply.
+    const stuck = failed ? (last.problem_keys || []).filter((k) => keys.includes(k) && !changedSince(k, last.at)) : [];
+    const retry = failed && (stuck.length > 0 || !(last.refused || []).length);
+    const blame = startupBlame().filter((k) => keys.includes(k));
     const changes = el('details', { class: 'st-banner__details' }, el('summary', {}, pending.length === 1 ? 'What changes' : `What changes (${pending.length})`),
       el('ul', { class: 'st-changes', role: 'list' }, ...pending.map((p) => {
         const f = S.fields[p.key];
@@ -938,34 +1102,88 @@
           ? el('span', { class: 'st-changes__val' }, 'changed')
           : el('span', { class: 'st-changes__val' }, el('span', { class: 'mono' }, show(f, p.old)), icon('arrow-right', 'icon--xs'), el('span', { class: 'mono' }, show(f, p.new))));
       })));
-    const body = [];
-    if (failed) {
-      body.push(el('b', {}, last.rolled_back ? 'The restart went back to the previous settings' : 'The restart didn’t apply the changes'),
+    const out = [];
+    if (retry) {
+      out.push(el('b', {}, last.rolled_back ? 'The restart went back to the previous settings' : 'The restart didn’t apply the changes'),
         el('p', {}, sentence(last.error)), el('p', { class: 'st-banner__meta' }, `Still waiting: ${listWords(names)}.`));
+      const link = settingLink(stuck[0]);
+      if (link) out.push(link);
     } else {
-      body.push(el('b', {}, `Restart Signalith to apply: ${listWords(names)}`));
-      body.push(el('p', {}, r.available ? 'Saved changes wait for a restart. Signalith restarts in a few seconds and everyone stays signed in.' : (r.unavailable || 'Restart Signalith on the server to apply them.')));
+      out.push(el('b', {}, `Restart Signalith to apply: ${listWords(names)}`));
+      // Browsers keep sign-ins over http:// and https:// apart.
+      const flips = pending.some((p) => (p.key === 'server.tls_cert' || p.key === 'server.tls_key') && !p.old !== !p.new);
+      out.push(el('p', {}, r.available
+        ? 'Saved changes wait for a restart. Signalith restarts in a few seconds' + (flips ? '; with HTTPS turned on or off, people sign in again.' : ' and everyone stays signed in.')
+        : (r.unavailable || 'Restart Signalith on the server to apply them.')));
+      // The note above links to it.
+      if (blame.length) out.push(el('p', { class: 'st-banner__meta' }, `Change ${listWords(blame.map((k) => noun(shortName(k))))} first: Signalith couldn’t start with it.`));
     }
-    if (S.restartErr) body.push(el('p', { class: 'st-banner__error' }, icon('circle-alert', 'icon--sm'), S.restartErr));
-    if (r.blocked) body.push(el('p', { class: 'st-banner__error' }, icon('circle-alert', 'icon--sm'), r.blocked));
-    if (r.available) body.push(el('p', { class: 'st-banner__error st-banner__dirty', id: 'st-restart-dirty', hidden: '' }, 'Save or discard the changes on this page first.'));
-    body.push(changes);
-    const btn = r.available ? el('button', { type: 'button', class: 'btn btn--primary', id: 'st-restart-now' }, icon('rotate-ccw'), failed ? 'Try again' : 'Restart now') : null;
+    if (S.restartErr) out.push(el('p', { class: 'st-banner__error' }, icon('circle-alert', 'icon--sm'), S.restartErr));
+    if (r.blocked) out.push(el('p', { class: 'st-banner__error' }, icon('circle-alert', 'icon--sm'), r.blocked));
+    if (r.available) out.push(el('p', { class: 'st-banner__error st-banner__dirty', id: 'st-restart-dirty', hidden: '' }, 'Save or discard the changes on this page first.'));
+    out.push(changes);
+    // The main button only when a restart can be expected to work.
+    const weak = retry || blame.length > 0;
+    const btn = r.available ? el('button', { type: 'button', class: 'btn ' + (weak ? 'btn--secondary' : 'btn--primary'), id: 'st-restart-now', 'data-weak': weak ? '1' : '' },
+      icon('rotate-ccw'), retry ? 'Try again' : 'Restart now') : null;
     if (btn) btn.addEventListener('click', () => restartNow(btn));
-    return box(failed ? 'warning' : 'info', icon(failed ? 'triangle-alert' : 'rotate-ccw'), el('div', { class: 'st-banner__body' }, ...body),
-      btn ? el('div', { class: 'st-banner__actions' }, btn) : null);
+    return box(retry ? 'warning' : 'info', icon(retry ? 'triangle-alert' : 'rotate-ccw'), body(...out), btn ? actions(btn) : null);
+  }
+
+  // progressBanner shows a restart under way, and what came of it when
+  // the page cannot follow Signalith.
+  function progressBanner(st, box, body, actions) {
+    const away = st.goTo && origin(st.goTo) !== origin(location.href);
+    if (st.down) {
+      return box('danger', el('span', { class: 'st-spinner', 'aria-hidden': 'true' }), body(
+        el('b', {}, 'Signalith couldn’t start'),
+        el('p', {}, st.down + ' This page reloads when it is back.')));
+    }
+    if (st.timedOut) {
+      const reload = el('button', { type: 'button', class: 'btn btn--secondary', onclick: () => location.reload() }, icon('refresh-cw'), 'Reload the page');
+      if (away) {
+        // HTTPS turned on or off, or a new port: this address may simply
+        // not answer any more.
+        return box('warning', icon('triangle-alert'), body(
+          el('b', {}, 'Signalith doesn’t answer here'),
+          el('p', {}, 'It may already be running at ', el('span', { class: 'mono' }, st.goTo), '. Open it there. If it doesn’t open, check Signalith on the server, for example with systemctl status signalith or docker compose logs signalith.')),
+        actions(el('a', { class: 'btn btn--primary', href: pageAt(st.goTo) }, icon('external-link'), 'Open the new address'), reload));
+      }
+      return box('danger', icon('circle-alert'), body(
+        el('b', {}, 'Signalith hasn’t come back yet'),
+        el('p', {}, 'It has not answered for 90 seconds. Check it on the server, for example with systemctl status signalith or docker compose logs signalith. If a saved setting stops it from starting, run signalith settings reset there.')),
+      actions(reload));
+    }
+    if (st.done && st.reachable === false) {
+      return box('info', icon('circle-check'), body(
+        el('b', {}, 'Signalith restarted'),
+        el('p', {}, 'It now answers only on the server itself, at ', el('span', { class: 'mono' }, st.listen || st.goTo), '. This page stops working here in a few seconds.')));
+    }
+    let moving = null;
+    if (st.goTo && st.reachable !== false) {
+      // Browsers keep a sign-in made over http:// apart from https://.
+      const signIn = new URL(st.goTo, location.href).protocol !== location.protocol ? ' You may need to sign in again there.' : '';
+      moving = el('p', {}, 'Signalith moves to ', el('span', { class: 'mono' }, st.goTo), '. This page follows it there.' + signIn +
+        ' If that address doesn’t open, come back here: Signalith goes back to this address after ' + Math.round((st.confirmIn || 120) / 60) + ' minutes.');
+    }
+    return box('progress', el('span', { class: 'st-spinner', 'aria-hidden': 'true' }), el('div', { class: 'st-banner__body', role: 'status' },
+      el('b', {}, st.done ? (st.goTo ? 'Signalith is back. Opening the new address…' : 'Signalith is back. Reloading the page…') : st.external ? 'Signalith is restarting…' : 'Restarting Signalith…'),
+      st.done ? null : el('p', {}, 'It checks the new settings first, and keeps the current ones if they can’t work. This usually takes a few seconds.'),
+      moving, el('div', { class: 'st-progress', 'aria-hidden': 'true' }, el('span', {}))));
   }
 
   // The restart button waits for unsaved changes to be saved or discarded,
-  // and is the page's main button only while there are none.
+  // and is the page's main button only while there are none and a restart
+  // can be expected to work.
   function syncRestartButton() {
     const btn = $('st-restart-now');
     if (!btn) return;
     const dirty = dirtyKeys().length > 0;
     const blocked = !!(S.view.restart && S.view.restart.blocked);
     btn.disabled = dirty || blocked;
-    btn.classList.toggle('btn--primary', !dirty);
-    btn.classList.toggle('btn--secondary', dirty);
+    const main = !dirty && !btn.dataset.weak;
+    btn.classList.toggle('btn--primary', main);
+    btn.classList.toggle('btn--secondary', !main);
     const note = $('st-restart-dirty');
     if (note) note.hidden = !dirty;
   }
@@ -973,13 +1191,25 @@
   async function restartNow(btn) {
     S.restartErr = '';
     const before = lastAt(S.view);
-    const restore = busy(btn, 'Restarting…');
+    let restore = busy(btn, 'Restarting…');
     let res;
     try {
-      res = await api('api/settings/restart', {});
+      try {
+        res = await api('api/settings/restart', S.localOK ? { local_only: true } : {});
+      } catch (e) {
+        if (e.code !== 'local_only') throw e;
+        // The new address is one only the server itself reaches.
+        restore();
+        const ok = await caseConfirm({ title: 'Restart with an address only the server reaches?', text: sentence(e.message) + ' Use this only with a proxy on the same server.', confirm: 'Restart anyway' });
+        if (!ok) { btn.focus(); return; }
+        S.localOK = true;
+        restore = busy(btn, 'Restarting…');
+        res = await api('api/settings/restart', { local_only: true });
+      }
     } catch (e) {
       restore();
       if (e.code === 'restarting') { watchRestart({ before, started: Date.now(), external: true }); return; }
+      if (e.code === 'awaiting') { load(); return; }
       if (e.code !== 'forbidden') {
         S.restartErr = sentence(e.message);
         renderAlerts();
@@ -988,7 +1218,15 @@
       }
       return;
     }
-    watchRestart({ before, started: Date.now(), goTo: res.go_to || '' });
+    S.localOK = false;
+    watchRestart({ before, started: Date.now(), goTo: res.go_to || '', reachable: res.reachable, listen: res.new_listen || '', confirmIn: res.confirm_within_s });
+  }
+
+  // follow opens the page at Signalith's new address, which tells
+  // Signalith the move worked.
+  function follow(st) {
+    try { sessionStorage.setItem(RESTART_NOTE, '1'); } catch (_) { /* ignore */ }
+    location.assign(st.goTo.replace(/[?#].*$/, '') + '?restarted=1#settings');
   }
 
   // watchRestart shows the restart under way and asks the server how it
@@ -1000,25 +1238,49 @@
     const b = $('st-restart');
     if (b && !st.external) b.focus({ preventScroll: true });
     window.scrollTo({ top: 0 });
+    let misses = 0;
     while (S.restart === st) {
       await sleep(1000);
       if (S.restart !== st) return;
-      if (Date.now() - st.started > 90000) { st.timedOut = true; renderAlerts(); return; }
+      // While Signalith is down it keeps trying, and so does the page.
+      if (!st.down && Date.now() - st.started > 90000) { st.timedOut = true; renderAlerts(); return; }
       let v;
       try {
         // Requests wait while the server switches; one that waits too
         // long is answered 503, which only means "ask again".
         v = await api('api/settings');
-      } catch (_) {
+      } catch (e) {
+        if (e.code === 'down') {
+          if (!st.down) { st.down = sentence(e.message); renderAlerts(); }
+          continue;
+        }
+        // 503 means a request waited too long while Signalith switched.
+        if (e.status === 503) continue;
+        // HTTPS turned on or off on the same port: this address stops
+        // answering at once, so go to the new one and let it say how the
+        // restart went.
+        misses++;
+        if (st.goTo && st.reachable !== false && origin(st.goTo) !== origin(location.href) && misses >= 5) {
+          st.done = true;
+          renderAlerts();
+          follow(st);
+          return;
+        }
         continue;
       }
+      misses = 0;
+      if (st.down) { st.down = ''; st.external = true; }
       if (v.restart.in_progress || lastAt(v) === st.before) continue;
       const last = v.restart.last;
       if (last && last.ok && !st.external) {
         st.done = true;
         renderAlerts();
-        try { sessionStorage.setItem(RESTART_NOTE, '1'); } catch (_) { /* ignore */ }
-        if (st.goTo) location.assign(st.goTo.replace(/[?#].*$/, '') + '?restarted=1#settings'); else location.reload();
+        if (st.reachable === false) return;
+        if (st.goTo) follow(st);
+        else {
+          try { sessionStorage.setItem(RESTART_NOTE, '1'); } catch (_) { /* ignore */ }
+          location.reload();
+        }
         return;
       }
       S.restart = null;

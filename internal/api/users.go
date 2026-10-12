@@ -56,7 +56,17 @@ func meView(p *principal) map[string]any {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, meView(principalOf(r)))
+	p := principalOf(r)
+	me := meView(p)
+	// The Search page starts with the default time range set on the
+	// Settings page, until someone picks another.
+	me["search_default_earliest"] = s.conf().Search.DefaultEarliest
+	// Every page asks this first: an admin who gets here at a new web
+	// address after a restart moved it confirms that it works.
+	if p.Role == users.Admin && !p.MustChangePassword {
+		s.confirmMove(r)
+	}
+	writeJSON(w, http.StatusOK, me)
 }
 
 // handleChangeOwnPassword lets local users change their own password. It

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jrsamsanchez/signalith/internal/assistant"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 )
 
 // The Settings page shows the settings in Registry. Each one names its
@@ -85,10 +87,23 @@ type Setting struct {
 	WaitsFor []string
 	// check checks a value from the page beyond what Validate does.
 	check func(any) error
+	// problem words what is wrong with the setting in a whole
+	// configuration for its field on the page, in place of Validate's
+	// wording (which names settings by their keys), or returns "".
+	problem func(*Config) string
 }
 
 // Live reports whether a change applies as soon as it is saved.
 func (s *Setting) Live() bool { return !s.Restart }
+
+// Check checks a value from ParseValue beyond what Validate does, as a
+// save from the page does.
+func (s *Setting) Check(v any) error {
+	if s.check == nil {
+		return nil
+	}
+	return s.check(v)
+}
 
 // Noun returns the label for use inside a sentence: "Password" becomes
 // "password", while "API key" and "OpenSearch address" keep their
@@ -148,7 +163,7 @@ var Registry = []Setting{
 		Placeholder: "0.0.0.0:8080", Env: "SIGNALITH_LISTEN",
 		Confirm: "After the restart Signalith answers only at the new address. Agents and bookmarks that use the old one stop working until they are changed."},
 	{Key: "server.tls_cert", Section: "web", Label: "Certificate file", Type: TypeText, Restart: true,
-		Help:        "Full path of a PEM certificate. With a key file, the web page, the API and syslog over TLS use HTTPS, and addresses change from http:// to https://.",
+		Help:        "Full path of a PEM certificate. With a key file, the web page, the API and syslog over TLS use HTTPS. When Public address is empty, it changes from http:// to https:// too.",
 		Placeholder: "/etc/signalith/tls/cert.pem", EmptyMeans: "HTTP, no certificate"},
 	{Key: "server.tls_key", Section: "web", Label: "Key file", Type: TypeText, Restart: true,
 		Help:        "Full path of the certificate's PEM private key.",
@@ -158,11 +173,11 @@ var Registry = []Setting{
 		EmptyMeans: "10000"},
 	{Key: "server.shared_addresses", Section: "web", Label: "Proxies and gateways", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges of a reverse proxy, load balancer or NAT gateway that many people and agents reach Signalith through. They are not limited like one computer.",
-		Placeholder: "10.0.0.5", EmptyMeans: "none"},
+		Placeholder: "10.0.0.5", EmptyMeans: "none", check: checkAddressList, problem: listProblem("server.shared_addresses")},
 
 	{Key: "opensearch.url", Section: "opensearch", Label: "Address", Type: TypeURL, Restart: true,
 		Help:        "Where OpenSearch answers.",
-		Placeholder: "https://opensearch.example.com:9200", Env: "SIGNALITH_OPENSEARCH_URL",
+		Placeholder: "https://opensearch.example.com:9200", Env: "SIGNALITH_OPENSEARCH_URL", check: noSecretIn("put the username and password in their own fields below"),
 		Confirm: "Signalith will store and search events in the OpenSearch at the new address. Events stored in the current one stay there and do not show in searches."},
 	{Key: "opensearch.username", Section: "opensearch", Label: "Username", Type: TypeText, Restart: true,
 		Help: "Leave empty if OpenSearch does not ask for a password.", Env: "SIGNALITH_OPENSEARCH_USERNAME"},
@@ -180,7 +195,8 @@ var Registry = []Setting{
 		Placeholder: "/etc/signalith/opensearch-client-key.pem"},
 	{Key: "opensearch.proxy", Section: "opensearch", Label: "Proxy", Type: TypeText, Restart: true,
 		Help:        "A proxy to reach OpenSearch through, such as http://proxy:3128. It sees every event, so use one only when the network needs it.",
-		Placeholder: "http://proxy:3128", EmptyMeans: "connect directly", Env: "SIGNALITH_OPENSEARCH_PROXY"},
+		Placeholder: "http://proxy:3128", EmptyMeans: "connect directly", Env: "SIGNALITH_OPENSEARCH_PROXY",
+		check: noSecretIn("a proxy that needs a password is set in signalith.yaml or with SIGNALITH_OPENSEARCH_PROXY, where it is not shown")},
 	{Key: "opensearch.allow_insecure_http", Section: "opensearch", Label: "Allow password over plain http", Type: TypeBool, Restart: true,
 		Help:    "Lets the username and password go to OpenSearch on another computer over http:// instead of https://.",
 		Confirm: "The OpenSearch username and password will cross the network unencrypted, where anyone on the way can read them. Use an https:// address instead when you can.", ConfirmWhen: "on"},
@@ -194,7 +210,7 @@ var Registry = []Setting{
 		Help: "Extra copies of each new index on other OpenSearch nodes: 0 for one node, 1 or more for a cluster. Applies to indices created after the restart."},
 
 	{Key: "search.default_earliest", Section: "search", Label: "Default time range", Type: TypeChoice,
-		Help: "The time range of a search that does not set one.", check: checkEarliest,
+		Help: "The time range the Search page starts with until someone picks another, and of a search sent without one, such as from the API.", check: checkEarliest,
 		Choices: []Choice{{"-15m", "Last 15 minutes"}, {"-1h", "Last hour"}, {"-4h", "Last 4 hours"},
 			{"-24h", "Last 24 hours"}, {"-7d", "Last 7 days"}, {"-30d", "Last 30 days"}}},
 	{Key: "search.max_events", Section: "search", Label: "Events per search", Type: TypeNumber, Min: intp(1), Max: intp(100000),
@@ -214,7 +230,7 @@ var Registry = []Setting{
 		Placeholder: "0.0.0.0:6514", EmptyMeans: "off"},
 	{Key: "syslog.allow", Section: "syslog", Label: "Allowed senders", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges, such as 10.0.0.0/8, that may send syslog. Others are dropped and counted.",
-		Placeholder: "10.0.0.0/8", EmptyMeans: "any sender"},
+		Placeholder: "10.0.0.0/8", EmptyMeans: "any sender", check: checkAddressList, problem: listProblem("syslog.allow")},
 	{Key: "syslog.public_port", Section: "syslog", Label: "Port devices send to", Type: TypeNumber, Restart: true, Min: intp(0), Max: intp(65535),
 		Help:       "When Docker or a firewall forwards another port to the one Signalith listens on, the port devices send to. Add data shows it.",
 		EmptyMeans: "the listen port"},
@@ -231,10 +247,10 @@ var Registry = []Setting{
 			{assistant.OpenAI, "OpenAI or compatible"}}},
 	{Key: "assistant.url", Section: "assistant", Label: "Address", Type: TypeURL,
 		Help:        "Only for a model on your own hardware or another compatible service, such as http://localhost:11434/v1 for Ollama.",
-		Placeholder: "http://localhost:11434/v1", EmptyMeans: "the provider's own address"},
+		Placeholder: "http://localhost:11434/v1", EmptyMeans: "the provider's own address", check: noSecretIn("put the key in API key below")},
 	{Key: "assistant.model", Section: "assistant", Label: "Model", Type: TypeText,
 		Help:        "The model's name. Required for OpenAI or compatible, such as llama3.1 with Ollama.",
-		Placeholder: "llama3.1", EmptyMeans: "the provider's default model"},
+		Placeholder: "llama3.1", EmptyMeans: "the provider's default model", problem: modelProblem},
 	{Key: "assistant.api_key", Section: "assistant", Label: "API key", Type: TypeSecret,
 		Help: "Only sent to the provider's address it was entered for. Local models often need none.",
 		Env:  "SIGNALITH_ASSISTANT_API_KEY", SentWith: []string{"assistant.provider", "assistant.url"},
@@ -258,7 +274,7 @@ var Excluded = map[string]string{
 	"auth.admin_password_hash": "The built-in admin's password is changed on the server with signalith passwd.",
 	"auth.users_file":          "The Users page keeps its users there, and a page cannot move a file it depends on. Shown under About this server.",
 	"auth.ldap":                "Directory sign-in is set up on the Users page.",
-	"ingest.tokens":            "Agent tokens are set up with Add data. The page shows how many there are.",
+	"ingest.tokens":            "Agent tokens are set in signalith.yaml (ingest.tokens) or with SIGNALITH_INGEST_TOKEN; Add data shows the agent setup that uses them. The page shows how many there are.",
 	"detections.dir":           "Pages save detections there, and a page cannot move a folder it saves into. Shown under About this server.",
 	"lookups.dir":              "It holds this page's own settings file, users and lists, so it cannot move from a page. Shown under About this server.",
 	"dashboards.dir":           "Pages save dashboards there, and a page cannot move a folder it saves into. Shown under About this server.",
@@ -337,10 +353,16 @@ func field(c *Config, key string) (reflect.Value, bool) {
 
 // Value returns the value of a setting in c: a string, int, bool or
 // []string. Lists are never nil.
+//
+// A public address worked out from the listen address is "", as it was
+// set: that is what the page shows, compares and saves.
 func (c *Config) Value(key string) any {
 	v, ok := field(c, key)
 	if !ok {
 		return nil
+	}
+	if key == "server.public_url" && c.publicURLDerived {
+		return ""
 	}
 	if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.String {
 		out := make([]string, v.Len())
@@ -364,6 +386,9 @@ func (c *Config) SetValue(key string, val any) error {
 		return fmt.Errorf("%s takes a %s, not a %s", key, v.Type(), nv.Type())
 	}
 	v.Set(nv)
+	if key == "server.public_url" {
+		c.publicURLDerived = false
+	}
 	return nil
 }
 
@@ -376,6 +401,9 @@ func (c *Config) CopyValue(key string, from *Config) error {
 	}
 	dst, _ := field(c, key)
 	dst.Set(src)
+	if key == "server.public_url" {
+		c.publicURLDerived = from.publicURLDerived
+	}
 	return nil
 }
 
@@ -407,7 +435,11 @@ func ParseValue(s *Setting, raw any) (any, error) {
 			// Secrets are taken as typed: spaces can be part of one.
 			return str, nil
 		}
-		return strings.TrimSpace(str), nil
+		str = strings.TrimSpace(str)
+		if err := noControl(str); err != nil {
+			return nil, err
+		}
+		return str, nil
 	case reflect.Int:
 		var f float64
 		switch n := raw.(type) {
@@ -463,12 +495,113 @@ func ParseValue(s *Setting, raw any) (any, error) {
 		out := []string{}
 		for _, it := range items {
 			if it = strings.TrimSpace(it); it != "" {
+				if err := noControl(it); err != nil {
+					return nil, err
+				}
 				out = append(out, it)
 			}
 		}
 		return out, nil
 	}
 	return nil, fmt.Errorf("%s cannot be changed here", s.Key)
+}
+
+// noControl refuses line breaks, tabs and other control characters in a
+// one-line value, which could pass for more than one value where it is
+// printed.
+func noControl(s string) error {
+	if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+		return fmt.Errorf("remove the line break, tab or other control character")
+	}
+	return nil
+}
+
+// noSecretIn refuses an address with a password or key in it, which
+// would be shown on the page and in logs; why says where it goes instead.
+func noSecretIn(why string) func(any) error {
+	return func(v any) error {
+		if hasSecret(v.(string)) {
+			return fmt.Errorf("leave passwords and keys out of the address: %s", why)
+		}
+		return nil
+	}
+}
+
+// hasSecret reports whether an address holds a user name and password,
+// or a query parameter whose name suggests a key or token.
+func hasSecret(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Validate refuses it; a password in it must still not be kept.
+		return strings.Contains(raw, "@")
+	}
+	if u.User != nil || u.Host == "" && strings.Contains(raw, "@") {
+		return true
+	}
+	for name := range u.Query() {
+		if redact.SecretName(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// badAddresses lists the entries of a list of IP addresses or ranges that
+// are not one.
+func badAddresses(list []string) []string {
+	var bad []string
+	for _, a := range list {
+		if _, err := parseAllow(a); err != nil {
+			bad = append(bad, "“"+a+"”")
+		}
+	}
+	return bad
+}
+
+// addressListProblem words the bad entries of an address list, every one
+// of them, or returns "".
+func addressListProblem(list []string) string {
+	bad := badAddresses(list)
+	switch len(bad) {
+	case 0:
+		return ""
+	case 1:
+		return bad[0] + " isn't an IP address or a range like 10.0.0.0/8."
+	}
+	return joinWords(bad) + " aren't IP addresses or ranges like 10.0.0.0/8."
+}
+
+func checkAddressList(v any) error {
+	if p := addressListProblem(v.([]string)); p != "" {
+		return errors.New(p)
+	}
+	return nil
+}
+
+func listProblem(key string) func(*Config) string {
+	return func(c *Config) string {
+		list, _ := c.Value(key).([]string)
+		return addressListProblem(list)
+	}
+}
+
+// modelProblem asks for a model where the provider needs one named.
+func modelProblem(c *Config) string {
+	if c.Assistant.Provider == assistant.OpenAI && strings.TrimSpace(c.Assistant.Model) == "" {
+		return "Enter the model's name: OpenAI or compatible needs one, such as llama3.1 with Ollama or gpt-4.1 with OpenAI."
+	}
+	return ""
+}
+
+// joinWords joins items as "a, b and c".
+func joinWords(items []string) string {
+	if len(items) <= 1 {
+		return strings.Join(items, "")
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 func deref(p *int, d int) int {

@@ -289,6 +289,14 @@ func (s *Store) saveLocked() error {
 // Linux; on Windows the folder's permissions apply), through a temporary
 // file in the same folder that is then renamed into place.
 func WriteFileAtomic(name string, data []byte) error {
+	return WriteFileAtomicWith(name, data, nil)
+}
+
+// WriteFileAtomicWith is WriteFileAtomic with prepare called on the new
+// file before it takes name's place, such as to give it an owner by its
+// open handle: unlike a path, the handle cannot be swapped for a link to
+// another file in between.
+func WriteFileAtomicWith(name string, data []byte, prepare func(*os.File) error) error {
 	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
 		return err
 	}
@@ -307,6 +315,11 @@ func WriteFileAtomic(name string, data []byte) error {
 	}
 	if err := tmp.Sync(); err != nil {
 		return fail(err)
+	}
+	if prepare != nil {
+		if err := prepare(tmp); err != nil {
+			return fail(err)
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmp.Name())

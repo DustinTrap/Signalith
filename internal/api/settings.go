@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -30,6 +32,7 @@ func (s *Server) routeSettings(api *router) {
 	api.admin("POST /api/settings/test/opensearch", s.handleTestOpenSearch)
 	api.admin("POST /api/settings/test/assistant", s.handleTestAssistant)
 	api.admin("POST /api/settings/restart", s.handleRestart)
+	api.admin("POST /api/settings/restart/confirm", s.handleConfirmMove)
 	api.admin("GET /api/settings/export", s.handleExportSettings)
 }
 
@@ -39,21 +42,50 @@ func (s *Server) routeSettings(api *router) {
 type Restarter interface {
 	// Restart begins a restart shortly after it returns, so the answer to
 	// the request that asked for it still goes out. It returns
-	// ErrRestarting while one is under way.
-	Restart(by, client string) error
+	// ErrRestarting while one is under way, and ErrAwaitingMove while a
+	// move of the web page waits for someone to reach the new address.
+	// localOnly is true when the admin agreed that the web page will
+	// answer on the server itself only: then a move is not undone when
+	// nobody reaches the new address from elsewhere.
+	Restart(by, client string, localOnly bool) error
 	// RestartStatus reports whether a restart is under way and how the
 	// last one went.
 	RestartStatus() RestartStatus
+	// Confirm tells a restart that moved the web page that someone
+	// reached it at its new address, when r came in there. It reports
+	// whether it did.
+	Confirm(r *http.Request) bool
 }
 
 // ErrRestarting refuses a restart while one is under way.
 var ErrRestarting = errors.New("a restart is already under way; wait for it to finish")
+
+// ErrAwaitingMove refuses a restart while the web page waits for someone
+// to reach it at its new address.
+var ErrAwaitingMove = errors.New("Signalith moved to a new web address and waits for someone to open this page there. Open it at the new address first, or wait until Signalith goes back by itself")
+
+// MoveWait is how long a restart that moves the web page waits for
+// someone to reach the new address before it goes back to the old one.
+const MoveWait = 2 * time.Minute
 
 // RestartStatus is the state of restarts.
 type RestartStatus struct {
 	InProgress bool `json:"in_progress"`
 	// Last is how the last restart went; nil before the first.
 	Last *RestartResult `json:"last"`
+	// Awaiting is set while a move of the web page waits for someone to
+	// reach the new address.
+	Awaiting *AwaitingMove `json:"awaiting,omitempty"`
+}
+
+// AwaitingMove is a move of the web page that waits to be confirmed.
+type AwaitingMove struct {
+	// From and To are the old and new listen addresses, with the scheme.
+	From  string    `json:"from"`
+	To    string    `json:"to"`
+	Until time.Time `json:"until"`
+	// Keys are the settings that moved it.
+	Keys []string `json:"keys"`
 }
 
 // RestartResult is how a restart went.
@@ -67,8 +99,20 @@ type RestartResult struct {
 	// the previous ones were started again.
 	RolledBack bool `json:"rolled_back,omitempty"`
 	// Keys are the settings it applied, or tried to.
-	Keys   []string `json:"keys"`
-	TookMS int64    `json:"took_ms"`
+	Keys []string `json:"keys"`
+	// ProblemKeys are the settings a failure is about, when known.
+	ProblemKeys []string `json:"problem_keys,omitempty"`
+	// Refused lists the changes made on the Settings page that were set
+	// aside for it: they are not used, not even when Signalith next
+	// starts, until they are tried again or changed.
+	Refused []string `json:"refused,omitempty"`
+	// Reverted is true when nobody reached the web page at its new
+	// address in time, so Signalith went back to the previous one.
+	Reverted bool `json:"reverted,omitempty"`
+	// Confirmed is true once someone reached the web page at its new
+	// address.
+	Confirmed bool  `json:"confirmed,omitempty"`
+	TookMS    int64 `json:"took_ms"`
 }
 
 // noConfigFile refuses changes on a server started without a file.
@@ -122,9 +166,16 @@ type settingField struct {
 	// ResetTo is what Reset goes back to, for a value set on the page.
 	ResetTo *resetTo `json:"reset_to,omitempty"`
 	// Problem must be fixed before saving or restarting; Warning is a
-	// value that is not used, and why.
+	// value that is not used, and why. Suggest is a value the page can
+	// offer in its place.
 	Problem string `json:"problem,omitempty"`
 	Warning string `json:"warning,omitempty"`
+	Suggest string `json:"suggest,omitempty"`
+	// Refused is a change made here that a restart set aside, and why.
+	Refused *config.RefusedSetting `json:"refused,omitempty"`
+	// StartupProblem is true when this setting kept Signalith from
+	// starting with the settings saved here.
+	StartupProblem bool `json:"startup_problem,omitempty"`
 }
 
 // resetTo is a setting's value without the page: from signalith.yaml
@@ -153,6 +204,21 @@ type pendingSetting struct {
 	New     any    `json:"new,omitempty"`
 }
 
+// urlKeys are settings whose value is an address that may hold a user
+// name and password, from signalith.yaml or the environment. The page
+// shows them without it, and the logs and the export too.
+var urlKeys = map[string]bool{"server.public_url": true, "opensearch.url": true, "opensearch.proxy": true, "assistant.url": true}
+
+// shownValue is a setting's value as the page, the logs and the export
+// show it: an address without any password in it.
+func shownValue(c *config.Config, key string) any {
+	v := c.Value(key)
+	if s, ok := v.(string); ok && urlKeys[key] {
+		return redact.URL(s)
+	}
+	return v
+}
+
 // fieldValue is a setting's value for the page; secrets are never sent.
 func fieldValue(c *config.Config, set *config.Setting) (any, *bool) {
 	if set.Type == config.TypeSecret {
@@ -160,7 +226,7 @@ func fieldValue(c *config.Config, set *config.Setting) (any, *bool) {
 		has := v != ""
 		return nil, &has
 	}
-	return c.Value(set.Key), nil
+	return shownValue(c, set.Key), nil
 }
 
 // pendingSettings lists the saved settings that differ from those in use.
@@ -175,55 +241,102 @@ func pendingSettings(running, saved *config.Config) []pendingSetting {
 		if set.Type == config.TypeSecret {
 			p.Secret = true
 		} else {
-			p.Old, p.New = running.Value(set.Key), saved.Value(set.Key)
+			p.Old, p.New = shownValue(running, set.Key), shownValue(saved, set.Key)
 		}
 		out = append(out, p)
 	}
 	return out
 }
 
-// settingsProblems sorts problems by the setting they are about, worded
+// warningsByField sorts warnings by the setting they are about, worded
 // for its field, and returns the rest.
-func settingsProblems(problems []string) (map[string]string, []string) {
+func warningsByField(list []string) (map[string]string, []string) {
 	fields := map[string]string{}
 	var rest []string
-	for _, p := range problems {
+	for _, w := range list {
 		placed := false
-		for _, k := range config.ProblemKeys(p) {
+		for _, k := range config.ProblemKeys(w) {
 			if _, ok := config.Lookup(k); ok {
 				if _, dup := fields[k]; !dup {
-					fields[k] = config.PlainProblem(k, p)
+					fields[k] = config.PlainProblem(k, w)
 				}
 				placed = true
 			}
 		}
 		if !placed {
-			rest = append(rest, p)
+			rest = append(rest, w)
 		}
 	}
 	return fields, rest
 }
 
-// publicURLWarning notes a public address whose port is not the one
-// Signalith listens on, as after the listen address moved. A proxy or a
-// port forward in between makes that right, so it is only a warning.
-func publicURLWarning(c *config.Config) string {
-	if c.Server.PublicURL == "" || c.Source("server.public_url").Kind == config.FromDefault {
-		return ""
+// httpsOn reports whether the web server of c serves HTTPS.
+func httpsOn(c *config.Config) bool { return c.Server.TLSCert != "" && c.Server.TLSKey != "" }
+
+// webURL is the address of the web page at host and port, without the
+// port when it is the scheme's own.
+func webURL(scheme, host, port string) string {
+	if (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		if strings.Contains(host, ":") {
+			return scheme + "://[" + host + "]"
+		}
+		return scheme + "://" + host
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
+}
+
+// publicURLWarning notes a public address that does not match how the web
+// server answers: another scheme (http:// while it serves HTTPS) or
+// another port, as after the listen address moved. A proxy or a port
+// forward in between makes that right, so it is only a warning. soon is
+// true when that is how it answers after the next restart. It also
+// returns the address that matches, for the page to offer.
+func publicURLWarning(c *config.Config, soon bool) (string, string) {
+	if c.Server.PublicURL == "" || c.PublicURLDerived() {
+		return "", ""
 	}
 	u, err := url.Parse(c.Server.PublicURL)
 	_, listen, lerr := net.SplitHostPort(c.Server.Listen)
-	if err != nil || lerr != nil || u.Host == "" {
-		return ""
+	if err != nil || lerr != nil || u.Host == "" || listen == "0" {
+		return "", ""
 	}
+	told := strings.ToLower(u.Scheme)
 	port := u.Port()
 	if port == "" {
-		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+		port = map[string]string{"http": "80", "https": "443"}[told]
 	}
-	if port == "" || port == listen {
-		return ""
+	serves := "http"
+	if httpsOn(c) {
+		serves = "https"
 	}
-	return fmt.Sprintf("Agents are told to send to port %s, but Signalith listens on port %s. That is right only when a proxy or a port forward passes port %s on to %s; otherwise change one of them, or empty this to use the listen address.", port, listen, port, listen)
+	if port == "" || (told == serves && port == listen) {
+		return "", ""
+	}
+	verb := "answers"
+	if soon {
+		verb = "will answer"
+	}
+	var msg string
+	switch {
+	case told != serves && port != listen:
+		msg = fmt.Sprintf("Agents are told to use %s:// on port %s, but Signalith %s with %s:// on port %s.", told, port, verb, serves, listen)
+	case told != serves:
+		msg = fmt.Sprintf("Agents are told to use %s://, but Signalith %s with %s://.", told, verb, serves)
+	default:
+		msg = fmt.Sprintf("Agents are told to use port %s, but Signalith %s on port %s.", port, verb, listen)
+	}
+	msg += " That is right only when a proxy or a port forward passes one on to the other."
+	suggest := webURL(serves, u.Hostname(), listen)
+	if p := strings.TrimRight(u.EscapedPath(), "/"); p != "" {
+		suggest += p
+	}
+	return msg, suggest
+}
+
+// webMoves reports whether the web page answers somewhere else with c
+// than with running: another listen address, or HTTPS turned on or off.
+func webMoves(running, c *config.Config) bool {
+	return running.Server.Listen != c.Server.Listen || httpsOn(running) != httpsOn(c)
 }
 
 // settingsView is GET /api/settings.
@@ -233,16 +346,26 @@ func (s *Server) settingsView() (map[string]any, error) {
 		return nil, err
 	}
 	running := s.conf()
-	problems, general := settingsProblems(saved.Problems)
-	warnings, otherWarnings := settingsProblems(saved.SettingsWarnings())
-	if w := publicURLWarning(saved.Config); w != "" && warnings["server.public_url"] == "" {
-		warnings["server.public_url"] = w
+	problems, general := config.FieldProblems(saved.Config, saved.Problems)
+	warnings, otherWarnings := warningsByField(saved.SettingsWarnings())
+	suggest := map[string]string{}
+	if w, sg := publicURLWarning(saved.Config, webMoves(running, saved.Config)); w != "" && warnings["server.public_url"] == "" {
+		warnings["server.public_url"], suggest["server.public_url"] = w, sg
 	}
 	pending := pendingSettings(running, saved.Config)
 	waiting := map[string]bool{}
 	for _, p := range pending {
 		waiting[p.Key] = true
 	}
+	refusedList := saved.Refused()
+	refused := map[string]*config.RefusedSetting{}
+	for i := range refusedList {
+		if str, ok := refusedList[i].Value.(string); ok && urlKeys[refusedList[i].Key] {
+			refusedList[i].Value = redact.URL(str)
+		}
+		refused[refusedList[i].Key] = &refusedList[i]
+	}
+	startupKeys := running.SettingsProblemKeys()
 	sections := make([]settingsSection, 0, len(config.Sections))
 	for _, sec := range config.Sections {
 		out := settingsSection{ID: sec.ID, Title: sec.Title, Help: sec.Help, Fields: []settingField{}}
@@ -255,16 +378,16 @@ func (s *Server) settingsView() (map[string]any, error) {
 				Min: set.Min, Max: set.Max, Placeholder: set.Placeholder, EmptyMeans: set.EmptyMeans,
 				Source: saved.Source(set.Key), Env: set.Env, Apply: "live",
 				Dangerous: set.Confirm != "", Confirm: set.Confirm, ConfirmWhen: set.ConfirmWhen,
-				Pending: waiting[set.Key], Problem: problems[set.Key], Warning: warnings[set.Key]}
+				Pending: waiting[set.Key], Problem: problems[set.Key], Warning: warnings[set.Key], Suggest: suggest[set.Key],
+				Refused: refused[set.Key], StartupProblem: slices.Contains(startupKeys, set.Key)}
 			if set.Restart {
 				f.Apply = "restart"
 			}
 			f.Value, f.Set = fieldValue(saved.Config, set)
 			// A public address worked out from the listen address shows as
 			// empty, with what it works out to now.
-			if set.Key == "server.public_url" && f.Source.Kind == config.FromDefault {
-				f.EmptyMeans = fmt.Sprintf("%v, worked out from the listen address", f.Value)
-				f.Value = ""
+			if set.Key == "server.public_url" && saved.PublicURLDerived() {
+				f.EmptyMeans = saved.Server.PublicURL + ", worked out from the listen address"
 			}
 			if f.Set != nil && *f.Set {
 				f.SentTo = set.SentTo(saved.Config)
@@ -276,9 +399,6 @@ func (s *Server) settingsView() (map[string]any, error) {
 				base := saved.Base()
 				rt := &resetTo{Source: base.Source(set.Key).Kind}
 				rt.Value, rt.Set = fieldValue(base, set)
-				if set.Key == "server.public_url" && rt.Source == config.FromDefault {
-					rt.Value = ""
-				}
 				f.ResetTo = rt
 			}
 			out.Fields = append(out.Fields, f)
@@ -286,16 +406,26 @@ func (s *Server) settingsView() (map[string]any, error) {
 		sections = append(sections, out)
 	}
 	file := map[string]any{
-		"path": saved.SettingsFile(), "env": "SIGNALITH_SETTINGS_FILE", "from_env": saved.SettingsFileFromEnv(),
+		"path": fullPath(saved.SettingsFile()), "env": "SIGNALITH_SETTINGS_FILE", "from_env": saved.SettingsFileFromEnv(),
 		"keys": saved.PageKeys(),
 	}
 	if saved.PageErr != nil {
-		file["error"] = "The settings file cannot be read (" + saved.PageErr.Error() + "). Reset all settings to start it again, or fix it on the server."
+		// Only the reason: the page names the file itself.
+		var pe *config.PageFileError
+		reason := saved.PageErr
+		if errors.As(saved.PageErr, &pe) && pe.Err != nil {
+			reason = pe.Err
+		}
+		file["error"] = plainFileError(reason)
+		file["backup"] = fullPath(saved.SettingsFile()) + ".broken"
 	}
 	restart := map[string]any{"available": s.Restarter != nil, "in_progress": false, "last": nil, "needed": len(pending) > 0}
 	if s.Restarter != nil {
 		st := s.Restarter.RestartStatus()
 		restart["in_progress"], restart["last"] = st.InProgress, st.Last
+		if st.Awaiting != nil {
+			restart["awaiting"] = st.Awaiting
+		}
 	} else {
 		restart["unavailable"] = "This server cannot restart itself. Restart Signalith on the server to apply the changes."
 	}
@@ -314,22 +444,51 @@ func (s *Server) settingsView() (map[string]any, error) {
 		"config_file":   s.Config.Path(),
 		"settings_file": file,
 		// startup_problem says why the running server is not using the
-		// page's settings, when it started without them.
+		// page's settings, when it started without them; startup_keys are
+		// the settings to blame, when known, and startup_file is true when
+		// it was that their file cannot be read.
 		"startup_problem": running.SettingsProblem(),
+		"startup_keys":    startupKeys,
+		"startup_file":    running.SettingsFileProblem(),
 		"problems":        general,
 		"warnings":        otherWarnings,
 		"pending":         pending,
+		"refused":         refusedList,
 		"restart":         restart,
+		"move_wait_s":     int(MoveWait.Seconds()),
 		"about":           s.aboutServer(running),
 		"elsewhere":       s.managedElsewhere(running),
 	}, nil
+}
+
+// plainFileError words why the settings file cannot be read, without the
+// YAML library's type names.
+func plainFileError(err error) string {
+	msg := err.Error()
+	rest, ok := strings.CutPrefix(msg, "yaml: ")
+	if !ok {
+		return sentence(msg)
+	}
+	if lines, ok := strings.CutPrefix(rest, "unmarshal errors:"); ok {
+		var where []string
+		for _, l := range strings.Split(lines, "\n") {
+			if n, _, ok := strings.Cut(strings.TrimSpace(l), ":"); ok && strings.HasPrefix(n, "line ") {
+				where = append(where, n)
+			}
+		}
+		if len(where) > 0 {
+			return "It is not laid out as Signalith writes it (" + strings.Join(where, ", ") + ")."
+		}
+		return "It is not laid out as Signalith writes it."
+	}
+	return "It is not valid YAML (" + strings.TrimSuffix(rest, ".") + ")."
 }
 
 // restartBlocked says why the saved settings cannot be applied, or "".
 func restartBlocked(saved *config.Saved) string {
 	switch {
 	case saved.PageErr != nil:
-		return "The settings file cannot be read. Reset all settings, or fix the file on the server, before restarting."
+		return "The settings file cannot be read. Fix it on the server, or start a new one, before restarting."
 	case len(saved.Problems) > 0:
 		return "Fix the problems shown on this page before restarting."
 	}
@@ -352,6 +511,10 @@ func (s *Server) aboutServer(c *config.Config) map[string]any {
 		{Key: "dashboards.dir", Label: "Dashboards folder", Path: c.DashboardsDir(), Source: c.Source("dashboards.dir")},
 		{Key: "auth.users_file", Label: "Users file", Path: c.UsersFile(), Source: c.Source("auth.users_file")},
 		{Key: "intel.feeds_file", Label: "Threat intel feeds file", Path: c.IntelFeedsFile(), Source: c.Source("intel.feeds_file")},
+	}
+	// Whoever reads the page is not in Signalith's working folder.
+	for i := range paths {
+		paths[i].Path = fullPath(paths[i].Path)
 	}
 	about := map[string]any{
 		"version":       s.Version,
@@ -378,28 +541,46 @@ func settingsFileSource(c *config.Config) config.Source {
 // not. Page is the app's page name.
 func (s *Server) managedElsewhere(c *config.Config) []map[string]any {
 	tokens := len(c.Ingest.Tokens)
-	detail := fmt.Sprintf("%d agent tokens are set.", tokens)
+	detail := fmt.Sprintf("%d agent tokens are set in signalith.yaml or the environment.", tokens)
 	switch tokens {
 	case 0:
-		detail = "No agent token is set, so agents cannot send data."
+		detail = "No agent token is set, so agents cannot send data. Set one in signalith.yaml (ingest.tokens) or with SIGNALITH_INGEST_TOKEN, then restart."
 	case 1:
-		detail = "1 agent token is set."
+		detail = "1 agent token is set in signalith.yaml or the environment."
 	}
 	return []map[string]any{
 		{"what": "Users and directory sign-in", "page": "users"},
-		{"what": "Agent setup and tokens", "page": "data", "detail": detail},
+		{"what": "Agent setup", "page": "data", "detail": detail},
 		{"what": "Threat intel feeds", "page": "intel"},
 		{"what": "Data retention", "page": "retention"},
 	}
 }
 
+// confirmMove tells a restart that moved the web page that an admin
+// reached it, when r came in at the new address.
+func (s *Server) confirmMove(r *http.Request) bool {
+	if s.Restarter == nil || !s.Restarter.Confirm(r) {
+		return false
+	}
+	s.audit(r, "new web address confirmed", "host", r.Host)
+	return true
+}
+
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	s.confirmMove(r)
 	view, err := s.settingsView()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// handleConfirmMove is how the page, opened at the new address after a
+// restart moved it, says it got there. It answers whether that confirmed
+// a move.
+func (s *Server) handleConfirmMove(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"confirmed": s.confirmMove(r)})
 }
 
 // settingsRequest is the body of PUT /api/settings.
@@ -410,8 +591,112 @@ type settingsRequest struct {
 	Clear []string `json:"clear"`
 	// Reset lists settings to take off the page.
 	Reset []string `json:"reset"`
+	// Retry lists changes a restart set aside, to use again.
+	Retry []string `json:"retry"`
 	// ResetAll takes every setting off the page.
 	ResetAll bool `json:"reset_all"`
+	// CheckOnly checks the changes without saving them, and returns what
+	// to ask before saving them.
+	CheckOnly bool `json:"check_only"`
+}
+
+// confirmation is something the page asks before it saves a change.
+type confirmation struct {
+	Key string `json:"key"`
+	// Name and Title, when set, name what changes and the question to ask,
+	// where the setting's label would not say it.
+	Name  string `json:"name,omitempty"`
+	Title string `json:"title,omitempty"`
+	// Old and New are the setting's values, for the page to show; left
+	// out for switches and secrets.
+	Old  any    `json:"old,omitempty"`
+	New  any    `json:"new,omitempty"`
+	Text string `json:"text"`
+	// Code is "local_only" for a web address only the server can reach,
+	// which the restart asks again about unless told it was agreed to.
+	Code string `json:"code,omitempty"`
+	// Also is a change the page offers to make with this one.
+	Also *alsoChange `json:"also,omitempty"`
+}
+
+// alsoChange is another setting the page offers to change with one, such
+// as the public address with the listen port.
+type alsoChange struct {
+	Key   string `json:"key"`
+	Value any    `json:"value"`
+	Label string `json:"label"`
+}
+
+// confirmations lists what to ask before saving res: the dangerous changes,
+// and changes that would keep people or agents from reaching Signalith.
+func confirmations(r *http.Request, res *config.EditResult) []confirmation {
+	out := []confirmation{}
+	before, after := res.Before, res.Config
+	changed := func(k string) bool { return slices.Contains(res.Changed, k) }
+	for _, k := range res.Changed {
+		set, _ := config.Lookup(k)
+		if set.Confirm == "" {
+			continue
+		}
+		v := after.Value(k)
+		if (set.ConfirmWhen == "on" && v != true) || (set.ConfirmWhen == "off" && v != false) {
+			continue
+		}
+		c := confirmation{Key: k, Text: set.Confirm}
+		if set.Type != config.TypeBool && set.Type != config.TypeSecret {
+			c.Old, c.New = shownValue(before, k), shownValue(after, k)
+		}
+		if k == "server.listen" && loopbackOnly(after.Server.Listen) && !isLoopback(clientHost(r)) {
+			c.Text = "Only programs on the server itself can reach Signalith at " + after.Server.Listen +
+				". You could not open this page again from here, and agents on other computers cannot send. Use this only with a proxy on the same server."
+			c.Code = "local_only"
+		}
+		out = append(out, c)
+	}
+	if httpsOn(before) != httpsOn(after) {
+		scheme, other := "https", "http"
+		if !httpsOn(after) {
+			scheme, other = "http", "https"
+		}
+		c := confirmation{Key: "server.tls_cert", Name: "HTTPS", Title: "Turn HTTPS on?",
+			Text: fmt.Sprintf("After the restart the web page and the API answer with %s:// only. Bookmarks and agents that use %s:// stop working until they are changed.", scheme, other)}
+		if scheme == "http" {
+			c.Title = "Turn HTTPS off?"
+		}
+		if !changed("server.tls_cert") {
+			c.Key = "server.tls_key"
+		}
+		out = append(out, c)
+	}
+	// A public address that matched the old web address and does not
+	// match the new one would send agents to the old one.
+	if webMoves(before, after) && !changed("server.public_url") && !after.PublicURLDerived() {
+		if _, sg := publicURLWarning(after, true); sg != "" {
+			if old, _ := publicURLWarning(before, false); old == "" {
+				set, _ := config.Lookup("server.public_url")
+				out = append(out, confirmation{Key: "server.public_url", Title: "Agents would still use the old address", Old: shownValue(after, "server.public_url"),
+					Text: "Agents are told to send to " + redact.URL(after.Server.PublicURL) + ", the old address. Unless a proxy or a port forward passes it on, they stop sending.",
+					Also: &alsoChange{Key: "server.public_url", Value: sg, Label: "Also change " + set.Label + " to " + sg}})
+			}
+		}
+	}
+	return out
+}
+
+// loopbackOnly reports whether a listen address takes connections from
+// the server itself only.
+func loopbackOnly(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	return err == nil && host != "" && isLoopback(host)
+}
+
+// clientHost is the address of the computer r came from.
+func clientHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
@@ -427,10 +712,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
 	res, err := config.CheckEdit(s.Config.Path(), config.Edit{Values: req.Values, Clear: req.Clear, Reset: req.Reset,
-		ResetAll: req.ResetAll, By: userOf(r)})
+		Retry: req.Retry, ResetAll: req.ResetAll, By: userOf(r)})
 	switch {
 	case errors.Is(err, config.ErrPageFile):
-		writeJSON(w, http.StatusConflict, map[string]any{"error": sentence(err.Error()), "code": "settings_file"})
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "Nothing was saved, because the settings file cannot be read. Fix it on the server, or start a new one.", "code": "settings_file"})
 		return
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err)
@@ -448,7 +733,22 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg, "fields": res.Fields, "problems": problems})
 		return
 	}
+	if req.CheckOnly {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": nonNil(res.Changed), "confirm": confirmations(r, res)})
+		return
+	}
 	file := res.Config.SettingsFile()
+	backup := ""
+	if req.ResetAll {
+		// A file that cannot be read is kept next to the new one, so what
+		// it held can still be looked at.
+		if _, err := config.ReadPageSettings(file); err != nil {
+			if backup, err = config.BackUpPageFile(file); err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("could not keep a copy of the settings file before starting a new one: %w", err))
+				return
+			}
+		}
+	}
 	if err := config.WritePageSettings(file, res.Page); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("could not save the settings file %s: %w", file, err))
 		return
@@ -464,20 +764,17 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.audit(r, "settings saved", "changes", describeChanges(res), "reset", strings.Join(req.Reset, ","),
-		"cleared", strings.Join(req.Clear, ","), "reset_all", req.ResetAll, "applied_now", strings.Join(applied, ","),
-		"after_restart", strings.Join(restart, ","), "file", file)
+		"cleared", strings.Join(req.Clear, ","), "retried", strings.Join(req.Retry, ","), "reset_all", req.ResetAll,
+		"applied_now", strings.Join(applied, ","), "after_restart", strings.Join(restart, ","), "file", file, "backup", backup)
 	view, err := s.settingsView()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if applied == nil {
-		applied = []string{}
+	view["saved"], view["applied"], view["after_restart"] = nonNil(res.Changed), nonNil(applied), nonNil(restart)
+	if backup != "" {
+		view["backup"] = fullPath(backup)
 	}
-	if restart == nil {
-		restart = []string{}
-	}
-	view["saved"], view["applied"], view["after_restart"] = nonNil(res.Changed), applied, restart
 	writeJSON(w, http.StatusOK, view)
 }
 
@@ -489,12 +786,13 @@ func nonNil(list []string) []string {
 }
 
 // describeChanges lists what a save changed for the audit log: the new
-// values, but for secrets only that they changed.
+// values, but for secrets only that they changed, and addresses without
+// any password in them.
 func describeChanges(res *config.EditResult) string {
 	var parts []string
 	for _, k := range res.Changed {
 		set, _ := config.Lookup(k)
-		v := res.Config.Value(k)
+		v := shownValue(res.Config, k)
 		switch {
 		case set.Type == config.TypeSecret:
 			if s, _ := v.(string); s == "" {
@@ -514,26 +812,81 @@ func describeChanges(res *config.EditResult) string {
 // applyLive puts the saved settings that apply at once into use, and
 // returns their keys. A setting worked out from one that waits for a
 // restart waits too.
+//
+// A secret goes into use together with the settings that say where it is
+// sent (its SentWith), all as saved, and only when it is then sent to the
+// address it was saved for. Nothing applies at once while the server runs
+// without the page's settings (SettingsProblem): mixing some of them into
+// signalith.yaml's could send a secret somewhere else.
 func (s *Server) applyLive(res *config.EditResult) []string {
 	cur := s.conf()
+	if cur.SettingsProblem() != "" {
+		return nil
+	}
 	next := *cur
-	var applied []string
-	for _, key := range res.Changed {
+	live := func(key string) bool {
 		set, _ := config.Lookup(key)
 		if !set.Live() {
-			continue
+			return false
 		}
-		wait := false
 		for _, k := range set.WaitsFor {
-			wait = wait || !config.SameValue(cur, res.Config, k)
+			if !config.SameValue(cur, res.Config, k) {
+				return false
+			}
 		}
-		if wait {
+		return true
+	}
+	copyKeys := map[string]bool{}
+	for _, key := range res.Changed {
+		if live(key) {
+			copyKeys[key] = true
+		}
+	}
+	// A secret and where it is sent apply as one.
+	var groups [][]string
+	for i := range config.Registry {
+		set := &config.Registry[i]
+		if set.Type != config.TypeSecret || len(set.SentWith) == 0 {
 			continue
 		}
-		if err := next.CopyValue(key, res.Config); err != nil {
+		group := append([]string{set.Key}, set.SentWith...)
+		if !slices.ContainsFunc(group, func(k string) bool { return copyKeys[k] || slices.Contains(res.Changed, k) }) {
 			continue
 		}
-		applied = append(applied, key)
+		if slices.ContainsFunc(group, func(k string) bool { return !live(k) }) {
+			for _, k := range group {
+				delete(copyKeys, k)
+			}
+			continue
+		}
+		for _, k := range group {
+			copyKeys[k] = true
+		}
+		groups = append(groups, group)
+	}
+	for k := range copyKeys {
+		if err := next.CopyValue(k, res.Config); err != nil {
+			delete(copyKeys, k)
+		}
+	}
+	for _, group := range groups {
+		set, _ := config.Lookup(group[0])
+		secret, _ := next.Value(set.Key).(string)
+		if secret == "" || set.SentTo(&next) == set.SentTo(res.Config) {
+			continue
+		}
+		// It would go somewhere else: it waits for the restart.
+		for _, k := range group {
+			_ = next.CopyValue(k, cur)
+			delete(copyKeys, k)
+		}
+	}
+	var applied []string
+	for i := range config.Registry {
+		k := config.Registry[i].Key
+		if copyKeys[k] && !config.SameValue(cur, &next, k) {
+			applied = append(applied, k)
+		}
 	}
 	if len(applied) == 0 {
 		return nil
@@ -596,11 +949,19 @@ func (s *Server) testValues(r *http.Request, keys ...string) (*config.Config, ma
 			continue
 		}
 		v, err := config.ParseValue(set, raw)
+		if err == nil {
+			err = set.Check(v)
+		}
 		if err != nil {
 			fields[key] = sentence(err.Error())
 			continue
 		}
 		if set.Type == config.TypeSecret && v.(string) == "" && !typed[key] {
+			continue
+		}
+		// The page shows addresses without their password; one sent back
+		// as shown is the saved one.
+		if str, ok := v.(string); ok && urlKeys[key] && str == shownValue(saved.Config, key) {
 			continue
 		}
 		typed[key] = true
@@ -637,10 +998,26 @@ func writeFieldProblems(w http.ResponseWriter, fields map[string]string) {
 	writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Fix the settings marked below, then test again.", "fields": fields, "problems": []string{}})
 }
 
+// oneTest runs one connection test at a time: each can take a while and
+// read a large answer. It reports false, having answered 429, when
+// another is running.
+func (s *Server) oneTest(w http.ResponseWriter) (func(), bool) {
+	if !s.testMu.TryLock() {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"code": "busy",
+			"error": "Another connection test is running. Try again when it has finished."})
+		return nil, false
+	}
+	return s.testMu.Unlock, true
+}
+
+// openSearchTestKeys are the settings the OpenSearch test uses.
+var openSearchTestKeys = []string{"opensearch.url", "opensearch.username", "opensearch.password", "opensearch.ca_file",
+	"opensearch.cert_file", "opensearch.key_file", "opensearch.proxy", "opensearch.allow_insecure_http", "opensearch.tls_skip_verify"}
+
 // handleTestOpenSearch tries the OpenSearch connection settings in the
 // form, saved or not, and says what it found in plain words.
 func (s *Server) handleTestOpenSearch(w http.ResponseWriter, r *http.Request) {
-	c, fields, err := s.testValues(r, "opensearch.url", "opensearch.username", "opensearch.password", "opensearch.tls_skip_verify")
+	c, fields, err := s.testValues(r, openSearchTestKeys...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -648,15 +1025,27 @@ func (s *Server) handleTestOpenSearch(w http.ResponseWriter, r *http.Request) {
 	if len(fields) == 0 && config.Origin(c.OpenSearch.URL) == "" {
 		fields["opensearch.url"] = "Enter an address like https://opensearch.example.com:9200."
 	}
+	if len(fields) == 0 {
+		byKey, _ := config.FieldProblems(c, c.OpenSearchProblems())
+		for _, k := range openSearchTestKeys {
+			if byKey[k] != "" {
+				fields[k] = byKey[k]
+			}
+		}
+	}
 	if len(fields) > 0 {
 		writeFieldProblems(w, fields)
 		return
 	}
+	done, ok := s.oneTest(w)
+	if !ok {
+		return
+	}
+	defer done()
 	ctx, cancel := context.WithTimeout(r.Context(), store.CheckTimeout+5*time.Second)
 	defer cancel()
-	rep := store.Check(ctx, store.Config{URL: c.OpenSearch.URL, Username: c.OpenSearch.Username,
-		Password: c.OpenSearch.Password, TLSSkipVerify: c.OpenSearch.TLSSkipVerify})
-	s.audit(r, "settings tested", "what", "opensearch", "url", c.OpenSearch.URL, "username", c.OpenSearch.Username,
+	rep := store.Check(ctx, c.OpenSearchConnection())
+	s.audit(r, "settings tested", "what", "opensearch", "url", redact.URL(c.OpenSearch.URL), "username", c.OpenSearch.Username,
 		"ok", rep.OK, "problem", rep.Problem)
 	writeJSON(w, http.StatusOK, rep)
 }
@@ -695,7 +1084,7 @@ func (s *Server) handleTestAssistant(w http.ResponseWriter, r *http.Request) {
 		case a.URL != "" && config.Origin(a.URL) == "":
 			fields["assistant.url"] = "Enter an address like http://localhost:11434/v1, or leave it empty."
 		case a.Provider == assistant.OpenAI && a.Model == "":
-			fields["assistant.model"] = "Enter the model's name, such as llama3.1."
+			fields["assistant.model"] = "Enter the model's name: OpenAI or compatible needs one, such as llama3.1 with Ollama or gpt-4.1 with OpenAI."
 		case a.Provider == assistant.Anthropic && a.APIKey == "":
 			fields["assistant.api_key"] = "Enter the API key."
 		}
@@ -704,9 +1093,14 @@ func (s *Server) handleTestAssistant(w http.ResponseWriter, r *http.Request) {
 		writeFieldProblems(w, fields)
 		return
 	}
+	done, ok := s.oneTest(w)
+	if !ok {
+		return
+	}
+	defer done()
 	client := assistant.New(a.Provider, a.URL, a.Model, a.APIKey)
 	client.HTTP.Timeout = 45 * time.Second
-	rep := assistantReport{Provider: a.Provider, Model: client.Model, URL: client.URL, Question: assistantQuestion}
+	rep := assistantReport{Provider: a.Provider, Model: client.Model, URL: redact.URL(client.URL), Question: assistantQuestion}
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 	defer cancel()
@@ -718,7 +1112,7 @@ func (s *Server) handleTestAssistant(w http.ResponseWriter, r *http.Request) {
 		rep.OK, rep.Query = true, q
 		rep.Message = fmt.Sprintf("The model answered in %.1f seconds.", time.Since(start).Seconds())
 	}
-	s.audit(r, "settings tested", "what", "assistant", "provider", a.Provider, "url", client.URL, "model", client.Model, "ok", rep.OK)
+	s.audit(r, "settings tested", "what", "assistant", "provider", a.Provider, "url", redact.URL(client.URL), "model", client.Model, "ok", rep.OK)
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -748,14 +1142,29 @@ func sentence(s string) string {
 	return s
 }
 
+// restartRequest is the body of POST /api/settings/restart.
+type restartRequest struct {
+	// LocalOnly is the admin's yes to a web address that only the server
+	// itself can reach, asked from another computer.
+	LocalOnly bool `json:"local_only"`
+}
+
 // handleRestart restarts the server with the saved settings, shortly
 // after answering 202.
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	var req restartRequest
+	if r.ContentLength != 0 {
+		if err := readJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	if s.Restarter == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"code": "restart_unavailable",
 			"error": "This server cannot restart itself. Restart Signalith on the server to apply the changes."})
 		return
 	}
+	s.confirmMove(r)
 	saved, err := s.savedSettings()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -766,11 +1175,23 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	running := s.conf()
+	// Moving the web page to an address only the server itself can reach
+	// locks out whoever asks from elsewhere: they say yes first.
+	localOnly := running.Server.Listen != saved.Server.Listen && loopbackOnly(saved.Server.Listen) && !isLoopback(clientHost(r))
+	if localOnly && !req.LocalOnly {
+		writeJSON(w, http.StatusConflict, map[string]any{"code": "local_only", "listen": saved.Server.Listen,
+			"error": "After this restart only programs on the server itself can reach Signalith, at " + saved.Server.Listen +
+				". You could not open this page again from here."})
+		return
+	}
 	pending := pendingSettings(running, saved.Config)
-	if err := s.Restarter.Restart(userOf(r), clientIP(r)); err != nil {
+	if err := s.Restarter.Restart(userOf(r), clientIP(r), localOnly); err != nil {
 		code := "restart_failed"
-		if errors.Is(err, ErrRestarting) {
+		switch {
+		case errors.Is(err, ErrRestarting):
 			code = "restarting"
+		case errors.Is(err, ErrAwaitingMove):
+			code = "awaiting"
 		}
 		writeJSON(w, http.StatusConflict, map[string]any{"code": code, "error": sentence(err.Error())})
 		return
@@ -779,10 +1200,13 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	for _, p := range pending {
 		keys = append(keys, p.Key)
 	}
-	s.audit(r, "restart requested", "pending", strings.Join(keys, ","))
-	resp := map[string]any{"restarting": true, "pending": keys, "listen_changed": false}
+	s.audit(r, "restart requested", "pending", strings.Join(keys, ","), "local_only", localOnly)
+	resp := map[string]any{"restarting": true, "pending": keys, "listen_changed": false, "reachable": !localOnly}
 	if moved := newAddress(r, running, saved.Config); moved != "" {
 		resp["listen_changed"], resp["new_listen"], resp["go_to"] = true, saved.Server.Listen, moved
+		if !localOnly {
+			resp["confirm_within_s"] = int(MoveWait.Seconds())
+		}
 	}
 	writeJSON(w, http.StatusAccepted, resp)
 }
@@ -792,8 +1216,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 // now (or the new listen address's own host, when it listens on one
 // address only), with the new port and scheme.
 func newAddress(r *http.Request, running, saved *config.Config) string {
-	https := func(c *config.Config) bool { return c.Server.TLSCert != "" && c.Server.TLSKey != "" }
-	if running.Server.Listen == saved.Server.Listen && https(running) == https(saved) {
+	if !webMoves(running, saved) {
 		return ""
 	}
 	lhost, port, err := net.SplitHostPort(saved.Server.Listen)
@@ -813,10 +1236,10 @@ func newAddress(r *http.Request, running, saved *config.Config) string {
 		}
 	}
 	scheme := "http"
-	if https(saved) {
+	if httpsOn(saved) {
 		scheme = "https"
 	}
-	return scheme + "://" + net.JoinHostPort(host, port) + "/"
+	return webURL(scheme, host, port) + "/"
 }
 
 func isLoopback(host string) bool {
@@ -840,7 +1263,7 @@ func (s *Server) handleExportSettings(w http.ResponseWriter, r *http.Request) {
 	if len(saved.Problems) > 0 || saved.PageErr != nil {
 		c = s.conf()
 	}
-	text, err := exportSettings(c, s.conf().Server.PublicURL, time.Now())
+	text, err := exportSettings(c, redact.URL(s.conf().Server.PublicURL), time.Now())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -857,10 +1280,11 @@ func (s *Server) handleExportSettings(w http.ResponseWriter, r *http.Request) {
 
 // serverOwn are settings that belong to one server, marked in the export.
 var serverOwn = map[string]string{
-	"server.listen":     "this server's own address",
-	"server.public_url": "this server's own address",
-	"server.tls_cert":   "a file on this server",
-	"server.tls_key":    "a file on this server",
+	"server.listen":      "this server's own address",
+	"server.public_url":  "this server's own address",
+	"server.tls_cert":    "a file on this server",
+	"server.tls_key":     "a file on this server",
+	"opensearch.ca_file": "a file on this server", "opensearch.cert_file": "a file on this server", "opensearch.key_file": "a file on this server",
 }
 
 // exportSettings writes the page's settings of c as signalith.yaml
@@ -903,14 +1327,13 @@ func exportSection(b *strings.Builder, c *config.Config, settings []*config.Sett
 			fmt.Fprintf(b, "  # %s: left out; %s\n", name, hint)
 			continue
 		}
-		val := c.Value(set.Key)
-		// A public address worked out from the listen address is left
-		// empty, so the other server works out its own.
-		if set.Key == "server.public_url" && c.Source(set.Key).Kind == config.FromDefault {
-			val = ""
+		// An address with a password in it is left out like a password.
+		if s, _ := c.Value(set.Key).(string); urlKeys[set.Key] && s != "" && redact.URL(s) != s {
+			fmt.Fprintf(b, "  # %s: left out, as it holds a password; set it here\n", name)
+			continue
 		}
 		v := &yaml.Node{}
-		if err := v.Encode(val); err != nil {
+		if err := v.Encode(c.Value(set.Key)); err != nil {
 			return err
 		}
 		if v.Kind == yaml.SequenceNode {
@@ -927,4 +1350,16 @@ func exportSection(b *strings.Builder, c *config.Config, settings []*config.Sett
 		b.WriteString(line + "\n")
 	}
 	return nil
+}
+
+// fullPath is p from the root, as people on the server look for it; p
+// itself when it cannot be worked out.
+func fullPath(p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }

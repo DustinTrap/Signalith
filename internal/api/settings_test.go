@@ -42,23 +42,37 @@ func (b *logBuffer) String() string {
 
 // fakeRestarter records restarts instead of doing them.
 type fakeRestarter struct {
-	mu    sync.Mutex
-	calls []string
-	busy  bool
+	mu        sync.Mutex
+	calls     []string
+	localOnly []bool
+	busy      bool
+	awaiting  bool
+	confirms  int
 }
 
-func (f *fakeRestarter) Restart(by, client string) error {
+func (f *fakeRestarter) Restart(by, client string, localOnly bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.busy {
 		return ErrRestarting
 	}
+	if f.awaiting {
+		return ErrAwaitingMove
+	}
 	f.calls = append(f.calls, by)
+	f.localOnly = append(f.localOnly, localOnly)
 	return nil
 }
 
 func (f *fakeRestarter) RestartStatus() RestartStatus {
 	return RestartStatus{Last: &RestartResult{OK: false, Error: "OpenSearch did not answer", Keys: []string{"opensearch.url"}}}
+}
+
+func (f *fakeRestarter) Confirm(*http.Request) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.confirms++
+	return false
 }
 
 // newSettingsServer starts a server whose config is loaded from a
@@ -110,7 +124,8 @@ func TestSettingsRoutesAreAdminOnly(t *testing.T) {
 	ts, _, _ := newSettingsServer(t, "", nil)
 	for _, rt := range []struct{ method, path string }{
 		{"GET", "/api/settings"}, {"PUT", "/api/settings"}, {"POST", "/api/settings/test/opensearch"},
-		{"POST", "/api/settings/test/assistant"}, {"POST", "/api/settings/restart"}, {"GET", "/api/settings/export"},
+		{"POST", "/api/settings/test/assistant"}, {"POST", "/api/settings/restart"}, {"POST", "/api/settings/restart/confirm"},
+		{"GET", "/api/settings/export"},
 	} {
 		if code, out := doAs(t, ts, "andy", "role-password", rt.method, rt.path, "{}"); code != 403 || out["code"] != "forbidden" {
 			t.Errorf("analyst %s %s: %d %v", rt.method, rt.path, code, out)
@@ -524,20 +539,28 @@ func TestPublicURLWarning(t *testing.T) {
 		}
 		return c
 	}
+	cert, key := selfSigned(t)
+	tlsOn := "\n  tls_cert: " + cert + "\n  tls_key: " + key + "\n"
 	for _, c := range []struct {
-		yaml string
-		warn bool
+		yaml, warn, suggest string
 	}{
-		{"server:\n  listen: 0.0.0.0:9090\n", false},
-		{"server:\n  listen: 0.0.0.0:9090\n  public_url: http://siem.example.com:9090\n", false},
-		{"server:\n  listen: 0.0.0.0:9090\n  public_url: https://siem.example.com\n", true},
-		{"server:\n  listen: 0.0.0.0:443\n  public_url: https://siem.example.com\n", false},
-		{"server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n", true},
+		{"server:\n  listen: 0.0.0.0:9090\n", "", ""},
+		{"server:\n  listen: 0.0.0.0:9090\n  public_url: http://siem.example.com:9090\n", "", ""},
+		{"server:\n  listen: 0.0.0.0:9090\n  public_url: https://siem.example.com\n", "Agents are told to use https:// on port 443, but Signalith answers with http:// on port 9090.", "http://siem.example.com:9090"},
+		{"server:\n  listen: 0.0.0.0:443\n  public_url: https://siem.example.com\n", "Agents are told to use https://, but Signalith answers with http://.", "http://siem.example.com:443"},
+		{"server:\n  listen: 0.0.0.0:443\n  public_url: https://siem.example.com" + tlsOn, "", ""},
+		{"server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n", "Agents are told to use port 18740, but Signalith answers on port 18743.", "http://127.0.0.1:18743"},
+		// HTTPS turned on while the public address says http://, as
+		// signalith init writes it.
+		{"server:\n  listen: 127.0.0.1:18725\n  public_url: http://127.0.0.1:18725" + tlsOn, "Agents are told to use http://, but Signalith answers with https://.", "https://127.0.0.1:18725"},
 	} {
-		w := publicURLWarning(load(c.yaml))
-		if (w != "") != c.warn {
-			t.Errorf("%q: %q", c.yaml, w)
+		w, sg := publicURLWarning(load(c.yaml), false)
+		if !strings.HasPrefix(w, c.warn) || (c.warn == "") != (w == "") || sg != c.suggest {
+			t.Errorf("%q: %q, suggest %q", c.yaml, w, sg)
 		}
+	}
+	if w, _ := publicURLWarning(load("server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n"), true); !strings.Contains(w, "will answer on port 18743") {
+		t.Errorf("before the restart: %q", w)
 	}
 }
 
@@ -559,17 +582,23 @@ func TestBrokenSettingsFileOnThePage(t *testing.T) {
 	ts, _ := newTestServerWith(t, func(s *Server) { s.Config = cfg })
 	_, view := do(t, ts, "GET", "/api/settings", "", true)
 	sf := view["settings_file"].(map[string]any)
-	if !strings.Contains(view["startup_problem"].(string), "signalith settings reset") || !strings.Contains(sf["error"].(string), "Reset all settings") {
+	// The page words the problem; the file only says what is wrong with it.
+	if !strings.Contains(view["startup_problem"].(string), "signalith settings reset") || strings.Contains(sf["error"].(string), file) ||
+		sf["error"] != "It is not laid out as Signalith writes it (line 1)." || view["startup_file"] != true || sf["backup"] != file+".broken" {
 		t.Errorf("startup problem %q, file %v", view["startup_problem"], sf)
 	}
 	// Changes cannot be saved over it, but it can be reset as a whole.
 	if code, out := do(t, ts, "PUT", "/api/settings", `{"values":{"search.max_events":50}}`, true); code != 409 || out["code"] != "settings_file" {
 		t.Errorf("save over a broken file %d %v", code, out)
 	}
-	if code, out := do(t, ts, "PUT", "/api/settings", `{"reset_all":true}`, true); code != 200 {
+	if code, out := do(t, ts, "PUT", "/api/settings", `{"reset_all":true}`, true); code != 200 || out["backup"] != file+".broken" {
 		t.Errorf("reset all %d %v", code, out)
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Errorf("the broken file is still there: %v", err)
+	}
+	// What it held is kept next to it.
+	if data, err := os.ReadFile(file + ".broken"); err != nil || !strings.Contains(string(data), "not, a, map") {
+		t.Errorf("backup %q %v", data, err)
 	}
 }

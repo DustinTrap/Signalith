@@ -26,6 +26,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -55,7 +56,14 @@ type Config struct {
 	sections map[string]bool
 	// layers records where each setting's value came from.
 	layers *layers
+	// publicURLDerived is true when server.public_url was empty and
+	// Validate worked it out from the listen address.
+	publicURLDerived bool
 }
+
+// PublicURLDerived reports whether server.public_url was worked out from
+// the listen address, because it was empty.
+func (c *Config) PublicURLDerived() bool { return c.publicURLDerived }
 
 // layers records where the settings of a loaded config came from: the
 // environment, the Settings page (see pagefile.go), signalith.yaml or the
@@ -64,6 +72,7 @@ type layers struct {
 	file     map[string]bool       // keys set in signalith.yaml, such as "server.listen"
 	env      map[string]string     // keys set by an environment variable, and its name
 	page     map[string]*PageEntry // settings applied from the Settings page
+	refused  map[string]*PageEntry // settings from the page a restart set aside
 	pageFile string                // the Settings page's file
 	// pageFileEnv is true when SIGNALITH_SETTINGS_FILE named it.
 	pageFileEnv bool
@@ -71,8 +80,12 @@ type layers struct {
 	base     *Config
 	mismatch []secretMismatch
 	warnings []string
-	// problem says why the page's settings are not in use.
-	problem string
+	// problem says why the page's settings are not in use, problemKeys
+	// which of them were to blame (when known), and pageFileErr whether
+	// it was that their file could not be read.
+	problem     string
+	problemKeys []string
+	pageFileErr bool
 }
 
 // Server controls the web UI and API listener.
@@ -619,7 +632,19 @@ func (c *Config) HasSection(name string) bool { return c.sections[name] }
 // Settings from the page that cannot be used never stop Signalith: it
 // starts with signalith.yaml alone, and SettingsProblem says why.
 func Load(path string) (*Config, error) {
-	s, err := LoadSaved(path)
+	return loadWith(path, nil)
+}
+
+// LoadSetAside is Load with the settings keys, changed on the Settings
+// page, set aside for reason: they are not used, as after MarkRefused,
+// whether or not that could be saved.
+func LoadSetAside(path string, keys []string, reason string) (*Config, error) {
+	now := time.Now()
+	return loadWith(path, func(p *PageSettings) { p.refuse(keys, reason, now) })
+}
+
+func loadWith(path string, adjust func(*PageSettings)) (*Config, error) {
+	s, err := loadSaved(path, adjust)
 	if err != nil {
 		return nil, err
 	}
@@ -634,26 +659,51 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.layers.pageFileErr = s.PageErr != nil
 	if s.PageErr != nil {
 		c.layers.problem = fmt.Sprintf("The settings saved on the Settings page were not used, because %v. Signalith started with signalith.yaml alone. Fix the file, or remove it with: signalith settings reset", s.PageErr)
 	} else {
 		c.layers.problem = "The settings saved on the Settings page were not used, because with them: " + strings.Join(s.Problems, "; ") +
 			". Signalith started with signalith.yaml alone. Fix these settings on the Settings page, or remove them with: signalith settings reset"
+		for _, p := range s.Problems {
+			for _, k := range ProblemKeys(p) {
+				if s.Config.Source(k).Kind == FromPage && !slices.Contains(c.layers.problemKeys, k) {
+					c.layers.problemKeys = append(c.layers.problemKeys, k)
+				}
+			}
+		}
 	}
 	return c, nil
 }
 
 // LoadWithoutPage is LoadFile for a server that could not start with the
 // settings saved on the Settings page; reason says why, and SettingsProblem
-// reports it.
-func LoadWithoutPage(path, reason string) (*Config, error) {
+// reports it. keys are the settings to blame, when known.
+func LoadWithoutPage(path, reason string, keys []string) (*Config, error) {
 	c, err := LoadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	c.layers.problem = "The settings saved on the Settings page were not used, because " + reason +
 		". Signalith started with signalith.yaml alone. Fix these settings on the Settings page, or remove them with: signalith settings reset"
+	c.layers.problemKeys = keys
 	return c, nil
+}
+
+// SettingsProblemKeys lists the settings from the Settings page that kept
+// Signalith from starting with them, when SettingsProblem is set and it
+// is known which.
+func (c *Config) SettingsProblemKeys() []string {
+	if c.layers == nil || c.layers.problemKeys == nil {
+		return []string{}
+	}
+	return c.layers.problemKeys
+}
+
+// SettingsFileProblem reports whether SettingsProblem is that the
+// Settings page's file could not be read.
+func (c *Config) SettingsFileProblem() bool {
+	return c.layers != nil && c.layers.pageFileErr
 }
 
 // LoadFile is Load without the settings changed on the Settings page:
@@ -687,6 +737,10 @@ type Saved struct {
 
 // LoadSaved reads the configuration as saved, valid or not.
 func LoadSaved(path string) (*Saved, error) {
+	return loadSaved(path, nil)
+}
+
+func loadSaved(path string, adjust func(*PageSettings)) (*Saved, error) {
 	c, err := readAndEnv(path)
 	if err != nil {
 		return nil, err
@@ -694,6 +748,10 @@ func LoadSaved(path string) (*Saved, error) {
 	s := &Saved{}
 	page, perr := ReadPageSettings(c.SettingsFile())
 	if perr == nil {
+		if adjust != nil {
+			page = page.Clone()
+			adjust(page)
+		}
 		s.Page = page
 	}
 	cfg, err := build(path, page)
@@ -762,7 +820,7 @@ func readAndEnv(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
-	c.layers = &layers{file: map[string]bool{}, env: map[string]string{}, page: map[string]*PageEntry{}}
+	c.layers = &layers{file: map[string]bool{}, env: map[string]string{}, page: map[string]*PageEntry{}, refused: map[string]*PageEntry{}}
 	var top map[string]any
 	if yaml.Unmarshal(data, &top) == nil {
 		c.sections = make(map[string]bool, len(top))
@@ -935,8 +993,8 @@ func (c *Config) Validate() error {
 	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
 		p = append(p, "server.tls_cert and server.tls_key must be set together")
 	}
-	if c.Server.PublicURL == "" {
-		c.Server.PublicURL = defaultPublicURL(c.Server)
+	if c.Server.PublicURL == "" || c.publicURLDerived {
+		c.Server.PublicURL, c.publicURLDerived = defaultPublicURL(c.Server), true
 	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	}
@@ -1058,6 +1116,25 @@ func (c *Config) Warnings() []string {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
 	return w
+}
+
+// OpenSearchConnection returns the settings Signalith connects to
+// OpenSearch with.
+func (c *Config) OpenSearchConnection() store.Config {
+	ca, cert, key := c.OpenSearchTLSFiles()
+	return store.Config{
+		URL: c.OpenSearch.URL, Username: c.OpenSearch.Username, Password: c.OpenSearch.Password,
+		CAFile: ca, CertFile: cert, KeyFile: key,
+		TLSSkipVerify: c.OpenSearch.TLSSkipVerify, Proxy: c.OpenSearch.Proxy,
+	}
+}
+
+// OpenSearchProblems lists what is wrong with the OpenSearch connection
+// settings, as Validate words it.
+func (c *Config) OpenSearchProblems() []string {
+	o := c.OpenSearch
+	o.moveURLCredentials()
+	return o.problems(c.resolve)
 }
 
 // OpenSearchTLSFiles returns opensearch.ca_file, cert_file and key_file,

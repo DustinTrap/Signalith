@@ -113,6 +113,7 @@ type Server struct {
 	dirSlots     chan struct{}  // limits directory connections at once
 	background   sync.WaitGroup // directory checks still running
 	settingsMu   sync.Mutex     // serializes saves on the Settings page
+	testMu       sync.Mutex     // one connection test at a time
 	// live holds Config with the settings saved on the Settings page that
 	// apply at once, and liveAI the assistant they give.
 	live   atomic.Pointer[config.Config]

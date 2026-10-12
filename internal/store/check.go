@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/redact"
 )
 
 // Report is what a connection test found, in plain words.
@@ -38,6 +40,10 @@ type Report struct {
 // CheckTimeout bounds a connection test.
 const CheckTimeout = 10 * time.Second
 
+// checkMaxResponse caps each answer a connection test reads: OpenSearch's
+// own are a few hundred bytes.
+const checkMaxResponse = 1 << 20
+
 // Check connects to OpenSearch with cfg and reports what it found: whether
 // it answered, the cluster's name, version and health, or what went wrong
 // and how to fix it.
@@ -46,7 +52,8 @@ func Check(ctx context.Context, cfg Config) Report {
 	if cfg.Timeout == 0 || cfg.Timeout > CheckTimeout {
 		cfg.Timeout = CheckTimeout
 	}
-	rep := Report{URL: cfg.URL}
+	cfg.MaxResponseBytes = checkMaxResponse
+	rep := Report{URL: redact.URL(cfg.URL)}
 	defer func() { rep.TookMS = time.Since(start).Milliseconds() }()
 	c := New(cfg)
 	var root struct {
@@ -60,6 +67,10 @@ func Check(ctx context.Context, cfg Config) Report {
 	err := c.Do(ctx, http.MethodGet, "/", nil, &root)
 	var se *Error
 	switch {
+	case errors.Is(err, ErrResponseTooLarge):
+		rep.Reached, rep.Problem = true, "not_opensearch"
+		rep.Message = fmt.Sprintf("Something answered at %s with far more than OpenSearch would, so it is not OpenSearch. Check the address and port.", redact.URL(cfg.URL))
+		return rep
 	case errors.As(err, &se) && se.Status == http.StatusForbidden:
 		// A user limited to Signalith's indices may not read the root;
 		// cluster health below tells whether it signed in.
@@ -68,12 +79,17 @@ func Check(ctx context.Context, cfg Config) Report {
 		return rep
 	case root.Version.Number == "":
 		rep.Reached, rep.Problem = true, "not_opensearch"
-		rep.Message = fmt.Sprintf("Something answered at %s, but it is not OpenSearch. Check the address and port.", cfg.URL)
+		rep.Message = fmt.Sprintf("Something answered at %s, but it is not OpenSearch. Check the address and port.", redact.URL(cfg.URL))
 		return rep
 	}
 	rep.Reached = true
 	rep.ClusterName, rep.Version, rep.Distribution = root.ClusterName, root.Version.Number, root.Version.Distribution
 	health, err := c.Health(ctx)
+	if errors.Is(err, ErrResponseTooLarge) {
+		rep.Problem = "not_opensearch"
+		rep.Message = fmt.Sprintf("Something answered at %s with far more than OpenSearch would, so it is not OpenSearch. Check the address and port.", redact.URL(cfg.URL))
+		return rep
+	}
 	if err != nil {
 		explainCheck(&rep, cfg, err)
 		return rep
@@ -95,7 +111,7 @@ func Check(ctx context.Context, cfg Config) Report {
 // explainCheck words a failed connection test.
 func explainCheck(rep *Report, cfg Config, err error) {
 	u, _ := url.Parse(cfg.URL)
-	host := cfg.URL
+	host := redact.URL(cfg.URL)
 	if u != nil && u.Host != "" {
 		host = u.Host
 	}

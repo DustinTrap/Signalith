@@ -25,8 +25,10 @@ type Edit struct {
 	// ResetAll takes every setting off the page, even when the page's
 	// file cannot be read.
 	ResetAll bool
-	By       string
-	At       time.Time
+	// Retry lists changes a restart set aside, to use again.
+	Retry []string
+	By    string
+	At    time.Time
 }
 
 // EditResult is an edit checked against the whole configuration.
@@ -101,6 +103,10 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 			continue
 		}
 		touched[key] = true
+		if e := page.Settings[key]; e != nil && e.Refused != "" {
+			// A change set aside by a restart is replaced by this one.
+			page.Remove(key)
+		}
 		if s.Type == TypeSecret {
 			if v.(string) != "" {
 				typed[key] = v.(string)
@@ -137,6 +143,16 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		delete(typed, key)
 		page.Remove(key)
 	}
+	for _, key := range e.Retry {
+		if _, ok := Lookup(key); !ok {
+			res.Fields[key] = notOnPage(key)
+			continue
+		}
+		if en := page.Settings[key]; en != nil && en.Refused != "" {
+			touched[key] = true
+			en.Refused, en.RefusedAt, en.CheckedAt = "", time.Time{}, time.Time{}
+		}
+	}
 	if e.ResetAll {
 		for _, s := range Registry {
 			touched[s.Key] = true
@@ -159,9 +175,11 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		return nil, err
 	}
 	res.Page, res.Config = page, after
-	for _, p := range problemsOf(after) {
-		res.addProblem(p)
+	fields, rest := FieldProblems(after, problemsOf(after))
+	for _, k := range sortedKeys(fields) {
+		res.setField(k, fields[k])
 	}
+	res.Problems = append(res.Problems, rest...)
 	if touched["server.tls_cert"] || touched["server.tls_key"] {
 		if c, k := after.Server.TLSCert, after.Server.TLSKey; c != "" && k != "" {
 			if _, err := tls.LoadX509KeyPair(c, k); err != nil {
@@ -201,19 +219,39 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 	return res, nil
 }
 
-// addProblem puts a validation problem at the fields it is about, or in
-// the general list when it is about none on the page.
-func (r *EditResult) addProblem(p string) {
-	placed := false
-	for _, k := range ProblemKeys(p) {
-		if _, ok := Lookup(k); ok {
-			r.setField(k, PlainProblem(k, p))
-			placed = true
+// FieldProblems sorts the problems of c, as Validate words them, by the
+// setting on the page they are about, worded for its field, and returns
+// the rest, which are about settings that are not on the page.
+func FieldProblems(c *Config, problems []string) (map[string]string, []string) {
+	fields := map[string]string{}
+	if len(problems) == 0 {
+		return fields, nil
+	}
+	for i := range Registry {
+		s := &Registry[i]
+		if s.problem == nil {
+			continue
+		}
+		if msg := s.problem(c); msg != "" {
+			fields[s.Key] = msg
 		}
 	}
-	if !placed {
-		r.Problems = append(r.Problems, p)
+	var rest []string
+	for _, p := range problems {
+		placed := false
+		for _, k := range ProblemKeys(p) {
+			if _, ok := Lookup(k); ok {
+				if _, dup := fields[k]; !dup {
+					fields[k] = PlainProblem(k, p)
+				}
+				placed = true
+			}
+		}
+		if !placed {
+			rest = append(rest, p)
+		}
 	}
+	return fields, rest
 }
 
 // setField records a field's problem; the first one stays.

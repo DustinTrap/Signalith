@@ -225,12 +225,19 @@ the detection scheduler and the AI assistant. Each one shows where its value com
 from; an environment variable wins over the page, which wins over `signalith.yaml`.
 Some apply at once; for the rest, the page restarts Signalith inside the same process,
 after checking that the new web address can be listened on and that OpenSearch
-answers, so a typo cannot lock you out, and people stay signed in. Changes are kept in
+answers, and people stay signed in. A move of the web address goes back by itself
+when nobody reaches the new one within 2 minutes, which makes a lockout unlikely,
+though a firewall or proxy in between can still cause one. Changes are kept in
 `settings.yaml` in the lookups folder (`SIGNALITH_SETTINGS_FILE` moves it), never in
 `signalith.yaml`. Passwords and keys are never shown, and are only sent to the address
 they were entered for. If a change goes wrong, `signalith settings list` shows what
 was changed on the page and `signalith settings reset [setting...]` undoes it; then
-restart the service. See [docs/settings.md](docs/settings.md).
+restart the service. The Linux service keeps the file in `/var/lib/signalith/lookups`:
+give it with `-file /var/lib/signalith/lookups/settings.yaml`. See
+[docs/settings.md](docs/settings.md).
+
+Behind a reverse proxy that serves HTTPS, have it send `X-Forwarded-Proto: https`, so
+the sign-in cookie is marked for HTTPS only.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

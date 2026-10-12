@@ -3028,6 +3028,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-settings .st-alerts .alert { overflow-wrap: anywhere; }
 #page-settings .st-alerts .dx-alert__body { min-width: 0; display: grid; gap: 4px; }
 #page-settings .st-alert-actions { margin-top: 6px; }
+#page-settings .st-alert-more { display: grid; gap: 4px; }
+#page-settings .st-alert-more .mono { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 #page-settings .st-layout { display: grid; grid-template-columns: var(--st-nav-w) minmax(0, var(--st-main-w)); gap: var(--sp-6); align-items: start; }
 #page-settings .st-main { display: grid; gap: var(--sp-4); min-width: 0; }
 
@@ -3086,10 +3088,17 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-settings .st-source--env > span { min-width: 0; }
 #page-settings .st-source--env .icon { margin-top: 3px; }
 #page-settings .st-source--pending { color: var(--warning); }
+#page-settings .st-source--refused { color: var(--warning); }
+#page-settings .st-source--refused .icon { align-self: flex-start; margin-top: 3px; }
+#page-settings .st-source--refused .mono { font-size: var(--fs-xs); overflow-wrap: anywhere; }
 #page-settings .st-dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: .6; }
 #page-settings .st-hint { font-size: var(--fs-sm); color: var(--text-3); line-height: 1.45; overflow-wrap: anywhere; }
 #page-settings .st-warn { display: flex; align-items: flex-start; gap: 6px; font-size: var(--fs-sm); color: var(--warning); line-height: 1.45; }
 #page-settings .st-warn .icon { width: 14px; height: 14px; margin-top: 2px; flex: none; }
+#page-settings .st-warn__body { display: grid; gap: 8px; justify-items: start; min-width: 0; }
+/* "Use http://…": the address can be long, so it is cut at the end */
+#page-settings .st-use { max-width: 100%; min-width: 0; }
+#page-settings .st-use .mono { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
 #page-settings .field-error { align-items: flex-start; line-height: 1.45; }
 #page-settings .field-error .icon { margin-top: 2px; }
 
@@ -3203,6 +3212,8 @@ body:has(#page-settings.active .st-savebar:not([hidden])) #toast { bottom: 88px;
 .st-dialog .st-confirm__what b { font-weight: 600; }
 .st-dialog .st-confirm__change .mono { font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .st-dialog .st-confirm__item p { color: var(--text-2); line-height: 1.5; }
+.st-dialog .st-confirm__also { align-items: flex-start; margin-top: 2px; color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.st-dialog .st-confirm__also input { margin-top: 3px; flex: none; accent-color: var(--accent-fill); }
 
 #page-settings .st-skel .st-field__text { gap: 8px; }
 
@@ -3211,8 +3222,20 @@ body:has(#page-settings.active .st-savebar:not([hidden])) #toast { bottom: 88px;
   #page-settings .st-layout { gap: var(--sp-5); }
 }
 @media (max-width: 720px) {
-  #page-settings .st-layout { grid-template-columns: minmax(0, 1fr); }
-  #page-settings .st-nav { display: none; }
+  #page-settings .st-layout { grid-template-columns: minmax(0, 1fr); gap: var(--sp-3); }
+  /* the sections become a row of chips under the top bar, scrolled sideways */
+  #page-settings .st-nav {
+    z-index: 7; top: var(--topbar-h); margin: 0 calc(-1 * var(--sp-4)); padding: 8px var(--sp-4);
+    background: var(--sheet); box-shadow: inset 0 -1px 0 var(--line-subtle);
+    overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none;
+  }
+  #page-settings .st-nav::-webkit-scrollbar { display: none; }
+  #page-settings .st-nav__list { display: flex; gap: 6px; width: max-content; }
+  #page-settings .st-nav__item { width: auto; height: var(--h-md); padding: 0 12px; border-radius: var(--r-full); background: var(--chip-bg); font-size: var(--fs-sm); }
+  #page-settings .st-nav__item[aria-current="true"] { background: var(--accent-soft-2); color: var(--accent); }
+  #page-settings .st-nav__item[aria-current="true"]::before { display: none; }
+  #page-settings .st-nav__mark:not([data-state="changed"], [data-state="problem"]) { display: none; }
+  #page-settings .st-card { scroll-margin-top: calc(var(--topbar-h) + 60px); }
   #page-settings .st-card__head, #page-settings .st-field, #page-settings .st-test, #page-settings .st-about__body { padding-left: 16px; padding-right: 16px; }
   #page-settings .st-banner { flex-wrap: wrap; }
   #page-settings .st-banner__actions { width: 100%; padding-left: 28px; }

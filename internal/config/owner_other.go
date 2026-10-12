@@ -13,11 +13,12 @@ type fileOwner struct {
 	ok       bool
 }
 
-// ownerOf returns the owner of the first of paths that exists.
+// ownerOf returns the owner of the first of paths that exists. A link is
+// skipped: its owner says nothing about who should own the file.
 func ownerOf(paths ...string) fileOwner {
 	for _, p := range paths {
-		fi, err := os.Stat(p)
-		if err != nil {
+		fi, err := os.Lstat(p)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
 		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
@@ -27,11 +28,14 @@ func ownerOf(paths ...string) fileOwner {
 	return fileOwner{}
 }
 
-// apply gives path to the owner, when running as root: the command line
-// is often run with sudo while the service runs as its own account,
-// which must still be able to read the file.
-func (o fileOwner) apply(path string) {
+// apply gives the new file f to the owner, when running as root: the
+// command line is often run with sudo while the service runs as its own
+// account, which must still be able to read the file. It works on the
+// open file, before it is renamed into place, so nothing can swap the
+// path for a link to another file in between.
+func (o fileOwner) apply(f *os.File) error {
 	if o.ok && os.Geteuid() == 0 {
-		_ = os.Chown(path, o.uid, o.gid)
+		return f.Chown(o.uid, o.gid)
 	}
+	return nil
 }

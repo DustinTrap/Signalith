@@ -33,6 +33,9 @@ Environment=SIGNALITH_ARCHIVE_DIR=/var/lib/signalith/archive
 # ReadWritePaths=/mnt/archive/signalith
 # The archive CLI does not see these variables; give it the folder:
 #   sudo -u signalith signalith archive list -c /etc/signalith/signalith.yaml -dir /var/lib/signalith/archive
+# Nor do the settings and validate commands; give them the Settings
+# page's file, for example to undo a change that locks people out:
+#   sudo signalith settings reset -c /etc/signalith/signalith.yaml -file /var/lib/signalith/lookups/settings.yaml server.listen
 
 [Install]
 WantedBy=multi-user.target

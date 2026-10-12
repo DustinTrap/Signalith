@@ -41,6 +41,14 @@ type PageEntry struct {
 	SentTo    string    `yaml:"sent_to,omitempty"`
 	ChangedBy string    `yaml:"changed_by,omitempty"`
 	ChangedAt time.Time `yaml:"changed_at,omitempty"`
+	// Refused says why a restart did not use this change, which is then
+	// set aside: Signalith does not use it, not even when it next starts,
+	// until it is saved again on the page.
+	Refused   string    `yaml:"refused,omitempty"`
+	RefusedAt time.Time `yaml:"refused_at,omitempty"`
+	// CheckedAt is when Signalith last started with this change after
+	// checking it; zero for one saved since, with no restart yet.
+	CheckedAt time.Time `yaml:"checked_at,omitempty"`
 }
 
 const pageFileHeader = `# Settings changed on the Settings page of Signalith. They override
@@ -126,6 +134,76 @@ func (p *PageSettings) Remove(key string) bool {
 	return true
 }
 
+// refuse sets the changes to keys aside, for reason. It returns the keys
+// it set aside: those changed on the page and not set aside already.
+func (p *PageSettings) refuse(keys []string, reason string, at time.Time) []string {
+	var out []string
+	for _, k := range keys {
+		if e := p.Settings[k]; e != nil && e.Refused == "" {
+			e.Refused, e.RefusedAt = reason, at.UTC()
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// MarkRefused sets the changes made on the Settings page to keys aside in
+// the settings file, for reason, so they are not used again, not even at
+// the next start, until they are saved again on the page. It returns the
+// keys it set aside.
+func MarkRefused(path string, keys []string, reason string) ([]string, error) {
+	p, err := ReadPageSettings(path)
+	if err != nil {
+		return nil, err
+	}
+	marked := p.refuse(keys, reason, time.Now())
+	if len(marked) == 0 {
+		return nil, nil
+	}
+	return marked, WritePageSettings(path, p)
+}
+
+// MarkChecked records in the settings file that Signalith started with the
+// changes to keys after checking them, as a restart does.
+func MarkChecked(path string, keys []string) error {
+	p, err := ReadPageSettings(path)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	changed := false
+	for _, k := range keys {
+		if e := p.Settings[k]; e != nil && e.Refused == "" && e.CheckedAt.IsZero() {
+			e.CheckedAt, changed = now, true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return WritePageSettings(path, p)
+}
+
+// PageChecked reports whether the change to key made on the Settings page
+// was checked by a restart, or Signalith started with it after checking.
+func (c *Config) PageChecked(key string) bool {
+	if c.layers == nil {
+		return false
+	}
+	e := c.layers.page[key]
+	return e != nil && !e.CheckedAt.IsZero()
+}
+
+// BackUpPageFile moves a settings file that cannot be read out of the way,
+// to settings.yaml.broken next to it, before a new one is started, so
+// what it held can still be looked at. It returns the backup's path.
+func BackUpPageFile(path string) (string, error) {
+	backup := path + ".broken"
+	if err := os.Rename(path, backup); err != nil {
+		return "", err
+	}
+	return backup, nil
+}
+
 // PageFileError is a settings file that cannot be read.
 type PageFileError struct {
 	Path string
@@ -185,11 +263,7 @@ func WritePageSettings(path string, p *PageSettings) error {
 	// folder, so "sudo signalith settings reset" does not leave a file the
 	// service cannot read.
 	owner := ownerOf(path, filepath.Dir(path))
-	if err := users.WriteFileAtomic(path, buf.Bytes()); err != nil {
-		return err
-	}
-	owner.apply(path)
-	return nil
+	return users.WriteFileAtomicWith(path, buf.Bytes(), owner.apply)
 }
 
 // secretMismatch is a secret that is not used because the address it
@@ -214,6 +288,10 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 			continue
 		}
 		if l.env[key] != "" {
+			continue
+		}
+		if e.Refused != "" {
+			l.refused[key] = e
 			continue
 		}
 		if s.Type == TypeSecret {
@@ -316,6 +394,40 @@ func (c *Config) Source(key string) Source {
 		return Source{Kind: FromFile}
 	}
 	return Source{Kind: FromDefault}
+}
+
+// RefusedSetting is a change saved on the Settings page that a restart
+// set aside, and why.
+type RefusedSetting struct {
+	Key string `json:"key"`
+	// Value is the value set aside; nil for a secret.
+	Value  any       `json:"value"`
+	Reason string    `json:"reason"`
+	At     time.Time `json:"at"`
+	By     string    `json:"by,omitempty"`
+}
+
+// Refused lists the changes made on the Settings page that a restart set
+// aside, in page order.
+func (c *Config) Refused() []RefusedSetting {
+	out := []RefusedSetting{}
+	if c.layers == nil {
+		return out
+	}
+	for _, key := range sortedKeys(c.layers.refused) {
+		e := c.layers.refused[key]
+		r := RefusedSetting{Key: key, Reason: e.Refused, At: e.RefusedAt, By: e.ChangedBy}
+		if s, ok := Lookup(key); ok && s.Type != TypeSecret {
+			if f, ok := field(&Config{}, key); ok {
+				nv := reflect.New(f.Type())
+				if e.Value.Decode(nv.Interface()) == nil {
+					r.Value = nv.Elem().Interface()
+				}
+			}
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // PageKeys lists the settings whose value comes from the Settings page.

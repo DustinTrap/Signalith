@@ -805,7 +805,7 @@ async function toggleField(f) {
   box.setAttribute('aria-busy', 'true');
   box.replaceChildren(...[desc, ...[72, 54, 38].map((w) => el('div', { class: 'fv fv--skeleton' }, el('span', { class: 'skeleton', style: `width:${w}%` })))].filter(Boolean));
   try {
-    const q = new URLSearchParams({ field: f.name, datamodel: currentDatamodel(), earliest: $('time').value === '0' ? '' : $('time').value });
+    const q = new URLSearchParams({ field: f.name, datamodel: currentDatamodel(), earliest: timeEarliest() });
     const rows = await api('api/fields/values?' + q);
     if (openField !== f.name) return;
     const total = rows.reduce((s, r) => s + (Number(r.count) || 0), 0) || 1;
@@ -1066,7 +1066,10 @@ function clearQueryError() {
 // ones the result has), an events-over-time histogram and the table.
 let searchSeq = 0;
 let lastSearch = null; // { query, earliest, res, tab, events, eventsQuery }
-const timeEarliest = () => ($('time').value === '0' ? '' : $('time').value);
+// timeEarliest is the time picker's range for the server: "0" for All
+// time, which the default time range set on the Settings page never
+// replaces (it fills in only an empty one).
+const timeEarliest = () => $('time').value;
 
 async function runSearch() {
   const query = queryBox.value.trim() || '*';
@@ -1500,7 +1503,7 @@ async function loadHistogram(seq, query, earliest) {
   let res;
   try {
     res = await fetchHist(ownTime ? '' : HIST_SPAN[$('time').value] || '1d');
-    if (!ownTime && !earliest && (res.rows || []).length < 3) res = await fetchHist('1h');
+    if (!ownTime && earliest === '0' && (res.rows || []).length < 3) res = await fetchHist('1h');
   } catch (_) {
     if (seq === searchSeq) hideHistogram();
     return;
@@ -3189,7 +3192,15 @@ function healthPageError(e) {
     saved = localStorage.getItem('signalith.query');
     savedTime = localStorage.getItem('signalith.time');
   } catch (_) { /* ignore */ }
-  if (savedTime) $('time').value = savedTime;
+  if (savedTime) {
+    $('time').value = savedTime;
+  } else {
+    // Until someone picks a range, the Search page starts with the
+    // default time range set on the Settings page.
+    const m = await meReady;
+    const d = m && m.search_default_earliest != null ? (m.search_default_earliest || '0') : '';
+    if (d && [...$('time').options].some((o) => o.value === d)) $('time').value = d;
+  }
   if (saved) setQuery(saved);
   updateBuilderVisibility();
   loadFields();

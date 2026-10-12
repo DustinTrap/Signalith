@@ -17,17 +17,19 @@ answers them `403`.
 
 The page has one card per section (General, Web server, OpenSearch, Search,
 Syslog, Detections, AI assistant, Threat intel) and **About this server**. On a
-wide screen a list of the sections stays on the left; on a phone the cards
-follow one another.
+wide screen a list of the sections stays on the left; on a phone the sections
+are a row of buttons under the top bar that scrolls sideways.
 
-Each setting has its name, what it does, and a quiet note on where its value
-comes from:
+Each setting has its name and what it does. A setting with no note comes from
+`signalith.yaml` or the built-in default (an empty box shows what empty means,
+such as "When empty: 12h"); the page says so once, at the top. A note shows only
+when it tells you something:
 
-- **From signalith.yaml**, or nothing for a built-in default (an empty box shows
-  what empty means, such as "When empty: 12h").
 - **Changed here by ann, 2h ago**, with **Reset** to take it off the page.
 - A lock and **Set by SIGNALITH_…** when an environment variable sets it. The box
   cannot be changed; change the variable where Signalith's environment is set.
+- **Set aside**, when a restart could not use a change (see below), with why,
+  **Try it again** and **Remove**.
 
 Changes wait until you save them. A bar at the bottom says how many are not
 saved yet, with **Discard** and **Save changes**; leaving the page or closing the
@@ -36,12 +38,20 @@ saved: each setting with a problem says what is wrong, and the cursor moves to
 the first one.
 
 Changes that are hard to undo ask before they are saved, and say what will happen:
-a new listen address, OpenSearch address or index prefix, skipping OpenSearch's
-certificate check, turning the detection scheduler off, and allowing threat intel
-feeds from this computer.
+a new listen address, OpenSearch address or index prefix, turning HTTPS on or off,
+skipping OpenSearch's certificate check, turning the detection scheduler off, and
+allowing threat intel feeds from this computer. The server checks the changes
+first, so you are only asked about changes that can be saved. When the listen
+port or HTTPS changes and the public address still names the old one, the same
+question offers to change the public address too, since agents send there. A
+listen address on `127.0.0.1` chosen from another computer says plainly that you
+could not open the page again from there.
 
 The public address may be left empty: it is then worked out from the listen
-address, and the page shows what it works out to.
+address, and the page shows what it works out to. When it is set and does not
+match how Signalith answers (`http://` while it serves HTTPS, or another port),
+the page warns and offers the matching address with one click. That is right
+only behind a proxy or a port forward.
 
 Turning syslog on is two settings in the **Syslog** card (UDP and TCP address,
 such as `0.0.0.0:514`), then a restart. The **Add data** page's syslog steps send
@@ -56,10 +66,12 @@ Docker), never to `signalith.yaml`, which is often read-only. Set
 `SIGNALITH_SETTINGS_FILE` to keep it somewhere else.
 
 The file holds only the settings changed on the page, each with who changed it and
-when. Signalith rewrites it whole on every save, through a temporary file and a
-rename, readable only by its own account (mode 0600), since it can hold passwords
-and API keys. When `signalith settings reset` runs as root, the file keeps the
-owner it had, so the service can still read it.
+when, when a restart last checked it (`checked_at`), and for a change a restart set
+aside, why (`refused`). Signalith rewrites it whole on every save, through a
+temporary file and a rename, readable only by its own account (mode 0600), since it
+can hold passwords and API keys. When `signalith settings reset` runs as root, the
+new file is given the owner the old one had before it is put in place, so the
+service can still read it.
 
 ```yaml
 settings:
@@ -67,6 +79,13 @@ settings:
     value: siem2
     changed_by: ann
     changed_at: 2026-10-12T18:52:32Z
+    checked_at: 2026-10-12T18:53:02Z
+  server.listen:
+    value: 0.0.0.0:443
+    changed_by: ann
+    changed_at: 2026-10-12T18:55:10Z
+    refused: "Signalith cannot listen on 0.0.0.0:443 (bind: permission denied). Signalith kept running with the previous settings. Choose another address or port."
+    refused_at: 2026-10-12T18:55:12Z
   opensearch.password:
     secret: the-password
     sent_to: https://opensearch.corp.example:9200
@@ -99,8 +118,11 @@ The others are saved and wait for a restart. A banner at the top of the page
 names what is waiting (**What changes** lists the value in use and the saved
 one) and has a **Restart now** button. While Signalith restarts, the banner
 shows its progress; the page reloads when Signalith is back, or moves to the new
-address when the web address changed, and you stay signed in. If the new
-settings cannot work, the banner says why and what to change. Signalith restarts
+address when the web address or HTTPS changed, and you stay signed in (unless
+HTTPS was turned on or off: browsers keep sign-ins over `http://` and `https://`
+apart, so you sign in again there). If the new settings cannot work, the banner
+says why, with a link to the setting to change, and **Try again** is no longer
+the main button until something changes. Signalith restarts
 itself inside the same process: it stops its components (web handlers, OpenSearch
 client, syslog receiver, detection scheduler, feed downloader and the rest) and
 builds them again from the saved settings. This works the same under Docker,
@@ -109,41 +131,96 @@ arrive during the few milliseconds of the switch wait for it.
 
 ### Protection against locking yourself out
 
+The page makes it hard to lock yourself out, though not impossible: a firewall
+or a proxy between you and Signalith can still make a working address
+unreachable. Keep shell access to the server for the steps below.
+
 Before anything stops, a restart checks that the new settings can work:
 
-- the new web address can be listened on;
+- data retention is not deleting, archiving or restoring days right now;
+- the files and folders Signalith reads can be read (users, directory sign-in,
+  detections, dashboards);
 - the certificate and key files load;
-- OpenSearch answers with the new address, username and password (within 10
-  seconds);
-- new syslog addresses can be listened on.
+- OpenSearch answers with the new connection settings (within 10 seconds);
+- the new web address and syslog addresses can be listened on.
 
 If one of these fails, nothing changes: Signalith keeps running with the settings
-in use, and the page says what failed and what to change. If the new components then
-fail to start anyway, Signalith goes back to the previous settings and says so.
+in use, and the page says what failed. A change that caused it is **set aside**:
+it stays in the settings file, marked with why, but is not used, not even when
+Signalith next starts, until you **Try it again**, change it or **Remove** it. The
+other changes can then be applied with **Restart now**. If the new
+components then fail to start anyway, Signalith goes back to the previous
+settings, sets the changes aside, and says so. If even the previous settings
+cannot start, the web page stays up to say so, and Signalith tries again every
+30 seconds.
 
-When the web address moves, the old address keeps answering for 30 seconds, so the
-page there can send you to the new one. Check the **public address** too: agents
-are told to send there, and the page warns when its port is not the one Signalith
-listens on (right only behind a proxy or a port forward).
+When the web address or HTTPS changes, the page moves to the new address, and
+Signalith waits up to 2 minutes for an admin to open a page there. If nobody
+does (the new address cannot be reached from your computer, or a firewall blocks
+it), Signalith goes back to the previous address by itself and sets the change
+aside. For a move to another port, the old address keeps answering until then.
+A listen address on `127.0.0.1` saved from another computer asks once more
+before the restart, and is then kept, since only the server can reach it.
 
 Settings saved on the page never keep Signalith from starting. If the settings
 file cannot be read, or Signalith cannot start with the settings in it (for
-example, the saved web address is taken), it starts with `signalith.yaml` alone,
-logs why, and shows it at the top of the Settings page and in
-`signalith validate`.
+example, the saved web address is taken) but can with `signalith.yaml` alone, it
+starts with `signalith.yaml` alone, logs why, and shows it at the top of the
+Settings page, on the setting to blame, and in `signalith validate`. An
+OpenSearch connection saved on the page but not checked by a restart yet is
+checked when Signalith starts: if OpenSearch answers with the settings in
+`signalith.yaml` but not with the page's, those are set aside.
 
 ### If you are locked out anyway
 
-On the server:
+On the server, with the file the service uses. On Linux, the service's unit
+points the lookups folder at `/var/lib/signalith`, which a shell does not know,
+so give the file with `-file`:
 
 ```
-signalith settings list               # what was changed on the page, by whom and when
+sudo signalith settings list  -c /etc/signalith/signalith.yaml -file /var/lib/signalith/lookups/settings.yaml
+sudo signalith settings reset -c /etc/signalith/signalith.yaml -file /var/lib/signalith/lookups/settings.yaml server.listen
+sudo signalith settings reset -c /etc/signalith/signalith.yaml -file /var/lib/signalith/lookups/settings.yaml   # every change
+sudo systemctl restart signalith
+```
+
+`list` shows what was changed on the page, by whom and when, and what was set
+aside. Passwords and keys are never printed. When there is no settings file
+where the command looks, it says so and names the service's file if it finds
+one; it never claims to have reset anything. A file that cannot be read is kept
+as `settings.yaml.broken` when `reset` starts a new one. `signalith validate`
+takes `-file` too.
+
+On Windows (PowerShell as administrator):
+
+```
 signalith settings reset server.listen
-signalith settings reset              # every change made on the page
+Restart-Service Signalith
 ```
 
-then restart the service (`systemctl restart signalith`, `Restart-Service Signalith`
-or `docker compose restart signalith`). Passwords and keys are never printed.
+In Docker, see below.
+
+## Docker
+
+In the quick start (`deploy/docker/docker-compose.yml`), `signalith.yaml` is
+mounted read-only, and the page keeps its changes in the `signalith-data` volume.
+
+- Settings set in the compose file's `environment:` (the listen address, the
+  OpenSearch address, the admin password and agent token, and the public address
+  when you set it there) are locked on the page. Change them in
+  `docker-compose.yml`, then `docker compose -f deploy/docker/docker-compose.yml up -d`.
+- A port Signalith listens on inside the container only reaches it when the
+  compose file publishes it under `ports:`. The quick start publishes 8080 (web)
+  and 514 to the container's 5514 (syslog). If you change a syslog address on the
+  page, add the port to `ports:` too, and set **Port devices send to** to the port
+  on the host. The page reminds you on those settings when it runs in a container.
+- To undo a change from the command line:
+
+```
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith settings list
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith settings reset server.listen
+docker compose -f deploy/docker/docker-compose.yml restart signalith
+```
 
 ## Passwords and API keys
 
@@ -157,6 +234,9 @@ to the browser; the page only says whether one is set.
   password or key again, or clear it; the page refuses to save otherwise. A password
   from `signalith.yaml` or the environment is likewise only sent to the address set
   there.
+- An address with a user name and password in it (`http://user:pass@host`) or a
+  key in its query is refused on the page: put them in their own fields. One that
+  comes from `signalith.yaml` is shown, logged and exported without it.
 
 **Test connection** checks OpenSearch with the values on the form, saved or not,
 and says plainly what is wrong: nothing answers, wrong password, a certificate that
@@ -185,7 +265,7 @@ change off the page.
 | `auth.admin_user`, `auth.admin_password_hash` | `signalith.yaml` and `signalith passwd` only: the built-in admin is the break-glass account, so no page can lock everyone out. |
 | `auth.ldap` | The Users page sets up directory sign-in. |
 | `auth.users_file`, `intel.feeds_file`, `detections.dir`, `dashboards.dir`, `lookups.dir` | `signalith.yaml`: pages save into these files and folders, and the lookups folder holds the Settings page's own file. The page shows where they are. |
-| `ingest.tokens` | Add data. The page shows how many there are. |
+| `ingest.tokens` | `signalith.yaml` (`ingest.tokens`) or `SIGNALITH_INGEST_TOKEN`; **Add data** shows the agent setup that uses them. The page shows how many there are. |
 | `intel.feeds` | The Threat intel page. |
 
 ## Audit log
@@ -196,11 +276,15 @@ address. Values of settings are logged; passwords and keys never are (they show 
 
 | Message | Fields |
 | --- | --- |
-| `settings saved` | `by`, `client`, `changes` (`key=value` pairs), `reset`, `cleared`, `reset_all`, `applied_now`, `after_restart`, `file` |
+| `settings saved` | `by`, `client`, `changes` (`key=value` pairs), `reset`, `cleared`, `retried`, `reset_all`, `applied_now`, `after_restart`, `file`, `backup` |
 | `settings tested` | `by`, `client`, `what` (`opensearch` or `assistant`), the address, `ok` |
-| `restart requested` | `by`, `client`, `pending` |
+| `restart requested` | `by`, `client`, `pending`, `local_only` |
 | `restarted with the saved settings` | `by`, `client`, `settings`, `took_ms` |
-| `restart failed` | `by`, `client`, `settings`, `rolled_back`, `reason` |
+| `restart failed` | `by`, `client`, `settings`, `rolled_back`, `set_aside`, `reason` |
+| `new web address confirmed` | `by`, `client`, `host` |
+| `went back to the previous web address` | `settings`, `reason` |
+
+Addresses are logged without any password in them.
 
 ```
 level=INFO msg="settings saved" audit=true by=ann client=10.0.0.12 changes="opensearch.index_prefix=siem2 opensearch.password=(changed) search.max_events=5000" applied_now=search.max_events after_restart=opensearch.password,opensearch.index_prefix
@@ -215,10 +299,11 @@ from the Signalith page itself.
 | Route | What it does |
 | --- | --- |
 | `GET /api/settings` | Every setting by section, with its value, source, whether it is locked, applies at once or after a restart, and is waiting for one; what is waiting; the last restart; paths and version |
-| `PUT /api/settings` | Saves changes: `{"values": {key: value}, "clear": [keys], "reset": [keys], "reset_all": false}` |
-| `POST /api/settings/test/opensearch` | Tests OpenSearch with `{"values": {...}}` over the saved settings |
+| `PUT /api/settings` | Saves changes: `{"values": {key: value}, "clear": [keys], "reset": [keys], "retry": [keys], "reset_all": false}`. With `"check_only": true` it saves nothing and answers `{"ok": true, "changed": [...], "confirm": [...]}`: what to ask before saving |
+| `POST /api/settings/test/opensearch` | Tests OpenSearch with `{"values": {...}}` over the saved settings; one test at a time (`429` `busy` otherwise) |
 | `POST /api/settings/test/assistant` | Tests the AI assistant the same way |
-| `POST /api/settings/restart` | Restarts with the saved settings; answers 202 at once |
+| `POST /api/settings/restart` | Restarts with the saved settings; answers 202 at once. `409` with `code` `restarting`, `awaiting` (a move waits for confirmation), `settings_invalid`, or `local_only` (send `{"local_only": true}` to go ahead) |
+| `POST /api/settings/restart/confirm` | From the new address after a move: confirms it (`GET /api/me` by an admin does too) |
 | `GET /api/settings/export` | `{"yaml": "...", "filename": "signalith-settings.yaml"}`; `?download=1` downloads the file |
 
 One setting in `GET /api/settings`:

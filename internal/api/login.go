@@ -118,9 +118,14 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// secureCookie reports whether the session cookie is marked Secure (sent
+// over HTTPS only): when the browser reached Signalith over HTTPS, itself
+// or through a proxy that says so with X-Forwarded-Proto. It does not go
+// by server.public_url, which can say https:// while this very request
+// came over plain HTTP; a Secure cookie would then never come back, and
+// nobody could sign in.
 func (s *Server) secureCookie(r *http.Request) bool {
-	return r.TLS != nil || strings.HasPrefix(s.conf().Server.PublicURL, "https://") ||
-		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	return r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 // handleLogin signs in from the sign-in page. A user who must change

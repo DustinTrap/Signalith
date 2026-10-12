@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -367,10 +368,17 @@ func TestRestartGoesBackWhenTheNewSettingsDoNotStart(t *testing.T) {
 	if !rs.signedIn("") {
 		t.Error("the admin was signed out, or the server stopped answering")
 	}
-	// The saved change is still waiting, so it can be fixed on the page.
+	// The change is set aside, so the next start does not use it either;
+	// the page shows it on its field, to try again or change.
+	if strings.Join(res.Refused, ",") != "opensearch.index_prefix" {
+		t.Errorf("set aside %v", res.Refused)
+	}
 	code, view, _ := rs.call("", "GET", "/api/settings", "")
-	if pending := view["pending"].([]any); code != 200 || len(pending) != 1 || pending[0].(map[string]any)["key"] != "opensearch.index_prefix" {
-		t.Errorf("pending %d %v", code, view["pending"])
+	if refused := view["refused"].([]any); code != 200 || len(refused) != 1 || refused[0].(map[string]any)["key"] != "opensearch.index_prefix" || len(view["pending"].([]any)) != 0 {
+		t.Errorf("refused %d %v pending %v", code, view["refused"], view["pending"])
+	}
+	if c, err := config.Load(rs.r.path); err != nil || c.OpenSearch.IndexPrefix != "signalith" {
+		t.Errorf("the next start would use %v %v", c.OpenSearch.IndexPrefix, err)
 	}
 	if l := rs.logs.String(); !strings.Contains(l, "rolled_back=true") {
 		t.Errorf("audit log:\n%s", l)
@@ -524,11 +532,83 @@ func TestSettingsCommand(t *testing.T) {
 		t.Errorf("list of a broken file: %v", err)
 	}
 	out, err = capture(t, func() error { return cmdSettings([]string{"reset", "-c", path}) })
-	if err != nil || !strings.Contains(out, "Removed every change") {
+	if err != nil || !strings.Contains(out, "Removed every change") || !strings.Contains(out, "kept as "+file+".broken") {
 		t.Errorf("reset all: %v\n%s", err, out)
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Errorf("the settings file is still there: %v", err)
+	}
+	// With no file, nothing is claimed.
+	out, err = capture(t, func() error { return cmdSettings([]string{"reset", "-c", path}) })
+	if err == nil || strings.Contains(out, "Removed") || !strings.Contains(err.Error(), "there is no settings file at "+file) {
+		t.Errorf("reset without a file: %v\n%s", err, out)
+	}
+}
+
+// The Linux service points the lookups folder at /var/lib/signalith in its
+// unit, which a shell does not see: the settings commands then name the
+// service's file, never claim to have reset what they did not, and take
+// it with -file.
+func TestSettingsCommandWithTheServiceLayout(t *testing.T) {
+	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
+	t.Setenv("SIGNALITH_LOOKUPS_DIR", "")
+	fos := newFakeOpenSearch(t)
+	dir := t.TempDir()
+	h, _ := config.HashPassword("s3cret-pass")
+	os.MkdirAll(filepath.Join(dir, "etc"), 0o750)
+	path := filepath.Join(dir, "etc", "signalith.yaml")
+	os.WriteFile(path, []byte("opensearch:\n  url: "+fos.URL+"\nauth:\n  admin_password_hash: "+h+"\n"), 0o600)
+	svc := filepath.Join(dir, "var", "lookups", "settings.yaml")
+	saved := serviceSettingsFile
+	serviceSettingsFile = svc
+	t.Cleanup(func() { serviceSettingsFile = saved })
+	page := &config.PageSettings{}
+	page.Set("server.listen", "127.0.0.1:18745", "admin", time.Now())
+	page.Set("assistant.model", "llama3\nauth:\n  admin_user: eve", "admin", time.Now())
+	if err := config.WritePageSettings(svc, page); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "linux" {
+		t.Skip("the service layout is Linux's")
+	}
+	shell := filepath.Join(dir, "etc", "lookups", "settings.yaml")
+	out, err := capture(t, func() error { return cmdSettings([]string{"list", "-c", path}) })
+	if err != nil || !strings.Contains(out, "There is no settings file at "+shell) ||
+		!strings.Contains(out, "sudo signalith settings list -c "+path+" -file "+svc) {
+		t.Errorf("list: %v\n%s", err, out)
+	}
+	out, err = capture(t, func() error { return cmdSettings([]string{"reset", "-c", path}) })
+	if err == nil || strings.Contains(out, "Removed every change") || !strings.Contains(err.Error(), "nothing was reset") {
+		t.Errorf("reset all: %v\n%s", err, out)
+	}
+	_, err = capture(t, func() error { return cmdSettings([]string{"reset", "-c", path, "server.listen"}) })
+	if err == nil || !strings.Contains(err.Error(), "-file "+svc+" server.listen") {
+		t.Errorf("reset one: %v", err)
+	}
+	if left, _ := config.ReadPageSettings(svc); len(left.Keys()) != 2 {
+		t.Fatalf("the service's file changed: %v", left.Keys())
+	}
+	out, _ = capture(t, func() error { return cmdValidate([]string{"-c", path}) })
+	if !strings.Contains(out, "Note: The Signalith service keeps its settings in "+svc) {
+		t.Errorf("validate:\n%s", out)
+	}
+	// With -file, the service's file.
+	out, err = capture(t, func() error { return cmdSettings([]string{"list", "-c", path, "-file", svc}) })
+	if err != nil || !strings.Contains(out, `"llama3\nauth:\n  admin_user: eve"`) || strings.Contains(out, "\nauth:") {
+		t.Errorf("list -file: %v\n%s", err, out)
+	}
+	os.Setenv("SIGNALITH_SETTINGS_FILE", "")
+	out, err = capture(t, func() error { return cmdValidate([]string{"-c", path, "-file", svc}) })
+	if !strings.Contains(out, "Changed on the Settings page ("+svc+"): assistant.model, server.listen.") {
+		t.Errorf("validate -file: %v\n%s", err, out)
+	}
+	os.Setenv("SIGNALITH_SETTINGS_FILE", "")
+	out, err = capture(t, func() error { return cmdSettings([]string{"reset", "-c", path, "-file", svc, "server.listen"}) })
+	if err != nil || !strings.Contains(out, "Reset server.listen in "+svc) {
+		t.Errorf("reset -file: %v\n%s", err, out)
+	}
+	if left, _ := config.ReadPageSettings(svc); strings.Join(left.Keys(), ",") != "assistant.model" {
+		t.Errorf("left: %v", left.Keys())
 	}
 }
 
@@ -565,7 +645,7 @@ func TestStartWithSignalithYAMLWhenThePageSettingsFail(t *testing.T) {
 					t.Errorf("%s is not waiting for a restart: %v", k, view["pending"])
 				}
 			}
-			if l := rs.logs.String(); !strings.Contains(l, "starting with signalith.yaml alone") {
+			if l := rs.logs.String(); !strings.Contains(l, "started with signalith.yaml alone") {
 				t.Errorf("log:\n%s", l)
 			}
 		})

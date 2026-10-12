@@ -580,3 +580,28 @@ func TestOrigin(t *testing.T) {
 		}
 	}
 }
+
+// Every bad entry of an address list is named, in plain words.
+func TestAddressListProblem(t *testing.T) {
+	for _, c := range []struct {
+		list []string
+		want string
+	}{
+		{[]string{"10.0.0.0/8", "192.168.1.5"}, ""},
+		{[]string{"10.0.0.0/8", "printer"}, "“printer” isn't an IP address or a range like 10.0.0.0/8."},
+		{[]string{"10.0.0.0/8", "192.168.1.0/33", "printer"}, "“192.168.1.0/33” and “printer” aren't IP addresses or ranges like 10.0.0.0/8."},
+	} {
+		if got := addressListProblem(c.list); got != c.want {
+			t.Errorf("%v: %q", c.list, got)
+		}
+	}
+	// On the page, the field says it without an index or the key.
+	path := writeConfig(t, "")
+	res, err := CheckEdit(path, Edit{Values: map[string]any{"syslog.allow": []any{"10.0.0.0/8", "192.168.1.0/33", "printer"}}, By: "ann"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.Fields["syslog.allow"]; strings.Contains(got, "[1]") || !strings.Contains(got, "“printer”") {
+		t.Errorf("field problem %q", got)
+	}
+}
