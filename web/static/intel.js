@@ -151,7 +151,7 @@ function renderFeeds(feeds, downloads) {
           const n = (r.status || {}).count || 0;
           toast(`Downloaded ${f.name}: ${n.toLocaleString()} ${n === 1 ? 'indicator' : 'indicators'}.`);
         } catch (e) {
-          toast(`${f.name}: ${e.message}`);
+          toast(`${f.name}: ${e.message}`, null, { tone: 'danger' });
         }
         loadIntel();
       }, st.running);

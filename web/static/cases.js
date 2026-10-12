@@ -55,18 +55,18 @@ function caseAvatar(name) {
 }
 
 // Entities: which icon and chip kind a field's values get.
-const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f]*:[0-9a-f:.]+$/i;
-function entityKind(field, value) {
+const CASE_IP_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f]*:[0-9a-f:.]+$/i;
+function caseEntityKind(field, value) {
   if (['user', 'src_user', 'member'].includes(field)) return 'user';
   if (field === 'object') return 'group';
-  if (['src', 'dest', 'host', 'src_host', 'dest_host', 'dvc'].includes(field)) return IP_RE.test(value) ? 'ip' : 'host';
+  if (['src', 'dest', 'host', 'src_host', 'dest_host', 'dvc'].includes(field)) return CASE_IP_RE.test(value) ? 'ip' : 'host';
   if (field === 'process_name') return 'process';
   if (/sha256|sha1|md5|hash/.test(field)) return 'hash';
   if (['url', 'query', 'domain'].includes(field)) return 'domain';
   return '';
 }
-const KIND_ICON = { user: 'user', group: 'users', host: 'server', ip: 'globe', process: 'terminal', hash: 'hash', domain: 'link' };
-const ENTITY_FIELDS = ['user', 'src_user', 'src', 'src_host', 'dest', 'dest_host', 'host', 'process_name', 'process_sha256', 'process_md5', 'object', 'member', 'query', 'url', 'risk_object'];
+const CASE_KIND_ICON = { user: 'user', group: 'users', host: 'server', ip: 'globe', process: 'terminal', hash: 'hash', domain: 'link' };
+const CASE_ENTITY_FIELDS = ['user', 'src_user', 'src', 'src_host', 'dest', 'dest_host', 'host', 'process_name', 'process_sha256', 'process_md5', 'object', 'member', 'query', 'url', 'risk_object'];
 
 // busy disables a button while its request runs, optionally relabelled;
 // it returns a function that puts the button back.
@@ -232,7 +232,7 @@ function caseRow(c) {
   el('td', { 'data-col': 'title' },
     el('div', { class: 'cell-title', title: c.title }, c.title),
     ents.length ? el('div', { class: 'cell-sub' }, ...ents.map((e) => {
-      const kind = entityKind(e.field, e.value);
+      const kind = caseEntityKind(e.field, e.value);
       return el('span', Object.assign({ class: 'chip', title: `${e.field}: ${e.value}` }, kind ? { 'data-kind': kind } : {}), el('span', {}, e.value));
     })) : el('div', { class: 'cell-sub c-sub-empty' }, c.description || 'No entities yet')),
   el('td', { 'data-col': 'status' }, statusBadge(c.status), el('span', { class: 'cell-det', title: 'Case ' + c.id }, c.id)),
@@ -715,7 +715,7 @@ function entryNode(c, e, linked) {
   }
 }
 
-const HISTORY_ICON = { status: 'circle-dot', owner: 'user', severity: 'gauge', title: 'pencil', description: 'pencil', resolution: 'pencil', finding: 'unlink', entity: 'tag', timeline: 'trash-2' };
+const CASE_HISTORY_ICON = { status: 'circle-dot', owner: 'user', severity: 'gauge', title: 'pencil', description: 'pencil', resolution: 'pencil', finding: 'unlink', entity: 'tag', timeline: 'trash-2' };
 function historyNode(h) {
   const who = el('b', {}, h.author || 'Someone');
   const label = (field, v) => {
@@ -736,7 +736,7 @@ function historyNode(h) {
     case 'title': text = [who, ' renamed the case to ', el('b', {}, h.to)]; break;
     default: text = [who, ` changed ${h.field} from `, el('b', {}, label(h.field, h.from)), ' to ', el('b', {}, label(h.field, h.to))];
   }
-  return tlItem({ kind: 'change', icon: HISTORY_ICON[h.field] || 'history', time: h.time, text, change: true });
+  return tlItem({ kind: 'change', icon: CASE_HISTORY_ICON[h.field] || 'history', time: h.time, text, change: true });
 }
 
 // changeRun folds consecutive field changes into "5 changes by sam · Show".
@@ -822,7 +822,7 @@ function findingsCard(c, linked, missing) {
 function entitiesCard(c, ectx) {
   const ents = c.entities || [];
   const list = ents.map((e, i) => {
-    const kind = entityKind(e.field, e.value);
+    const kind = caseEntityKind(e.field, e.value);
     const ctx = ectx[i];
     const bits = [e.field];
     if (ctx) {
@@ -834,7 +834,7 @@ function entitiesCard(c, ectx) {
     }
     const q = e.field + '=' + quoteValue(e.value);
     return el('li', {}, el('button', { type: 'button', class: 'entity c-entity', title: `Search the last 7 days for ${q}`, onclick: () => openSearch(q, '-7d') },
-      el('span', { class: 'entity__icon' }, icon(KIND_ICON[kind] || 'tag')),
+      el('span', { class: 'entity__icon' }, icon(CASE_KIND_ICON[kind] || 'tag')),
       el('span', { class: 'entity__main' }, el('span', { class: 'entity__name' }, e.value), el('span', { class: 'entity__desc', title: bits.join(' · ') }, bits.join(' · '))),
       ctx && ctx.watchlist ? el('span', { class: 'badge badge--warning' }, 'Watchlist') : null));
   });
@@ -844,7 +844,7 @@ function entitiesCard(c, ectx) {
   const valueIn = el('input', { id: 'ce-value', class: 'input', type: 'text', placeholder: 'Value', autocomplete: 'off', 'aria-label': 'Value' });
   const addBtn = el('button', { type: 'submit', class: 'btn btn--secondary btn--sm' }, 'Add');
   const form = el('form', { class: 'c-entity-form hidden' },
-    el('datalist', { id: 'ce-fields' }, ...ENTITY_FIELDS.map((f) => el('option', { value: f }))),
+    el('datalist', { id: 'ce-fields' }, ...CASE_ENTITY_FIELDS.map((f) => el('option', { value: f }))),
     fieldIn, valueIn,
     el('div', { class: 'c-entity-form__bar' }, el('button', { type: 'button', class: 'btn btn--ghost btn--sm', onclick: () => toggle(false) }, 'Cancel'), addBtn));
   const toggleBtn = el('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'aria-expanded': 'false', onclick: () => toggle(form.classList.contains('hidden')) }, icon('plus'), 'Add');

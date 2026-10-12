@@ -2,7 +2,6 @@
 'use strict';
 
 // ---------- shared: priority, context, states, inspectors ----------
-// Other pages use prioBadge and contextLine (findings, investigations), and
 // intel.js uses the ri* helpers, so they stay global.
 const PRIORITY_LABEL = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
 
@@ -19,16 +18,6 @@ function riContextBits(c) {
   if ((c.category || []).length) bits.push(c.category.join(', '));
   if (c.bunit) bits.push(c.bunit);
   return bits;
-}
-
-// contextLine summarizes asset or identity context in a few words.
-function contextLine(c) {
-  if (!c) return null;
-  const bits = riContextBits(c);
-  const parts = [prioBadge(c.priority), c.watchlist ? riWatchBadge() : null, bits.length ? el('span', {}, bits.join(' · ')) : null];
-  const out = el('span', { class: 'ctx' });
-  parts.filter(Boolean).forEach((p, i) => out.append(...(i ? [' ', p] : [p])));
-  return out;
 }
 
 const riNum = (v) => (typeof v === 'number' ? v.toLocaleString(undefined, { maximumFractionDigits: 1 }) : fmtValue(v));

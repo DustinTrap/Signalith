@@ -197,8 +197,10 @@ function dxUntil(t) {
   if (s < 86400) return 'in ' + Math.round(s / 3600) + 'h';
   return 'in ' + Math.round(s / 86400) + 'd';
 }
-function dxNotify(msg, action) {
-  if (typeof toast === 'function') toast(msg, action);
+// dxNotify shows a toast; failures pass { tone: 'danger' } so they get the
+// alert icon instead of the tick.
+function dxNotify(msg, action, opts) {
+  if (typeof toast === 'function') toast(msg, action, opts);
 }
 function dxOwner(name) {
   if (!name) {
@@ -487,8 +489,8 @@ const ENTITY_LABEL = {
   user: 'User', src_user: 'Source user', src: 'Source', src_host: 'Source host', dest: 'Destination', dest_host: 'Destination host',
   host: 'Host', process_name: 'Process', object: 'Object', member: 'Member', risk_object: 'Risk object',
 };
-const KIND_ICON = { user: 'user', host: 'server', ip: 'globe', process: 'terminal', file: 'file-text', domain: 'link', hash: 'hash', group: 'users' };
-function entityKind(k, v, ents) {
+const FINDING_KIND_ICON = { user: 'user', host: 'server', ip: 'globe', process: 'terminal', file: 'file-text', domain: 'link', hash: 'hash', group: 'users' };
+function findingEntityKind(k, v, ents) {
   if (['user', 'src_user', 'member'].includes(k)) return 'user';
   if (['src_host', 'dest_host', 'host'].includes(k)) return 'host';
   if (k === 'process_name') return 'process';
@@ -506,7 +508,7 @@ function findingChips(f) {
     const v = String(raw);
     if (!v || seen.has(v)) continue;
     seen.add(v);
-    const kind = entityKind(k, v, ents);
+    const kind = findingEntityKind(k, v, ents);
     const attrs = { class: 'chip', title: `${ENTITY_LABEL[k] || k}: ${v}` };
     if (kind) attrs['data-kind'] = kind;
     chips.push(el('span', attrs, el('span', {}, v)));
@@ -618,7 +620,7 @@ async function bulkUpdate(update, done) {
       try {
         for (const g of groups.values()) await api('api/findings/bulk', { ids: g.ids, update: g.prev });
         dxNotify('Change undone.');
-      } catch (e) { dxNotify('Couldn’t undo: ' + e.message); }
+      } catch (e) { dxNotify('Couldn’t undo: ' + e.message, null, { tone: 'danger' }); }
       await loadFindings();
       if (openFinding) showFinding(openFinding, { focus: false });
     } };
@@ -630,7 +632,7 @@ async function bulkUpdate(update, done) {
 }
 async function bulkButton(btn, update, done) {
   btn.disabled = true;
-  try { await bulkUpdate(update, done); } catch (e) { dxNotify('Nothing was changed: ' + e.message); } finally { btn.disabled = false; }
+  try { await bulkUpdate(update, done); } catch (e) { dxNotify('Nothing was changed: ' + e.message, null, { tone: 'danger' }); } finally { btn.disabled = false; }
 }
 $('f-bulk-clear').addEventListener('click', () => {
   selected.clear();
@@ -789,14 +791,14 @@ function historyText(h) {
     default: return [b(h.author), ` changed ${h.field} from ${h.from || 'empty'} to ${h.to || 'empty'}`];
   }
 }
-const HISTORY_ICON = { created: 'crosshair', status: 'circle-dot', owner: 'user', severity: 'gauge', disposition: 'flag' };
+const FINDING_HISTORY_ICON = { created: 'crosshair', status: 'circle-dot', owner: 'user', severity: 'gauge', disposition: 'flag' };
 function findingActivity(f) {
   const time = (t) => el('span', { class: 'timeline__time', title: fmtTime(t) }, dxAge(t));
   const dot = (name) => el('span', { class: 'timeline__dot' }, icon(name));
   return [
     ...(f.comments || []).map((c) => ({ t: c.time, node: el('li', {}, dot('message-square-text'),
       el('div', { class: 'timeline__text' }, el('b', {}, c.author), ' added a note', el('p', { class: 'dx-note' }, c.text)), time(c.time)) })),
-    ...(f.history || []).filter((h) => h.field !== 'urgency').map((h) => ({ t: h.time, node: el('li', {}, dot(HISTORY_ICON[h.field] || 'history'),
+    ...(f.history || []).filter((h) => h.field !== 'urgency').map((h) => ({ t: h.time, node: el('li', {}, dot(FINDING_HISTORY_ICON[h.field] || 'history'),
       el('div', { class: 'timeline__text' }, ...historyText(h)), time(h.time)) })),
   ].sort((a, b) => new Date(b.t) - new Date(a.t)).map((x) => x.node);
 }
@@ -813,11 +815,11 @@ function contextBits(c) {
 }
 function findingEntity(k, v, f) {
   const val = String(v);
-  const kind = entityKind(k, val, f.entities || {});
+  const kind = findingEntityKind(k, val, f.entities || {});
   const ctx = f.context && f.context[k];
   const q = (k === 'risk_object' ? 'datamodel=Risk ' : '') + k + '=' + quoteValue(val);
   const b = el('button', { class: 'entity dx-entity', type: 'button', title: `Search the last 7 days for ${k}=${val}` },
-    el('span', { class: 'entity__icon' }, icon(KIND_ICON[kind] || 'tag')),
+    el('span', { class: 'entity__icon' }, icon(FINDING_KIND_ICON[kind] || 'tag')),
     el('span', { class: 'entity__main' }, el('span', { class: 'entity__name' }, val),
       el('span', { class: 'entity__desc' }, [ENTITY_LABEL[k] || k, ...contextBits(ctx)].join(' · '))),
     ctx && ctx.watchlist ? el('span', { class: 'badge badge--warning' }, 'Watchlist') : null,
@@ -950,7 +952,7 @@ async function undoFinding(id, prev) {
   try {
     await api('api/findings/' + encodeURIComponent(id), prev, 'PATCH');
     dxNotify('Change undone.');
-  } catch (e) { dxNotify('Couldn’t undo: ' + e.message); }
+  } catch (e) { dxNotify('Couldn’t undo: ' + e.message, null, { tone: 'danger' }); }
   await loadFindings({ quiet: true });
   if (openFinding === id) showFinding(id, { focus: false });
 }
@@ -1105,7 +1107,7 @@ async function setDetectionEnabled(d, on, input) {
     await loadDetections();
   } catch (e) {
     input.checked = !on;
-    dxNotify(`Couldn’t turn ${on ? 'on' : 'off'} ${plainTitle(d.title)}: ${e.message}`);
+    dxNotify(`Couldn’t turn ${on ? 'on' : 'off'} ${plainTitle(d.title)}: ${e.message}`, null, { tone: 'danger' });
   } finally { input.disabled = false; }
 }
 
@@ -1289,7 +1291,7 @@ async function deleteDetection(d) {
     det.msg = null;
     dxNotify(revert ? 'Reverted to the built-in version.' : 'Detection deleted.');
     loadDetections();
-  } catch (e) { dxNotify('Couldn’t ' + (revert ? 'revert' : 'delete') + ': ' + e.message); }
+  } catch (e) { dxNotify('Couldn’t ' + (revert ? 'revert' : 'delete') + ': ' + e.message, null, { tone: 'danger' }); }
 }
 
 function dxConfirm(o) {

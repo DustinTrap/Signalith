@@ -721,7 +721,7 @@
       items.length && err ? cardAlert('danger', err) : null, content);
   }
 
-  const riskBand = (s) => (s >= 100 ? 'critical' : s >= 75 ? 'high' : s >= 40 ? 'medium' : 'low');
+  // riskBand comes from risk.js, so a score has the same colour here and on the Risk page.
   const looksLikeIP = (v) => /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || /^[0-9a-f]*:[0-9a-f:]+$/i.test(v);
   function riskCard(rep) {
     const err = sectionError(rep, 'risk_objects');
@@ -1016,14 +1016,15 @@
     if (saved.id === dash.current) dash.def = saved;
     return saved;
   }
-  const say = (msg, action) => { if (typeof toast === 'function') toast(msg, action); };
+  const say = (msg, action, opts) => { if (typeof toast === 'function') toast(msg, action, opts); };
+  const sayError = (msg) => say(msg, null, { tone: 'danger' });
 
   async function movePanel(i, dir) {
     const d = structuredClone(dash.def);
     const j = i + dir;
     if (j < 0 || j >= d.panels.length) return;
     [d.panels[i], d.panels[j]] = [d.panels[j], d.panels[i]];
-    try { await saveDashboard(d); } catch (e) { say('Couldn’t move the panel: ' + e.message); return; }
+    try { await saveDashboard(d); } catch (e) { sayError('Couldn’t move the panel: ' + e.message); return; }
     runDashboard();
   }
 
@@ -1032,12 +1033,12 @@
     const title = before.panels[i].title;
     const d = structuredClone(before);
     d.panels.splice(i, 1);
-    try { await saveDashboard(d); } catch (e) { say('Couldn’t remove the panel: ' + e.message); return; }
+    try { await saveDashboard(d); } catch (e) { sayError('Couldn’t remove the panel: ' + e.message); return; }
     runDashboard();
     say(`Removed “${title}”.`, {
       label: 'Undo',
       run: async () => {
-        try { await saveDashboard(before); } catch (e) { say('Couldn’t restore the panel: ' + e.message); return; }
+        try { await saveDashboard(before); } catch (e) { sayError('Couldn’t restore the panel: ' + e.message); return; }
         if (dash.current === before.id) runDashboard();
       },
     });

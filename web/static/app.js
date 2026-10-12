@@ -96,6 +96,9 @@ function selectPage(name) {
 function showPage(name, opts = {}) {
   if (!$('page-' + name)) return;
   const switching = name !== currentPage;
+  // A dialog left open on the page being hidden would keep the whole app
+  // inert while showing nothing (for example after Back), so close it.
+  if (switching) document.querySelectorAll(`.page:not(#page-${name}) dialog[open]`).forEach((d) => d.close());
   selectPage(name);
   setNavOpen(false);
   if (location.hash !== '#' + name) {
@@ -294,6 +297,11 @@ async function refreshHealthCard() {
   if (document.hidden) return;
   let h;
   try { h = await api('api/health'); } catch (_) { return; }
+  renderHealthCard(h);
+}
+// renderHealthCard draws the card from an api/health reply. The Health page
+// passes its own replies here too, so the card and the page never disagree.
+function renderHealthCard(h) {
   const os = h.opensearch || {};
   const ing = h.ingest || {};
   const warnings = h.warnings || [];
@@ -1049,18 +1057,18 @@ async function showTab(id) {
 }
 
 // Entity values read as chips, as everywhere else in Signalith.
-const ENTITY_FIELDS = {
+const SEARCH_ENTITY_FIELDS = {
   user: 'user', src_user: 'user', dest_user: 'user', user_name: 'user', risk_object: null,
   host: 'host', dest_host: 'host', src_host: 'host', dvc: 'host',
   process_name: 'process', parent_process_name: 'process',
   file_name: 'file', file_path: 'file', domain: 'domain', url: 'domain', query: 'domain',
   hash: 'hash', file_hash: 'hash', md5: 'hash', sha1: 'hash', sha256: 'hash',
 };
-const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f]*:[0-9a-f:]+$/i;
-function entityKind(col, v) {
+const SEARCH_IP_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f]*:[0-9a-f:]+$/i;
+function searchEntityKind(col, v) {
   if (typeof v !== 'string' || !v || v.length > 80) return null;
-  if (IP_RE.test(v)) return 'ip';
-  if (ENTITY_FIELDS[col]) return ENTITY_FIELDS[col];
+  if (SEARCH_IP_RE.test(v)) return 'ip';
+  if (SEARCH_ENTITY_FIELDS[col]) return SEARCH_ENTITY_FIELDS[col];
   const f = fields.find((x) => x.name === col);
   return f && f.type === 'ip' ? 'ip' : null;
 }
@@ -1181,7 +1189,7 @@ function renderTable(box, res, opts) {
     td.addEventListener('click', (ev) => showCellMenu(ev, c, v, opts.kind, r));
     if (v == null || v === '') return td;
     const text = c === '_time' ? fmtTime(v) : fmtValue(v);
-    const kind = entityKind(c, v);
+    const kind = searchEntityKind(c, v);
     if (c === barCol) {
       td.append(el('div', { class: 'bar-cell' }, el('span', {}, text), el('span', { class: 'bar', 'aria-hidden': 'true' }, el('span', { style: `--w:${Math.max(1, 100 * (Number(v) || 0) / barMax).toFixed(1)}%` }))));
     } else if (kind) {
@@ -1891,6 +1899,7 @@ async function loadHealth(quiet) {
     st.at = Date.now();
     st.failed = false;
     healthPageRender(h);
+    renderHealthCard(h);
   } catch (e) {
     st.failed = true;
     if (st.data) healthPageFoot();
