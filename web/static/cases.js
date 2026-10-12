@@ -6,7 +6,7 @@ const caseState = { list: [], open: null, data: null };
 
 async function refreshCaseCount() {
   try {
-    const s = await api('/api/cases/summary');
+    const s = await api('api/cases/summary');
     const b = $('case-count');
     b.textContent = s.open;
     b.classList.toggle('hidden', !s.open);
@@ -52,7 +52,7 @@ async function loadCases() {
   if ($('c-owner').value === 'me' && currentUser) p.set('owner', currentUser);
   if ($('c-text').value.trim()) p.set('q', $('c-text').value.trim());
   try {
-    const res = await api('/api/cases?' + p);
+    const res = await api('api/cases?' + p);
     caseState.list = res.cases;
     renderCases(res.total);
   } catch (e) {
@@ -99,7 +99,7 @@ async function showCase(id) {
   box.classList.remove('hidden');
   if (!caseState.data || caseState.data.case.id !== id) box.replaceChildren(el('div', { class: 'muted' }, 'Loading...'));
   try {
-    caseState.data = await api('/api/cases/' + encodeURIComponent(id));
+    caseState.data = await api('api/cases/' + encodeURIComponent(id));
   } catch (e) {
     fill(box, el('button', { class: 'link', onclick: showCaseList }, '← All cases'), el('div', { class: 'error' }, e.message));
     return;
@@ -111,7 +111,7 @@ async function showCase(id) {
 async function caseCall(path, body, method) {
   const c = caseState.data.case;
   try {
-    const res = await api('/api/cases/' + encodeURIComponent(c.id) + path, body, method);
+    const res = await api('api/cases/' + encodeURIComponent(c.id) + path, body, method);
     refreshCaseCount();
     await showCase(c.id);
     return res;
@@ -243,7 +243,7 @@ function contextLineFor(e) {
   const show = (c) => { if (c) fill(holder, contextLine(c)); };
   if (ctxCache.has(key)) show(ctxCache.get(key));
   else {
-    api('/api/lookups/context?' + new URLSearchParams({ field: e.field, value: e.value }))
+    api('api/lookups/context?' + new URLSearchParams({ field: e.field, value: e.value }))
       .then((c) => { ctxCache.set(key, c); show(c); })
       .catch(() => ctxCache.set(key, null));
   }
@@ -369,14 +369,14 @@ function pickCase({ title = '', heading = 'Add to case', only = '' } = {}) {
       }
       if (!newTitle.value.trim()) { msg.textContent = 'Give the new case a title.'; newTitle.focus(); return; }
       try {
-        const res = await api('/api/cases', { title: newTitle.value.trim(), severity: newSev.value, owner: currentUser });
+        const res = await api('api/cases', { title: newTitle.value.trim(), severity: newSev.value, owner: currentUser });
         refreshCaseCount();
         finish(res.case.id);
       } catch (e) { msg.textContent = e.message; }
     });
     dlg.showModal();
     if (only === 'new') { newTitle.focus(); return; }
-    api('/api/cases?' + new URLSearchParams({ status: 'new,in_progress,pending', limit: '50' })).then((res) => {
+    api('api/cases?' + new URLSearchParams({ status: 'new,in_progress,pending', limit: '50' })).then((res) => {
       if (!res.cases.length) {
         fill(list, el('div', { class: 'muted small' }, 'No open cases yet.'));
         newRadio.checked = true;
@@ -400,7 +400,7 @@ async function addFindingsToCase(ids, title) {
   const id = await pickCase({ title });
   if (!id) return;
   try {
-    const res = await api('/api/cases/' + encodeURIComponent(id) + '/findings', { ids });
+    const res = await api('api/cases/' + encodeURIComponent(id) + '/findings', { ids });
     const failed = Object.keys(res.failed || {}).length;
     refreshCaseCount();
     toast(`${ids.length - failed} finding${ids.length - failed === 1 ? '' : 's'} added to ${res.case.title}.` + (failed ? ` ${failed} could not be added.` : ''),
@@ -427,7 +427,7 @@ $('search-to-case').addEventListener('click', async () => {
   if (!id) return;
   const earliest = $('time').value === '0' ? '' : $('time').value;
   try {
-    const res = await api('/api/cases/' + encodeURIComponent(id) + '/entries', { kind: 'search', query, earliest });
+    const res = await api('api/cases/' + encodeURIComponent(id) + '/entries', { kind: 'search', query, earliest });
     toast(`Search saved to ${res.case.title}.`, { label: 'Open case', run: () => openCase(id) });
   } catch (e) { alert(e.message); }
 });
@@ -437,7 +437,7 @@ async function pinEventToCase(row) {
   const id = await pickCase();
   if (!id) return;
   try {
-    const res = await api('/api/cases/' + encodeURIComponent(id) + '/entries', { kind: 'event', event: row });
+    const res = await api('api/cases/' + encodeURIComponent(id) + '/entries', { kind: 'event', event: row });
     toast(`Event pinned to ${res.case.title}.`, { label: 'Open case', run: () => openCase(id) });
   } catch (e) { alert(e.message); }
 }

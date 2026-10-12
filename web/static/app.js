@@ -17,12 +17,43 @@ const el = (tag, attrs = {}, ...children) => {
   return n;
 };
 
+// icon returns an inline SVG for symbol #i-NAME in the sprite at the top of
+// index.html, for example icon('search') or icon('x', 'icon--sm').
+function icon(name, extraClass) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('class', 'icon' + (extraClass ? ' ' + extraClass : ''));
+  svg.setAttribute('aria-hidden', 'true');
+  const use = document.createElementNS(ns, 'use');
+  use.setAttribute('href', '#i-' + name);
+  svg.append(use);
+  return svg;
+}
+
+// ago describes a past time briefly: just now, 5m ago, 3h ago, 2d ago.
+function ago(t) {
+  const s = (Date.now() - new Date(t).getTime()) / 1000;
+  if (!isFinite(s)) return '';
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+// api calls the Signalith API. Paths are relative to the page so the UI
+// works behind a proxy; a signed-out session goes to the sign-in page and
+// comes back here afterwards.
+let signingIn = false;
 async function api(path, body, method) {
   const opts = body === undefined ? { method: method || 'GET' } : {
     method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   };
-  const resp = await fetch(path, opts);
+  const resp = await fetch(path.replace(/^\//, ''), opts);
   const data = await resp.json().catch(() => ({}));
+  if (resp.status === 401 && !signingIn) {
+    signingIn = true;
+    location.assign('login?next=' + encodeURIComponent(location.pathname + location.search + location.hash));
+  }
   if (!resp.ok) {
     const err = new Error(data.error || resp.statusText);
     err.pos = data.pos;
@@ -32,16 +63,271 @@ async function api(path, body, method) {
   return data;
 }
 
-// ---------- navigation ----------
-document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => showPage(t.dataset.page)));
-function showPage(name) {
-  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.page === name));
+// ---------- app shell: navigation ----------
+// Each page is a <section id="page-NAME" class="page">; its nav item
+// (.nav__item[data-page=NAME]) gives the title and group shown in the top
+// bar. The URL hash names the page, so links and Back work.
+const appEl = $('app');
+const narrow = matchMedia('(max-width: 960px)');
+let currentPage = null;
+
+function pageInfo(name) {
+  const item = document.querySelector(`.nav__item[data-page="${name}"]`);
+  const group = item && item.closest('.nav__group');
+  return { title: item ? item.querySelector('span').textContent : name, group: group ? group.dataset.group : 'Help' };
+}
+
+// selectPage shows a page without loading its data.
+function selectPage(name) {
+  currentPage = name;
+  document.querySelectorAll('.nav__item[data-page]').forEach((a) => {
+    if (a.dataset.page === name) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === 'page-' + name));
+  const { title, group } = pageInfo(name);
+  $('crumb-group').textContent = group;
+  $('crumb-page').textContent = title;
+  document.title = title + ' · Signalith';
+}
+
+// showPage opens a page and loads its data. opts.replace keeps the
+// current history entry instead of adding one.
+function showPage(name, opts = {}) {
+  if (!$('page-' + name)) return;
+  const switching = name !== currentPage;
+  selectPage(name);
+  setNavOpen(false);
+  if (location.hash !== '#' + name) {
+    try { history[opts.replace ? 'replaceState' : 'pushState'](null, '', '#' + name); } catch (_) { /* sandboxed */ }
+  }
+  if (switching) window.scrollTo(0, 0);
   if (name === 'data') loadAgentConfig();
   if (name === 'health') loadHealth();
   if (typeof onPageShown === 'function') onPageShown(name);
   try { localStorage.setItem('signalith.page', name); } catch (_) { /* storage may be blocked */ }
 }
+
+function pageFromHash() {
+  const name = decodeURIComponent(location.hash.slice(1));
+  return name && $('page-' + name) ? name : null;
+}
+const followHash = () => {
+  const name = pageFromHash();
+  if (name && name !== currentPage) showPage(name, { replace: true });
+};
+window.addEventListener('hashchange', followHash);
+window.addEventListener('popstate', followHash);
+
+// Links to pages (nav items, the logo, the health card) switch in place.
+document.addEventListener('click', (ev) => {
+  const link = ev.target.closest('a[data-page]');
+  if (!link || ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+  ev.preventDefault();
+  showPage(link.dataset.page);
+});
+
+// ---------- app shell: phone drawer ----------
+function setNavOpen(open) {
+  appEl.toggleAttribute('data-nav-open', open);
+  $('nav-toggle').setAttribute('aria-expanded', String(open));
+  syncDrawer();
+}
+// Off screen, the closed drawer must not take keyboard focus.
+function syncDrawer() {
+  $('sidebar').inert = narrow.matches && !appEl.hasAttribute('data-nav-open');
+}
+narrow.addEventListener('change', () => { if (!narrow.matches) setNavOpen(false); syncDrawer(); });
+syncDrawer();
+$('nav-toggle').addEventListener('click', () => {
+  setNavOpen(true);
+  const here = document.querySelector('.nav__item[aria-current="page"]');
+  (here || $('jump')).focus();
+});
+document.querySelectorAll('[data-nav-close]').forEach((b) => b.addEventListener('click', () => {
+  setNavOpen(false);
+  $('nav-toggle').focus();
+}));
+// The scrim sits behind the drawer and behind slide-over inspectors
+// (.app[data-inspect]); clicking it closes both.
+$('scrim').addEventListener('click', () => {
+  setNavOpen(false);
+  appEl.removeAttribute('data-inspect');
+});
+
+// ---------- app shell: page jumper ----------
+// Typing in the sidebar box filters the nav; Enter opens the first match.
+// Ctrl+K (Cmd+K on a Mac), or / when not typing, focuses it.
+const JUMP_WORDS = {
+  dashboards: 'home overview posture charts', findings: 'alerts incidents queue triage', cases: 'cases investigations',
+  risk: 'risk scores', search: 'query events logs hunt', intel: 'threat intel ioc indicators feeds',
+  detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
+  data: 'ingest agents fluent bit sources onboarding', health: 'status opensearch ingest', help: 'help syntax language commands',
+};
+const jump = $('jump');
+$('jump-key').textContent = /Mac|iPhone|iPad/.test(navigator.platform) ? '\u2318K' : 'Ctrl K';
+
+function jumpMatches() {
+  const q = jump.value.trim().toLowerCase();
+  const hits = [];
+  document.querySelectorAll('#sidebar .nav__item[data-page]').forEach((a) => {
+    const words = [a.textContent, a.dataset.page, JUMP_WORDS[a.dataset.page] || ''].join(' ').toLowerCase();
+    const hit = !q || words.includes(q);
+    a.classList.toggle('hidden', !hit);
+    if (hit) hits.push(a);
+  });
+  document.querySelectorAll('#sidebar .nav__group').forEach((g) => g.classList.toggle('hidden', !g.querySelector('.nav__item:not(.hidden)')));
+  $('jump-empty').classList.toggle('hidden', hits.length > 0);
+  return hits;
+}
+function clearJump() {
+  jump.value = '';
+  jumpMatches();
+}
+jump.addEventListener('input', jumpMatches);
+jump.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    const first = jumpMatches()[0];
+    if (first) {
+      clearJump();
+      jump.blur();
+      showPage(first.dataset.page);
+    }
+  } else if (ev.key === 'ArrowDown') {
+    const first = jumpMatches()[0];
+    if (first) { ev.preventDefault(); first.focus(); }
+  } else if (ev.key === 'Escape') {
+    ev.stopPropagation();
+    if (jump.value) clearJump(); else jump.blur();
+  }
+});
+jump.addEventListener('blur', () => { setTimeout(() => { if (document.activeElement !== jump && !$('sidebar').contains(document.activeElement)) clearJump(); }, 150); });
+
+function focusJump() {
+  if (narrow.matches) setNavOpen(true);
+  jump.focus();
+  jump.select();
+}
+const isTyping = (t) => !!(t && t.closest && t.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'));
+
+// ---------- app shell: theme ----------
+// The saved choice lives under signalith.theme (see assets/theme.js);
+// no saved choice follows the system setting.
+function setTheme(t) {
+  const root = document.documentElement;
+  if (t) root.dataset.theme = t; else delete root.dataset.theme;
+  try {
+    if (t) localStorage.setItem('signalith.theme', t); else localStorage.removeItem('signalith.theme');
+  } catch (_) { /* storage may be blocked */ }
+  syncThemeButtons();
+}
+function syncThemeButtons() {
+  const t = document.documentElement.dataset.theme || '';
+  document.querySelectorAll('[data-set-theme]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.setTheme === t)));
+}
+const prefersDark = matchMedia('(prefers-color-scheme: dark)');
+document.querySelectorAll('[data-theme-toggle]').forEach((b) => b.addEventListener('click', () => {
+  const t = document.documentElement.dataset.theme;
+  setTheme((t ? t === 'dark' : prefersDark.matches) ? 'light' : 'dark');
+}));
+document.querySelectorAll('[data-set-theme]').forEach((b) => b.addEventListener('click', () => setTheme(b.dataset.setTheme)));
+syncThemeButtons();
+
+// ---------- app shell: menus and keys ----------
+// details.menu closes on a click outside it and on Esc.
+document.addEventListener('click', (ev) => {
+  document.querySelectorAll('details.menu[open]').forEach((d) => { if (!d.contains(ev.target)) d.removeAttribute('open'); });
+});
+document.addEventListener('keydown', (ev) => {
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === 'k') {
+    ev.preventDefault();
+    focusJump();
+    return;
+  }
+  if (ev.key === '/' && !ev.ctrlKey && !ev.metaKey && !ev.altKey && !isTyping(ev.target) && !document.querySelector('dialog[open]')) {
+    ev.preventDefault();
+    focusJump();
+    return;
+  }
+  if (ev.key !== 'Escape' || ev.defaultPrevented) return;
+  const menu = document.querySelector('details.menu[open]');
+  if (menu) {
+    menu.removeAttribute('open');
+    menu.querySelector('summary').focus();
+  } else if (appEl.hasAttribute('data-nav-open')) {
+    setNavOpen(false);
+    $('nav-toggle').focus();
+  } else if (appEl.hasAttribute('data-inspect')) {
+    appEl.removeAttribute('data-inspect');
+  }
+});
+
+// ---------- app shell: user menu ----------
+api('api/me').then((m) => {
+  const name = m.user || '';
+  const initial = (name.replace(/^[^a-z0-9]+/i, '').charAt(0) || '?').toUpperCase();
+  $('user-avatar').textContent = initial;
+  $('user-avatar-lg').textContent = initial;
+  $('user-name').textContent = name;
+  $('user-menu-name').textContent = name;
+  // A browser that signed in with HTTP Basic auth keeps sending the
+  // password, so signing out would not stick.
+  const basic = m.auth === 'basic';
+  $('sign-out').classList.toggle('hidden', basic);
+  $('basic-note').classList.toggle('hidden', !basic);
+}).catch(() => {});
+$('sign-out').addEventListener('click', async () => {
+  $('sign-out').disabled = true;
+  try { await fetch('api/logout', { method: 'POST' }); } catch (_) { /* the session ends when it expires */ }
+  location.replace('login?signedout');
+});
+
+// ---------- app shell: sidebar health ----------
+// One calm line about OpenSearch and when the last event arrived; the
+// dot turns amber or red when something needs a look on the Health page.
+async function refreshHealthCard() {
+  if (document.hidden) return;
+  let h;
+  try { h = await api('api/health'); } catch (_) { return; }
+  const os = h.opensearch || {};
+  const ing = h.ingest || {};
+  const warnings = h.warnings || [];
+  const failed = ing.failed || 0;
+  // Yellow is normal on a single node, so only red, unreachable, failed
+  // events or config warnings change the card.
+  let state = '';
+  let title = 'Healthy';
+  if (!os.status || os.status === 'red' || os.status === 'unreachable') {
+    state = 'down';
+    title = 'OpenSearch ' + (os.status || 'unknown');
+  } else if (failed > 0 || warnings.length) {
+    state = 'warn';
+    title = 'Needs attention';
+  }
+  const pulse = $('health-pulse');
+  if (state) pulse.dataset.state = state; else delete pulse.dataset.state;
+  $('health-title').textContent = title;
+  const meta = [ing.last_seen ? 'Last event ' + ago(ing.last_seen) : 'No events yet'];
+  if (failed) meta.push(failed.toLocaleString() + ' failed');
+  $('health-meta').textContent = meta.join(' · ');
+  const card = $('health-card');
+  card.title = ['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n');
+  card.setAttribute('aria-label', `Health: ${title}, OpenSearch ${os.status || 'unknown'}, ${meta.join(', ')}`);
+  card.classList.remove('hidden');
+  if (h.version) $('user-menu-meta').textContent = 'Signalith ' + h.version;
+}
+refreshHealthCard();
+setInterval(refreshHealthCard, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshHealthCard(); });
+
+// The first page: the URL hash, else the last page used, else Search.
+// Shown now so nothing flashes; its data loads once every script is in.
+let firstPage = pageFromHash();
+try { firstPage = firstPage || localStorage.getItem('signalith.page'); } catch (_) { /* ignore */ }
+if (!firstPage || !$('page-' + firstPage)) firstPage = 'search';
+selectPage(firstPage);
+document.addEventListener('DOMContentLoaded', () => showPage(firstPage, { replace: true }));
 
 // ---------- query text helpers ----------
 // splitPipes returns [search, rest] split at the first | outside quotes.
@@ -91,7 +377,7 @@ async function loadFields() {
   if (dm === fieldsFor) return;
   fieldsFor = dm;
   try {
-    fields = await api('/api/fields?datamodel=' + encodeURIComponent(dm));
+    fields = await api('api/fields?datamodel=' + encodeURIComponent(dm));
   } catch (e) {
     fields = [];
   }
@@ -120,7 +406,7 @@ async function showFieldValues(f, li) {
   box.replaceChildren(el('div', { class: 'muted' }, f.description || f.name), el('div', { class: 'muted' }, 'Loading top values...'));
   try {
     const q = new URLSearchParams({ field: f.name, datamodel: currentDatamodel(), earliest: $('time').value });
-    const rows = await api('/api/fields/values?' + q);
+    const rows = await api('api/fields/values?' + q);
     const items = rows.map((r) => el('div', { class: 'fv', title: 'Filter on this value', onclick: () => addSearchTerm(f.name + '=' + quoteValue(r[f.name])) },
       el('span', {}, String(r[f.name])), el('span', { class: 'muted' }, r.count)));
     box.replaceChildren(el('div', { class: 'muted' }, f.description || f.name),
@@ -252,7 +538,7 @@ function builderChanged() {
   clearTimeout(buildTimer);
   buildTimer = setTimeout(async () => {
     try {
-      const { query } = await api('/api/build', readSpec());
+      const { query } = await api('api/build', readSpec());
       setQuery(query, true);
       $('builder-note').textContent = '';
       loadFields();
@@ -268,7 +554,7 @@ async function parseIntoBuilder() {
   const text = $('query').value.trim();
   if (!text) return;
   try {
-    const res = await api('/api/parse', { query: text });
+    const res = await api('api/parse', { query: text });
     $('query-error').classList.add('hidden');
     if (!res.builder_ok) {
       $('builder-note').textContent = ' (this query uses features the builder cannot show; edit the text instead)';
@@ -316,7 +602,7 @@ async function runSearch() {
   $('explanation').classList.add('hidden');
   hideCellMenu();
   try {
-    const res = await api('/api/search', { query, earliest: $('time').value === '0' ? '' : $('time').value });
+    const res = await api('api/search', { query, earliest: $('time').value === '0' ? '' : $('time').value });
     renderResult(res);
   } catch (e) {
     $('status').textContent = '';
@@ -584,7 +870,7 @@ function renderChart(res) {
 $('explain').addEventListener('click', async () => {
   const box = $('explanation');
   try {
-    const res = await api('/api/explain', { query: $('query').value || '*', earliest: $('time').value === '0' ? '' : $('time').value });
+    const res = await api('api/explain', { query: $('query').value || '*', earliest: $('time').value === '0' ? '' : $('time').value });
     box.replaceChildren(
       el('strong', {}, 'What this query does'),
       el('ol', {}, ...res.steps.map((s) => el('li', {}, s))),
@@ -625,7 +911,7 @@ async function ask(question, mode) {
   box.replaceChildren(el('span', { class: 'muted' }, mode === 'ai' || $('ask-ai').checked ? 'Asking the AI model...' : 'Writing the query...'));
   let res;
   try {
-    res = await api('/api/ask', { question, mode: mode || ($('ask-ai').checked ? 'ai' : 'auto') });
+    res = await api('api/ask', { question, mode: mode || ($('ask-ai').checked ? 'ai' : 'auto') });
   } catch (e) {
     box.replaceChildren(el('div', { class: 'error' }, e.message));
     return;
@@ -652,7 +938,7 @@ async function ask(question, mode) {
 $('ask-form').addEventListener('submit', (ev) => { ev.preventDefault(); ask($('ask').value); });
 
 async function loadAskInfo() {
-  try { askInfo = await api('/api/ask'); } catch (_) { return; }
+  try { askInfo = await api('api/ask'); } catch (_) { return; }
   $('ask-ai-wrap').classList.toggle('hidden', !askInfo.ai_available);
   if (askInfo.ai_model) $('ask-ai-wrap').title += ' (' + askInfo.ai_model + ')';
   $('ask-examples').replaceChildren(...askInfo.examples.map((q) => el('li', {}, el('a', { onclick: () => ask(q) }, q))));
@@ -668,7 +954,7 @@ async function loadAgentConfig() {
   $('windows-opts').classList.toggle('hidden', os !== 'windows');
   const q = new URLSearchParams({ os, source: $('linux-source').value, sysmon: $('sysmon').checked });
   try {
-    const a = await api('/api/agents/config?' + q);
+    const a = await api('api/agents/config?' + q);
     $('agent-steps').replaceChildren(...a.steps.map((s) => el('li', {}, s)));
     $('agent-path').textContent = a.config_path;
     $('agent-config').textContent = a.config;
@@ -683,7 +969,7 @@ $('copy-config').addEventListener('click', () => navigator.clipboard.writeText($
 async function loadHealth() {
   const box = $('health');
   try {
-    const h = await api('/api/health');
+    const h = await api('api/health');
     const os = h.opensearch || {};
     const cls = os.status === 'green' ? 'ok' : os.status === 'yellow' ? 'warn' : 'bad';
     const ing = h.ingest || {};
@@ -707,19 +993,17 @@ async function loadHealth() {
 // ---------- startup ----------
 (async function init() {
   try {
-    const models = await api('/api/datamodels');
+    const models = await api('api/datamodels');
     $('b-datamodel').append(...models.map((m) => el('option', { value: m.name, title: m.description }, m.name.replace('_', ' '))));
   } catch (_) { /* shown on search */ }
-  let saved = null, savedTime = null, page = null;
+  let saved = null, savedTime = null;
   try {
     saved = localStorage.getItem('signalith.query');
     savedTime = localStorage.getItem('signalith.time');
-    page = localStorage.getItem('signalith.page');
   } catch (_) { /* ignore */ }
   if (savedTime) $('time').value = savedTime;
   if (saved) setQuery(saved);
   updateBuilderVisibility();
   loadFields();
   loadAskInfo();
-  if (page && page !== 'search') showPage(page);
 })();

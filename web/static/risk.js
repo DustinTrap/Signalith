@@ -22,7 +22,7 @@ async function loadRisk() {
   const p = new URLSearchParams({ since: $('r-since').value });
   if ($('r-type').value) p.set('type', $('r-type').value);
   try {
-    const res = await api('/api/risk?' + p);
+    const res = await api('api/risk?' + p);
     renderRisk(res.objects || []);
   } catch (e) {
     $('r-list').replaceChildren(el('div', { class: 'error', style: 'padding:12px' }, e.message));
@@ -61,7 +61,7 @@ async function showRiskObject(object, type) {
   box.replaceChildren(el('div', { class: 'muted' }, 'Loading...'));
   let res;
   try {
-    res = await api('/api/risk/object?' + new URLSearchParams({ object, type, since: $('r-since').value }));
+    res = await api('api/risk/object?' + new URLSearchParams({ object, type, since: $('r-since').value }));
   } catch (e) {
     box.replaceChildren(el('div', { class: 'error' }, e.message));
     return;
@@ -93,7 +93,7 @@ async function loadLists() {
   for (const panel of document.querySelectorAll('#page-assets .panel')) {
     const kind = panel.dataset.kind;
     try {
-      const res = await api('/api/lookups/' + kind);
+      const res = await api('api/lookups/' + kind);
       panel.querySelector('.l-count').textContent = `(${res.count})`;
       const items = res.items || [];
       const cols = res.columns;
@@ -113,7 +113,7 @@ for (const panel of document.querySelectorAll('#page-assets .panel')) {
     const file = panel.querySelector('.l-file').files[0];
     if (!file) { msg.replaceChildren(el('div', { class: 'error' }, 'Choose a CSV file first.')); return; }
     const text = await file.text();
-    const resp = await fetch('/api/lookups/' + panel.dataset.kind, { method: 'PUT', headers: { 'Content-Type': 'text/csv' }, body: text });
+    const resp = await fetch('api/lookups/' + panel.dataset.kind, { method: 'PUT', headers: { 'Content-Type': 'text/csv' }, body: text });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       msg.replaceChildren(el('div', { class: 'error' }, data.error || resp.statusText,

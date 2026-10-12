@@ -25,7 +25,7 @@ function huntQuery(ind) {
 async function loadIntel() {
   let res;
   try {
-    res = await api('/api/intel');
+    res = await api('api/intel');
   } catch (e) {
     $('ti-feeds').replaceChildren(el('div', { class: 'error' }, e.message));
     return;
@@ -65,7 +65,7 @@ function renderFeeds(feeds, downloads) {
       refresh.disabled = true;
       refresh.textContent = 'Downloading...';
       try {
-        await api(`/api/intel/feeds/${encodeURIComponent(f.name)}/refresh`, {}, 'POST');
+        await api(`api/intel/feeds/${encodeURIComponent(f.name)}/refresh`, {}, 'POST');
       } catch (e) {
         alert(`${f.name}: ${e.message}`);
       }
@@ -101,7 +101,7 @@ async function loadIndicators() {
   if ($('ti-source').value) p.set('source', $('ti-source').value);
   let res;
   try {
-    res = await api('/api/intel/indicators?' + p);
+    res = await api('api/intel/indicators?' + p);
   } catch (e) {
     $('ti-list').replaceChildren(el('div', { class: 'error', style: 'padding:12px' }, e.message));
     return;
@@ -123,7 +123,7 @@ async function loadIndicators() {
       actions.push(' ', el('button', { class: 'link danger-link', onclick: async () => {
         if (!confirm(`Delete ${ind.value}?`)) return;
         try {
-          await api('/api/intel/indicators/' + encodeURIComponent(ind.id), undefined, 'DELETE');
+          await api('api/intel/indicators/' + encodeURIComponent(ind.id), undefined, 'DELETE');
         } catch (e) {
           alert(e.message);
         }
@@ -165,7 +165,7 @@ $('ti-add').addEventListener('submit', async (ev) => {
     tags: $('ti-tags').value.split(',').map((t) => t.trim()).filter(Boolean),
   };
   try {
-    const ind = await api('/api/intel/indicators', body);
+    const ind = await api('api/intel/indicators', body);
     msg.replaceChildren(el('div', { class: 'ok' }, `Added ${ind.type} ${ind.value}. Searches and the threat detection use it right away.`));
     $('ti-value').value = '';
     $('ti-desc').value = '';
@@ -180,7 +180,7 @@ $('ti-upload').addEventListener('click', async () => {
   const file = $('ti-file').files[0];
   if (!file) { msg.replaceChildren(el('div', { class: 'error' }, 'Choose a CSV or text file first.')); return; }
   const text = await file.text();
-  const resp = await fetch('/api/intel/upload', { method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: text });
+  const resp = await fetch('api/intel/upload', { method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: text });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
     const lines = data.lines || [];

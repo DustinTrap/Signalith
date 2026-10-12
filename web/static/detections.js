@@ -19,21 +19,14 @@ function onPageShown(name) {
 
 // fill replaces a node's children, skipping null placeholders.
 const fill = (n, ...kids) => n.replaceChildren(...kids.filter((k) => k != null));
-const sevBadge = (s) => el('span', { class: 'sev sev-' + s }, s === 'informational' ? 'info' : s);
-const statusBadge = (s) => el('span', { class: 'status-badge st-' + s }, STATUS_LABEL[s] || s);
+const SEVERITY_LABEL = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low', informational: 'Info' };
+// sevBadge and statusBadge draw the .sev and .status components keyed by the API value.
+const sevBadge = (s) => el('span', { class: 'sev', 'data-sev': s }, SEVERITY_LABEL[s] || s);
+const statusBadge = (s) => el('span', { class: 'status', 'data-status': s }, STATUS_LABEL[s] || s);
 const techLink = (id) => el('a', {
   class: 'tech', target: '_blank', rel: 'noopener',
   href: 'https://attack.mitre.org/techniques/' + id.replace('.', '/') + '/',
 }, id);
-
-function ago(t) {
-  const s = (Date.now() - new Date(t).getTime()) / 1000;
-  if (!isFinite(s)) return '';
-  if (s < 60) return 'just now';
-  if (s < 3600) return Math.floor(s / 60) + 'm ago';
-  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-  return Math.floor(s / 86400) + 'd ago';
-}
 
 // Opens the Search page on a query and time window.
 function openSearch(query, earliest, latest) {
@@ -50,19 +43,21 @@ function openSearch(query, earliest, latest) {
 
 // ---------- findings ----------
 let currentUser = '';
-api('/api/me').then((m) => { currentUser = m.user; }).catch(() => {});
+api('api/me').then((m) => { currentUser = m.user; }).catch(() => {});
 let findingsList = [];
 const selected = new Set();
 let openFinding = null;
 
 async function refreshOpenCount() {
   try {
-    const s = await api('/api/findings/summary');
+    const s = await api('api/findings/summary');
     const b = $('open-count');
+    const crit = s.by_urgency.critical || 0;
     b.textContent = s.open;
     b.classList.toggle('hidden', !s.open);
-    const crit = (s.by_urgency.critical || 0) + (s.by_urgency.high || 0);
-    b.classList.toggle('hot', crit > 0);
+    // A small dot marks open critical findings; the count stays neutral.
+    b.toggleAttribute('data-critical', crit > 0);
+    b.title = crit ? `${s.open} open, ${crit} critical` : `${s.open} open`;
     return s;
   } catch (_) { return null; }
 }
@@ -84,7 +79,7 @@ async function loadFindings() {
   if (severityOverride) p.set('urgency', severityOverride);
   p.set('limit', '500');
   try {
-    const res = await api('/api/findings?' + p);
+    const res = await api('api/findings?' + p);
     findingsList = res.findings;
     renderFindings(res.total);
   } catch (e) {
@@ -145,7 +140,7 @@ $('f-bulk-apply').addEventListener('click', async () => {
   if ($('f-bulk-comment').value.trim()) update.comment = $('f-bulk-comment').value.trim();
   if (!Object.keys(update).length) return;
   try {
-    const res = await api('/api/findings/bulk', { ids: [...selected], update });
+    const res = await api('api/findings/bulk', { ids: [...selected], update });
     const failed = Object.keys(res.failed || {}).length;
     if (failed) alert(`${failed} finding(s) could not be updated.`);
     selected.clear();
@@ -176,7 +171,7 @@ async function showFinding(id) {
   box.classList.remove('hidden');
   box.replaceChildren(el('div', { class: 'muted' }, 'Loading...'));
   let data;
-  try { data = await api('/api/findings/' + encodeURIComponent(id)); } catch (e) {
+  try { data = await api('api/findings/' + encodeURIComponent(id)); } catch (e) {
     box.replaceChildren(el('div', { class: 'error' }, e.message));
     return;
   }
@@ -190,7 +185,7 @@ async function showFinding(id) {
   const save = el('button', { class: 'primary', onclick: async () => {
     const u = { status: status.value, severity: severity.value, disposition: disposition.value, owner: owner.value.trim(), comment: comment.value };
     try {
-      await api('/api/findings/' + encodeURIComponent(f.id), u, 'PATCH');
+      await api('api/findings/' + encodeURIComponent(f.id), u, 'PATCH');
       await loadFindings();
       showFinding(f.id);
     } catch (e) { alert(e.message); }
@@ -242,7 +237,7 @@ let schedulerOn = true;
 
 async function loadDetections() {
   try {
-    const res = await api('/api/detections');
+    const res = await api('api/detections');
     detections = res.detections;
     schedulerOn = res.scheduler;
     $('d-scheduler-note').classList.toggle('hidden', schedulerOn);
@@ -270,7 +265,7 @@ function renderDetections() {
     toggle.addEventListener('click', (ev) => ev.stopPropagation());
     toggle.addEventListener('change', async () => {
       try {
-        await api('/api/detections/' + encodeURIComponent(d.id), { ...d, enabled: toggle.checked }, 'PUT');
+        await api('api/detections/' + encodeURIComponent(d.id), { ...d, enabled: toggle.checked }, 'PUT');
         loadDetections();
       } catch (e) { alert(e.message); toggle.checked = !toggle.checked; }
     });
@@ -350,7 +345,7 @@ function editDetection(d, opts = {}) {
     ok();
     out.replaceChildren(el('div', { class: 'muted' }, 'Running over the last ' + (lookback.value || '?') + '...'));
     try {
-      const res = await api('/api/detections/test', read());
+      const res = await api('api/detections/test', read());
       const r = res.result;
       const n = (r.rows || []).length;
       fill(out, 
@@ -363,8 +358,8 @@ function editDetection(d, opts = {}) {
     ok();
     try {
       const body = read();
-      if (isNew) await api('/api/detections', body);
-      else await api('/api/detections/' + encodeURIComponent(body.id), body, 'PUT');
+      if (isNew) await api('api/detections', body);
+      else await api('api/detections/' + encodeURIComponent(body.id), body, 'PUT');
       box.classList.add('hidden');
       loadDetections();
     } catch (e) { fail(e); }
@@ -373,7 +368,7 @@ function editDetection(d, opts = {}) {
     ok();
     out.replaceChildren(el('div', { class: 'muted' }, 'Running...'));
     try {
-      const res = await api('/api/detections/' + encodeURIComponent(d.id) + '/run', {});
+      const res = await api('api/detections/' + encodeURIComponent(d.id) + '/run', {});
       out.replaceChildren(el('div', {}, `${res.results} result(s), ${res.findings.length} new finding(s), ${res.throttled} throttled.`,
         res.findings.length ? el('button', { class: 'link', onclick: () => showPage('findings') }, ' Open findings') : null));
       loadDetections();
@@ -383,12 +378,12 @@ function editDetection(d, opts = {}) {
     const msg = d.source === 'override' ? 'Discard your changes and go back to the built-in version?' : 'Delete this detection?';
     if (!confirm(msg)) return;
     try {
-      await api('/api/detections/' + encodeURIComponent(d.id), undefined, 'DELETE');
+      await api('api/detections/' + encodeURIComponent(d.id), undefined, 'DELETE');
       box.classList.add('hidden');
       loadDetections();
     } catch (e) { fail(e); }
   } }, d.source === 'override' ? 'Revert to built-in' : 'Delete');
-  const yaml = isNew ? null : el('a', { class: 'button-link', href: '/api/detections/' + encodeURIComponent(d.id) + '/yaml' }, 'Download YAML');
+  const yaml = isNew ? null : el('a', { class: 'button-link', href: 'api/detections/' + encodeURIComponent(d.id) + '/yaml' }, 'Download YAML');
 
   fill(box, 
     el('div', { class: 'detail-head' }, el('h3', {}, isNew ? 'New detection' : 'Edit detection'),
@@ -420,7 +415,7 @@ $('d-sigma-cancel').addEventListener('click', () => $('d-sigma-box').classList.a
 $('d-sigma-convert').addEventListener('click', async () => {
   $('d-sigma-error').classList.add('hidden');
   try {
-    const res = await api('/api/detections/sigma', { rule: $('d-sigma-text').value });
+    const res = await api('api/detections/sigma', { rule: $('d-sigma-text').value });
     $('d-sigma-box').classList.add('hidden');
     $('d-sigma-text').value = '';
     editDetection({ ...res.detection, source: 'new' }, { warnings: res.warnings });
@@ -449,7 +444,7 @@ $('save-detection').addEventListener('click', () => {
 let coverage = null;
 async function loadCoverage() {
   try {
-    coverage = await api('/api/coverage');
+    coverage = await api('api/coverage');
     renderCoverage();
   } catch (e) {
     $('c-matrix').replaceChildren(el('div', { class: 'error' }, e.message));

@@ -65,7 +65,7 @@ const searchLink = (q, earliest) => linkButton('Open in Search', () => openSearc
 async function loadDashboardList() {
   let res;
   try {
-    res = await api('/api/dashboards');
+    res = await api('api/dashboards');
   } catch (e) {
     res = { dashboards: [{ id: 'posture', title: 'Security posture', builtin: true }], error: e.message };
   }
@@ -97,14 +97,14 @@ async function showDashboard(id) {
   }
   const seq = ++dash.seq;
   try {
-    dash.def = await api('/api/dashboards/' + encodeURIComponent(id));
+    dash.def = await api('api/dashboards/' + encodeURIComponent(id));
   } catch (e) {
     if (seq === dash.seq) $('db-body').replaceChildren(el('div', { class: 'error dcard w-full' }, e.message));
     return;
   }
   if (seq !== dash.seq) return;
   $('db-desc').textContent = dash.def.description || '';
-  $('db-yaml').href = '/api/dashboards/' + encodeURIComponent(id) + '/yaml';
+  $('db-yaml').href = 'api/dashboards/' + encodeURIComponent(id) + '/yaml';
   setRange(dash.def.time_range);
   if (dash.def.refresh) setRefresh(dash.def.refresh);
   setAutoRefresh();
@@ -147,7 +147,7 @@ async function loadPosture() {
   }
   let rep;
   try {
-    rep = await api('/api/posture?range=' + encodeURIComponent(range));
+    rep = await api('api/posture?range=' + encodeURIComponent(range));
   } catch (e) {
     if (seq === dash.seq) body.replaceChildren(el('div', { class: 'dcard w-full error' }, e.message));
     return;
@@ -173,7 +173,7 @@ function renderPosture(rep) {
     const v = ind.unit === 'seconds' ? fmtDuration(ind.value) : ind.value == null ? '–' : fmtCompact(ind.value);
     let extra = null;
     if (ind.id === 'open_findings' && !ind.error) {
-      const chips = URGENCIES.filter((u) => rep.open_by_urgency[u]).map((u) => el('span', { class: 'sev sev-' + u, title: `${rep.open_by_urgency[u]} open ${u}` }, `${rep.open_by_urgency[u]} ${u === 'informational' ? 'info' : u}`));
+      const chips = URGENCIES.filter((u) => rep.open_by_urgency[u]).map((u) => el('span', { class: 'sev', 'data-sev': u, title: `${rep.open_by_urgency[u]} open ${u}` }, `${rep.open_by_urgency[u]} ${u === 'informational' ? 'info' : u}`));
       extra = el('div', { class: 'kpi-chips' }, ...(chips.length ? chips : [el('span', { class: 'muted small' }, 'Queue is clear')]));
     }
     const tile = el('div', { class: 'kpi', title: ind.help || '' },
@@ -301,7 +301,7 @@ async function runDashboard() {
   if (!boxes.length) return;
   let res;
   try {
-    res = await api('/api/dashboards/' + encodeURIComponent(d.id) + '/run', { range: $('db-range').value });
+    res = await api('api/dashboards/' + encodeURIComponent(d.id) + '/run', { range: $('db-range').value });
   } catch (e) {
     if (seq === dash.seq) boxes.forEach((b) => b.replaceChildren(el('div', { class: 'error' }, e.message)));
     return;
@@ -405,7 +405,7 @@ function renderPanelTable(box, res) {
 
 // ---------- saving ----------
 async function saveDashboard(d) {
-  const saved = await api('/api/dashboards/' + encodeURIComponent(d.id), d, 'PUT');
+  const saved = await api('api/dashboards/' + encodeURIComponent(d.id), d, 'PUT');
   dash.def = saved;
   return saved;
 }
@@ -459,7 +459,7 @@ function openDashboardEditor(isNew) {
   const save = async () => {
     const body = { ...structuredClone(d), title: title.value.trim(), description: desc.value.trim(), time_range: range.value, refresh: refresh.value };
     try {
-      const saved = isNew ? await api('/api/dashboards', body) : await saveDashboard(body);
+      const saved = isNew ? await api('api/dashboards', body) : await saveDashboard(body);
       box.classList.add('hidden');
       await loadDashboardList();
       await showDashboard(saved.id);
@@ -487,7 +487,7 @@ function openDashboardEditor(isNew) {
 
 async function deleteDashboard() {
   if (!confirm(`Delete the dashboard "${dash.def.title}"? Its YAML file is removed from the server.`)) return;
-  try { await api('/api/dashboards/' + encodeURIComponent(dash.def.id), undefined, 'DELETE'); } catch (e) { alert(e.message); return; }
+  try { await api('api/dashboards/' + encodeURIComponent(dash.def.id), undefined, 'DELETE'); } catch (e) { alert(e.message); return; }
   $('db-editor').classList.add('hidden');
   await loadDashboardList();
   showDashboard('posture');
@@ -567,7 +567,7 @@ async function openPanelEditor({ index, panel, pickTarget }) {
     if (!question) return;
     askMsg.textContent = 'Writing the query...';
     try {
-      const res = await api('/api/ask', { question, mode: 'auto' });
+      const res = await api('api/ask', { question, mode: 'auto' });
       qtext.value = res.query;
       if (!title.value.trim()) title.value = question.charAt(0).toUpperCase() + question.slice(1);
       if (!vizTouched) { viz.value = suggestViz(res.query); syncViz(); }
@@ -587,7 +587,7 @@ async function openPanelEditor({ index, panel, pickTarget }) {
     releaseCharts(preview);
     preview.replaceChildren(dcard(pn.title || 'Preview', pn.width || 'full', content));
     try {
-      const res = await api('/api/panels/run', { range: $('db-range').value, panel: pn });
+      const res = await api('api/panels/run', { range: $('db-range').value, panel: pn });
       preview.firstChild.className = 'dcard w-' + (res.panel.width || 'full');
       renderPanelBody(content, res.panel, res.result, res.range);
     } catch (e) {
@@ -600,10 +600,10 @@ async function openPanelEditor({ index, panel, pickTarget }) {
     try {
       let id = dash.def && !pickTarget ? dash.def.id : target.value;
       if (pickTarget && !id) {
-        const created = await api('/api/dashboards', { title: newTitle.value.trim() || pn.title || 'My dashboard', time_range: $('db-range').value, panels: [pn] });
+        const created = await api('api/dashboards', { title: newTitle.value.trim() || pn.title || 'My dashboard', time_range: $('db-range').value, panels: [pn] });
         id = created.id;
       } else if (isNew) {
-        await api('/api/dashboards/' + encodeURIComponent(id) + '/panels', pn);
+        await api('api/dashboards/' + encodeURIComponent(id) + '/panels', pn);
       } else {
         const d = structuredClone(dash.def);
         d.panels[index] = pn;
