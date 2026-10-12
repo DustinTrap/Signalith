@@ -7,10 +7,15 @@
 // own instead, not inherited from the folder above: full control for
 // SYSTEM, Administrators, the Signalith service account (NT
 // SERVICE\Signalith) and the account that made it, and nobody else. A file
-// that is replaced keeps its mode, owner and access list.
+// that is replaced keeps its mode, owner and access list. A symbolic link
+// is followed: the file it points to is replaced and the link stays. Run
+// as root, a link made by another account is refused instead, since the
+// account the server runs as could otherwise point one of its own files
+// at a system file for root to overwrite.
 package securefile
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"errors"
@@ -28,7 +33,8 @@ const ServiceName = "Signalith"
 
 // WriteFile replaces path with data, through a temporary file in the same
 // folder that is then renamed into place, so a crash never leaves half a
-// file. Missing folders above it are created.
+// file. Missing folders above it are created. When path is a symbolic
+// link, the file it points to is replaced and the link stays.
 func WriteFile(path string, data []byte) error {
 	p, err := Prepare(path, data)
 	if err != nil {
@@ -43,15 +49,31 @@ func WriteFile(path string, data []byte) error {
 type Pending struct {
 	path string
 	tmp  string
+	// data is a copy of the content, for a file that can only be written
+	// in place (see Commit); it is cleared when the write is done, and
+	// the caller may clear its own as soon as Prepare returns.
 	data []byte
 }
 
-// Path returns the file the pending write replaces.
+// Path returns the file the pending write replaces: the path given to
+// Prepare, or the file a link there points to.
 func (p *Pending) Path() string { return p.path }
 
 // Prepare writes data to a temporary file next to path, with the access
 // path has (or a new file's), and returns it without replacing path.
-func Prepare(path string, data []byte) (*Pending, error) {
+func Prepare(path string, data []byte) (*Pending, error) { return prepare(path, data, false) }
+
+// PreparePrivate is Prepare for a file that must be private whatever the
+// file it replaces allowed, such as a key: readable and writable by its
+// owner only (mode 0600, keeping the owner), or on Windows the protected
+// access list of a new file.
+func PreparePrivate(path string, data []byte) (*Pending, error) { return prepare(path, data, true) }
+
+func prepare(path string, data []byte, private bool) (*Pending, error) {
+	path, err := resolveLink(path)
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
@@ -75,6 +97,11 @@ func Prepare(path string, data []byte) (*Pending, error) {
 		if err := keepAccess(path, st, tmp); err != nil {
 			return fail(fmt.Errorf("could not give the new %s the same permissions as the old one: %w", path, err))
 		}
+		if private {
+			if err := makePrivate(tmp); err != nil {
+				return fail(fmt.Errorf("could not make %s private: %w", path, err))
+			}
+		}
 	} else if errors.Is(err, os.ErrNotExist) {
 		if err := newFileAccess(tmp, dir); err != nil {
 			return fail(fmt.Errorf("could not make %s private: %w", path, err))
@@ -86,12 +113,36 @@ func Prepare(path string, data []byte) (*Pending, error) {
 		os.Remove(tmp.Name())
 		return nil, err
 	}
-	return &Pending{path: path, tmp: tmp.Name(), data: data}, nil
+	return &Pending{path: path, tmp: tmp.Name(), data: bytes.Clone(data)}, nil
 }
+
+// resolveLink returns the file to replace for path: path itself, or, when
+// path is a symbolic link, the file it points to. Replacing the link with
+// a file instead would leave the old content, such as plain-text
+// passwords, in the file it pointed to, and later changes there would be
+// ignored.
+func resolveLink(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		return path, nil
+	}
+	if err := linkAllowed(path, fi); err != nil {
+		return "", err
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("%s is a link to a file that cannot be found: %w", path, err)
+	}
+	return target, nil
+}
+
+// rename puts a file in place; tests replace it.
+var rename = os.Rename
 
 // Commit puts the file in place.
 func (p *Pending) Commit() error {
-	err := os.Rename(p.tmp, p.path)
+	defer p.done()
+	err := rename(p.tmp, p.path)
 	if err != nil && isBusy(err) {
 		// A file mounted into a container on its own (a Docker bind mount
 		// of one file) cannot be replaced, only written in place.
@@ -109,6 +160,7 @@ func (p *Pending) Commit() error {
 // returns an error wrapping fs.ErrExist otherwise, so two programs making
 // the same file at once cannot both win.
 func (p *Pending) CommitNew() error {
+	defer p.done()
 	defer os.Remove(p.tmp)
 	err := os.Link(p.tmp, p.path)
 	if err == nil || errors.Is(err, fs.ErrExist) {
@@ -118,11 +170,20 @@ func (p *Pending) CommitNew() error {
 	if _, serr := os.Lstat(p.path); serr == nil {
 		return &fs.PathError{Op: "create", Path: p.path, Err: fs.ErrExist}
 	}
-	return os.Rename(p.tmp, p.path)
+	return rename(p.tmp, p.path)
 }
 
 // Discard removes the temporary file.
-func (p *Pending) Discard() { os.Remove(p.tmp) }
+func (p *Pending) Discard() {
+	p.done()
+	os.Remove(p.tmp)
+}
+
+// done clears the copy of the content.
+func (p *Pending) done() {
+	clear(p.data)
+	p.data = nil
+}
 
 func writeInPlace(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
@@ -140,9 +201,17 @@ func writeInPlace(path string, data []byte) error {
 	return f.Close()
 }
 
+// OtherLinks returns how many other names (hard links) the file at path
+// has. Replacing the file gives path new content, but those names keep
+// the old, so a caller encrypting passwords in it should say so. It is 0
+// when there are none, the file does not exist, or on Windows.
+func OtherLinks(path string) int { return otherLinks(path) }
+
 // MkdirPrivate creates dir, and any missing folders above it, and makes
 // dir private (see the package comment). A dir that already exists is
-// made private too when this account may change it.
+// made private too when this account may change it, but it must be a
+// folder itself, not a link to one: following a link someone else made
+// could change the permissions of any folder.
 func MkdirPrivate(dir string) error {
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -153,6 +222,15 @@ func MkdirPrivate(dir string) error {
 		return err
 	}
 	created := err == nil
+	if !created {
+		fi, err := os.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if fi.Mode().Type() != fs.ModeDir {
+			return fmt.Errorf("%s is not a folder of its own (it is a link or another kind of file); move it away so Signalith can make the folder", dir)
+		}
+	}
 	if perr := privateDir(dir, parent, created); perr != nil && created {
 		return fmt.Errorf("could not make %s private: %w", dir, perr)
 	}

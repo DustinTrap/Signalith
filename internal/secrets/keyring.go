@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -63,6 +64,9 @@ type Source struct {
 	OldPath, OldKeyID, OldErr string
 	// Created is true when the key was made just now.
 	Created bool
+	// Warning says what is wrong with who may use the key file, such as
+	// other accounts being able to read it; "" when nothing is.
+	Warning string
 }
 
 // Weak reports whether the key comes from SIGNALITH_MASTER_KEY.
@@ -106,7 +110,10 @@ func (s Source) String() string {
 // opened. A key file that changes on disk is read again, so a running
 // server picks up a rotated key.
 type Keyring struct {
-	dirs   []string
+	dirs []string
+	// also are folders looked in after dirs only for a key that is
+	// there (see LookAlsoIn).
+	also   []string
 	getenv func(string) string
 	// OnCreate, when set, is called after a new master key is made.
 	OnCreate func(Source)
@@ -138,6 +145,23 @@ func NewKeyring(dirs ...string) *Keyring {
 	return k
 }
 
+// LookAlsoIn adds folders looked in after the others, for a key another
+// install of Signalith on this computer made there. Unlike the others, a
+// folder this account may not look into is passed over rather than an
+// error: it is most likely that install's own, not this one's. A new key
+// is never made there.
+func (k *Keyring) LookAlsoIn(dirs ...string) {
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		d = filepath.Clean(d)
+		if !slices.Contains(k.dirs, d) && !slices.Contains(k.also, d) {
+			k.also = append(k.also, d)
+		}
+	}
+}
+
 // DefaultPath returns where a new master key is made, or "" when the
 // keyring has no folders.
 func (k *Keyring) DefaultPath() string {
@@ -148,11 +172,26 @@ func (k *Keyring) DefaultPath() string {
 }
 
 func (k *Keyring) defaultFiles() []string {
-	out := make([]string, len(k.dirs))
-	for i, d := range k.dirs {
-		out[i] = filepath.Join(d, "keys", defaultName)
+	var out []string
+	for _, d := range append(slices.Clone(k.dirs), k.also...) {
+		out = append(out, filepath.Join(d, "keys", defaultName))
 	}
 	return out
+}
+
+// lookFor reports whether the default key file p is there. For a file in
+// one of the also folders, not being allowed to look counts as not there.
+func (k *Keyring) lookFor(p string) (bool, error) {
+	_, err := os.Lstat(p)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case errors.Is(err, fs.ErrPermission) && slices.Contains(k.also, filepath.Dir(filepath.Dir(p))):
+		return false, nil
+	}
+	return false, err
 }
 
 // Unused lists default key files that exist but are not the one in use,
@@ -165,7 +204,7 @@ func (k *Keyring) Unused() []string {
 		if err == nil && filepath.Clean(p) == filepath.Clean(src.Path) {
 			continue
 		}
-		if _, serr := os.Stat(p); serr == nil {
+		if there, serr := k.lookFor(p); there || serr != nil {
 			out = append(out, p)
 		}
 	}
@@ -348,7 +387,7 @@ func (k *Keyring) load() error {
 		return k.loadFile(FromKeyFile, p, readKeyFile)
 	}
 	if v := strings.TrimSpace(k.getenv("SIGNALITH_MASTER_KEY")); v != "" {
-		raw, err := parseKey([]byte(v))
+		raw, err := parseKeyText([]byte(v))
 		if err != nil {
 			return fmt.Errorf("SIGNALITH_MASTER_KEY: %w", err)
 		}
@@ -361,8 +400,14 @@ func (k *Keyring) load() error {
 		return nil
 	}
 	for _, p := range k.defaultFiles() {
-		if _, err := os.Lstat(p); err == nil {
+		there, err := k.lookFor(p)
+		if there {
 			return k.loadFile(FromDefault, p, readDefault)
+		}
+		if err != nil {
+			// A key that is there but cannot be read is not a missing key:
+			// making another would leave the values it encrypted unreadable.
+			return fmt.Errorf("cannot read the master key %s: %w. %s", p, err, accessHint(p))
 		}
 	}
 	return &NoKeyError{Looked: k.defaultFiles()}
@@ -376,6 +421,9 @@ func (k *Keyring) loadFile(kind, path string, read func(string) ([]byte, error))
 	}
 	raw, err := read(path)
 	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return fmt.Errorf("cannot read the master key %s: %w. %s", path, err, accessHint(path))
+		}
 		return fmt.Errorf("cannot read the master key %s: %w", path, err)
 	}
 	m, err := newMasterKey(raw)
@@ -384,7 +432,7 @@ func (k *Keyring) loadFile(kind, path string, read func(string) ([]byte, error))
 		return fmt.Errorf("the master key %s: %w", path, err)
 	}
 	k.cur, k.stamp = m, st
-	k.src = Source{Kind: kind, Path: path, KeyID: m.id}
+	k.src = Source{Kind: kind, Path: path, KeyID: m.id, Warning: keyFileWarning(path, st)}
 	if ost, err := os.Stat(path + ".old"); err == nil {
 		k.oldExists, k.oldStamp = true, ost
 		k.src.OldPath = path + ".old"
@@ -425,7 +473,7 @@ func (k *Keyring) create() (Source, error) {
 	if err := securefile.MkdirPrivate(filepath.Dir(path)); err != nil {
 		return Source{}, fmt.Errorf("could not make a folder for the master key: %w", err)
 	}
-	p, err := securefile.Prepare(path, data)
+	p, err := securefile.PreparePrivate(path, data)
 	if err != nil {
 		return Source{}, fmt.Errorf("could not save a new master key: %w", err)
 	}
@@ -453,12 +501,33 @@ func readKeyFile(path string) ([]byte, error) {
 
 var errBadKey = errors.New("it does not hold a master key: 32 random bytes, or one line of base64 (make one with: openssl rand -base64 32)")
 
-// parseKey reads a master key: 32 bytes as they are, or one line of
-// base64 or hex text, with optional # comment lines.
+var errTypedKey = errors.New("it holds 32 characters of text, which look typed rather than random, so they are not used as a key. " +
+	"A master key is 32 random bytes, written as one line of base64 (make one with: openssl rand -base64 32)")
+
+// parseKey reads a key file: 32 bytes as they are, or one line of base64
+// or hex text, with optional # comment lines. 32 bytes that are all text
+// are read as text, not as a key, since they are far more likely a typed
+// passphrase than random bytes.
 func parseKey(data []byte) ([]byte, error) {
-	if len(data) == keySize {
+	if len(data) == keySize && !isText(data) {
 		return bytes.Clone(data), nil
 	}
+	return parseKeyText(data)
+}
+
+// isText reports whether data is all printable ASCII or white space.
+func isText(data []byte) bool {
+	for _, c := range data {
+		if (c < 0x20 || c > 0x7e) && c != '\t' && c != '\n' && c != '\r' {
+			return false
+		}
+	}
+	return true
+}
+
+// parseKeyText reads a master key written as one line of base64 or hex
+// text, with optional # comment lines, as SIGNALITH_MASTER_KEY holds it.
+func parseKeyText(data []byte) ([]byte, error) {
 	var line []byte
 	n := 0
 	for _, l := range bytes.Split(data, []byte("\n")) {
@@ -485,6 +554,9 @@ func parseKey(data []byte) ([]byte, error) {
 			return b, nil
 		}
 		clear(b)
+	}
+	if len(line) == keySize {
+		return nil, errTypedKey
 	}
 	return nil, errBadKey
 }

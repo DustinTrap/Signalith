@@ -15,12 +15,14 @@ RestartSec=5
 # EnvironmentFile=-/etc/signalith/signalith.env
 
 # The master key that encrypts the passwords and keys Signalith stores is
-# found by itself (keys/master.key next to signalith.yaml, or in
-# /var/lib/signalith). To pass it as a systemd credential instead, which
-# only this service can read while it runs, uncomment the next line.
-# "signalith secrets" commands run by hand then use the same file; restart
-# the service after "signalith secrets rotate-master". See docs/encryption.md.
-# LoadCredential=master.key:/etc/signalith/keys/master.key
+# /var/lib/signalith/keys/master.key, made by "signalith init" or by the
+# server. systemd can hand it to the service instead from a file only root
+# can read, away from the service's own folder and from /etc/signalith:
+# move the key to /etc/credstore/signalith-master.key and uncomment the next
+# line, as docs/encryption.md ("Keeping the key elsewhere") shows step by
+# step. It is off by default because the service does not start while that
+# file is missing. "signalith secrets" commands run by hand use the same file.
+# LoadCredential=master.key:/etc/credstore/signalith-master.key
 
 # Lets the signalith user open the syslog port 514 (ports below 1024 are
 # privileged on Linux) and nothing else.
@@ -49,9 +51,10 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
-# Other users' processes are hidden, and /proc shows only processes.
+# Other users' processes are hidden. (ProcSubset=pid is left out: it hides
+# /proc/sys too, and Go then gives each listener a backlog of 128 instead
+# of the kernel's somaxconn, which would slow agents reconnecting at once.)
 ProtectProc=invisible
-ProcSubset=pid
 
 # Only the kinds of network it uses (AF_NETLINK lists this computer's
 # addresses for the Add data page), and only the system calls of an

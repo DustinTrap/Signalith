@@ -97,9 +97,12 @@ Invoke-Checked "signalith validate" { & $exe validate -c $config }
 # Creates the service, or updates one installed before (older versions ran
 # as LocalSystem), to run as NT SERVICE\Signalith and restart after a
 # failure. It also gives that account the data folders signalith.yaml
-# names outside this folder, such as an archive on another disk.
+# names outside this folder, such as an archive on another disk, and read
+# access to the certificate and key files it names.
 Invoke-Checked "signalith service install" { & $exe service install -c $config }
-Invoke-Checked "signalith service start" { & $exe service start }
+# Waits until the service runs, and stops here, naming the log, if it
+# stops again instead.
+Invoke-Checked "signalith service start" { & $exe service start -c $config }
 New-NetFirewallRule -DisplayName "Signalith" -Direction Inbound -Protocol TCP -LocalPort ($Listen.Split(":")[-1]) -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
 # Open the syslog ports the config turns on (syslog.udp, syslog.tcp,
@@ -126,7 +129,8 @@ if ($LASTEXITCODE -ne 0) {
   }
 }
 Write-Host "Signalith is running. Open http://localhost:$($Listen.Split(':')[-1])"
-Write-Host "Back up $ConfigDir\keys: it holds the master key for the passwords and keys Signalith stores (see docs\encryption.md)."
+Write-Host "The master key for the passwords and keys Signalith stores is in $ConfigDir\keys, protected for this computer only."
+Write-Host "Keep a copy of those passwords and keys, or a key you can move, as docs\encryption.md explains."
 # Retention settings saved in the web UI go to $ConfigDir\lookups, and days
 # archived before deletion to $ConfigDir\archive (retention.archive_dir in
 # signalith.yaml moves them). Those folders get the permissions above. An

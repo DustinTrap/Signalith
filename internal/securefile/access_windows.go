@@ -91,11 +91,21 @@ func keepAccess(old string, _ os.FileInfo, tmp *os.File) error {
 	return windows.SetNamedSecurityInfo(tmp.Name(), windows.SE_FILE_OBJECT, info, nil, nil, dacl, nil)
 }
 
+// makePrivate gives tmp the protected access list of a new file.
+func makePrivate(tmp *os.File) error { return protect(tmp.Name(), false) }
+
 // newFileAccess gives a new file the protected access list.
 func newFileAccess(tmp *os.File, _ string) error { return protect(tmp.Name(), false) }
 
 // privateDir gives a folder the protected access list, inherited by the
 // files and folders inside it.
 func privateDir(dir, _ string, _ bool) error { return protect(dir, true) }
+
+// linkAllowed follows links: on Windows only administrators may make them
+// (folder junctions, which any account may make, are refused by
+// MkdirPrivate).
+func linkAllowed(string, os.FileInfo) error { return nil }
+
+func otherLinks(string) int { return 0 }
 
 func isBusy(error) bool { return false }

@@ -39,13 +39,31 @@ Desktop when you sign in".
    sudo install -m 0755 signalith-linux-amd64 /usr/local/bin/signalith
    sudo useradd --system --no-create-home signalith
    sudo signalith init -c /etc/signalith/signalith.yaml -opensearch http://127.0.0.1:9200
-   sudo chown -R signalith /etc/signalith
+   sudo chown -R signalith /etc/signalith /var/lib/signalith
    sudo cp deploy/systemd/signalith.service /etc/systemd/system/
    sudo systemctl enable --now signalith
    ```
    `init` prints the admin password once, and where it put the master key that
-   encrypts the passwords and keys Signalith stores (`/etc/signalith/keys/master.key`).
+   encrypts the passwords and keys Signalith stores (`/var/lib/signalith/keys/master.key`).
    Back that file up, apart from the config; see [Encryption](#encryption).
+
+To upgrade, stop the service, replace the program and the unit, encrypt passwords an older
+version kept as plain text in `signalith.yaml`, and start it again:
+
+```sh
+sudo systemctl stop signalith
+sudo install -m 0755 signalith-linux-amd64 /usr/local/bin/signalith
+sudo cp deploy/systemd/signalith.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo signalith secrets encrypt
+sudo systemctl start signalith
+sudo signalith secrets status
+```
+
+The server encrypts the passwords and keys in its own files when it starts. Its master key is
+`/var/lib/signalith/keys/master.key`; `secrets status` shows where it is. Older versions cannot
+read encrypted values: before going back to one, run `sudo signalith secrets decrypt` (see
+[docs/encryption.md](docs/encryption.md#going-back-to-an-older-version)).
 
 ### Windows
 
@@ -60,7 +78,10 @@ Desktop when you sign in".
    the script and run it again: it stops the service, replaces the program, encrypts passwords an
    older version kept as plain text, moves the service off LocalSystem and starts it again. An
    archive folder outside `C:\ProgramData\Signalith` (`retention.archive_dir`) is given to the new
-   account too.
+   account too, and certificate and key files named in `signalith.yaml` (`server.tls_cert`,
+   `opensearch.ca_file` and the like) can be read by it; the script says which. Before going back
+   to an older version, run `signalith secrets decrypt` (see
+   [docs/encryption.md](docs/encryption.md#going-back-to-an-older-version)).
 
 ### Send data
 
@@ -213,9 +234,11 @@ from their groups; set it up and test it on the same page. The `admin` account f
   (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
   quick start caps container logs the same way; under systemd, journald limits the log.
 - **Secrets**: every password and key Signalith stores in a file is encrypted with a master
-  key (`signalith secrets`; see [Encryption](#encryption)). Passwords and keys in configured URLs
-  are hidden (`***`) everywhere a URL is shown or logged, and agents get a generic error rather
-  than OpenSearch details.
+  key (`signalith secrets`; see [Encryption](#encryption)). A password written into
+  `opensearch.url` is moved out of the address and encrypted by `signalith secrets encrypt`; one
+  in `opensearch.proxy` or a key in a feed's address cannot be, and is reported. Passwords and
+  keys in configured URLs are hidden (`***`) everywhere a URL is shown or logged, and agents get a
+  generic error rather than OpenSearch details.
 - **Memory**: on Linux the server turns off core dumps and keeps other programs from reading its
   memory; the systemd unit also turns off swap for it, hides other processes and limits it to the
   files and system calls it needs. On Windows the service runs as its own account rather than
@@ -235,7 +258,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
 | `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
 | `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
-| `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
+| `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown; `signalith secrets encrypt` moves it there in the file, encrypted |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials. Sent only over https, or plain http to this machine, unless `allow_insecure_http` is on |
 | `opensearch.ca_file` | none | PEM file with the CA that signed OpenSearch's certificate (for a private CA); system CAs are trusted too. Relative to the config file |
 | `opensearch.cert_file`, `opensearch.key_file` | none | Client certificate and key for certificate sign-in to OpenSearch; reloaded when they change |
@@ -298,10 +321,11 @@ passwords and headers), in `directory.json` (the directory service account passw
 `intel_feeds.yaml` (keys of feeds added on the page). They look like `enc:v1:9096cd23:...`. A
 plain value pasted into `signalith.yaml` still works, and `signalith validate` and the **Health**
 page say to encrypt it. The master key is made by `signalith init` (or the first time a
-password is stored): `/etc/signalith/keys/master.key` on Linux,
+password is stored): `/var/lib/signalith/keys/master.key` on Linux,
 `C:\ProgramData\Signalith\keys\master.key.dpapi` on Windows (also protected with DPAPI for that
-computer), `/var/lib/signalith/keys/master.key` in the Docker volume. Losing it loses only the
-stored passwords and keys, which can be entered again, never events.
+computer), `/var/lib/signalith/keys/master.key` in the Docker volume. Back it up, apart from
+the config. Losing it loses only the stored passwords and keys, never events: the server keeps
+running, and the **Health** page lists what to enter again.
 
 ```sh
 sudo signalith secrets status                       # where the key is; how each value is stored
@@ -310,10 +334,15 @@ sudo signalith secrets set opensearch.password      # asks twice without showing
 sudo signalith secrets set ingest.tokens            # adds a token; press Enter to have one made
 sudo signalith secrets rotate-master                # new master key; everything encrypted again
 sudo signalith secrets rotate-master -prune         # remove the previous key once nothing needs it
+sudo signalith secrets decrypt                      # plain text again, before going back to an older version
 ```
 
+When the key is lost, `encrypt` and `set` stop rather than make a new one; add `-new-key` to the
+first of them.
+
 [docs/encryption.md](docs/encryption.md) covers backing up and changing the key, keeping it in a
-systemd credential or a Docker secret, disk encryption (BitLocker, LUKS, Docker Desktop, cloud
+systemd credential or a Docker secret, the commands in Docker, going back to an older version,
+disk encryption (BitLocker, LUKS, Docker Desktop, cloud
 disks), what protects passwords in memory, and confidential VMs. HTTPS is in
 [docs/https.md](docs/https.md).
 

@@ -426,3 +426,26 @@ func TestDirectoryBindPasswordEncrypted(t *testing.T) {
 		t.Errorf("reloaded %q", d.Settings().BindPassword)
 	}
 }
+
+// A typed bind password that starts like an encrypted value would be
+// stored as it is, so it is refused.
+func TestBindPasswordLookingEncrypted(t *testing.T) {
+	d, err := OpenDirectory(filepath.Join(t.TempDir(), "directory.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := Preset(TypeActiveDirectory)
+	on := true
+	s.Enabled = &on
+	s.URL, s.BindDN, s.UserBaseDN = "ldaps://dc1.example.com", "CN=svc,DC=example,DC=com", "DC=example,DC=com"
+	s.AdminGroups = []string{"CN=Admins,DC=example,DC=com"}
+	s.BindPassword = "enc:v1:0011aabb:AAAA"
+	var se *SettingsError
+	if err := d.Save(s); !errors.As(err, &se) || !strings.Contains(err.Error(), "how encrypted values look") {
+		t.Errorf("Save = %v", err)
+	}
+	s.BindPassword = "enc:plain-password"
+	if err := d.Save(s); err != nil {
+		t.Errorf("a password starting with enc: refused: %v", err)
+	}
+}

@@ -57,8 +57,16 @@ type Config struct {
 	// file is the config as that file has it: no settings from the
 	// environment, and passwords and keys as written. Save writes it.
 	file *Config
-	// plain lists the passwords and keys stored as plain text in the file.
-	plain []string
+	// plain lists the passwords and keys stored as plain text in the file,
+	// and addressWarnings those written into addresses that cannot be
+	// encrypted there.
+	plain, addressWarnings []string
+	// unreadable lists the encrypted ones that cannot be decrypted, with
+	// what to do; locked has their fields, and feedLocked their labels by
+	// feed. See openSecrets.
+	unreadable []string
+	locked     map[string]bool
+	feedLocked map[string][]string
 	// keys holds the master key; see Keyring.
 	keys *secrets.Keyring
 }
@@ -603,15 +611,15 @@ func (c *Config) Path() string { return c.path }
 func (c *Config) HasSection(name string) bool { return c.sections[name] }
 
 // Load reads a config file, applies defaults and environment overrides,
-// decrypts the passwords and keys stored encrypted, and validates it.
+// decrypts the passwords and keys stored encrypted, and validates it. A
+// value that cannot be decrypted is left out and reported by Warnings
+// rather than failing (see Unreadable).
 func Load(path string) (*Config, error) {
 	c, err := LoadUnchecked(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.openSecrets(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
+	c.openSecrets()
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -646,6 +654,8 @@ func LoadUnchecked(path string) (*Config, error) {
 		return nil, err
 	}
 	c.plain = plainLabels(c.file.secretRefs())
+	inURL, warnings := addressPlain(c.file.addressSecrets())
+	c.plain, c.addressWarnings = append(c.plain, inURL...), warnings
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
@@ -811,6 +821,11 @@ func (c *Config) Validate() error {
 			for _, pr := range s.Problems() {
 				msg := pr.Message
 				if pr.Field == "bind_password" {
+					if c.locked["auth.ldap.bind_password"] {
+						// Reported by Warnings; directory sign-in fails
+						// without trying an empty password.
+						continue
+					}
 					msg = "set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD environment variable"
 				}
 				p = append(p, "auth.ldap."+pr.Field+": "+msg)
@@ -834,7 +849,8 @@ func (c *Config) Validate() error {
 	switch c.Assistant.Provider {
 	case "":
 	case "anthropic":
-		if c.Assistant.APIKey == "" {
+		// A key that cannot be decrypted is reported by Warnings instead.
+		if c.Assistant.APIKey == "" && !c.locked["assistant.api_key"] {
 			p = append(p, "assistant.api_key is required for anthropic; set it or SIGNALITH_ASSISTANT_API_KEY")
 		}
 	case "openai":

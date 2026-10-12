@@ -142,6 +142,9 @@ func cmdInit(args []string) error {
 	if _, err := os.Stat(*path); err == nil && !*force {
 		return fmt.Errorf("%s already exists; use -force to overwrite it", *path)
 	}
+	// A service set up already (an install run again) keeps its master
+	// key where it has it.
+	useServiceEnv(*path, os.Stdout)
 	c := config.Default()
 	c.Server.Listen = *listen
 	c.Server.PublicURL = *publicURL
@@ -234,6 +237,14 @@ func cmdValidate(args []string) error {
 	path := configFlag(fs)
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
 	fs.Parse(args)
+	// The service's folders and master key, so this checks what it uses.
+	// Installers read the -syslog-ports output, so nothing else is
+	// printed then.
+	if *ports {
+		applyServiceEnv(*path)
+	} else {
+		useServiceEnv(*path, os.Stdout)
+	}
 	c, err := loadConfig(*path, newLogger(os.Stderr))
 	if err != nil {
 		return err
@@ -243,8 +254,15 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
-	if src, err := c.Keyring().Source(); err == nil {
+	if n := len(c.Unreadable()); n > 0 {
+		fmt.Printf("Warning: %d %s in it cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
+			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
+	}
+	switch src, err := c.Keyring().Source(); {
+	case err == nil:
 		fmt.Printf("Master key for stored passwords and keys: %s, key id %s.\n", src, src.KeyID)
+	case !errors.Is(err, secrets.ErrNoKey):
+		fmt.Println("Warning:", err)
 	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
@@ -297,7 +315,9 @@ func cmdValidate(args []string) error {
 			if f.Source == intel.SourceUI {
 				page++
 			}
-			if f.Problem != "" {
+			// Problems of feeds in signalith.yaml are among the warnings
+			// below.
+			if f.Problem != "" && f.Source == intel.SourceUI {
 				fmt.Printf("Warning: threat intel feed %s (added on the Threat intel page): %s\n", f.Name, f.Problem)
 			}
 		}
@@ -853,7 +873,10 @@ func retentionKeepDays(ret *retention.Manager) int {
 func intelFeeds(c *config.Config) []intel.Feed {
 	var out []intel.Feed
 	for _, f := range c.Intel.Feeds {
-		out = append(out, f.Feed(intel.SourceConfig))
+		fd := f.Feed(intel.SourceConfig)
+		// A feed whose key cannot be decrypted is not downloaded.
+		fd.Problem = c.FeedProblem(f.Name)
+		out = append(out, fd)
 	}
 	return out
 }

@@ -38,6 +38,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -54,8 +55,14 @@ const (
 	infoID  = "signalith key id v1"
 )
 
-// IsSealed reports whether v is an encrypted value rather than plain text.
-func IsSealed(v string) bool { return strings.HasPrefix(v, Prefix) }
+// sealedForm matches the start of an encrypted value of any version:
+// enc:v1:, enc:v2: and so on.
+var sealedForm = regexp.MustCompile(`^enc:v[0-9]+:`)
+
+// IsSealed reports whether v is an encrypted value rather than plain text:
+// it starts with enc:v and a version number, as in enc:v1:. Any other
+// text, even one starting with enc:, is a plain value.
+func IsSealed(v string) bool { return sealedForm.MatchString(v) }
 
 // KeyID returns the id of the master key an encrypted value was made
 // with, or "" for plain text or a damaged value.
@@ -165,18 +172,20 @@ type OpenError struct {
 }
 
 func (e *OpenError) Error() string {
-	var s string
 	switch {
 	case e.Reason != "":
-		s = fmt.Sprintf("%s cannot be decrypted: %s", e.Field, e.Reason)
+		// The master key is there; the value itself is the problem.
+		return fmt.Sprintf("%s cannot be decrypted: %s. Enter the value again", e.Field, e.Reason)
 	case e.Have == "":
-		s = fmt.Sprintf("%s is encrypted with master key %s, but no master key was found", e.Field, e.KeyID)
-	default:
-		s = fmt.Sprintf("%s is encrypted with master key %s, but the master key here is %s (%s)", e.Field, e.KeyID, e.Have, e.Where)
+		return fmt.Sprintf("%s is encrypted with master key %s, but no master key was found. %s", e.Field, e.KeyID, restoreKey)
 	}
-	return s + ". Restore the master key it was encrypted with, or enter the value again; " +
-		"without that key only stored passwords and keys are lost, never events"
+	return fmt.Sprintf("%s is encrypted with master key %s, but the master key here is %s (%s). %s", e.Field, e.KeyID, e.Have, e.Where, restoreKey)
 }
+
+// restoreKey says how to fix a value encrypted with a master key that is
+// not here.
+const restoreKey = "Restore the master key it was encrypted with, or enter the value again; " +
+	"without that key only stored passwords and keys are lost, never events"
 
 // State is how a stored value is kept.
 type State int
@@ -245,7 +254,7 @@ func Default() *Keyring {
 
 // Seal encrypts plain for the setting field with the default keyring,
 // making a master key on first need. Empty and already encrypted values
-// are returned as they are.
+// are returned as they are (see IsSealed).
 func Seal(field, plain string) (string, error) { return Default().Seal(field, plain) }
 
 // Open decrypts a value stored for the setting field with the default

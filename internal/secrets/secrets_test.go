@@ -519,3 +519,230 @@ func TestPackageDefault(t *testing.T) {
 		t.Errorf("Open = %q, %v", v, err)
 	}
 }
+
+// A password that happens to start with enc: is still a password: it is
+// encrypted, not stored as it is.
+func TestPlainValuesStartingWithEnc(t *testing.T) {
+	k := keyring(t.TempDir(), nil)
+	for _, pw := range []string{"enc:", "enc:hunter2", "enc:V1:x", "encrypted!"} {
+		if IsSealed(pw) {
+			t.Errorf("IsSealed(%q)", pw)
+		}
+		sealed, err := k.Seal("directory.bind_password", pw)
+		if err != nil || sealed == pw || !IsSealed(sealed) {
+			t.Errorf("Seal(%q) = %q, %v", pw, sealed, err)
+			continue
+		}
+		if got, err := k.Open("directory.bind_password", sealed); err != nil || got != pw {
+			t.Errorf("Open = %q, %v; want %q", got, err, pw)
+		}
+	}
+	for _, v := range []string{"enc:v1:0011aabb:AAAA", "enc:v2:anything"} {
+		if !IsSealed(v) {
+			t.Errorf("IsSealed(%q) = false", v)
+		}
+	}
+}
+
+// A value that does not decrypt with the key that made it was changed or
+// moved; the key is fine, so the error does not ask for another one.
+func TestChangedValueDoesNotBlameTheKey(t *testing.T) {
+	k := keyring(t.TempDir(), nil)
+	sealed, _ := k.Seal("opensearch.password", "pw")
+	_, err := k.Open("assistant.api_key", sealed)
+	if err == nil || strings.Contains(err.Error(), "Restore the master key") || !strings.Contains(err.Error(), "Enter the value again") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+// A key file that is there but cannot be read is an error, not a missing
+// key, so no second key is made beside it.
+func TestUnreadableKeyIsNotMissing(t *testing.T) {
+	// A file where the keys folder should be: the key path cannot be
+	// looked at (not a folder).
+	blocked := t.TempDir()
+	os.WriteFile(filepath.Join(blocked, "keys"), []byte("x"), 0o600)
+	k := keyring(blocked, nil)
+	if _, err := k.Seal("a", "b"); err == nil || errors.Is(err, ErrNoKey) || !strings.Contains(err.Error(), "cannot read the master key") {
+		t.Errorf("Seal with an unreadable key path: %v", err)
+	}
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return // permissions do not stop root, and Windows uses access lists
+	}
+	dir := t.TempDir()
+	first := keyring(dir, nil)
+	if _, err := first.Seal("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(dir, "keys")
+	os.Chmod(keys, 0)
+	defer os.Chmod(keys, 0o700)
+	k = keyring(dir, nil)
+	_, err := k.Seal("c", "d")
+	if err == nil || errors.Is(err, ErrNoKey) || !strings.Contains(err.Error(), "permission denied") || !strings.Contains(err.Error(), "chown") {
+		t.Errorf("Seal with a key it may not read: %v", err)
+	}
+	if u := k.Unused(); len(u) != 1 {
+		t.Errorf("Unused = %v; the unreadable key is still a key", u)
+	}
+}
+
+// A folder added with LookAlsoIn is used when it holds a key, never gets
+// a new one, and is passed over when this account may not look into it
+// (another install's state folder).
+func TestLookAlsoIn(t *testing.T) {
+	own, other := t.TempDir(), t.TempDir()
+	theirs := keyring(other, nil)
+	if _, err := theirs.Seal("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	k := keyring(own, nil)
+	k.LookAlsoIn(other)
+	if src, err := k.Source(); err != nil || src.Path != filepath.Join(other, "keys", defaultName) {
+		t.Errorf("Source = %+v, %v; want the key in the other folder", src, err)
+	}
+
+	empty := t.TempDir()
+	k = keyring(own, nil)
+	k.LookAlsoIn(empty)
+	if _, err := k.Seal("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := k.Source(); src.Path != filepath.Join(own, "keys", defaultName) {
+		t.Errorf("new key made in %s, want the first folder", src.Path)
+	}
+	if _, err := os.Stat(filepath.Join(empty, "keys")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a key folder was made in the also folder: %v", err)
+	}
+
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return // permissions do not stop root, and Windows uses access lists
+	}
+	os.Chmod(other, 0)
+	defer os.Chmod(other, 0o700)
+	fresh := t.TempDir()
+	k = keyring(fresh, nil)
+	k.LookAlsoIn(other)
+	if _, err := k.Seal("a", "b"); err != nil {
+		t.Errorf("Seal with another install's folder closed to this account: %v", err)
+	}
+	if u := k.Unused(); len(u) != 0 {
+		t.Errorf("Unused = %v; a folder that cannot be looked into is not a key", u)
+	}
+	// The same folder as one of this config's own is not passed over.
+	k = keyring(other, nil)
+	k.LookAlsoIn(other)
+	if _, err := k.Source(); err == nil || errors.Is(err, ErrNoKey) {
+		t.Errorf("Source with its own folder closed: %v; want a permission error", err)
+	}
+}
+
+// 32 characters of text are a typed passphrase, not a random key.
+func TestTypedKeysAreRefused(t *testing.T) {
+	typed := "ChangeMeChangeMeChangeMeChangeMe"
+	if _, err := parseKey([]byte(typed)); !errors.Is(err, errTypedKey) {
+		t.Errorf("parseKey(typed) = %v", err)
+	}
+	if _, err := parseKey([]byte("correct horse battery staple 12\n")); err == nil {
+		t.Error("a 31-character passphrase and a newline was accepted")
+	}
+	k := keyring(t.TempDir(), map[string]string{"SIGNALITH_MASTER_KEY": typed})
+	if _, err := k.Source(); err == nil || !strings.Contains(err.Error(), "openssl rand -base64 32") {
+		t.Errorf("typed SIGNALITH_MASTER_KEY: %v", err)
+	}
+	// Random bytes are still read as they are, from a file.
+	raw := bytes.Repeat([]byte{0x80, 0x01}, 16)
+	if got, err := parseKey(raw); err != nil || !bytes.Equal(got, raw) {
+		t.Errorf("parseKey(raw bytes) = %x, %v", got, err)
+	}
+	// SIGNALITH_MASTER_KEY is base64 or hex only.
+	if _, err := parseKeyText(raw); err == nil {
+		t.Error("raw bytes accepted as text")
+	}
+}
+
+// A key file other accounts can read is reported, and rotating it makes
+// the new key private.
+func TestKeyFilePermissionWarning(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes do not apply on Windows")
+	}
+	dir := t.TempDir()
+	k := keyring(dir, nil)
+	if _, err := k.Seal("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if src, _ := k.Source(); src.Warning != "" {
+		t.Errorf("a new key is private, but: %s", src.Warning)
+	}
+	p := filepath.Join(dir, "keys", defaultName)
+	os.Chmod(p, 0o644)
+	k = keyring(dir, nil)
+	src, err := k.Source()
+	if err != nil || !strings.Contains(src.Warning, "chmod 600") {
+		t.Fatalf("Source = %+v, %v", src, err)
+	}
+	r, err := k.BeginRotation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	r.Done()
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		t.Errorf("rotated key mode %v, want 0600", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(p + ".old"); st.Mode().Perm() != 0o600 {
+		t.Errorf("previous key mode %v, want 0600", st.Mode().Perm())
+	}
+}
+
+// BeginNew makes the first key only when it is committed, and leaves
+// nothing behind otherwise.
+func TestBeginNew(t *testing.T) {
+	dir := t.TempDir()
+	k := keyring(dir, nil)
+	r, err := k.BeginNew()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := r.Seal("opensearch.password", "pw")
+	if err != nil || KeyID(sealed) != r.KeyID() {
+		t.Fatalf("Seal = %q, %v", sealed, err)
+	}
+	r.Discard()
+	if _, err := os.Stat(filepath.Join(dir, "keys")); !os.IsNotExist(err) {
+		t.Errorf("Discard left the keys folder: %v", err)
+	}
+	if _, err := k.Source(); !errors.Is(err, ErrNoKey) {
+		t.Errorf("a key after Discard: %v", err)
+	}
+
+	r, _ = k.BeginNew()
+	sealed, _ = r.Seal("opensearch.password", "pw")
+	if err := r.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := k.Open("opensearch.password", sealed); err != nil || got != "pw" {
+		t.Errorf("Open after Commit = %q, %v", got, err)
+	}
+	if _, err := k.BeginNew(); err == nil {
+		t.Error("BeginNew with a key already there")
+	}
+	if err := r.Undo(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.Source(); !errors.Is(err, ErrNoKey) {
+		t.Errorf("a key after Undo: %v", err)
+	}
+
+	// Someone else making a key meanwhile wins; Commit says so.
+	r, _ = k.BeginNew()
+	if _, err := keyring(dir, nil).Seal("x", "y"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Commit(); err == nil || !strings.Contains(err.Error(), "meanwhile") {
+		t.Errorf("Commit after another key was made: %v", err)
+	}
+}

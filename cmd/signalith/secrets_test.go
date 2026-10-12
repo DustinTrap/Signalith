@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
@@ -21,7 +23,7 @@ import (
 // TestMain keeps the tests away from this computer's own Signalith: no
 // systemd service settings, master key variables or state folder.
 func TestMain(m *testing.M) {
-	systemctlShow = func() ([]byte, error) { return nil, errors.New("no systemd in tests") }
+	readServiceSettings = func() *serviceSettings { return nil }
 	for _, k := range []string{"SIGNALITH_STATE_DIR", "SIGNALITH_MASTER_KEY", "SIGNALITH_MASTER_KEY_FILE", "CREDENTIALS_DIRECTORY",
 		"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_ASSISTANT_API_KEY", "SIGNALITH_INGEST_TOKEN", "SIGNALITH_LDAP_BIND_PASSWORD", "SIGNALITH_LOOKUPS_DIR"} {
 		os.Unsetenv(k)
@@ -204,6 +206,9 @@ func TestSecretsSet(t *testing.T) {
 	}
 	if _, err := runCmd(t, "pw\n", "set", "auth.ldap.bind_password", "-c", path); err == nil || !strings.Contains(err.Error(), "no auth.ldap section") {
 		t.Errorf("no ldap section: %v", err)
+	}
+	if _, err := runCmd(t, "enc:v1:00000000:AAAA\n", "set", "assistant.api_key", "-c", path); err == nil || !strings.Contains(err.Error(), "how encrypted values look") {
+		t.Errorf("a value that looks encrypted: %v", err)
 	}
 	data, _ := os.ReadFile(path)
 	if strings.Contains(string(data), "new OpenSearch pass") || strings.Contains(string(data), "another-token") ||
@@ -398,17 +403,18 @@ func TestInitWritesEncryptedValues(t *testing.T) {
 }
 
 func TestServiceEnv(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "signalith.env")
+	os.WriteFile(envFile, []byte("# secrets for the service\nSIGNALITH_MASTER_KEY_FILE=\"/srv/keys/signalith.key\"\nSIGNALITH_OPENSEARCH_PASSWORD=never-taken\n"), 0o600)
 	show := []byte(`ExecStart={ path=/usr/local/bin/signalith ; argv[]=/usr/local/bin/signalith serve -c /etc/signalith/signalith.yaml ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
 Environment=SIGNALITH_STATE_DIR=/var/lib/signalith SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups "SIGNALITH_ARCHIVE_DIR=/mnt/arch ive" SIGNALITH_OPENSEARCH_PASSWORD=secret GOTRACEBACK=none
-LoadCredential=master.key:/etc/signalith/keys/master.key
+EnvironmentFiles=` + envFile + ` (ignore_errors=yes)
+EnvironmentFiles=/nonexistent/other.env (ignore_errors=yes)
 `)
-	got, cred := serviceEnv(show, "/etc/signalith/signalith.yaml")
-	if cred != "/etc/signalith/keys/master.key" {
-		t.Errorf("credential = %q", cred)
-	}
+	s := parseSystemctlShow(show, os.ReadFile)
+	got := s.envFor("/etc/signalith/signalith.yaml")
 	want := map[string]string{
 		"SIGNALITH_STATE_DIR": "/var/lib/signalith", "SIGNALITH_LOOKUPS_DIR": "/var/lib/signalith/lookups",
-		"SIGNALITH_ARCHIVE_DIR": "/mnt/arch ive", "SIGNALITH_MASTER_KEY_FILE": "/etc/signalith/keys/master.key",
+		"SIGNALITH_ARCHIVE_DIR": "/mnt/arch ive", "SIGNALITH_MASTER_KEY_FILE": "/srv/keys/signalith.key",
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %v", got)
@@ -418,10 +424,206 @@ LoadCredential=master.key:/etc/signalith/keys/master.key
 			t.Errorf("%s = %q, want %q", k, got[k], v)
 		}
 	}
-	if got, _ := serviceEnv(show, "/srv/other/signalith.yaml"); got != nil {
+	// A key passed as a systemd credential is the file the service reads.
+	cred := parseSystemctlShow(append(show, "LoadCredential=master.key:/etc/credstore/signalith-master.key\n"...), os.ReadFile)
+	if cred.cred != "/etc/credstore/signalith-master.key" || cred.envFor("/etc/signalith/signalith.yaml")["SIGNALITH_MASTER_KEY_FILE"] != "/etc/credstore/signalith-master.key" {
+		t.Errorf("credential: %+v", cred)
+	}
+	if got := s.envFor("/srv/other/signalith.yaml"); got != nil {
 		t.Errorf("another config file: %v", got)
 	}
-	if got, _ := serviceEnv([]byte("ExecStart=\nEnvironment=\n"), "/etc/signalith/signalith.yaml"); got != nil {
-		t.Errorf("no service: %v", got)
+	if s := parseSystemctlShow([]byte("ExecStart=\nEnvironment=\n"), os.ReadFile); s.envFor("/etc/signalith/signalith.yaml") != nil {
+		t.Errorf("no service: %+v", s)
+	}
+	// The Windows service's settings, as read from the registry.
+	win := &serviceSettings{args: []string{"-c", `C:\ProgramData\Signalith\signalith.yaml`},
+		env: map[string]string{"SIGNALITH_MASTER_KEY_FILE": `C:\ProgramData\Signalith\keys\master.key`, "SIGNALITH_ADMIN_PASSWORD": "x"}}
+	if runtime.GOOS == "windows" {
+		if got := win.envFor(`c:\programdata\signalith\SIGNALITH.yaml`); len(got) != 1 || got["SIGNALITH_MASTER_KEY_FILE"] == "" {
+			t.Errorf("Windows service: %v", got)
+		}
+	}
+}
+
+func TestParseEnvFile(t *testing.T) {
+	got := parseEnvFile([]byte("# comment\n; another\nA=1\n B = two words \nC=\"quoted value\"\nexport D='x'\nnot a setting\n"))
+	want := map[string]string{"A": "1", "B": "two words", "C": "quoted value", "D": "x"}
+	if len(got) != len(want) {
+		t.Errorf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// keyFileOf returns where the CLI keeps the master key for a test config.
+func keyFileOf(path string) string {
+	f := filepath.Join(filepath.Dir(path), "keys", "master.key")
+	if runtime.GOOS == "windows" {
+		f += ".dpapi"
+	}
+	return f
+}
+
+// Prune keeps the previous key while it cannot be read, while a value
+// that cannot be decrypted may need it, and, with a systemd credential,
+// until the service has restarted with the new key.
+func TestPruneKeepsAKeyThatMayBeNeeded(t *testing.T) {
+	path, lookups := secretsSetup(t)
+	if _, err := runCmd(t, "", "encrypt", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runCmd(t, "", "rotate-master", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	old := keyFileOf(path) + ".old"
+	kept, _ := os.ReadFile(old)
+
+	// The previous key cannot be read.
+	os.WriteFile(old, []byte("damaged"), 0o600)
+	if _, err := runCmd(t, "", "rotate-master", "-prune", "-c", path); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+		t.Errorf("prune with an unreadable previous key: %v", err)
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Fatal("the unreadable previous key was removed")
+	}
+	os.WriteFile(old, kept, 0o600)
+
+	// A value encrypted with a third key cannot be decrypted; it might be
+	// the previous key's, so the key stays.
+	stranger := secrets.NewKeyring(t.TempDir())
+	sealed, err := stranger.Seal(users.BindPasswordField, "from another key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirFile := filepath.Join(lookups, "directory.json")
+	good, _ := os.ReadFile(dirFile)
+	os.WriteFile(dirFile, regexp.MustCompile(`enc:v1:[^"]+`).ReplaceAll(good, []byte(sealed)), 0o600)
+	if _, err := runCmd(t, "", "rotate-master", "-prune", "-c", path); err == nil || !strings.Contains(err.Error(), "bind_password") || !strings.Contains(err.Error(), "may need it") {
+		t.Errorf("prune with an undecryptable value: %v", err)
+	}
+	os.WriteFile(dirFile, good, 0o600)
+
+	// With the key as a systemd credential, the service must have
+	// restarted since the rotation.
+	defer func() { keyIsCredential, serviceRestarted = false, serviceStartedAfter }()
+	keyIsCredential = true
+	serviceRestarted = func(time.Time) (bool, error) { return false, nil }
+	if _, err := runCmd(t, "", "rotate-master", "-prune", "-c", path); err == nil || !strings.Contains(err.Error(), "systemctl restart signalith") {
+		t.Errorf("prune before the service restarted: %v", err)
+	}
+	serviceRestarted = func(time.Time) (bool, error) { return true, nil }
+	if out, err := runCmd(t, "", "rotate-master", "-prune", "-c", path); err != nil || !strings.Contains(out, "Removed the previous master key") {
+		t.Errorf("prune after the restart (%v):\n%s", err, out)
+	}
+}
+
+// With no master key here but values encrypted with one, encrypt and set
+// stop instead of making a second key, unless told to with -new-key.
+func TestNoSecondKeyWithoutAsking(t *testing.T) {
+	path, _ := secretsSetup(t)
+	elsewhere := filepath.Join(t.TempDir(), "service.key")
+	os.WriteFile(elsewhere, []byte(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x81}, 32))+"\n"), 0o600)
+	t.Setenv("SIGNALITH_MASTER_KEY_FILE", elsewhere)
+	if _, err := runCmd(t, "", "encrypt", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	// The same commands run without the service's variable.
+	t.Setenv("SIGNALITH_MASTER_KEY_FILE", "")
+	before, _ := os.ReadFile(path)
+	for _, args := range [][]string{{"encrypt"}, {"set", "opensearch.password"}} {
+		_, err := runCmd(t, "pw\n", append(args, "-c", path)...)
+		if err == nil || !strings.Contains(err.Error(), "SIGNALITH_MASTER_KEY_FILE") || !strings.Contains(err.Error(), "-new-key") {
+			t.Errorf("%v without the key: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "keys")); !os.IsNotExist(err) {
+		t.Errorf("a key folder was made: %v", err)
+	}
+	if now, _ := os.ReadFile(path); !bytes.Equal(now, before) {
+		t.Error("the config changed")
+	}
+	// The key is lost: -new-key makes one and stores the value with it.
+	out, err := runCmd(t, "new pw\n", "set", "opensearch.password", "-new-key", "-c", path)
+	if err != nil || !strings.Contains(out, "Made a new master key") {
+		t.Fatalf("set -new-key (%v):\n%s", err, out)
+	}
+	if _, err := os.Stat(keyFileOf(path)); err != nil {
+		t.Error(err)
+	}
+}
+
+// When a file cannot be written, no master key is left behind either.
+func TestNoKeyWhenNothingCanBeWritten(t *testing.T) {
+	path, _ := secretsSetup(t)
+	defer func() { prepareFile = securefile.Prepare }()
+	prepareFile = func(p string, data []byte) (*securefile.Pending, error) {
+		if p == path {
+			return nil, errors.New("read-only file system")
+		}
+		return securefile.Prepare(p, data)
+	}
+	for _, args := range [][]string{{"encrypt"}, {"set", "opensearch.password"}} {
+		out, err := runCmd(t, "pw\n", append(args, "-c", path)...)
+		if err == nil || !strings.Contains(err.Error(), "read-only file system") || strings.Contains(out, "Made a new master key") {
+			t.Errorf("%v (%v):\n%s", args, err, out)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "keys")); !os.IsNotExist(err) {
+			t.Errorf("%v left a key folder: %v", args, err)
+		}
+	}
+}
+
+// decrypt writes everything back as plain text, for going back to an
+// older version.
+func TestSecretsDecrypt(t *testing.T) {
+	path, lookups := secretsSetup(t)
+	before := allFiles(t, path, lookups)
+	if _, err := runCmd(t, "", "encrypt", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runCmd(t, "", "decrypt", "-c", path)
+	if err != nil || !strings.Contains(out, "Decrypted 3 values in "+path) || !strings.Contains(out, "plain text") {
+		t.Fatalf("decrypt (%v):\n%s", err, out)
+	}
+	text := allFiles(t, path, lookups)
+	if strings.Contains(text, "enc:v1:") {
+		t.Errorf("still encrypted:\n%s", text)
+	}
+	for _, p := range plainSecrets {
+		if !strings.Contains(text, p) {
+			t.Errorf("%q is not back", p)
+		}
+	}
+	// signalith.yaml is as it was, comments and all.
+	if data, _ := os.ReadFile(path); !strings.Contains(before, string(data)) {
+		t.Errorf("signalith.yaml after decrypt:\n%s", data)
+	}
+}
+
+// A password written into opensearch.url is moved to opensearch.password
+// and encrypted there.
+func TestEncryptMovesTheURLPassword(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "admin password from the environment")
+	os.WriteFile(path, []byte("opensearch:\n  url: https://admin:Plain%20OS%20pw%231@127.0.0.1:18810   # lab\n"), 0o600)
+	out, err := runCmd(t, "", "status", "-c", path)
+	if !strings.Contains(out, "opensearch.url  plain text") || !strings.Contains(out, "0 encrypted, 1 plain text") {
+		t.Errorf("status (%v):\n%s", err, out)
+	}
+	out, err = runCmd(t, "", "encrypt", "-c", path)
+	if err != nil || !strings.Contains(out, "now opensearch.password, encrypted") {
+		t.Fatalf("encrypt (%v):\n%s", err, out)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "Plain") || !strings.Contains(string(data), "url: https://127.0.0.1:18810   # lab") {
+		t.Errorf("file:\n%s", data)
+	}
+	c, err := config.Load(path)
+	if err != nil || c.OpenSearch.Username != "admin" || c.OpenSearch.Password != "Plain OS pw#1" || len(c.PlainSecrets()) != 0 {
+		t.Errorf("load: %v %+v %v", err, c.OpenSearch, c.PlainSecrets())
 	}
 }

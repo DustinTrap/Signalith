@@ -29,9 +29,14 @@ const secretsUsage = `Usage:
                                                showing it, or reads one line from a pipe
   signalith secrets rotate-master  [-c file]   make a new master key and encrypt everything again with it
   signalith secrets rotate-master -prune [-c file]   remove the previous master key once nothing uses it
+  signalith secrets decrypt        [-c file]   write every stored password and key as plain text again,
+                                               before going back to a version older than this one
 
 Settings for "set": opensearch.password, assistant.api_key, auth.ldap.bind_password,
 and ingest.tokens (adds a token; leave it empty to have one made).
+"encrypt" and "set" make the master key if there is none. If the files hold values
+encrypted with a key that cannot be found, they stop instead; add -new-key to make a
+new key anyway, when that one is lost (those values must then be entered again).
 See docs/encryption.md.
 `
 
@@ -60,7 +65,7 @@ func runSecrets(args []string, in *os.File, out io.Writer) error {
 		fmt.Fprint(out, secretsUsage)
 		return nil
 	}
-	if !slices.Contains([]string{"status", "encrypt", "set", "rotate-master"}, sub) {
+	if !slices.Contains([]string{"status", "encrypt", "set", "rotate-master", "decrypt"}, sub) {
 		fmt.Fprint(out, secretsUsage)
 		return fmt.Errorf("unknown secrets command %q", sub)
 	}
@@ -68,9 +73,12 @@ func runSecrets(args []string, in *os.File, out io.Writer) error {
 	fs.SetOutput(out)
 	fs.Usage = func() { fmt.Fprint(out, secretsUsage) }
 	path := configFlag(fs)
-	prune := false
-	if sub == "rotate-master" {
+	prune, newKey := false, false
+	switch sub {
+	case "rotate-master":
 		fs.BoolVar(&prune, "prune", false, "remove the previous master key")
+	case "encrypt", "set":
+		fs.BoolVar(&newKey, "new-key", false, "make a new master key even though the files hold values encrypted with one that cannot be found")
 	}
 	names, err := parseInterspersed(fs, rest)
 	if err != nil {
@@ -95,9 +103,11 @@ func runSecrets(args []string, in *os.File, out io.Writer) error {
 	case "status":
 		return secretsStatus(c, out)
 	case "encrypt":
-		return secretsEncrypt(c, out)
+		return secretsEncrypt(c, newKey, out)
 	case "set":
-		return secretsSet(c, names[0], in, out)
+		return secretsSet(c, names[0], newKey, in, out)
+	case "decrypt":
+		return secretsDecrypt(c, out)
 	}
 	if prune {
 		return secretsPrune(c, out)
@@ -128,9 +138,7 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 // signalith service is given in its unit are used too, so the command
 // finds the server's files and key (see serviceEnv).
 func secretsConfig(path string, out io.Writer) (*config.Config, error) {
-	if set := applyServiceEnv(path); len(set) > 0 {
-		fmt.Fprintf(out, "Using the folders the signalith service is given (systemctl show signalith):\n  %s\n\n", strings.Join(set, "\n  "))
-	}
+	useServiceEnv(path, out)
 	c, err := config.LoadUnchecked(path)
 	if err != nil {
 		return nil, err
@@ -141,6 +149,14 @@ func secretsConfig(path string, out io.Writer) (*config.Config, error) {
 	}
 	secrets.SetDefault(keys)
 	return c, nil
+}
+
+// useServiceEnv applies the signalith service's folder, file and master
+// key settings (see applyServiceEnv) and says so on out.
+func useServiceEnv(path string, out io.Writer) {
+	if where, set := applyServiceEnv(path); len(set) > 0 {
+		fmt.Fprintf(out, "Using the settings the signalith service is given (%s):\n  %s\n\n", where, strings.Join(set, "\n  "))
+	}
 }
 
 // useKeys makes the config's master key the one the files the server
@@ -212,6 +228,9 @@ func secretsStatus(c *config.Config, out io.Writer) error {
 		if src.Weak() {
 			fmt.Fprintln(out, "               Warning: other programs can sometimes read environment variables;\n               put the key in a file and set SIGNALITH_MASTER_KEY_FILE instead.")
 		}
+		if src.Warning != "" {
+			fmt.Fprintf(out, "               Warning: %s.\n", src.Warning)
+		}
 		switch {
 		case src.OldErr != "":
 			fmt.Fprintf(out, "Previous key:  %s cannot be read: %s\n", src.OldPath, src.OldErr)
@@ -254,6 +273,16 @@ func secretsStatus(c *config.Config, out io.Writer) error {
 			}
 			fmt.Fprintln(out, line)
 		}
+		if f.path == c.Path() {
+			for _, a := range config.AddressSecrets(data) {
+				if a.Movable {
+					counts[secrets.Plain]++
+					fmt.Fprintf(out, "  %s  plain text: %s\n", a.Label, a.Advice)
+				} else {
+					fmt.Fprintf(out, "  %s  holds %s\n", a.Label, a.Advice)
+				}
+			}
+		}
 	}
 	var env []string
 	for _, name := range []string{"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_INGEST_TOKEN", "SIGNALITH_ASSISTANT_API_KEY", "SIGNALITH_LDAP_BIND_PASSWORD"} {
@@ -278,19 +307,86 @@ func secretsStatus(c *config.Config, out io.Writer) error {
 		fmt.Fprintln(out, "Run: signalith secrets encrypt")
 	}
 	if n := counts[secrets.Unreadable]; n > 0 {
-		return fmt.Errorf("%d stored %s cannot be decrypted with this master key; restore the key they were encrypted with, "+
+		return fmt.Errorf("%d stored %s cannot be decrypted (see above): restore the master key they were encrypted with, "+
 			"or enter them again (signalith secrets set, or the page where they were added)", n, plural(n, "value", "values"))
 	}
 	return nil
 }
 
-// rewrite is a file whose stored values change.
+// sealedWithout lists the stored values encrypted with a master key, as
+// "label in file (master key id)", for when there is no master key here.
+func sealedWithout(c *config.Config) []string {
+	var out []string
+	for _, f := range secretFiles(c) {
+		data, err := os.ReadFile(f.path)
+		if err != nil {
+			continue
+		}
+		list, _ := listSecrets(f, data)
+		for _, s := range list {
+			if secrets.IsSealed(s.Value) {
+				out = append(out, fmt.Sprintf("%s in %s (master key %s)", s.Label, f.path, secrets.KeyID(s.Value)))
+			}
+		}
+	}
+	return out
+}
+
+// beginFirstKey returns a new master key to encrypt with, not yet in
+// place, when there is none (nil when there is one). When the files hold
+// values encrypted with a key that is not found, that key is elsewhere,
+// such as in a variable the service has and this shell does not, or it
+// is lost; a new key is then made only with -new-key, since values would
+// otherwise end up split between two keys.
+func beginFirstKey(c *config.Config, newKey bool) (*secrets.Rotation, error) {
+	keys := c.Keyring()
+	_, err := keys.Source()
+	if err == nil {
+		return nil, nil
+	}
+	if !errors.Is(err, secrets.ErrNoKey) {
+		return nil, err
+	}
+	if orphans := sealedWithout(c); len(orphans) > 0 && !newKey {
+		return nil, fmt.Errorf("%v, but these values are encrypted with one: %s.\n"+
+			"If the server gets its key from SIGNALITH_MASTER_KEY_FILE or SIGNALITH_MASTER_KEY, set the same variable here and run this again. "+
+			"If that key is lost, run this again with -new-key: a new master key is made, and the values above must be entered again "+
+			"(events are not affected). Nothing was changed", err, strings.Join(orphans, ", "))
+	}
+	return keys.BeginNew()
+}
+
+// linkNotes says which files had other names (hard links), which keep
+// the old text when a file is replaced.
+func linkNotes(paths ...string) []string {
+	var out []string
+	for _, p := range paths {
+		if n := securefile.OtherLinks(p); n > 0 {
+			out = append(out, fmt.Sprintf("Note: %s has %d other %s (hard links), which still hold its old text, with the values as they were. "+
+				"Remove %s, or copy this file over %s.", p, n, plural(n, "name", "names"), plural(n, "it", "them"), plural(n, "it", "them")))
+		}
+	}
+	return out
+}
+
+// madeKey says where a new master key was made.
+func madeKey(c *config.Config, out io.Writer) {
+	if src, err := c.Keyring().Source(); err == nil {
+		fmt.Fprintf(out, "Made a new master key: %s (key id %s).\nBack it up: without it the stored passwords and keys cannot be read (events are not affected).\n", src, src.KeyID)
+	}
+}
+
+// rewrite is a file whose stored values change: n of them, and the text
+// from old to new.
 type rewrite struct {
 	path     string
 	old, new []byte
 	n        int
 	pending  *securefile.Pending
 }
+
+// changed reports whether the file's text changes.
+func (r *rewrite) changed() bool { return !bytes.Equal(r.old, r.new) }
 
 // Seams for tests that make a write fail.
 var (
@@ -306,7 +402,7 @@ var (
 func writeAll(list []*rewrite, key, undo func() error) error {
 	var todo []*rewrite
 	for _, r := range list {
-		if r.n > 0 {
+		if r.changed() {
 			todo = append(todo, r)
 		}
 	}
@@ -362,10 +458,25 @@ func writeAll(list []*rewrite, key, undo func() error) error {
 	return nil
 }
 
-func secretsEncrypt(c *config.Config, out io.Writer) error {
+func secretsEncrypt(c *config.Config, newKey bool, out io.Writer) error {
 	keys := c.Keyring()
+	first, err := beginFirstKey(c, newKey)
+	if err != nil {
+		return err
+	}
+	committed := false
+	seal := keys.Seal
+	if first != nil {
+		seal = first.Seal
+		defer func() {
+			if !committed {
+				first.Discard()
+			}
+		}()
+	}
 	var list []*rewrite
 	var unreadable []string
+	moved := false
 	for _, f := range secretFiles(c) {
 		data, err := os.ReadFile(f.path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -374,17 +485,25 @@ func secretsEncrypt(c *config.Config, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		next, n, err := f.reseal(data, func(s secrets.Stored) (string, error) {
+		text := data
+		if f.path == c.Path() {
+			// A password in opensearch.url goes to opensearch.password
+			// first, where it is encrypted with the others.
+			if text, moved, err = config.MoveURLPassword(data); err != nil {
+				return fmt.Errorf("%s: %w", f.path, err)
+			}
+		}
+		next, n, err := f.reseal(text, func(s secrets.Stored) (string, error) {
 			st, _ := keys.Check(s.Field, s.Value)
 			switch st {
 			case secrets.Plain:
-				return keys.Seal(s.Field, s.Value)
+				return seal(s.Field, s.Value)
 			case secrets.Previous:
 				plain, err := keys.Open(s.Field, s.Value)
 				if err != nil {
 					return "", err
 				}
-				return keys.Seal(s.Field, plain)
+				return seal(s.Field, plain)
 			case secrets.Unreadable:
 				unreadable = append(unreadable, s.Label+" in "+f.path)
 			}
@@ -395,8 +514,25 @@ func secretsEncrypt(c *config.Config, out io.Writer) error {
 		}
 		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n})
 	}
-	if err := writeAll(list, nil, nil); err != nil {
+	var key, undo func() error
+	// A new key is kept only when something was encrypted with it.
+	if first != nil && len(changedPaths(list)) > 0 {
+		key = func() error {
+			if err := first.Commit(); err != nil {
+				return err
+			}
+			committed = true
+			return nil
+		}
+		undo = first.Undo
+	}
+	notes := linkNotes(changedPaths(list)...)
+	if err := writeAll(list, key, undo); err != nil {
 		return err
+	}
+	if committed {
+		first.Done()
+		madeKey(c, out)
 	}
 	total := 0
 	for _, r := range list {
@@ -405,15 +541,39 @@ func secretsEncrypt(c *config.Config, out io.Writer) error {
 			total += r.n
 		}
 	}
-	if total == 0 {
+	if moved {
+		fmt.Fprintln(out, "The password written in opensearch.url is now opensearch.password, encrypted, and the address no longer holds it.")
+	}
+	if total == 0 && !moved {
 		fmt.Fprintln(out, "Nothing to encrypt: every stored password and key is already encrypted with the master key in use.")
-	} else if src, err := keys.Source(); err == nil {
+	} else if src, err := keys.Source(); err == nil && !committed {
 		fmt.Fprintf(out, "Master key: %s, key id %s\n", src, src.KeyID)
+	}
+	if data, err := os.ReadFile(c.Path()); err == nil {
+		for _, a := range config.AddressSecrets(data) {
+			if !a.Movable {
+				fmt.Fprintf(out, "Not encrypted: %s holds %s.\n", a.Label, a.Advice)
+			}
+		}
+	}
+	for _, n := range notes {
+		fmt.Fprintln(out, n)
 	}
 	if len(unreadable) > 0 {
 		return leftAsIs(unreadable)
 	}
 	return nil
+}
+
+// changedPaths lists the files of a rewrite that change.
+func changedPaths(list []*rewrite) []string {
+	var out []string
+	for _, r := range list {
+		if r.changed() {
+			out = append(out, r.path)
+		}
+	}
+	return out
 }
 
 // leftAsIs reports stored values that could not be decrypted, and so
@@ -433,7 +593,37 @@ func plural(n int, one, many string) string {
 	return many
 }
 
-func secretsSet(c *config.Config, field string, in *os.File, out io.Writer) error {
+func secretsSet(c *config.Config, field string, newKey bool, in *os.File, out io.Writer) error {
+	data, err := config.ReadForEdit(c.Path())
+	if err != nil {
+		return err
+	}
+	// The file must be one this can change, before anything is asked.
+	if _, err := config.SetSecretText(data, field, "enc:v1:00000000:AAAA"); err != nil {
+		return fmt.Errorf("%s: %w", c.Path(), err)
+	}
+	first, err := beginFirstKey(c, newKey)
+	if err != nil {
+		return err
+	}
+	seal := c.Keyring().Seal
+	var key, undo func() error
+	committed := false
+	if first != nil {
+		defer func() {
+			if !committed {
+				first.Discard()
+			}
+		}()
+		seal, undo = first.Seal, first.Undo
+		key = func() error {
+			if err := first.Commit(); err != nil {
+				return err
+			}
+			committed = true
+			return nil
+		}
+	}
 	label := "New value for " + field + ": "
 	if field == "ingest.tokens" {
 		label = "New ingest token (press Enter to have one made): "
@@ -446,8 +636,24 @@ func secretsSet(c *config.Config, field string, in *os.File, out io.Writer) erro
 	if made {
 		value = config.RandomToken(24)
 	}
-	if err := config.SetSecret(c.Path(), field, value, c.Keyring()); err != nil {
+	if err := config.CheckSecret(field, value); err != nil {
 		return err
+	}
+	sealed, err := seal(field, value)
+	if err != nil {
+		return err
+	}
+	next, err := config.SetSecretText(data, field, sealed)
+	if err != nil {
+		return fmt.Errorf("%s: %w", c.Path(), err)
+	}
+	notes := linkNotes(c.Path())
+	if err := writeAll([]*rewrite{{path: c.Path(), old: data, new: next, n: 1}}, key, undo); err != nil {
+		return err
+	}
+	if committed {
+		first.Done()
+		madeKey(c, out)
 	}
 	if field == "ingest.tokens" {
 		if made {
@@ -461,6 +667,9 @@ func secretsSet(c *config.Config, field string, in *os.File, out io.Writer) erro
 	fmt.Fprintln(out, "Restart the server to use it.")
 	if env := secretEnv[field]; env != "" && os.Getenv(env) != "" {
 		fmt.Fprintf(out, "Note: %s is set in this environment; wherever it is set for the server, it is used instead of the file.\n", env)
+	}
+	for _, n := range notes {
+		fmt.Fprintln(out, n)
 	}
 	return nil
 }
@@ -504,6 +713,7 @@ func secretsRotate(c *config.Config, out io.Writer) error {
 		}
 		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n})
 	}
+	notes := linkNotes(changedPaths(list)...)
 	err = writeAll(list, func() error {
 		if err := r.Commit(); err != nil {
 			return err
@@ -523,16 +733,26 @@ func secretsRotate(c *config.Config, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "The previous key (%s) is kept as %s.old, so files saved before now can still be read.\n", before.KeyID, r.Path())
 	if keyIsCredential {
-		fmt.Fprintln(out, "The service gets the key as a systemd credential, read when it starts; restart it now: sudo systemctl restart signalith")
+		fmt.Fprintln(out, "The service gets the key as a systemd credential, which it reads only when it starts. Restart it now:\n"+
+			"  sudo systemctl restart signalith\n"+
+			"then encrypt anything it saved in the meantime with the new key: sudo signalith secrets encrypt")
+		fmt.Fprintln(out, "Next: back up the new key; after the restart, remove the previous one with: signalith secrets rotate-master -prune")
 	} else {
 		fmt.Fprintln(out, "A running server picks up the new key by itself.")
+		fmt.Fprintln(out, "Next: back up the new key, then remove the previous one with: signalith secrets rotate-master -prune")
 	}
-	fmt.Fprintln(out, "Next: back up the new key, then remove the previous one with: signalith secrets rotate-master -prune")
+	for _, n := range notes {
+		fmt.Fprintln(out, n)
+	}
 	if len(unreadable) > 0 {
 		return leftAsIs(unreadable)
 	}
 	return nil
 }
+
+// serviceRestarted reports whether the service picked up a key file
+// changed at t; tests replace it.
+var serviceRestarted = serviceStartedAfter
 
 func secretsPrune(c *config.Config, out io.Writer) error {
 	keys := c.Keyring()
@@ -544,7 +764,12 @@ func secretsPrune(c *config.Config, out io.Writer) error {
 		fmt.Fprintln(out, "There is no previous master key to remove.")
 		return nil
 	}
-	var still []string
+	if src.OldErr != "" {
+		// It cannot be told whether values need it, so it stays.
+		return fmt.Errorf("the previous master key %s cannot be read (%s), so it cannot be checked whether stored values still need it; "+
+			"it was not removed. Fix that first (signalith secrets status)", src.OldPath, src.OldErr)
+	}
+	var still, unknown []string
 	for _, f := range secretFiles(c) {
 		data, err := os.ReadFile(f.path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -558,8 +783,11 @@ func secretsPrune(c *config.Config, out io.Writer) error {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
 		for _, s := range list {
-			if st, _ := keys.Check(s.Field, s.Value); st == secrets.Previous {
+			switch st, err := keys.Check(s.Field, s.Value); {
+			case st == secrets.Previous:
 				still = append(still, s.Label+" in "+f.path)
+			case st == secrets.Unreadable && secrets.KeyID(s.Value) != src.KeyID:
+				unknown = append(unknown, fmt.Sprintf("%s in %s (%s)", s.Label, f.path, whyUnreadable(err)))
 			}
 		}
 	}
@@ -567,12 +795,89 @@ func secretsPrune(c *config.Config, out io.Writer) error {
 		return fmt.Errorf("%d stored %s still %s the previous master key: %s. Run: signalith secrets encrypt, then this again",
 			len(still), plural(len(still), "value", "values"), plural(len(still), "needs", "need"), strings.Join(still, ", "))
 	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("the previous master key was not removed, since %d stored %s cannot be decrypted and may need it: %s. "+
+			"Enter %s again, or remove %s, then run this again", len(unknown), plural(len(unknown), "value", "values"),
+			strings.Join(unknown, ", "), plural(len(unknown), "it", "them"), plural(len(unknown), "it", "them"))
+	}
+	if keyIsCredential {
+		// The running service still has the key it read when it started;
+		// until it restarts it encrypts what it saves with that one.
+		st, err := os.Stat(src.Path)
+		if err != nil {
+			return err
+		}
+		if ok, err := serviceRestarted(st.ModTime()); err != nil || !ok {
+			why := "the signalith service has not been restarted since the master key changed"
+			if err != nil {
+				why = "it cannot be told whether the signalith service was restarted since the master key changed (" + err.Error() + ")"
+			}
+			return fmt.Errorf("the previous master key was not removed: %s, and until then it encrypts what it saves with the previous key. "+
+				"Run: sudo systemctl restart signalith, then sudo signalith secrets encrypt, then this again", why)
+		}
+	}
 	removed, err := keys.RemoveOld()
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Removed the previous master key %s (key id %s).\n", removed, src.OldKeyID)
 	fmt.Fprintln(out, "Backups of files from before the rotation now need a backup of that key to be read.")
+	return nil
+}
+
+// secretsDecrypt writes every stored password and key back as plain text,
+// for going back to a version of Signalith older than this one, which
+// cannot read encrypted values and would use them as they are (such as
+// the directory service account's password, which could lock it out).
+func secretsDecrypt(c *config.Config, out io.Writer) error {
+	keys := c.Keyring()
+	var list []*rewrite
+	var unreadable []string
+	for _, f := range secretFiles(c) {
+		data, err := os.ReadFile(f.path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		next, n, err := f.reseal(data, func(s secrets.Stored) (string, error) {
+			if !secrets.IsSealed(s.Value) {
+				return s.Value, nil
+			}
+			plain, err := keys.Open(s.Field, s.Value)
+			if err != nil {
+				unreadable = append(unreadable, s.Label+" in "+f.path)
+				return s.Value, nil
+			}
+			return plain, nil
+		})
+		if err != nil {
+			return fmt.Errorf("%s: %w", f.path, err)
+		}
+		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n})
+	}
+	if err := writeAll(list, nil, nil); err != nil {
+		return err
+	}
+	total := 0
+	for _, r := range list {
+		if r.n > 0 {
+			fmt.Fprintf(out, "Decrypted %d %s in %s\n", r.n, plural(r.n, "value", "values"), r.path)
+			total += r.n
+		}
+	}
+	if total == 0 {
+		fmt.Fprintln(out, "Nothing to decrypt.")
+	} else {
+		fmt.Fprintln(out, "These files now hold passwords and keys as plain text. Put the older version in place before the server starts again: "+
+			"this version encrypts its own files again when it starts or saves them.")
+	}
+	if len(unreadable) > 0 {
+		return fmt.Errorf("%d stored %s cannot be decrypted and %s left as %s: %s. Enter %s again after going back",
+			len(unreadable), plural(len(unreadable), "value", "values"), plural(len(unreadable), "was", "were"),
+			plural(len(unreadable), "it was", "they were"), strings.Join(unreadable, ", "), plural(len(unreadable), "it", "them"))
+	}
 	return nil
 }
 

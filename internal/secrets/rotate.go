@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/jrsamsanchez/signalith/internal/securefile"
 )
@@ -14,12 +16,70 @@ import (
 // (securefile.Prepare), then Commit; or Discard to change nothing. If the
 // files cannot all be put in place after Commit, Undo puts the previous
 // key back; otherwise Done forgets it.
+//
+// BeginNew makes a Rotation for the first master key, used the same way,
+// so that a command that cannot write its files leaves no key behind.
 type Rotation struct {
 	k       *Keyring
 	path    string
 	next    *masterKey
 	pending *securefile.Pending
 	backup  []byte
+	// first is set for the first master key (BeginNew); madeDir is the
+	// keys folder it made, removed again if the key is not kept.
+	first   bool
+	madeDir string
+}
+
+// BeginNew makes a master key for a keyring that has none yet, without
+// putting it in place. It fails if there is one.
+func (k *Keyring) BeginNew() (*Rotation, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if err := k.ensure(); err == nil {
+		return nil, fmt.Errorf("there is a master key already (%s)", k.src)
+	} else if !errors.Is(err, ErrNoKey) {
+		return nil, err
+	}
+	path := k.DefaultPath()
+	if path == "" {
+		return nil, &NoKeyError{}
+	}
+	raw := make([]byte, keySize)
+	defer clear(raw)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, err
+	}
+	next, err := newMasterKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	data, err := encodeDefault(raw)
+	if err != nil {
+		return nil, fmt.Errorf("could not protect a new master key: %w", err)
+	}
+	defer clear(data)
+	dir := filepath.Dir(path)
+	madeDir := ""
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		madeDir = dir
+	}
+	if err := securefile.MkdirPrivate(dir); err != nil {
+		return nil, fmt.Errorf("could not make a folder for the master key: %w", err)
+	}
+	p, err := securefile.PreparePrivate(path, data)
+	if err != nil {
+		removeIfEmpty(madeDir)
+		return nil, fmt.Errorf("could not save a new master key: %w", err)
+	}
+	return &Rotation{k: k, path: path, next: next, pending: p, first: true, madeDir: madeDir}, nil
+}
+
+// removeIfEmpty removes a folder this command made, if nothing is in it.
+func removeIfEmpty(dir string) {
+	if dir != "" {
+		os.Remove(dir)
+	}
 }
 
 // BeginRotation makes a new master key. Only a key kept in a file can be
@@ -72,7 +132,8 @@ func (k *Keyring) BeginRotation() (*Rotation, error) {
 		return nil, fmt.Errorf("could not protect the new master key: %w", err)
 	}
 	defer clear(data)
-	p, err := securefile.Prepare(src.Path, data)
+	// The new key is private whatever the old file allowed.
+	p, err := securefile.PreparePrivate(src.Path, data)
 	if err != nil {
 		clear(backup)
 		return nil, fmt.Errorf("could not write the new master key next to %s: %w", src.Path, err)
@@ -100,6 +161,17 @@ func (r *Rotation) Seal(field, plain string) (string, error) {
 func (r *Rotation) Commit() error {
 	r.k.mu.Lock()
 	defer r.k.mu.Unlock()
+	if r.first {
+		if err := r.pending.CommitNew(); err != nil {
+			removeIfEmpty(r.madeDir)
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("another program (the server?) made a master key at %s meanwhile; run the command again to use it", r.path)
+			}
+			return fmt.Errorf("could not save the new master key %s: %w", r.path, err)
+		}
+		r.k.reset()
+		return nil
+	}
 	if err := securefile.WriteFile(r.path+".old", r.backup); err != nil {
 		r.pending.Discard()
 		clear(r.backup)
@@ -120,6 +192,16 @@ func (r *Rotation) Undo() error {
 	defer clear(r.backup)
 	r.k.mu.Lock()
 	defer r.k.mu.Unlock()
+	if r.first {
+		// Nothing was encrypted with the new key in the end.
+		err := os.Remove(r.path)
+		removeIfEmpty(r.madeDir)
+		r.k.reset()
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("could not remove the new master key %s, which nothing uses: %w", r.path, err)
+		}
+		return nil
+	}
 	if err := securefile.WriteFile(r.path, r.backup); err != nil {
 		return fmt.Errorf("could not put the previous master key back in %s (it is still in %s.old): %w", r.path, r.path, err)
 	}
@@ -135,6 +217,9 @@ func (r *Rotation) Done() { clear(r.backup) }
 func (r *Rotation) Discard() {
 	clear(r.backup)
 	r.pending.Discard()
+	if r.first {
+		removeIfEmpty(r.madeDir)
+	}
 }
 
 // RemoveOld deletes the previous master key kept after a rotation and

@@ -4,8 +4,11 @@ package securefile
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // keepAccess gives tmp the mode and owner of the file it replaces. A
@@ -23,6 +26,9 @@ func keepAccess(_ string, old os.FileInfo, tmp *os.File) error {
 	}
 	return nil
 }
+
+// makePrivate makes tmp readable and writable by its owner only.
+func makePrivate(tmp *os.File) error { return tmp.Chmod(0o600) }
 
 // newFileAccess keeps a new file at mode 0600 (os.CreateTemp's) and, when
 // running as root, gives it the owner of the folder it is in: the
@@ -42,19 +48,48 @@ func newFileAccess(tmp *os.File, dir string) error {
 }
 
 // privateDir sets dir to mode 0700 and, for a folder root just made, the
-// owner of the folder above it.
+// owner of the folder above it. It works on the folder opened without
+// following links, so a link put in its place meanwhile is not followed.
 func privateDir(dir, parent string, created bool) error {
-	if err := os.Chmod(dir, 0o700); err != nil {
+	f, err := os.OpenFile(dir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Chmod(0o700); err != nil {
 		return err
 	}
 	if created && os.Geteuid() == 0 {
 		if st, err := os.Stat(parent); err == nil {
 			if sys, ok := st.Sys().(*syscall.Stat_t); ok && (sys.Uid != 0 || sys.Gid != 0) {
-				return os.Chown(dir, int(sys.Uid), int(sys.Gid))
+				return f.Chown(int(sys.Uid), int(sys.Gid))
 			}
 		}
 	}
 	return nil
+}
+
+// linkAllowed refuses, when running as root, a link that another account
+// made.
+func linkAllowed(path string, fi os.FileInfo) error {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if os.Geteuid() != 0 || !ok || st.Uid == 0 {
+		return nil
+	}
+	target, _ := os.Readlink(path)
+	return fmt.Errorf("%s is a link to %s, made by another account (uid %d). Run as root, Signalith does not follow such a link, "+
+		"since that account could point it at any file; use the file it points to, or replace the link with that file", path, target, st.Uid)
+}
+
+func otherLinks(path string) int {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Nlink > 1 {
+		return int(sys.Nlink - 1)
+	}
+	return 0
 }
 
 func isBusy(err error) bool { return errors.Is(err, syscall.EBUSY) }

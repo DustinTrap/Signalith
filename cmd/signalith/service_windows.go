@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -49,6 +50,16 @@ func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 	if f, err := safelog.OpenRotating(filepath.Join(filepath.Dir(s.configPath), "signalith.log"), safelog.DefaultMaxSize, safelog.DefaultBackups); err == nil {
 		defer f.Close()
 		log = newLogger(f)
+	}
+	// A config that does not load stops the service before it reports
+	// running, so "signalith service start" and the Services console show
+	// that it failed.
+	if _, err := config.Load(s.configPath); err != nil {
+		log.Error("cannot start", "err", err)
+		if elog != nil {
+			elog.Error(1, "Signalith cannot start: "+err.Error())
+		}
+		return false, 1
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -109,7 +120,10 @@ func cmdService(args []string) error {
 			return err
 		}
 		defer s.Close()
-		return s.Start()
+		if err := s.Start(); err != nil {
+			return err
+		}
+		return waitRunning(s, filepath.Join(filepath.Dir(path), "signalith.log"))
 	case "stop":
 		s, err := m.OpenService(serviceName)
 		if err != nil {
@@ -120,6 +134,44 @@ func cmdService(args []string) error {
 		return err
 	default:
 		return fmt.Errorf("unknown service action %q", args[0])
+	}
+}
+
+// waitRunning waits until the service reports running and is still
+// running a few seconds later, so a service that stops right away (a
+// config it cannot load, a file it may not read) is reported here rather
+// than looking started.
+func waitRunning(s *mgr.Service, logFile string) error {
+	failed := func(st svc.Status) error {
+		return fmt.Errorf("the %s service stopped (exit code %d). See %s and the Windows event log (Application, source %s)",
+			serviceName, st.Win32ExitCode, logFile, serviceName)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		st, err := s.Query()
+		if err != nil {
+			return err
+		}
+		switch st.State {
+		case svc.Running:
+			// Still running after a few seconds: it got past loading its
+			// settings and opening its ports.
+			time.Sleep(5 * time.Second)
+			if st, err = s.Query(); err != nil {
+				return err
+			}
+			if st.State != svc.Running {
+				return failed(st)
+			}
+			fmt.Printf("The %s service is running.\n", serviceName)
+			return nil
+		case svc.Stopped:
+			return failed(st)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the %s service did not start within a minute. See %s", serviceName, logFile)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -192,58 +244,108 @@ func installService(m *mgr.Mgr, path string) error {
 		fmt.Printf("Warning: could not set the service to restart after it stops with an error: %v\n", err)
 	}
 	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
-	dirs := serviceFolders(abs)
-	for _, dir := range dirs {
-		if err := grantModify(dir, securefile.ServiceSID(serviceName)); err != nil {
-			fmt.Printf("Warning: could not give %s access to %s (%v). Run: icacls \"%s\" /grant \"%s:(OI)(CI)M\"\n", serviceAccount, dir, err, dir, serviceAccount)
+	sid := securefile.ServiceSID(serviceName)
+	// The folders and files signalith.yaml names, as the service sees
+	// them (with the environment it is given).
+	applyServiceEnv(abs)
+	access := serviceAccess(abs)
+	for _, dir := range access.write {
+		if err := grantAccess(dir, sid, modifyAccess, true); err != nil {
+			fmt.Printf("Warning: could not give %s access to %s (%v). Run: icacls \"%s\" /grant \"*%s:(OI)(CI)M\"\n", serviceAccount, dir, err, dir, sid)
+		}
+	}
+	for _, f := range access.read {
+		if err := grantAccess(f, sid, readAccess, false); err != nil {
+			fmt.Printf("Warning: %s may not be able to read %s, which signalith.yaml names (%v). Run: icacls \"%s\" /grant \"*%s:RX\"\n", serviceAccount, f, err, f, sid)
 		}
 	}
 	fmt.Printf("%s the %s service using %s.\n", verb, serviceName, abs)
-	fmt.Printf("It runs as %s, which may change files in: %s\n", serviceAccount, strings.Join(dirs, ", "))
+	fmt.Printf("It runs as %s, which may change files in: %s\n", serviceAccount, strings.Join(access.shown, ", "))
+	if len(access.read) > 0 {
+		fmt.Printf("It may also read: %s\n", strings.Join(access.read, ", "))
+	}
 	fmt.Println("Start it with: signalith service start")
 	return nil
 }
 
-// serviceFolders lists the folders the service writes to: the config
-// file's folder, then each data folder (lookups, detections, dashboards,
-// archive, state) that exists and is not inside one already listed, such
-// as an archive on another disk.
-func serviceFolders(configPath string) []string {
-	dirs := []string{filepath.Dir(configPath)}
+// readAccess is the "Read & execute" right on a file.
+const readAccess windows.ACCESS_MASK = 0x1200A9
+
+// serviceFiles are the folders the service writes to and the files it
+// reads, outside the config folder.
+type serviceFiles struct {
+	// write are the folders to give the service Modify on: the config
+	// file's folder and every data folder that exists (lookups,
+	// detections, dashboards, archive, state and its keys), each one
+	// itself, since a folder an older version made may have an access
+	// list of its own that the config folder's does not reach. shown
+	// lists the top ones, for people.
+	write, shown []string
+	// read are files the service reads outside those folders, such as a
+	// TLS certificate and key kept in an administrators' folder.
+	read []string
+}
+
+// serviceAccess works out what the service needs, from the config file.
+func serviceAccess(configPath string) serviceFiles {
+	top := filepath.Dir(configPath)
+	out := serviceFiles{write: []string{top}, shown: []string{top}}
 	c, err := config.LoadUnchecked(configPath)
 	if err != nil {
-		return dirs
+		return out
 	}
-	for _, d := range []string{c.StateDir(), c.LookupsDir(), c.DetectionsDir(), c.DashboardsDir(), c.ArchiveDir()} {
-		if d == "" {
+	inside := func(p string, dirs []string) bool {
+		for _, have := range dirs {
+			if rel, err := filepath.Rel(have, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+	folders := []string{c.StateDir(), filepath.Join(c.StateDir(), "keys"), c.LookupsDir(), c.DetectionsDir(), c.DashboardsDir(), c.ArchiveDir(),
+		filepath.Dir(c.UsersFile()), filepath.Dir(c.IntelFeedsFile())}
+	for _, d := range folders {
+		if d == "" || slices.ContainsFunc(out.write, func(have string) bool { return strings.EqualFold(have, d) }) {
 			continue
 		}
 		if st, err := os.Stat(d); err != nil || !st.IsDir() {
 			continue
 		}
-		inside := false
-		for _, have := range dirs {
-			if rel, err := filepath.Rel(have, d); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				inside = true
-				break
-			}
+		if !inside(d, out.shown) {
+			out.shown = append(out.shown, d)
 		}
-		if !inside {
-			dirs = append(dirs, d)
-		}
+		out.write = append(out.write, d)
 	}
-	return dirs
+	ca, cert, key := c.OpenSearchTLSFiles()
+	files := []string{c.Server.TLSCert, c.Server.TLSKey, ca, cert, key}
+	if c.Auth.LDAP != nil && c.Auth.LDAP.CACertFile != "" {
+		files = append(files, c.Auth.LDAP.CACertFile)
+	}
+	for _, f := range files {
+		if f == "" {
+			continue
+		}
+		if !filepath.IsAbs(f) {
+			f = filepath.Join(top, f)
+		}
+		if _, err := os.Stat(f); err != nil || inside(f, out.write) || slices.Contains(out.read, f) {
+			continue
+		}
+		out.read = append(out.read, f)
+	}
+	return out
 }
 
-// grantModify adds Modify for sid to the folder's access list, inherited
-// by what is in it, keeping the entries already there and whether the
-// list is its own or inherited from the folder above.
-func grantModify(dir, sid string) error {
+// grantAccess adds rights for sid to a file's or folder's access list
+// (inherited by what is in a folder when inherit is set), keeping the
+// entries already there and whether the list is its own or inherited from
+// the folder above.
+func grantAccess(path, sid string, rights windows.ACCESS_MASK, inherit bool) error {
 	s, err := windows.StringToSid(sid)
 	if err != nil {
 		return err
 	}
-	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err
 	}
@@ -259,10 +361,14 @@ func grantModify(dir, sid string) error {
 	if ctrl&windows.SE_DACL_PROTECTED != 0 {
 		info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
 	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if inherit {
+		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	}
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-		AccessPermissions: modifyAccess,
+		AccessPermissions: rights,
 		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Inheritance:       inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
@@ -272,5 +378,5 @@ func grantModify(dir, sid string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil)
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil)
 }

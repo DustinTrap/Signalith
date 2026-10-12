@@ -100,3 +100,22 @@ func TestFeedsFileEncrypted(t *testing.T) {
 		t.Errorf("rewritten file:\n%s", data)
 	}
 }
+
+// A typed key or password that starts like an encrypted value would be
+// stored as it is, so it is refused.
+func TestFeedInputRefusesEncryptedLookingValues(t *testing.T) {
+	in := FeedInput{Name: "my-feed", URL: "https://feeds.example.com/list.txt",
+		Headers: []HeaderInput{{Name: "X-Key", Value: "enc:v1:0011aabb:AAAA"}}, Username: "me", Password: "enc:v2:x"}
+	_, probs := in.spec(nil)
+	var msgs []string
+	for _, p := range probs {
+		msgs = append(msgs, p.Msg)
+	}
+	if got := strings.Join(msgs, "; "); strings.Count(got, "how encrypted values look") != 2 {
+		t.Errorf("problems: %s", got)
+	}
+	in.Headers[0].Value, in.Password = "enc:not-encrypted", "enc:hunter2"
+	if _, probs := in.spec(nil); len(probs) != 0 {
+		t.Errorf("plain values starting with enc: refused: %v", probs)
+	}
+}

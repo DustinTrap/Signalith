@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,8 +13,8 @@ import (
 	"strings"
 
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
-	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -24,17 +25,26 @@ import (
 // ones in place, and "signalith secrets set" stores a new one encrypted.
 // The secrets in the file are:
 //
-//	opensearch.password
+//	opensearch.password (and a password written into opensearch.url,
+//	which "signalith secrets encrypt" moves there)
 //	assistant.api_key
 //	auth.ldap.bind_password
 //	ingest.tokens (each one)
-//	intel.feeds[<name>].password and .headers.<name> (values that use
-//	${ENV_VAR} are left as they are)
+//	intel.feeds[].password and .headers (values that use ${ENV_VAR} are
+//	left as they are)
+//
+// A value that cannot be decrypted (the master key was lost or replaced,
+// or the value was changed) does not stop the server: it runs without it,
+// and Warnings say which values to enter again.
 
 // systemdStateDir is the state folder of the systemd unit. Commands run by
 // hand do not see the unit's SIGNALITH_STATE_DIR, so on Linux the master
 // key is also looked for there.
 const systemdStateDir = "/var/lib/signalith"
+
+// systemConfigDir holds the config of a system-wide Linux install
+// (/etc/signalith/signalith.yaml).
+const systemConfigDir = "/etc/"
 
 // StateDir returns the folder where Signalith keeps files it makes for
 // itself, such as its master key (in keys/): SIGNALITH_STATE_DIR when set,
@@ -49,21 +59,41 @@ func (c *Config) StateDir() string {
 // Keyring returns the master key holder for this config. The key is
 // looked for (after systemd credentials and the SIGNALITH_MASTER_KEY_FILE
 // and SIGNALITH_MASTER_KEY variables) in keys/ in the state folder, then
-// next to this file, where "signalith init" puts it when run before the
-// service had a state folder, then on Linux in /var/lib/signalith. A new
-// key is made in the state folder.
+// next to this file, then on Linux in /var/lib/signalith. A new key is
+// made in the first of these.
+//
+// On Linux, a config in /etc with no SIGNALITH_STATE_DIR set is a system
+// install whose service keeps its files in /var/lib/signalith (see
+// deploy/systemd), even when "signalith init" runs before the service is
+// set up. Its key goes there first, so it is not next to signalith.yaml
+// in /etc, where backups of /etc would carry both the key and the values
+// it decrypts. For any other config, /var/lib/signalith is only looked in
+// last, where a folder this account may not open is that install's and
+// not an error (see secrets.Keyring.LookAlsoIn).
 func (c *Config) Keyring() *secrets.Keyring {
 	if c.keys == nil {
 		dirs := []string{c.StateDir()}
 		if c.path != "" {
 			dirs = append(dirs, filepath.Dir(c.path))
 		}
+		var also []string
 		if runtime.GOOS == "linux" {
-			dirs = append(dirs, systemdStateDir)
+			also = append(also, systemdStateDir)
+			if os.Getenv("SIGNALITH_STATE_DIR") == "" && c.path != "" && strings.HasPrefix(absPath(c.path), systemConfigDir) {
+				dirs = append([]string{systemdStateDir}, dirs...)
+			}
 		}
 		c.keys = secrets.NewKeyring(dirs...)
+		c.keys.LookAlsoIn(also...)
 	}
 	return c.keys
+}
+
+func absPath(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
 }
 
 // secretRef is one password or key in a Config.
@@ -73,31 +103,43 @@ type secretRef struct {
 	// envRefs is true where ${ENV_VAR} is filled in from the environment;
 	// such values are not encrypted.
 	envRefs bool
-	get     func() string
-	set     func(string)
+	// feed is the feed it belongs to; token is set for an ingest token.
+	feed  string
+	token bool
+	get   func() string
+	set   func(string)
 }
 
-func feedField(name, part string) string { return "intel.feeds[" + name + "]." + part }
+// feedField is the setting a feed's password or header value in
+// signalith.yaml is encrypted for: intel.feeds.password, or
+// intel.feeds.headers. and the header's name in lower case (header names
+// ignore case). The feed's name is not part of it, so a feed can be
+// renamed in the file without entering its key again.
+func feedField(part string) string { return "intel.feeds." + strings.ToLower(part) }
+
+// feedLabel names a feed's password or header for people.
+func feedLabel(name, part string) string { return "intel.feeds[" + name + "]." + part }
 
 // secretRefs lists the passwords and keys in c.
 func (c *Config) secretRefs() []secretRef {
 	var out []secretRef
-	str := func(field, label string, env bool, p *string) {
-		out = append(out, secretRef{field: field, label: label, envRefs: env, get: func() string { return *p }, set: func(v string) { *p = v }})
+	str := func(r secretRef, p *string) {
+		r.get, r.set = func() string { return *p }, func(v string) { *p = v }
+		out = append(out, r)
 	}
-	str("opensearch.password", "opensearch.password", false, &c.OpenSearch.Password)
-	str("assistant.api_key", "assistant.api_key", false, &c.Assistant.APIKey)
+	str(secretRef{field: "opensearch.password", label: "opensearch.password"}, &c.OpenSearch.Password)
+	str(secretRef{field: "assistant.api_key", label: "assistant.api_key"}, &c.Assistant.APIKey)
 	// A bind password from SIGNALITH_LDAP_BIND_PASSWORD replaces the one
 	// in the file, which then need not be readable.
 	if c.Auth.LDAP != nil && c.ldapBindPassword == "" {
-		str("auth.ldap.bind_password", "auth.ldap.bind_password", false, &c.Auth.LDAP.BindPassword)
+		str(secretRef{field: "auth.ldap.bind_password", label: "auth.ldap.bind_password"}, &c.Auth.LDAP.BindPassword)
 	}
 	for i := range c.Ingest.Tokens {
-		str("ingest.tokens", fmt.Sprintf("ingest.tokens[%d]", i), false, &c.Ingest.Tokens[i])
+		str(secretRef{field: "ingest.tokens", label: fmt.Sprintf("ingest.tokens[%d]", i), token: true}, &c.Ingest.Tokens[i])
 	}
 	for i := range c.Intel.Feeds {
 		f := &c.Intel.Feeds[i]
-		str(feedField(f.Name, "password"), feedField(f.Name, "password"), true, &f.Password)
+		str(secretRef{field: feedField("password"), label: feedLabel(f.Name, "password"), envRefs: true, feed: f.Name}, &f.Password)
 		names := make([]string, 0, len(f.Headers))
 		for h := range f.Headers {
 			names = append(names, h)
@@ -105,7 +147,7 @@ func (c *Config) secretRefs() []secretRef {
 		sort.Strings(names)
 		for _, h := range names {
 			m := f.Headers
-			out = append(out, secretRef{field: feedField(f.Name, "headers."+h), label: feedField(f.Name, "headers."+h), envRefs: true,
+			out = append(out, secretRef{field: feedField("headers." + h), label: feedLabel(f.Name, "headers."+h), envRefs: true, feed: f.Name,
 				get: func() string { return m[h] }, set: func(v string) { m[h] = v }})
 		}
 	}
@@ -118,34 +160,71 @@ func isPlain(v string, envRefs bool) bool {
 	return v != "" && !secrets.IsSealed(v) && !(envRefs && len(intel.EnvRefs(v)) > 0)
 }
 
-// openSecrets decrypts the encrypted passwords and keys in c.
-func (c *Config) openSecrets() error {
-	var problems []string
+// openSecrets decrypts the encrypted passwords and keys in c. One that
+// cannot be decrypted does not stop Signalith, so a lost master key never
+// takes the whole server down: it is left out, as if it were not set,
+// and reported (see Unreadable). An unreadable ingest token is dropped and
+// the others kept; a feed with an unreadable password or header is not
+// downloaded (see FeedProblem).
+func (c *Config) openSecrets() {
+	c.unreadable, c.locked, c.feedLocked = nil, map[string]bool{}, map[string][]string{}
+	var tokens []string
 	for _, r := range c.secretRefs() {
 		v := r.get()
 		if !secrets.IsSealed(v) {
+			if r.token {
+				tokens = append(tokens, v)
+			}
 			continue
 		}
 		plain, err := c.Keyring().Open(r.field, v)
 		if err != nil {
-			problems = append(problems, strings.Replace(err.Error(), r.field, r.label, 1)+". "+fixHint(r.field))
+			c.unreadable = append(c.unreadable, strings.Replace(err.Error(), r.field, r.label, 1)+". "+fixHint(r, err))
+			c.locked[r.field] = true
+			if r.feed != "" {
+				// Kept as it is: the feed is not downloaded, so it is
+				// never sent.
+				c.feedLocked[r.feed] = append(c.feedLocked[r.feed], r.label)
+			} else if !r.token {
+				r.set("")
+			}
 			continue
 		}
 		r.set(plain)
+		if r.token {
+			tokens = append(tokens, plain)
+		}
 	}
-	if len(problems) > 0 {
-		return &ValidationError{Problems: problems}
+	c.Ingest.Tokens = tokens
+}
+
+// Unreadable lists the passwords and keys in signalith.yaml that cannot
+// be decrypted, each with what to do about it. The server runs without
+// them; Warnings include them.
+func (c *Config) Unreadable() []string { return c.unreadable }
+
+// FeedProblem says why a feed in signalith.yaml cannot be downloaded: its
+// password or a header cannot be decrypted. "" when it can.
+func (c *Config) FeedProblem(name string) string {
+	if l := c.feedLocked[name]; len(l) > 0 {
+		return strings.Join(l, " and ") + " cannot be decrypted with this server's master key, so the feed is not downloaded. " +
+			"Restore the master key, or replace the value in signalith.yaml with the plain one and run: signalith secrets encrypt"
 	}
-	return nil
+	return ""
 }
 
 // fixHint says how to enter a secret again.
-func fixHint(field string) string {
-	switch field {
+func fixHint(r secretRef, err error) string {
+	switch r.field {
 	case "opensearch.password", "assistant.api_key", "auth.ldap.bind_password":
-		return "Enter it again with: signalith secrets set " + field
+		return "Enter it again with: signalith secrets set " + r.field
 	case "ingest.tokens":
 		return "Remove it from ingest.tokens and add a token with: signalith secrets set ingest.tokens"
+	}
+	var oe *secrets.OpenError
+	if strings.HasPrefix(r.field, "intel.feeds.headers.") && errors.As(err, &oe) && oe.Reason != "" {
+		return "It is tied to the header's name: if the header was renamed, change the name back. " +
+			"Otherwise, replace it in signalith.yaml with the plain value, then run: signalith secrets encrypt"
 	}
 	return "Replace it in signalith.yaml with the plain value, then run: signalith secrets encrypt"
 }
@@ -167,20 +246,235 @@ func plainLabels(refs []secretRef) []string {
 // secretWarnings are the Warnings about stored secrets.
 func (c *Config) secretWarnings() []string {
 	var w []string
+	for _, u := range c.unreadable {
+		w = append(w, "In signalith.yaml, "+u+". Signalith runs without it until then.")
+	}
 	if n := len(c.plain); n > 0 {
 		what := "passwords or keys in signalith.yaml are"
 		if n == 1 {
 			what = "password or key in signalith.yaml is"
 		}
-		w = append(w, fmt.Sprintf("%d %s stored as plain text (%s). Run: signalith secrets encrypt", n, what, strings.Join(c.plain, ", ")))
+		how := "Run: signalith secrets encrypt"
+		if inContainer() {
+			how += " (in Docker, see docs/encryption.md, \"Docker\")"
+		}
+		w = append(w, fmt.Sprintf("%d %s stored as plain text (%s). %s", n, what, strings.Join(c.plain, ", "), how))
 	}
+	w = append(w, c.addressWarnings...)
 	if c.path != "" {
-		if src, err := c.Keyring().Source(); err == nil && src.Weak() {
-			w = append(w, "The master key comes from the SIGNALITH_MASTER_KEY environment variable, which other programs on this computer "+
-				"can sometimes read (docker inspect, /proc). Put it in a file readable only by Signalith and set SIGNALITH_MASTER_KEY_FILE instead.")
+		if src, err := c.Keyring().Source(); err == nil {
+			if src.Weak() {
+				w = append(w, "The master key comes from the SIGNALITH_MASTER_KEY environment variable, which other programs on this computer "+
+					"can sometimes read (docker inspect, /proc). Put it in a file readable only by Signalith and set SIGNALITH_MASTER_KEY_FILE instead.")
+			}
+			if src.Warning != "" {
+				w = append(w, src.Warning+".")
+			}
 		}
 	}
 	return w
+}
+
+// inContainer reports whether Signalith runs in a Docker or Podman
+// container.
+func inContainer() bool {
+	for _, f := range []string{"/.dockerenv", "/run/.containerenv"} {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// urlPassword returns the password written into a URL, if any.
+func urlPassword(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return ""
+	}
+	pw, _ := u.User.Password()
+	return pw
+}
+
+// urlKeyParams returns the names of query parameters in a URL that look
+// like they hold a key, such as apikey or token.
+func urlKeyParams(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for name := range u.Query() {
+		if redact.SecretName(name) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// AddressSecret is a password or key written into an address in
+// signalith.yaml, where it cannot be encrypted.
+type AddressSecret struct {
+	// Label names the setting, such as opensearch.url.
+	Label string
+	// Movable is set when "signalith secrets encrypt" moves it into a
+	// setting of its own and encrypts it there (opensearch.url); otherwise
+	// Advice says what to do instead.
+	Movable bool
+	Advice  string
+}
+
+// addressSecrets lists the passwords and keys written into addresses in
+// c's own settings: a password in opensearch.url or opensearch.proxy, and
+// a key in the query of a feed's URL.
+func (c *Config) addressSecrets() []AddressSecret {
+	var out []AddressSecret
+	if urlPassword(c.OpenSearch.URL) != "" {
+		out = append(out, AddressSecret{Label: "opensearch.url", Movable: true,
+			Advice: "a password in the address; signalith secrets encrypt moves it to opensearch.password"})
+	}
+	if urlPassword(c.OpenSearch.Proxy) != "" {
+		out = append(out, AddressSecret{Label: "opensearch.proxy",
+			Advice: "a password in the address, which cannot be encrypted there; set the proxy with the SIGNALITH_OPENSEARCH_PROXY environment variable instead"})
+	}
+	for _, f := range c.Intel.Feeds {
+		if names := urlKeyParams(f.URL); len(names) > 0 {
+			out = append(out, AddressSecret{Label: feedLabel(f.Name, "url"),
+				Advice: fmt.Sprintf("a key in the address (%s=), which cannot be encrypted there; if the feed accepts it, send it as a header instead (intel.feeds[].headers are encrypted)",
+					strings.Join(names, "=, "))})
+		}
+	}
+	return out
+}
+
+// AddressSecrets lists the passwords and keys written into addresses in
+// the signalith.yaml text data.
+func AddressSecrets(data []byte) []AddressSecret {
+	c := Default()
+	if yaml.Unmarshal(data, c) != nil {
+		return nil
+	}
+	return c.addressSecrets()
+}
+
+// addressPlain splits address secrets into plain-text labels, which
+// "signalith secrets encrypt" fixes, and warnings for the others.
+func addressPlain(list []AddressSecret) (plain, warnings []string) {
+	for _, a := range list {
+		if a.Movable {
+			plain = append(plain, a.Label+" (a password in the address)")
+		} else {
+			warnings = append(warnings, "In signalith.yaml, "+a.Label+" holds "+a.Advice+".")
+		}
+	}
+	return plain, warnings
+}
+
+// MoveURLPassword takes a user name and password written into
+// opensearch.url in the signalith.yaml text data out of the address, as
+// Signalith does each time it reads the file, and writes them as
+// opensearch.username and opensearch.password instead, where the password
+// can be encrypted. When those are set already, the address's are not
+// used, and are only removed. It reports whether it changed anything.
+func MoveURLPassword(data []byte) ([]byte, bool, error) {
+	type openSearch struct {
+		URL      string `yaml:"url"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+	}
+	read := func(b []byte) (openSearch, error) {
+		var f struct {
+			OpenSearch openSearch `yaml:"opensearch"`
+		}
+		err := yaml.Unmarshal(b, &f)
+		return f.OpenSearch, err
+	}
+	o, err := read(data)
+	if err != nil {
+		return nil, false, fmt.Errorf("not valid YAML: %w", err)
+	}
+	if urlPassword(o.URL) == "" {
+		return data, false, nil
+	}
+	stripped, user, pw, _ := redact.Strip(o.URL)
+	move := o.Username == "" && o.Password == ""
+	out, err := setScalar(data, []string{"opensearch", "url"}, stripped)
+	add := func(key, value string) {
+		if err != nil {
+			return
+		}
+		// Added as a line under url when there is no such key yet, so
+		// nothing else in the file moves.
+		if next, ok := addAfter(out, "opensearch", "url", key, value); ok {
+			out = next
+			return
+		}
+		out, err = setScalar(out, []string{"opensearch", key}, value)
+	}
+	// Each goes right under url: password first, so username ends up
+	// above it.
+	if move {
+		add("password", pw)
+	}
+	if move && user != "" {
+		add("username", user)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("could not move the password out of opensearch.url: %w", err)
+	}
+	if back, err := read(out); err != nil || back.URL != stripped || move && (back.Username != user || back.Password != pw) {
+		return nil, false, errors.New("could not move the password out of opensearch.url")
+	}
+	return out, true, nil
+}
+
+// addAfter adds "key: value" to the section of the YAML text data, on a
+// line of its own after the setting after, which must be on one line, with
+// the same indentation. It does nothing (false) when the section has key
+// already or the line cannot be placed; the caller then edits the
+// document instead.
+func addAfter(data []byte, section, after, key, value string) ([]byte, bool) {
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil || len(doc.Content) == 0 {
+		return nil, false
+	}
+	sec := mapValue(doc.Content[0], section)
+	if sec == nil || sec.Kind != yaml.MappingNode || sec.Style&yaml.FlowStyle != 0 || mapValue(sec, key) != nil {
+		return nil, false
+	}
+	var k, v *yaml.Node
+	for i := 0; i+1 < len(sec.Content); i += 2 {
+		if sec.Content[i].Value == after {
+			k, v = sec.Content[i], sec.Content[i+1]
+		}
+	}
+	if k == nil || v.Kind != yaml.ScalarNode || v.Line != k.Line || v.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
+		return nil, false
+	}
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	if k.Line < 1 || k.Line > len(lines) {
+		return nil, false
+	}
+	text := value
+	if !plainScalar(value) {
+		text = strconv.Quote(value)
+	}
+	var out bytes.Buffer
+	for _, l := range lines[:k.Line] {
+		out.Write(l)
+	}
+	if !bytes.HasSuffix(lines[k.Line-1], []byte("\n")) {
+		out.WriteByte('\n')
+	}
+	out.WriteString(strings.Repeat(" ", k.Column-1) + key + ": " + text + "\n")
+	for _, l := range lines[k.Line:] {
+		out.Write(l)
+	}
+	if valueAt(out.Bytes(), []string{section, key}) != value {
+		return nil, false
+	}
+	return out.Bytes(), true
 }
 
 // secretNode is one password or key in a YAML document of signalith.yaml.
@@ -230,11 +524,11 @@ func secretNodes(doc *yaml.Node) []secretNode {
 			if n := mapValue(f, "name"); n != nil {
 				name = n.Value
 			}
-			add(feedField(name, "password"), feedField(name, "password"), true, mapValue(f, "password"))
+			add(feedField("password"), feedLabel(name, "password"), true, mapValue(f, "password"))
 			if h := mapValue(f, "headers"); h != nil && h.Kind == yaml.MappingNode {
 				for i := 0; i+1 < len(h.Content); i += 2 {
 					k := h.Content[i].Value
-					add(feedField(name, "headers."+k), feedField(name, "headers."+k), true, h.Content[i+1])
+					add(feedField("headers."+k), feedLabel(name, "headers."+k), true, h.Content[i+1])
 				}
 			}
 		}
@@ -338,22 +632,11 @@ func secretsAre(data []byte, want []string) bool {
 // SettableSecrets are the settings "signalith secrets set" stores.
 var SettableSecrets = []string{"opensearch.password", "assistant.api_key", "auth.ldap.bind_password", "ingest.tokens"}
 
-// SetSecret stores value, encrypted with keys, as the setting field of the
-// config file at path, changing nothing else in it. For ingest.tokens the
-// value is added as another token. Settings from environment variables are
-// never copied into the file.
-func SetSecret(path, field, value string, keys *secrets.Keyring) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("config file %s not found; create one with: signalith init", path)
-		}
-		return err
-	}
-	var keysPath []string
+// CheckSecret checks a value "signalith secrets set" is to store as the
+// setting field.
+func CheckSecret(field, value string) error {
 	switch field {
 	case "opensearch.password", "assistant.api_key", "auth.ldap.bind_password":
-		keysPath = strings.Split(field, ".")
 	case "ingest.tokens":
 		if len(value) < 16 {
 			return errors.New("an ingest token must be at least 16 characters")
@@ -361,34 +644,47 @@ func SetSecret(path, field, value string, keys *secrets.Keyring) error {
 	default:
 		return fmt.Errorf("%s cannot be set this way; the settings are: %s", field, strings.Join(SettableSecrets, ", "))
 	}
-	if field == "auth.ldap.bind_password" {
+	if secrets.IsSealed(value) {
+		return errors.New("the value cannot start with enc:v and a number and a colon, which is how encrypted values look")
+	}
+	return nil
+}
+
+// ReadForEdit reads a config file to change it, saying how to make one
+// when there is none.
+func ReadForEdit(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("config file %s not found; create one with: signalith init", path)
+	}
+	return data, err
+}
+
+// SetSecretText returns the signalith.yaml text data with stored, an
+// encrypted value, as the setting field (added as another token for
+// ingest.tokens), and nothing else changed.
+func SetSecretText(data []byte, field, stored string) ([]byte, error) {
+	switch field {
+	case "opensearch.password", "assistant.api_key":
+		return setScalar(data, strings.Split(field, "."), stored)
+	case "auth.ldap.bind_password":
 		var doc yaml.Node
 		if err := yaml.Unmarshal(data, &doc); err != nil {
-			return fmt.Errorf("%s: not valid YAML: %w", path, err)
+			return nil, fmt.Errorf("not valid YAML: %w", err)
 		}
 		root := &doc
 		if len(root.Content) == 1 {
 			root = root.Content[0]
 		}
 		if l := mapValue(mapValue(root, "auth"), "ldap"); l == nil || l.Kind != yaml.MappingNode {
-			return errors.New("signalith.yaml has no auth.ldap section, so there is no bind password to set here; " +
+			return nil, errors.New("signalith.yaml has no auth.ldap section, so there is no bind password to set here; " +
 				"directory sign-in set up on the Users page keeps its own, which you change on that page")
 		}
+		return setScalar(data, strings.Split(field, "."), stored)
+	case "ingest.tokens":
+		return appendToken(data, stored)
 	}
-	sealed, err := keys.Seal(field, value)
-	if err != nil {
-		return err
-	}
-	var out []byte
-	if field == "ingest.tokens" {
-		out, err = appendToken(data, sealed)
-	} else {
-		out, err = setScalar(data, keysPath, sealed)
-	}
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	return securefile.WriteFile(path, out)
+	return nil, fmt.Errorf("%s cannot be set this way; the settings are: %s", field, strings.Join(SettableSecrets, ", "))
 }
 
 // appendToken adds a token at the end of ingest.tokens: as a new line

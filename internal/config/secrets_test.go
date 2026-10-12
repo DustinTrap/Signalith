@@ -244,44 +244,191 @@ func TestLoadMixedAndWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.OpenSearch.Password != "plain-pw" || c.Assistant.APIKey != "sk-sealed" {
-		t.Errorf("loaded %q %q", c.OpenSearch.Password, c.Assistant.APIKey)
+	if c.OpenSearch.Password != "plain-pw" || c.Assistant.APIKey != "sk-sealed" || len(c.Unreadable()) != 0 {
+		t.Errorf("loaded %q %q %v", c.OpenSearch.Password, c.Assistant.APIKey, c.Unreadable())
 	}
 	if p := c.PlainSecrets(); len(p) != 1 || p[0] != "opensearch.password" {
 		t.Errorf("PlainSecrets = %v", p)
 	}
-	// Another folder's key cannot open it: the error says which setting,
-	// which file and what to do.
+	// Another folder's key cannot open it. The server still starts, without
+	// the value, and the warnings say which setting and what to do.
 	other := filepath.Join(t.TempDir(), "signalith.yaml")
 	os.WriteFile(other, []byte(body), 0o600)
 	if _, err := secrets.NewKeyring(filepath.Dir(other)).Seal("x", "y"); err != nil {
 		t.Fatal(err)
 	}
-	_, err = Load(other)
-	for _, want := range []string{other, "assistant.api_key is encrypted with master key " + keys.KeyID(), "signalith secrets set assistant.api_key", "never events"} {
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("error lacks %q:\n%v", want, err)
+	c, err = Load(other)
+	if err != nil {
+		t.Fatalf("a value that cannot be decrypted stopped Load: %v", err)
+	}
+	if c.Assistant.APIKey != "" {
+		t.Errorf("the unreadable key was used: %q", c.Assistant.APIKey)
+	}
+	warnings := strings.Join(c.Warnings(), "\n")
+	for _, want := range []string{"assistant.api_key is encrypted with master key " + keys.KeyID(), "signalith secrets set assistant.api_key", "never events", "runs without it"} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("warnings lack %q:\n%s", want, warnings)
 		}
 	}
-	// A value copied into another setting is refused too.
+	// A value copied into another setting is not used either, and the
+	// key is not blamed for it.
 	os.WriteFile(path, []byte(strings.Replace(body, "password: plain-pw", "password: "+sealed, 1)), 0o600)
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "opensearch.password cannot be decrypted") {
-		t.Errorf("swapped value: %v", err)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// LoadUnchecked reads it anyway, for the secrets commands.
+	if u := c.Unreadable(); c.OpenSearch.Password != "" || len(u) != 1 || !strings.Contains(u[0], "opensearch.password cannot be decrypted") || strings.Contains(u[0], "Restore the master key") {
+		t.Errorf("swapped value: %q %v", c.OpenSearch.Password, u)
+	}
+	// LoadUnchecked reads it as written, for the secrets commands.
 	if c, err := LoadUnchecked(path); err != nil || c.OpenSearch.Password != sealed {
 		t.Errorf("LoadUnchecked: %v", err)
 	}
-	// A bind password from the environment is used instead of the file's,
-	// which then need not decrypt.
+	// A bind password that cannot be decrypted is left empty, so directory
+	// sign-in fails without trying it; the rest of the server runs.
 	ldap := "auth:\n  admin_password_hash: " + validConfig(t).Auth.AdminPasswordHash + "\n  ldap:\n    url: ldaps://dc1\n    bind_dn: CN=svc\n    bind_password: enc:v1:00000000:AAAA\n    user_base_dn: DC=x\n    admin_groups: [CN=a]\n"
 	os.WriteFile(path, []byte(ldap), 0o600)
-	if _, err := Load(path); err == nil {
-		t.Error("a damaged bind password loaded")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatalf("a damaged bind password stopped Load: %v", err)
 	}
+	if c.Auth.LDAP.BindPassword != "" || len(c.Unreadable()) != 1 || !strings.Contains(c.Unreadable()[0], "auth.ldap.bind_password") {
+		t.Errorf("damaged bind password: %q %v", c.Auth.LDAP.BindPassword, c.Unreadable())
+	}
+	// A bind password from the environment is used instead of the file's,
+	// which then need not decrypt.
 	t.Setenv("SIGNALITH_LDAP_BIND_PASSWORD", "from-env")
-	if _, err := Load(path); err != nil {
+	if c, err := Load(path); err != nil || len(c.Unreadable()) != 0 {
 		t.Errorf("with the environment's bind password: %v", err)
+	}
+}
+
+// With the master key lost, signalith.yaml still loads: unreadable ingest
+// tokens are dropped and the others kept, and a feed whose key cannot be
+// decrypted is not downloaded.
+func TestLoadWithoutTheMasterKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	lost := secrets.NewKeyring(t.TempDir())
+	seal := func(field, v string) string {
+		s, err := lost.Seal(field, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	body := "auth:\n  admin_password_hash: " + validConfig(t).Auth.AdminPasswordHash + "\n" +
+		"opensearch:\n  url: https://os.internal:9200\n  username: u\n  password: " + seal("opensearch.password", "pw") + "\n" +
+		"ingest:\n  tokens:\n    - " + seal("ingest.tokens", "token-from-the-lost-key") + "\n    - plain-token-0123456789\n" +
+		"intel:\n  feeds:\n    - name: cti\n      url: https://cti.example.com/list.txt\n      headers:\n        X-Key: " + seal("intel.feeds.headers.x-key", "k") + "\n"
+	os.WriteFile(path, []byte(body), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load without the master key: %v", err)
+	}
+	if c.OpenSearch.Password != "" {
+		t.Errorf("opensearch.password = %q", c.OpenSearch.Password)
+	}
+	if len(c.Ingest.Tokens) != 1 || c.Ingest.Tokens[0] != "plain-token-0123456789" {
+		t.Errorf("tokens = %v", c.Ingest.Tokens)
+	}
+	if p := c.FeedProblem("cti"); !strings.Contains(p, "headers.X-Key") || !strings.Contains(p, "not downloaded") {
+		t.Errorf("FeedProblem = %q", p)
+	}
+	if len(c.Unreadable()) != 3 {
+		t.Errorf("Unreadable = %v", c.Unreadable())
+	}
+	if w := strings.Join(c.Warnings(), "\n"); !strings.Contains(w, "ingest.tokens[0]") || !strings.Contains(w, "signalith secrets set ingest.tokens") {
+		t.Errorf("warnings:\n%s", w)
+	}
+}
+
+// A feed's encrypted values do not depend on its name, nor on the case of
+// a header's name, so renaming them in the file keeps them readable.
+func TestFeedValuesSurviveRenames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	keys := secrets.NewKeyring(dir)
+	data := []byte("auth:\n  admin_password_hash: " + validConfig(t).Auth.AdminPasswordHash + "\n" +
+		"intel:\n  feeds:\n    - name: myfeed\n      url: https://cti.example.com/list.txt\n      headers:\n        X-API-Key: the-key\n")
+	out, n, err := ResealFile(data, func(s secrets.Stored) (string, error) { return keys.Seal(s.Field, s.Value) })
+	if err != nil || n != 1 {
+		t.Fatalf("ResealFile = %d, %v", n, err)
+	}
+	renamed := strings.Replace(strings.Replace(string(out), "name: myfeed", "name: my-feed", 1), "X-API-Key:", "X-Api-Key:", 1)
+	os.WriteFile(path, []byte(renamed), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := c.Intel.Feeds[0].Headers["X-Api-Key"]; v != "the-key" || len(c.Unreadable()) != 0 {
+		t.Errorf("after renaming: %q %v", v, c.Unreadable())
+	}
+	// Another header name is another setting; the message says to change
+	// the name back.
+	os.WriteFile(path, []byte(strings.Replace(renamed, "X-Api-Key:", "X-Token:", 1)), 0o600)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := c.Unreadable(); len(u) != 1 || !strings.Contains(u[0], "change the name back") {
+		t.Errorf("Unreadable = %v", u)
+	}
+}
+
+// A password written into opensearch.url counts as plain text, and
+// MoveURLPassword moves it into opensearch.password, where it can be
+// encrypted. Passwords in the proxy and keys in feed addresses get a
+// warning of their own.
+func TestPasswordsInAddresses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	body := "auth:\n  admin_password_hash: " + validConfig(t).Auth.AdminPasswordHash + "\n" +
+		"opensearch:\n  url: https://admin:Plain%20OS%20pw%231@os.internal:9200   # the cluster\n  proxy: http://me:proxypw@proxy:3128\n" +
+		"intel:\n  feeds:\n    - name: cti\n      url: https://cti.example.com/list.txt?apikey=abc\n"
+	os.WriteFile(path, []byte(body), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.PlainSecrets(); len(p) != 1 || !strings.Contains(p[0], "opensearch.url") {
+		t.Errorf("PlainSecrets = %v", p)
+	}
+	w := strings.Join(c.Warnings(), "\n")
+	for _, want := range []string{"SIGNALITH_OPENSEARCH_PROXY", "apikey=", "Run: signalith secrets encrypt"} {
+		if !strings.Contains(w, want) {
+			t.Errorf("warnings lack %q:\n%s", want, w)
+		}
+	}
+	if list := AddressSecrets([]byte(body)); len(list) != 3 || !list[0].Movable || list[1].Movable {
+		t.Errorf("AddressSecrets = %+v", list)
+	}
+	out, moved, err := MoveURLPassword([]byte(body))
+	if err != nil || !moved {
+		t.Fatalf("MoveURLPassword = %v, %v", moved, err)
+	}
+	if !strings.Contains(string(out), "url: https://os.internal:9200   # the cluster") {
+		t.Errorf("the address was not cleaned in place:\n%s", out)
+	}
+	os.WriteFile(path, out, 0o600)
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OpenSearch.Username != "admin" || c.OpenSearch.Password != "Plain OS pw#1" || c.OpenSearch.URL != "https://os.internal:9200" {
+		t.Errorf("after moving: %q %q %q", c.OpenSearch.Username, c.OpenSearch.Password, c.OpenSearch.URL)
+	}
+	if p := c.PlainSecrets(); len(p) != 1 || p[0] != "opensearch.password" {
+		t.Errorf("PlainSecrets after moving = %v", p)
+	}
+	if _, moved, _ := MoveURLPassword(out); moved {
+		t.Error("moved twice")
+	}
+	// With a password set already, the address's is only removed.
+	withPw := strings.Replace(body, "  proxy:", "  username: u\n  password: kept\n  proxy:", 1)
+	out, moved, err = MoveURLPassword([]byte(withPw))
+	if err != nil || !moved || strings.Contains(string(out), "Plain%20OS") || !strings.Contains(string(out), "password: kept") {
+		t.Errorf("MoveURLPassword with a password set: %v %v\n%s", moved, err, out)
 	}
 }
 
@@ -369,8 +516,8 @@ func TestResealFileKeepsCommentsAndLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.keys = keys
-	if err := c.openSecrets(); err != nil || c.OpenSearch.Password != "os pass" || c.Intel.Feeds[0].Headers["X-OTX-API-KEY"] != "otx-key" {
-		t.Errorf("open: %v %+v", err, c.OpenSearch)
+	if c.openSecrets(); len(c.Unreadable()) != 0 || c.OpenSearch.Password != "os pass" || c.Intel.Feeds[0].Headers["X-OTX-API-KEY"] != "otx-key" {
+		t.Errorf("open: %v %+v", c.Unreadable(), c.OpenSearch)
 	}
 }
 
@@ -385,6 +532,30 @@ func TestResealFileFallsBackForBlockValues(t *testing.T) {
 	if got["opensearch.password"] != "multi\nline\n" || got["assistant.api_key"] != "k1" || !strings.Contains(string(out), "# keep me") {
 		t.Errorf("got %q from:\n%s", got, out)
 	}
+}
+
+// SetSecret stores value, encrypted with keys, as the setting field of the
+// config file at path, as "signalith secrets set" does.
+func SetSecret(path, field, value string, keys *secrets.Keyring) error {
+	data, err := ReadForEdit(path)
+	if err != nil {
+		return err
+	}
+	if err := CheckSecret(field, value); err != nil {
+		return err
+	}
+	if _, err := SetSecretText(data, field, "enc:v1:00000000:AAAA"); err != nil {
+		return err
+	}
+	sealed, err := keys.Seal(field, value)
+	if err != nil {
+		return err
+	}
+	out, err := SetSecretText(data, field, sealed)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
 }
 
 func TestSetSecret(t *testing.T) {
@@ -462,5 +633,35 @@ func TestPlainScalar(t *testing.T) {
 		if got := plainScalar(v); got != want {
 			t.Errorf("plainScalar(%q) = %v", v, got)
 		}
+	}
+}
+
+// On Linux a config in /etc is a system install: its master key goes in
+// /var/lib/signalith, where the service keeps its files, not next to
+// signalith.yaml, so backups of /etc do not carry the key with the values.
+func TestSystemInstallKeyFolder(t *testing.T) {
+	t.Setenv("SIGNALITH_STATE_DIR", "")
+	c := Default()
+	c.path = "/etc/signalith/signalith.yaml"
+	want := filepath.Join("/etc/signalith", "keys", "master.key")
+	if runtime.GOOS == "linux" {
+		want = "/var/lib/signalith/keys/master.key"
+	}
+	if got := c.Keyring().DefaultPath(); runtime.GOOS != "windows" && got != want {
+		t.Errorf("DefaultPath = %s, want %s", got, want)
+	}
+	// SIGNALITH_STATE_DIR still decides when set, and other places keep
+	// the key in the state folder.
+	t.Setenv("SIGNALITH_STATE_DIR", "/srv/signalith")
+	c = Default()
+	c.path = "/etc/signalith/signalith.yaml"
+	if got := c.Keyring().DefaultPath(); !strings.HasPrefix(got, filepath.Join("/srv/signalith", "keys")) {
+		t.Errorf("with SIGNALITH_STATE_DIR: %s", got)
+	}
+	t.Setenv("SIGNALITH_STATE_DIR", "")
+	c = Default()
+	c.path = filepath.Join(t.TempDir(), "signalith.yaml")
+	if got := c.Keyring().DefaultPath(); !strings.HasPrefix(got, filepath.Join(filepath.Dir(c.path), "keys")) {
+		t.Errorf("a config elsewhere: %s", got)
 	}
 }

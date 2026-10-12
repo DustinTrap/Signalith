@@ -61,6 +61,18 @@ older version) when it starts, and logs it once:
 level=INFO msg="encrypted the passwords and keys stored in a file" file=/var/lib/signalith/lookups/intel_feeds.yaml values=1
 ```
 
+**Passwords in addresses.** A password written into an address cannot be encrypted
+there, so Signalith counts it as plain text:
+
+- In `opensearch.url` (`https://admin:secret@opensearch:9200`), `signalith secrets
+  encrypt` takes it out of the address and writes it as `opensearch.username` and an
+  encrypted `opensearch.password`.
+- In `opensearch.proxy`, it is only reported: set the proxy with the
+  `SIGNALITH_OPENSEARCH_PROXY` environment variable instead.
+- A key in a feed's address (`https://feed.example/list?apikey=...`) is only
+  reported: if the feed accepts it as a header, send it that way, since headers are
+  encrypted.
+
 Not encrypted, because they need not be:
 
 - **User passwords** (the built-in admin's and those on the **Users** page) are
@@ -72,7 +84,10 @@ Not encrypted, because they need not be:
 
 How: each value is encrypted with AES-256-GCM, under a key derived from the master
 key for that setting alone. A value copied to another setting, or changed, does not
-decrypt.
+decrypt. A feed's password and header values in `signalith.yaml` are tied to the
+header's name, not to the feed's: rename a feed as you like, but after renaming a
+header (`X-API-Key` to `X-Auth-Key`) enter its value again. Header names ignore
+case, so `x-api-key` is the same header.
 
 ### The master key
 
@@ -87,13 +102,15 @@ password or key (`signalith init` does), and looks for it in this order:
 4. The key file Signalith makes, `keys/master.key` (on Windows
    `keys\master.key.dpapi`), in the state folder (`SIGNALITH_STATE_DIR`, or the
    folder that holds the lookups folder), then next to `signalith.yaml`, then on
-   Linux in `/var/lib/signalith`.
+   Linux in `/var/lib/signalith`. For a config in `/etc` on Linux,
+   `/var/lib/signalith` comes first, so the key is never made next to
+   `signalith.yaml`, where a copy of `/etc` would carry both.
 
 Where it ends up:
 
 | Install | Master key |
 | --- | --- |
-| Linux (systemd) | `/etc/signalith/keys/master.key`, made by `signalith init` |
+| Linux (systemd) | `/var/lib/signalith/keys/master.key`, made by `signalith init` |
 | Docker quick start | `/var/lib/signalith/keys/master.key`, in the `signalith-data` volume |
 | Windows | `C:\ProgramData\Signalith\keys\master.key.dpapi` |
 | Elsewhere | `keys/master.key` next to the lookups folder |
@@ -103,18 +120,29 @@ folder on Linux, and on Windows an access list of its own (SYSTEM, Administrator
 the service account, `NT SERVICE\Signalith`). On Windows the key is also encrypted
 with DPAPI for the computer, so a copy of the file is useless on another computer.
 
+On Linux, Signalith warns (in `signalith secrets status`, `signalith validate`, the
+log and the **Health** page) when other accounts can read or change the key file,
+such as a key restored from a backup with `cp`, and says how to fix it (`chmod 600`).
+A key file it is not allowed to read is an error that names the file and the fix
+(`sudo chown -R signalith /var/lib/signalith/keys`); Signalith never makes a second
+key while there is one it cannot read.
+
+A key file you make yourself holds one line of base64 (or hex), or the 32 bytes as
+they are. Make one with `openssl rand -base64 32 > master.key`. A 32-character
+passphrase is refused: typed text is far easier to guess than random bytes.
+
 `signalith secrets status` shows where the key is and how every value is stored:
 
 ```
 $ sudo signalith secrets status
-Using the folders the signalith service is given (systemctl show signalith):
+Using the settings the signalith service is given (systemctl show signalith):
   SIGNALITH_ARCHIVE_DIR=/var/lib/signalith/archive
   SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards
   SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
   SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
   SIGNALITH_STATE_DIR=/var/lib/signalith
 
-Master key:    /etc/signalith/keys/master.key, key id 9096cd23
+Master key:    /var/lib/signalith/keys/master.key, key id 9096cd23
 
 /etc/signalith/signalith.yaml
   opensearch.password  encrypted
@@ -131,51 +159,116 @@ Master key:    /etc/signalith/keys/master.key, key id 9096cd23
 6 encrypted, 0 plain text.
 ```
 
-On Linux, `signalith secrets` reads the folders the systemd service is given, so it
-finds the server's files when run by hand.
+A command run by hand does not see the settings the service is given, so
+`signalith secrets`, `signalith validate` and `signalith init` read them: on Linux
+the systemd unit's `Environment=`, `EnvironmentFile=` and `LoadCredential=` lines,
+and on Windows the Signalith service's `Environment` value in the registry. They
+find the server's files and key that way (only folders, files and the master key
+are taken, never other settings).
 
 #### Keeping the key elsewhere
 
-- **systemd credential**: uncomment `LoadCredential=master.key:/etc/signalith/keys/master.key`
-  in the unit. systemd then hands the key to the service when it starts, in a folder
-  only the service can read. `signalith secrets` commands use the same file. After
-  `rotate-master`, restart the service.
-- **Docker or Kubernetes secret**: create a key with `openssl rand -base64 32 >
-  master.key`, mount it into the container, and set `SIGNALITH_MASTER_KEY_FILE` to
-  its path. With Docker Compose, in a `docker-compose.override.yml` next to
-  `docker-compose.yml`:
+- **systemd credential**: systemd hands the key to the service when it starts, from
+  a file only root can read, away from the service's own folder and from
+  `/etc/signalith`. To move the key there:
 
-  ```yaml
-  services:
-    signalith:
-      environment:
-        - SIGNALITH_MASTER_KEY_FILE=/run/secrets/signalith_master_key
-      secrets: [signalith_master_key]
-  secrets:
-    signalith_master_key:
-      file: ./master.key
+  ```sh
+  sudo signalith secrets status      # "Master key:" names the key file; with a "Previous key:" line, prune it first
+  sudo systemctl stop signalith
+  sudo install -d -m 0700 /etc/credstore
+  sudo mv /var/lib/signalith/keys/master.key /etc/credstore/signalith-master.key
+  sudo chown root:root /etc/credstore/signalith-master.key
+  sudo sed -i 's|^# LoadCredential=|LoadCredential=|' /etc/systemd/system/signalith.service
+  sudo systemctl daemon-reload
+  sudo systemctl start signalith
+  sudo signalith secrets status      # "Master key: /etc/credstore/signalith-master.key"
   ```
 
-  The file must be readable by the container's user (uid 65532):
-  `sudo chown 65532 master.key && chmod 0400 master.key`. A key file holds the 32
-  bytes as they are, or one line of base64 or hex.
+  `signalith secrets` commands use the same file. The service reads the key only
+  when it starts, so after `rotate-master`, restart it and run `signalith secrets
+  encrypt` once (for anything it saved in between) before `rotate-master -prune`;
+  `-prune` waits for that restart. If the file is missing, the service does not start.
+- **Docker or Kubernetes secret**: mount the key file into the container and set
+  `SIGNALITH_MASTER_KEY_FILE` to its path; [Docker](#docker) below shows it with
+  Docker Compose.
 - **Windows, a key you can move**: the DPAPI-protected key works only on the
-  computer that made it. To use a key file you can restore on another server, put
-  one in `C:\ProgramData\Signalith\keys\master.key` and give the service its path:
+  computer that made it. To use a key file you can restore on another server, in a
+  PowerShell opened as Administrator:
 
   ```powershell
+  $exe = "$env:ProgramFiles\Signalith\signalith.exe"
+  Stop-Service Signalith
+  & $exe secrets decrypt          # values back to plain text, while the old key still works
+  $key = New-Object byte[] 32
+  [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($key)
+  [IO.File]::WriteAllText("$env:ProgramData\Signalith\keys\master.key", [Convert]::ToBase64String($key))
   Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\Signalith -Name Environment -Type MultiString `
     -Value 'SIGNALITH_MASTER_KEY_FILE=C:\ProgramData\Signalith\keys\master.key'
+  & $exe secrets encrypt          # encrypted again, with the new key
+  Remove-Item "$env:ProgramData\Signalith\keys\master.key.dpapi"
+  Start-Service Signalith
   ```
 
-  Values already encrypted with the old key need to be encrypted again: enter them
-  again, or set `SIGNALITH_MASTER_KEY_FILE` only for a fresh install.
+  The new file takes the `keys` folder's access list (SYSTEM, Administrators and
+  the service). Every `signalith` command, and `install.ps1` when you upgrade, reads
+  the service's `Environment` value, so they all use this key.
+
+### Docker
+
+In the Docker quick start the key is `/var/lib/signalith/keys/master.key` in the
+`signalith-data` volume, together with `directory.json` and `intel_feeds.yaml`. A
+backup of the volume therefore holds both the key and the values it decrypts. Copy
+the key out and keep it apart (in a password manager or a vault). From the
+repository folder, in a shell or PowerShell:
+
+```sh
+docker compose -f deploy/docker/docker-compose.yml cp signalith:/var/lib/signalith/keys/master.key "$HOME/signalith-master.key"
+```
+
+If you back up the volume, keep the key out of it instead, as a Docker secret. In
+`deploy/docker/docker-compose.override.yml`:
+
+```yaml
+services:
+  signalith:
+    environment:
+      - SIGNALITH_MASTER_KEY_FILE=/run/secrets/signalith_master_key
+    secrets: [signalith_master_key]
+secrets:
+  signalith_master_key:
+    file: ./master.key
+```
+
+Put the key copied out above in `deploy/docker/master.key` (or make a new one with
+`openssl rand -base64 32 > deploy/docker/master.key` before the first start). The
+container's account (uid 65532) must be able to read it: `sudo chown 65532
+deploy/docker/master.key && sudo chmod 0400 deploy/docker/master.key`. Git ignores
+that file. Compose reads the override file by itself only when run from its folder
+without `-f`, so from then on start Signalith with `cd deploy/docker` and `docker
+compose up -d`. The copy left in the volume is then not used; `signalith secrets
+status` notes it, and `docker run --rm -v docker_signalith-data:/data busybox rm
+/data/keys/master.key` removes it (`docker volume ls` shows the volume's name).
+
+`signalith.yaml` is mounted read-only in the container, so to encrypt a password
+you pasted into it (as the warning on the **Health** page asks), run the command in
+a container of its own that may write the file and uses the same volume, and so the
+same key. From `deploy/docker`, in a shell or PowerShell:
+
+```sh
+docker compose run --rm --no-deps --user 0 -v "$PWD/signalith.yaml:/work/signalith.yaml" signalith secrets encrypt -c /work/signalith.yaml
+docker compose restart signalith
+```
+
+`--user 0` lets it write a file that belongs to you rather than to the container's
+account; a key it makes is given to the account of its folder, so the server can
+read it. Any other `signalith secrets` command runs the same way.
 
 ### Backing up the key
 
 Back up the key file, and keep the copy **apart** from backups of `signalith.yaml`
 and the lookups folder: whoever has both can decrypt the passwords. A password
 manager or a vault is a good place; the file is short text on Linux and Docker.
+After `rotate-master`, back up the new key.
 
 On Windows the `.dpapi` file can only be read on the same Windows installation, so a
 copy helps when you restore that server (a VM snapshot or system backup), not on a
@@ -184,27 +277,36 @@ move (above).
 
 ### Losing the key
 
-Losing the key loses only the stored passwords and keys, never events. Enter them
-again:
+Losing the key loses only the stored passwords and keys, never events, and the
+server keeps running. Enter them again:
 
-- In `signalith.yaml`, the server does not start and names each value it cannot
-  decrypt, with the command that replaces it:
+- In `signalith.yaml`, each value that cannot be decrypted is left out, as if it
+  were not set, and the server log, `signalith validate` and the **Health** page
+  name it with the command that replaces it:
 
   ```
-  error: /etc/signalith/signalith.yaml: invalid configuration:
-    - ingest.tokens[0] is encrypted with master key c656730c, but no master key was found. Restore the master key it was encrypted with, or enter the value again; without that key only stored passwords and keys are lost, never events. Remove it from ingest.tokens and add a token with: signalith secrets set ingest.tokens
+  Warning: In signalith.yaml, ingest.tokens[0] is encrypted with master key c656730c, but no master key was found. Restore the master key it was encrypted with, or enter the value again; without that key only stored passwords and keys are lost, never events. Remove it from ingest.tokens and add a token with: signalith secrets set ingest.tokens. Signalith runs without it until then.
   ```
+
+  Agents that send with that token are refused until it is replaced, and without
+  `opensearch.password` OpenSearch refuses Signalith (the **Health** page shows
+  it); the web pages, syslog and other tokens keep working.
 
   `signalith secrets set opensearch.password` (or `assistant.api_key`,
   `auth.ldap.bind_password`) replaces a value; for an ingest token, remove the line
-  and add one with `signalith secrets set ingest.tokens`.
+  and add one with `signalith secrets set ingest.tokens`. While the file holds
+  values encrypted with a key that is not found, `set` and `encrypt` stop rather
+  than make a new key, since the key may only be elsewhere (such as in a variable
+  the service has and your shell does not). When it really is lost, add `-new-key`
+  to the first command: `sudo signalith secrets set opensearch.password -new-key`.
 - **Directory sign-in** keeps running but cannot search for users until you enter
   the service account password again on the **Users** page, under **Directory
   sign-in**. The **Health** page and the log say so. Signalith does not try a wrong
   password, so the account is not locked out.
 - A **threat intel feed** whose key cannot be decrypted stops downloading and shows
-  why on the **Threat intel** page; edit the feed and enter the key again. Other
-  feeds keep running.
+  why on the **Threat intel** page. For a feed added on the page, edit it and enter
+  the key again; for one in `signalith.yaml`, replace the value with the plain one
+  and run `signalith secrets encrypt`. Other feeds keep running.
 
 `signalith secrets status` lists everything that cannot be decrypted.
 
@@ -215,11 +317,11 @@ leaked:
 
 ```
 $ sudo signalith secrets rotate-master
-New master key dea48fde in /etc/signalith/keys/master.key.
+New master key dea48fde in /var/lib/signalith/keys/master.key.
 Encrypted 2 values again in /etc/signalith/signalith.yaml
 Encrypted 1 value again in /var/lib/signalith/lookups/directory.json
 Encrypted 3 values again in /var/lib/signalith/lookups/intel_feeds.yaml
-The previous key (9096cd23) is kept as /etc/signalith/keys/master.key.old, so files saved before now can still be read.
+The previous key (9096cd23) is kept as /var/lib/signalith/keys/master.key.old, so files saved before now can still be read.
 A running server picks up the new key by itself.
 Next: back up the new key, then remove the previous one with: signalith secrets rotate-master -prune
 ```
@@ -231,14 +333,15 @@ older backup can still be read. When nothing needs it any more:
 
 ```
 $ sudo signalith secrets rotate-master -prune
-Removed the previous master key /etc/signalith/keys/master.key.old (key id 9096cd23).
+Removed the previous master key /var/lib/signalith/keys/master.key.old (key id 9096cd23).
 Backups of files from before the rotation now need a backup of that key to be read.
 ```
 
-`-prune` refuses while a value still needs the previous key (such as a file
-restored from a backup) and says which; `signalith secrets encrypt` encrypts it
-with the new key first. A key in `SIGNALITH_MASTER_KEY` cannot be rotated by
-Signalith: change the variable yourself, or move the key to a file.
+`-prune` keeps the previous key, and says why, while a value still needs it (such
+as a file restored from a backup; `signalith secrets encrypt` encrypts it with the
+new key), while a value cannot be decrypted at all (it might need that key), or
+while the previous key cannot be read. A key in `SIGNALITH_MASTER_KEY` cannot be
+rotated by Signalith: change the variable yourself, or move the key to a file.
 
 ### Commands
 
@@ -247,11 +350,36 @@ Signalith: change the variable yourself, or move the key to a file.
 | `signalith secrets status [-c file]` | Where the master key is, and how each stored password or key is kept |
 | `signalith secrets encrypt [-c file]` | Encrypts plain values (and values still under the previous key), changing nothing else in the files |
 | `signalith secrets set <setting> [-c file]` | Stores `opensearch.password`, `assistant.api_key`, `auth.ldap.bind_password`, or another of `ingest.tokens`, encrypted. It asks twice without showing what you type, or reads one line from a pipe; for an ingest token, press Enter to have one made |
+| `signalith secrets encrypt -new-key`, `set <setting> -new-key` | The same, making a new master key although the files hold values encrypted with one that is not found (when that key is lost) |
 | `signalith secrets rotate-master [-c file]` | Makes a new master key and encrypts every stored value again with it |
 | `signalith secrets rotate-master -prune [-c file]` | Removes the previous master key once nothing needs it |
+| `signalith secrets decrypt [-c file]` | Writes every stored password and key as plain text again, before going back to an older version (below) |
 
 All of them write each file whole through a temporary file (a crash never leaves
-half a file) and keep its permissions and owner.
+half a file) and keep its permissions and owner. When a file is a link, the file it
+points to is written and the link stays.
+
+### Going back to an older version
+
+Versions of Signalith from before encryption cannot read encrypted values: they
+would use the `enc:v1:...` text itself as the password, and for directory sign-in
+repeated wrong passwords can lock the service account out. So before putting an
+older version back, stop the server and write the values as plain text again:
+
+```sh
+sudo systemctl stop signalith
+sudo signalith secrets decrypt
+sudo install -m 0755 signalith-old-version /usr/local/bin/signalith
+sudo systemctl start signalith
+```
+
+On Windows, in a PowerShell opened as Administrator, run `Stop-Service Signalith`
+and `& "$env:ProgramFiles\Signalith\signalith.exe" secrets decrypt`, then the older
+version's `install.ps1`. In Docker, run `docker compose stop signalith` and the
+`secrets decrypt` command the way [Docker](#docker) shows, then build the older
+version. If you skip this, enter the directory password and feed keys again in the
+older version, or restore the files from a backup made before the upgrade. Going
+forward again needs nothing: the new version encrypts them again.
 
 ### Disk encryption
 
