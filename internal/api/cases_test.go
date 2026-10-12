@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 )
 
@@ -116,5 +117,28 @@ func TestCasesAPI(t *testing.T) {
 	}
 	if code, _ := do(t, ts, "GET", "/api/cases/CASE-nope", "", true); code != 404 {
 		t.Errorf("unknown case = %d", code)
+	}
+}
+
+// takenOnce answers the first create as if its ID were taken.
+type takenOnce struct {
+	*cases.Memory
+	tried []string
+}
+
+func (s *takenOnce) Create(ctx context.Context, c *cases.Case) error {
+	s.tried = append(s.tried, c.ID)
+	if len(s.tried) == 1 {
+		return cases.ErrExists
+	}
+	return s.Memory.Create(ctx, c)
+}
+
+func TestCaseIDCollisionGetsANewID(t *testing.T) {
+	st := &takenOnce{Memory: cases.NewMemory()}
+	ts, _ := newTestServerWith(t, func(s *Server) { s.Cases = st })
+	code, out := do(t, ts, "POST", "/api/cases", `{"title":"Phishing wave"}`, true)
+	if code != 201 || len(st.tried) != 2 || st.tried[0] == st.tried[1] || out["case"].(map[string]any)["id"] != st.tried[1] {
+		t.Fatalf("create = %d %v, tried %v", code, out, st.tried)
 	}
 }

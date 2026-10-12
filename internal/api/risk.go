@@ -72,6 +72,7 @@ func (s *Server) handlePutLookup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("unknown list; use assets or identities"))
 		return
 	}
+	allowSlowUpload(w)
 	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)

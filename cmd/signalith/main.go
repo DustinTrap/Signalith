@@ -2,14 +2,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,16 +27,20 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
+	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/risk"
+	"github.com/jrsamsanchez/signalith/internal/safelog"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/web"
+	"golang.org/x/term"
 )
 
 // version is set at build time with -ldflags "-X main.version=..."
@@ -118,6 +123,7 @@ func cmdInit(args []string) error {
 	publicURL := fs.String("public-url", "", "URL agents use to reach this server (default: derived from -listen)")
 	osURL := fs.String("opensearch", "http://127.0.0.1:9200", "OpenSearch URL")
 	osUser := fs.String("opensearch-user", "", "OpenSearch username")
+	osInsecure := fs.Bool("opensearch-allow-insecure-http", false, "allow the OpenSearch username and password over plain http to another machine (sets opensearch.allow_insecure_http; prefer https)")
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
 	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
 	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
@@ -132,6 +138,7 @@ func cmdInit(args []string) error {
 	c.Server.PublicURL = *publicURL
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
+	c.OpenSearch.AllowInsecureHTTP = *osInsecure
 	// New installs receive syslog right away; existing configs without a
 	// syslog section keep it off.
 	c.Syslog.UDP = *syslogUDP
@@ -273,13 +280,16 @@ func cmdValidate(args []string) error {
 		}
 		fmt.Printf("%d custom dashboards loaded from %s.\n", len(list), c.DashboardsDir())
 	}
+	for _, w := range c.Warnings() {
+		fmt.Println("Warning:", w)
+	}
 	cl := newStore(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if status, err := cl.Health(ctx); err != nil {
 		fmt.Printf("Warning: OpenSearch is not reachable yet: %v\n", err)
 	} else {
-		fmt.Printf("OpenSearch at %s is %s.\n", c.OpenSearch.URL, status)
+		fmt.Printf("OpenSearch at %s is %s.\n", redact.URL(c.OpenSearch.URL), status)
 	}
 	return nil
 }
@@ -288,51 +298,81 @@ func cmdPasswd(args []string) error {
 	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
 	path := configFlag(fs)
 	fs.Parse(args)
-	c, err := loadForEdit(*path)
-	if err != nil {
-		return err
+	if _, err := os.Stat(*path); err != nil {
+		return fmt.Errorf("config file %s: %w", *path, err)
 	}
 	pw := os.Getenv("SIGNALITH_NEW_PASSWORD")
 	if pw == "" {
-		fmt.Print("New admin password (input is visible): ")
-		if _, err := fmt.Scanln(&pw); err != nil {
-			return errors.New("no password entered")
+		var err error
+		if pw, err = readNewPassword(os.Stdin, os.Stderr); err != nil {
+			return err
 		}
 	}
-	h, err := config.HashPassword(strings.TrimSpace(pw))
+	h, err := config.HashPassword(pw)
 	if err != nil {
 		return err
 	}
-	c.Auth.AdminPasswordHash = h
-	if err := c.Save(*path); err != nil {
+	// Only the hash changes in the file; settings from the environment
+	// (such as SIGNALITH_OPENSEARCH_PASSWORD) are not written into it.
+	if err := config.SetAdminPasswordHash(*path, h); err != nil {
 		return err
 	}
 	fmt.Println("Password updated. Restart the server to apply it.")
+	if os.Getenv("SIGNALITH_ADMIN_PASSWORD") != "" {
+		fmt.Println("Note: SIGNALITH_ADMIN_PASSWORD is set in this environment, and wherever it is set for the server it replaces the password in the file.")
+	}
 	return nil
 }
 
-// loadForEdit loads a config without failing on a missing password hash,
-// which is exactly what passwd fixes.
-func loadForEdit(path string) (*config.Config, error) {
-	c, err := config.Load(path)
-	if err == nil {
-		return c, nil
+// readNewPassword asks for the new password twice without showing it.
+// When input is not a terminal (a script piping it in), it reads one line.
+func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
+	fd := int(in.Fd())
+	if !term.IsTerminal(fd) {
+		line, err := bufio.NewReader(in).ReadString('\n')
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			if err != nil && !errors.Is(err, io.EOF) {
+				return "", err
+			}
+			return "", errors.New("no password entered")
+		}
+		return line, nil
 	}
-	var ve *config.ValidationError
-	if !errors.As(err, &ve) {
-		return nil, err
+	read := func(label string) (string, error) {
+		fmt.Fprint(prompt, label)
+		b, err := term.ReadPassword(fd)
+		fmt.Fprintln(prompt)
+		return string(b), err
 	}
-	os.Setenv("SIGNALITH_ADMIN_PASSWORD", "placeholder-to-load")
-	defer os.Unsetenv("SIGNALITH_ADMIN_PASSWORD")
-	return config.Load(path)
+	pw, err := read("New admin password: ")
+	if err != nil {
+		return "", err
+	}
+	if pw == "" {
+		return "", errors.New("no password entered")
+	}
+	again, err := read("Type it again: ")
+	if err != nil {
+		return "", err
+	}
+	if again != pw {
+		return "", errors.New("the passwords do not match; nothing was changed")
+	}
+	return pw, nil
 }
 
 func newStore(c *config.Config) *store.Client {
+	ca, cert, key := c.OpenSearchTLSFiles()
 	return store.New(store.Config{
 		URL:           c.OpenSearch.URL,
 		Username:      c.OpenSearch.Username,
 		Password:      c.OpenSearch.Password,
+		CAFile:        ca,
+		CertFile:      cert,
+		KeyFile:       key,
 		TLSSkipVerify: c.OpenSearch.TLSSkipVerify,
+		Proxy:         c.OpenSearch.Proxy,
 	})
 }
 
@@ -467,13 +507,23 @@ func cmdServe(args []string) error {
 	fs.Parse(args)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serve(ctx, *path, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return serve(ctx, *path, newLogger(os.Stderr))
+}
+
+// newLogger returns the server log. Values in it are cut to a sensible
+// length, since some come from whoever connects (such as the user name of
+// a failed sign-in).
+func newLogger(w io.Writer) *slog.Logger {
+	return slog.New(safelog.New(slog.NewTextHandler(w, nil)))
 }
 
 func serve(ctx context.Context, path string, log *slog.Logger) error {
 	c, err := config.Load(path)
 	if err != nil {
 		return err
+	}
+	for _, w := range c.Warnings() {
+		log.Warn(w)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -596,19 +646,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}()
 	go retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log)
 
-	hs := &http.Server{
-		Addr:              c.Server.Listen,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+	hs := httpserver.New(srv.Handler(), log)
+	ln, err := httpserver.Listen(c.Server.Listen, httpserver.Limits{Max: c.Server.MaxConnections}, log)
+	if err != nil {
+		return err
 	}
 	errc := make(chan error, 1)
 	go func() {
 		log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "version", version)
-		if c.Server.TLSCert != "" {
-			errc <- hs.ListenAndServeTLS(c.Server.TLSCert, c.Server.TLSKey)
-		} else {
-			errc <- hs.ListenAndServe()
-		}
+		errc <- httpserver.Serve(hs, ln, c.Server.TLSCert, c.Server.TLSKey)
 	}()
 	select {
 	case err := <-errc:
@@ -662,10 +708,10 @@ func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log
 	for {
 		err := cl.PutIndexTemplate(ctx, c.OpenSearch.IndexPrefix, tmpl)
 		if err == nil {
-			log.Info("opensearch index template ready", "url", c.OpenSearch.URL)
+			log.Info("opensearch index template ready", "url", redact.URL(c.OpenSearch.URL))
 			return true
 		}
-		log.Warn("waiting for opensearch", "url", c.OpenSearch.URL, "err", err)
+		log.Warn("waiting for opensearch", "url", redact.URL(c.OpenSearch.URL), "err", err)
 		select {
 		case <-ctx.Done():
 			return false

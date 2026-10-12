@@ -2,11 +2,13 @@ package cases
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/findings"
+	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
 func TestCaseFindingsAndEntities(t *testing.T) {
@@ -119,5 +121,60 @@ func TestMemorySearch(t *testing.T) {
 	}
 	if _, err := m.Get(ctx, "nope"); err != ErrNotFound {
 		t.Errorf("get unknown = %v", err)
+	}
+}
+
+func TestNewIDsAreLongAndRandom(t *testing.T) {
+	now := time.Now()
+	seen := map[string]bool{}
+	for i := 0; i < 1000; i++ {
+		id := NewID(now)
+		if len(id) != len("CASE-20261012-")+16 || seen[id] {
+			t.Fatalf("id %q (seen before: %v)", id, seen[id])
+		}
+		seen[id] = true
+	}
+}
+
+// fakeDoer records requests and answers like OpenSearch.
+type fakeDoer struct {
+	paths []string
+	err   error
+}
+
+func (f *fakeDoer) Do(_ context.Context, method, path string, _ any, _ any) error {
+	f.paths = append(f.paths, method+" "+path)
+	return f.err
+}
+
+func TestCreateNeverReplacesACase(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	a := &Case{ID: "CASE-1", Title: "first"}
+	if err := m.Create(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Create(ctx, &Case{ID: "CASE-1", Title: "second"}); !errors.Is(err, ErrExists) {
+		t.Fatalf("second create: %v", err)
+	}
+	if got, _ := m.Get(ctx, "CASE-1"); got.Title != "first" {
+		t.Errorf("case replaced: %q", got.Title)
+	}
+
+	// OpenSearch: create only if new, and a 409 means the ID is taken.
+	d := &fakeDoer{}
+	os := NewOpenSearch(d, "signalith")
+	if err := os.Create(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Save(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(d.paths, "; ") != "PUT /signalith_cases/_create/CASE-1?refresh=wait_for; PUT /signalith_cases/_doc/CASE-1?refresh=wait_for" {
+		t.Errorf("requests %v", d.paths)
+	}
+	d.err = &store.Error{Status: 409, Body: `{"error":{"type":"version_conflict_engine_exception"}}`}
+	if err := os.Create(ctx, a); !errors.Is(err, ErrExists) {
+		t.Errorf("conflict: %v", err)
 	}
 }

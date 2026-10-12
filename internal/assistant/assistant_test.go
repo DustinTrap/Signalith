@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jrsamsanchez/signalith/internal/query"
@@ -92,5 +93,61 @@ func TestPromptExamplesParse(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("found %d examples", n)
+	}
+}
+
+func TestRedirectsStayOnTheSameHost(t *testing.T) {
+	var leaked atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked.Store(r.Header.Get("x-api-key") + r.Header.Get("Authorization"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"content": []map[string]string{{"type": "text", "text": "datamodel=Endpoint"}}})
+	}))
+	defer other.Close()
+	// "localhost" is another host as far as the redirect is concerned.
+	otherURL := strings.Replace(other.URL, "127.0.0.1", "localhost", 1)
+	moved := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, otherURL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer moved.Close()
+	for _, c := range []*Client{New(Anthropic, moved.URL, "", "sk-ant-SECRET-KEY"), New(OpenAI, moved.URL, "m", "sk-SECRET")} {
+		_, err := c.Translate(context.Background(), "cmd", "")
+		if err == nil || !strings.Contains(err.Error(), "redirected") || leaked.Load() != nil {
+			t.Fatalf("%s: err=%v, other host got %v", c.Provider, err, leaked.Load())
+		}
+	}
+
+	// From https to plain http on the same machine.
+	downgrade := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer downgrade.Close()
+	c := New(Anthropic, downgrade.URL, "", "sk-ant-SECRET-KEY")
+	c.HTTP.Transport = downgrade.Client().Transport
+	if _, err := c.Translate(context.Background(), "cmd", ""); err == nil || leaked.Load() != nil {
+		t.Fatalf("https to http: err=%v, got %v", err, leaked.Load())
+	}
+
+	// A redirect within the same server still works, key and all.
+	same := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/messages" {
+			http.Redirect(w, r, "/v2/messages", http.StatusPermanentRedirect)
+			return
+		}
+		if r.Header.Get("x-api-key") != "k" {
+			t.Errorf("key lost on a same-host redirect")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"content": []map[string]string{{"type": "text", "text": "datamodel=Endpoint"}}})
+	}))
+	defer same.Close()
+	if q, err := New(Anthropic, same.URL, "", "k").Translate(context.Background(), "cmd", ""); err != nil || q != "datamodel=Endpoint" {
+		t.Fatalf("same-host redirect: %q %v", q, err)
+	}
+}
+
+func TestErrorsHideSecretsInTheURL(t *testing.T) {
+	c := New(OpenAI, "http://user:URLPASS@127.0.0.1:1/v1?api-key=URLKEY", "m", "")
+	_, err := c.Translate(context.Background(), "cmd", "")
+	if err == nil || strings.Contains(err.Error(), "URLPASS") || strings.Contains(err.Error(), "URLKEY") || !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Fatalf("err = %v", err)
 	}
 }

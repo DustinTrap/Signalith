@@ -490,7 +490,7 @@ function renderList() {
       const td = el('td', { class: listColClass(c), 'data-label': LIST_COL_LABEL[c] || c }, content);
       // the full value on hover, since long values end in an ellipsis
       const text = Array.isArray(it[c]) ? it[c].join(', ') : c === 'priority' || c === 'watchlist' || it[c] == null ? '' : String(it[c]);
-      if (text) td.title = text;
+      if (text) td.title = visibleText(text);
       return td;
     }))))));
   const total = res.count;
