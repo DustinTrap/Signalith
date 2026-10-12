@@ -949,49 +949,341 @@ async function loadAskInfo() {
 }
 
 // ---------- add data ----------
+// The server writes the Fluent Bit setup for the chosen OS: plain-sentence
+// steps and the config file. A step written as "Do this: command" shows the
+// command in a copyable well, and the step that saves the config file
+// carries the file itself.
+const agentFileEl = $('agent-file');
+let agentSetupSeq = 0;
+let agentSetupConfig = '';
+let agentSetupErrEl = null;
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', loadAgentConfig));
 $('linux-source').addEventListener('change', loadAgentConfig);
 $('sysmon').addEventListener('change', loadAgentConfig);
+
 async function loadAgentConfig() {
   const os = document.querySelector('input[name=os]:checked').value;
   $('linux-opts').classList.toggle('hidden', os !== 'linux');
   $('windows-opts').classList.toggle('hidden', os !== 'windows');
+  $('agent-title').textContent = 'Set up Fluent Bit on ' + (os === 'windows' ? 'Windows' : 'Linux');
+  const steps = $('agent-steps');
+  const seq = ++agentSetupSeq;
+  steps.setAttribute('aria-busy', 'true');
+  if (!agentSetupConfig) agentSetupSkeleton();
   const q = new URLSearchParams({ os, source: $('linux-source').value, sysmon: $('sysmon').checked });
   try {
     const a = await api('api/agents/config?' + q);
-    $('agent-steps').replaceChildren(...a.steps.map((s) => el('li', {}, s)));
-    $('agent-path').textContent = a.config_path;
-    $('agent-config').textContent = a.config;
+    if (seq === agentSetupSeq) agentSetupRender(a);
   } catch (e) {
-    $('agent-steps').replaceChildren(el('li', { class: 'error' }, e.message));
-    $('agent-config').textContent = '';
+    if (seq === agentSetupSeq) agentSetupError(e);
+  } finally {
+    if (seq === agentSetupSeq) steps.removeAttribute('aria-busy');
   }
 }
-$('copy-config').addEventListener('click', () => navigator.clipboard.writeText($('agent-config').textContent));
+
+function agentSetupRender(a) {
+  if (agentSetupErrEl) agentSetupErrEl.remove();
+  agentSetupConfig = a.config || '';
+  $('agent-steps').classList.remove('hidden');
+  const path = a.config_path || '';
+  // The step names the full path; the file bar shows the file name.
+  const pathEl = agentFileEl.querySelector('#agent-path');
+  pathEl.textContent = path.split(/[\\/]/).pop();
+  pathEl.title = path;
+  agentSetupEditor(agentSetupConfig);
+  let fileStep = null;
+  const items = (a.steps || []).map((s, i) => {
+    const li = agentSetupStep(s, i + 1, path);
+    if (!fileStep && path && s.includes(path)) fileStep = li;
+    return li;
+  });
+  $('agent-steps').replaceChildren(...items);
+  // The config file sits under the step that saves it, else after the list.
+  (fileStep ? fileStep.querySelector('.agent-step__body') : $('agent-body')).append(agentFileEl);
+  agentFileEl.classList.toggle('hidden', !agentSetupConfig);
+}
+
+// agentSetupStep renders one numbered step. "Label: command" becomes the
+// label plus a command well.
+function agentSetupStep(text, n, path) {
+  const body = el('div', { class: 'agent-step__body' });
+  const cut = text.indexOf(': ');
+  if (cut > 0 && cut < text.length - 2) {
+    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text.slice(0, cut), path)),
+      agentSetupCommand(text.slice(cut + 2)));
+  } else {
+    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text, path)));
+  }
+  return el('li', { class: 'agent-step' }, el('span', { class: 'agent-step__num' }, n), body);
+}
+
+// agentSetupInline turns URLs into links, the config path into code and
+// "Health page" into a link to that page.
+function agentSetupInline(text, path) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('(https?://[^\\s,;]*[^\\s,;.)])|(Health page)' + (path ? '|(' + esc(path) + ')' : ''), 'g');
+  const parts = [];
+  let last = 0;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if (m[1]) parts.push(el('a', { href: m[1], target: '_blank', rel: 'noopener noreferrer' }, m[1], icon('external-link', 'icon--xs')));
+    else if (m[2]) parts.push(el('a', { href: '#health', 'data-page': 'health' }, m[2]));
+    else parts.push(el('code', {}, m[3]));
+    last = re.lastIndex;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function agentSetupCommand(cmd) {
+  const btn = el('button', { class: 'btn btn--ghost btn--icon btn--sm', type: 'button', 'aria-label': 'Copy command', title: 'Copy command' }, icon('copy'));
+  btn.addEventListener('click', () => agentSetupCopy(cmd, btn));
+  return el('div', { class: 'agent-cmd' }, el('code', {}, cmd), btn);
+}
+
+// agentSetupEditor shows the config with line numbers and quiet colours:
+// section headers in the accent, keys secondary, comments muted.
+function agentSetupEditor(config) {
+  const lines = config.replace(/\n$/, '').split('\n');
+  const out = [];
+  lines.forEach((line, i) => {
+    let src;
+    if (/^\s*#/.test(line)) src = [el('span', { class: 'agent-c' }, line)];
+    else if (/^\s*\[[^\]]+\]\s*$/.test(line)) src = [el('span', { class: 'agent-s' }, line)];
+    else {
+      const m = line.match(/^(\s*)(\S+)(\s+)(.*)$/);
+      src = m ? [m[1], el('span', { class: 'agent-k' }, m[2]), m[3], m[4]] : [line];
+    }
+    out.push(el('span', { class: 'ln', 'aria-hidden': 'true' }, i + 1), el('span', { class: 'src' }, ...src));
+  });
+  agentFileEl.querySelector('#agent-config').replaceChildren(...out);
+}
+
+function agentSetupSkeleton() {
+  const bar = (w, cls) => el('span', { class: 'skeleton' + (cls ? ' ' + cls : ''), style: 'width:' + w });
+  $('agent-steps').replaceChildren(...['52%', '64%', '44%'].map((w) => el('li', { class: 'agent-step' },
+    el('span', { class: 'agent-step__num' }), el('div', { class: 'agent-step__body' }, bar(w), bar('100%', 'agent-skel-well')))));
+  agentFileEl.classList.add('hidden');
+}
+
+function agentSetupError(e) {
+  agentSetupConfig = '';
+  agentFileEl.classList.add('hidden');
+  $('agent-steps').replaceChildren();
+  $('agent-steps').classList.add('hidden');
+  if (agentSetupErrEl) agentSetupErrEl.remove();
+  agentSetupErrEl = el('div', { class: 'empty empty--compact', 'data-tone': 'danger', role: 'alert' },
+    el('span', { class: 'empty__icon' }, icon('circle-alert')),
+    el('div', { class: 'empty__title' }, 'Couldn’t build the agent setup'),
+    el('p', { class: 'empty__text' }, e.message || 'The Signalith server did not respond.'),
+    el('div', { class: 'empty__actions' }, el('button', { class: 'btn btn--secondary btn--sm', type: 'button', onclick: loadAgentConfig }, icon('refresh-cw'), 'Try again')));
+  $('agent-body').prepend(agentSetupErrEl);
+}
+
+// agentSetupCopy copies text. navigator.clipboard needs HTTPS or localhost,
+// so plain-HTTP servers fall back to a hidden textarea.
+async function agentSetupCopy(text, btn) {
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch (_) {
+    const ta = el('textarea', { class: 'sr-only', readonly: '', 'aria-hidden': 'true' });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    ta.remove();
+    btn.focus();
+  }
+  const use = btn.querySelector('use');
+  const label = btn.querySelector('span');
+  use.setAttribute('href', ok ? '#i-check' : '#i-circle-alert');
+  if (label) label.textContent = ok ? 'Copied' : 'Copy failed';
+  btn.classList.toggle('is-copied', ok);
+  $('agent-status').textContent = ok ? 'Copied.' : 'Couldn’t copy. Select the text and press Ctrl+C.';
+  clearTimeout(btn.copyTimer);
+  btn.copyTimer = setTimeout(() => {
+    use.setAttribute('href', '#i-copy');
+    if (label) label.textContent = 'Copy';
+    btn.classList.remove('is-copied');
+  }, 1800);
+}
+$('copy-config').addEventListener('click', () => agentSetupCopy(agentSetupConfig, $('copy-config')));
+$('agent-download').addEventListener('click', () => {
+  if (!agentSetupConfig) return;
+  const url = URL.createObjectURL(new Blob([agentSetupConfig], { type: 'text/plain' }));
+  const a = el('a', { href: url, download: 'fluent-bit.conf', class: 'hidden' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
 
 // ---------- health ----------
-async function loadHealth() {
-  const box = $('health');
+// Live while the page is open: it re-reads api/health every 10 seconds and
+// the components card says when it last updated.
+const healthPageState = { data: null, key: '', at: 0, tried: 0, busy: false, failed: false, ticker: null };
+
+async function loadHealth(quiet) {
+  const st = healthPageState;
+  if (!st.ticker) st.ticker = setInterval(healthPageTick, 1000);
+  if (st.busy) return;
+  if (!st.data && quiet !== true) healthPageSkeleton();
+  st.busy = true;
+  st.tried = Date.now();
   try {
     const h = await api('api/health');
-    const os = h.opensearch || {};
-    const cls = os.status === 'green' ? 'ok' : os.status === 'yellow' ? 'warn' : 'bad';
-    const ing = h.ingest || {};
-    const last = ing.last_seen ? new Date(ing.last_seen).toLocaleString() : 'never';
-    const cards = [
-      el('div', { class: 'card' }, el('h4', {}, 'OpenSearch'), el('div', { class: 'big ' + cls }, os.status || 'unknown'),
-        el('div', { class: 'muted' }, os.url || ''), os.error ? el('div', { class: 'error' }, os.error) : null,
-        os.status === 'yellow' ? el('div', { class: 'muted' }, 'Yellow is normal on a single node: replicas have nowhere to go.') : null),
-      el('div', { class: 'card' }, el('h4', {}, 'Events received since start'), el('div', { class: 'big' }, (ing.received || 0).toLocaleString()),
-        el('div', { class: 'muted' }, `${(ing.indexed || 0).toLocaleString()} indexed, ${(ing.failed || 0).toLocaleString()} failed`),
-        el('div', { class: 'muted' }, 'Last event: ' + last)),
-      el('div', { class: 'card' }, el('h4', {}, 'Server'), el('div', {}, 'Version ' + h.version), el('div', { class: 'muted' }, 'Config: ' + (h.config_file || ''))),
-    ];
-    for (const w of h.warnings || []) cards.push(el('div', { class: 'card' }, el('h4', { class: 'warn' }, 'Needs attention'), el('div', {}, w)));
-    box.replaceChildren(...cards);
+    st.data = h;
+    st.at = Date.now();
+    st.failed = false;
+    healthPageRender(h);
   } catch (e) {
-    box.replaceChildren(el('div', { class: 'error' }, e.message));
+    st.failed = true;
+    if (st.data) healthPageFoot();
+    else healthPageError(e);
+  } finally {
+    st.busy = false;
   }
+}
+
+// healthPageTick updates the "updated Ns ago" line and refreshes every 10
+// seconds; it stops when another page is open.
+function healthPageTick() {
+  const st = healthPageState;
+  if (currentPage !== 'health') {
+    clearInterval(st.ticker);
+    st.ticker = null;
+    return;
+  }
+  if (document.hidden) return;
+  healthPageFoot();
+  if (st.data && Date.now() - st.tried >= 10000) loadHealth(true);
+}
+
+const healthPageNum = (n) => (n || 0).toLocaleString();
+
+function healthPageAlert(tone, name, title, text) {
+  const attrs = { class: 'alert', 'data-tone': tone };
+  if (tone === 'danger') attrs.role = 'alert';
+  return el('div', attrs, icon(name), el('div', {}, el('b', {}, title), text ? el('p', {}, text) : null));
+}
+
+function healthPageKpi(name, label, value, foot, tone) {
+  const attrs = { class: 'card kpi' };
+  if (tone) attrs['data-tone'] = tone;
+  return el('div', attrs, el('div', { class: 'kpi__label' }, icon(name), label),
+    el('div', { class: 'kpi__value num' }, value), el('div', { class: 'kpi__foot' }, foot));
+}
+
+// healthPageRow is one component: name and a mono meta line (URL, path,
+// version), a pulse and state, and details.
+function healthPageRow(name, title, meta, state, label, details) {
+  const pulse = el('span', { class: 'pulse', 'aria-hidden': 'true' });
+  if (state) pulse.dataset.state = state;
+  return el('tr', {},
+    el('td', { 'data-col': 'name' }, el('div', { class: 'hp-comp' }, el('span', { class: 'hp-comp__icon' }, icon(name)),
+      el('div', { class: 'hp-comp__text' }, el('div', { class: 'cell-title' }, title), meta ? el('div', { class: 'hp-comp__meta mono', title: meta }, meta) : null))),
+    el('td', { 'data-col': 'state' }, el('span', { class: 'hp-state' }, pulse, label)),
+    el('td', { 'data-col': 'details', class: 'muted' }, ...[].concat(details)));
+}
+
+function healthPageRender(h) {
+  const os = h.opensearch || {};
+  const ing = h.ingest || {};
+  const received = ing.received || 0;
+  const indexed = ing.indexed || 0;
+  const failed = ing.failed || 0;
+  const lastAgo = ing.last_seen ? ago(ing.last_seen) : '';
+  // Re-render only when something visible changed, so focus and hover survive the refresh.
+  const key = JSON.stringify(h) + lastAgo;
+  if (key === healthPageState.key) { healthPageFoot(); return; }
+  healthPageState.key = key;
+
+  const status = os.status || 'unknown';
+  const alerts = [];
+  // The alert says what it means for you; the OpenSearch row gives the cause.
+  if (status === 'unreachable') alerts.push(healthPageAlert('danger', 'circle-alert', 'Signalith can’t reach OpenSearch.', 'Searches and new events fail until it is back.'));
+  else if (status === 'red') alerts.push(healthPageAlert('danger', 'circle-alert', 'OpenSearch is red.', 'Some data cannot be searched or stored until it recovers.'));
+  if (failed) alerts.push(healthPageAlert('warning', 'triangle-alert', `${healthPageNum(failed)} ${failed === 1 ? 'event' : 'events'} could not be stored.`, 'Counted since the server started. OpenSearch rejected them or did not answer.'));
+  for (const w of h.warnings || []) {
+    const cut = w.indexOf('. ');
+    alerts.push(cut > 0 ? healthPageAlert('warning', 'triangle-alert', w.slice(0, cut + 1), w.slice(cut + 2)) : healthPageAlert('warning', 'triangle-alert', w));
+  }
+
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const kpis = el('div', { class: 'kpis hp-kpis' },
+    healthPageKpi('inbox', 'Events received', healthPageNum(received), 'Since the server started'),
+    healthPageKpi('database', 'Indexed', healthPageNum(indexed), received ? Math.floor((indexed / received) * 1000) / 10 + '% of received' : 'Stored in OpenSearch'),
+    healthPageKpi('circle-x', 'Failed', healthPageNum(failed), failed ? 'Not stored' : 'None since start', failed ? 'warning' : ''),
+    healthPageKpi('clock', 'Last event', lastAgo ? cap(lastAgo) : 'None', ing.last_seen ? new Date(ing.last_seen).toLocaleString() : 'No events since start'));
+
+  const osRow = {
+    green: ['', 'Healthy', 'Cluster status green.'],
+    yellow: ['', 'Healthy', 'Cluster status yellow, which is normal on a single node: replicas have nowhere to go.'],
+    red: ['down', 'Red', 'Some primary shards are not assigned.'],
+    unreachable: ['down', 'Unreachable', os.error || 'No answer.'],
+  }[status] || ['down', cap(status), os.error || 'Unexpected cluster status.'];
+  // "Receiving" while an event arrived in the last 15 minutes; older is
+  // shown as quiet (grey), not as a fault, since some sites are quiet.
+  let ingRow;
+  const recent = ing.last_seen && Date.now() - new Date(ing.last_seen).getTime() < 15 * 60 * 1000;
+  if (failed) ingRow = ['warn', 'Some events failed', `${healthPageNum(failed)} of ${healthPageNum(received)} events since start could not be stored.`];
+  else if (recent) ingRow = ['', 'Receiving', `Last event ${lastAgo}.`];
+  else if (ing.last_seen) ingRow = ['idle', 'Quiet', `Last event ${lastAgo}.`];
+  else ingRow = ['idle', 'Waiting', ['No events since the server started. ', el('a', { href: '#data', 'data-page': 'data' }, 'Add data')]];
+
+  const table = el('table', { class: 'table hp-table' },
+    el('thead', {}, el('tr', {}, el('th', { scope: 'col', 'data-col': 'name' }, 'Component'), el('th', { scope: 'col', 'data-col': 'state' }, 'Status'), el('th', { scope: 'col' }, 'Details'))),
+    el('tbody', {},
+      healthPageRow('database', 'OpenSearch', os.url || '', osRow[0], osRow[1], osRow[2]),
+      healthPageRow('inbox', 'Ingest', 'api/ingest', ingRow[0], ingRow[1], ingRow[2]),
+      healthPageRow('server', 'Signalith server', h.version ? 'Version ' + h.version : '', '', 'Running',
+        h.config_file ? ['Config file ', el('code', {}, h.config_file)] : 'No config file.')));
+  const card = el('div', { class: 'card' },
+    el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Components'))),
+    el('div', { class: 'table-wrap' }, table),
+    el('div', { class: 'table-foot' }, el('span', { class: 'live', id: 'health-live' })));
+  const box = $('health');
+  box.removeAttribute('aria-busy');
+  box.replaceChildren(...(alerts.length ? [el('div', { class: 'hp-alerts' }, ...alerts)] : []), kpis, card);
+  healthPageFoot();
+}
+
+// healthPageFoot says when the numbers were last read.
+function healthPageFoot() {
+  const live = $('health-live');
+  const st = healthPageState;
+  if (!live || !st.at) return;
+  const s = Math.max(0, Math.round((Date.now() - st.at) / 1000));
+  const when = s < 5 ? 'just now' : s < 60 ? s + 's ago' : ago(st.at);
+  const pulse = el('span', { class: 'pulse', 'aria-hidden': 'true' });
+  if (st.failed) pulse.dataset.state = 'warn';
+  live.replaceChildren(pulse, st.failed ? `Couldn’t refresh, retrying · updated ${when}` : `Live · updated ${when}`);
+}
+
+function healthPageSkeleton() {
+  const bar = (w) => el('span', { class: 'skeleton', style: 'width:' + w });
+  const kpi = () => el('div', { class: 'card kpi' }, bar('56%'), el('span', { class: 'skeleton hp-skel-value' }), bar('70%'));
+  const row = () => el('tr', {}, el('td', {}, bar('60%')), el('td', {}, bar('50%')), el('td', {}, bar('80%')));
+  const box = $('health');
+  healthPageState.key = '';
+  box.setAttribute('aria-busy', 'true');
+  box.replaceChildren(el('div', { class: 'kpis hp-kpis' }, kpi(), kpi(), kpi(), kpi()),
+    el('div', { class: 'card' }, el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Components'))),
+      el('div', { class: 'table-wrap' }, el('table', { class: 'table hp-table', 'aria-busy': 'true' }, el('tbody', {}, row(), row(), row())))));
+}
+
+function healthPageError(e) {
+  const box = $('health');
+  healthPageState.key = '';
+  box.removeAttribute('aria-busy');
+  box.replaceChildren(el('div', { class: 'card' }, el('div', { class: 'empty', 'data-tone': 'danger', role: 'alert' },
+    el('span', { class: 'empty__icon' }, icon('circle-alert')),
+    el('div', { class: 'empty__title' }, 'Couldn’t load health'),
+    el('p', { class: 'empty__text' }, e.message || 'The Signalith server did not respond.'),
+    el('div', { class: 'empty__actions' }, el('button', { class: 'btn btn--secondary btn--sm', type: 'button', onclick: () => loadHealth() }, icon('refresh-cw'), 'Try again')))));
 }
 
 // ---------- startup ----------
