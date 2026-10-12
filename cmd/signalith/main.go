@@ -545,13 +545,14 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	// Closed once the index template is in place, so syslog does not
 	// create the day's first indices with the wrong field types.
 	templateReady := make(chan struct{})
+	ret := newRetention(c, cl, log)
 	var receiver *syslog.Receiver
 	if c.Syslog.Enabled() {
 		receiver = syslog.New(syslog.Config{
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
-			MaxAge: syslogMaxAge(c.Retention.Days), PublicPort: c.Syslog.PublicPort,
+			MaxAge: syslogMaxAge(retentionKeepDays(ret)), PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err
@@ -630,7 +631,6 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
 	}
-	ret := newRetention(c, cl, log)
 	if saved, err := ret.Store.Get(); err != nil {
 		log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
 	} else if saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
@@ -692,6 +692,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if c.Detections.Scheduler {
 		// Like detections, retention runs on one server only.
 		go ret.Start(ctx)
+	} else {
+		log.Warn("retention does not run on this server: it runs on the server with detections.scheduler: true, " +
+			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
 	}
 
 	hs := &http.Server{
@@ -732,7 +735,15 @@ func newRetention(c *config.Config, cl *store.Client, log *slog.Logger) *retenti
 		HistoryFile: filepath.Join(c.LookupsDir(), "retention_history.json"),
 		Interval:    c.RetentionInterval(),
 		Log:         log,
+		ReadOnly:    !c.Detections.Scheduler,
 	}
+}
+
+// retentionKeepDays is the shortest time any event category is kept, in
+// days (0: forever), as the settings stand when the server starts.
+func retentionKeepDays(ret *retention.Manager) int {
+	s, _ := ret.Settings()
+	return s.ShortestKeepDays()
 }
 
 // intelFeeds converts the feeds in signalith.yaml; the config is already

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -51,6 +52,17 @@ type Decision struct {
 	// diskBlocked means OpenSearch's flood-stage block is on the index:
 	// it can still be read and deleted, but not changed or merged.
 	diskBlocked bool
+	// verify is set on a delete in a category that archives, when the
+	// archive already holds the index (or it is empty): before deleting,
+	// the run blocks writes, refreshes and counts, and archives the index
+	// after all if it holds more than archived documents.
+	verify   bool
+	archived int64
+	// hold keeps an index out of reach of size caps and the guard.
+	hold bool
+	// uuid and primary (the primary shards' size) are for the archive.
+	uuid    string
+	primary int64
 }
 
 // Changes reports whether the decision does something to the index.
@@ -79,8 +91,9 @@ const (
 	GuardOff     = "off"
 	GuardOK      = "ok"
 	GuardOver    = "over"    // above the limit; the plan deletes the oldest days
-	GuardShort   = "short"   // above the limit and min_days stops the guard getting under it
+	GuardShort   = "short"   // above the limit, and the days the guard may delete cannot get it under
 	GuardUnknown = "unknown" // disk use could not be read
+	GuardPaused  = "paused"  // the settings file has errors, so nothing runs
 )
 
 // GuardStatus says what the disk guard sees and plans.
@@ -90,12 +103,20 @@ type GuardStatus struct {
 	Threshold int     `json:"max_disk_percent"`
 	MinDays   int     `json:"min_days"`
 	// NeedBytes is how much must go to get under the limit after the
-	// policies' own deletions; PlannedBytes is what the guard deletes.
+	// policies' own deletions; CanFreeBytes is what every day the guard
+	// may delete holds on that disk; PlannedBytes is what it deletes.
 	NeedBytes    int64  `json:"need_bytes,omitempty"`
+	CanFreeBytes int64  `json:"can_free_bytes,omitempty"`
 	PlannedBytes int64  `json:"planned_bytes,omitempty"`
 	PlannedDays  int    `json:"planned_days,omitempty"`
 	Message      string `json:"message"`
 }
+
+// FloodPercent is the disk use at which OpenSearch makes indices
+// read-only (its default flood-stage watermark). When the guard cannot get
+// the disk under its own limit, it only deletes days if that keeps the
+// disk at or below FloodPercent minus one.
+const FloodPercent = 95
 
 // Plan is everything a run would do.
 type Plan struct {
@@ -178,9 +199,44 @@ type Snapshot struct {
 	Indices []IndexInfo
 	// Disk is nil when disk use could not be read.
 	Disk *Disk
-	// Archived maps an index name to how many of its documents the
-	// archive holds.
-	Archived map[string]int64
+	// NodeBytes maps each index to the bytes it holds on Disk's node, so
+	// the guard knows what deleting it frees there. When nil, every
+	// index's whole size counts (a single node).
+	NodeBytes map[string]int64
+	// Archives lists the archive files of each index name.
+	Archives map[string][]Manifest
+	// Skip lists indices to leave alone, with the reason, such as days
+	// whose archive failed earlier in the same run.
+	Skip map[string]string
+}
+
+// archivedCopy returns how many documents of this very index the archive
+// holds, or -1 when no archive is known to cover it. An archive covers an
+// index it was made from (same UUID, written after writes were blocked),
+// or a restored index whose documents all came from its archives. An index
+// of the same name created again by late events is not covered, however
+// many documents older archives of that day hold.
+func archivedCopy(ix IndexInfo, mans []Manifest) int64 {
+	for _, m := range mans {
+		if ix.UUID != "" && m.IndexUUID == ix.UUID && m.Docs >= ix.Docs {
+			return m.Docs
+		}
+	}
+	if len(ix.RestoredFrom) == 0 {
+		return -1
+	}
+	var n int64
+	for _, id := range ix.RestoredFrom {
+		i := slices.IndexFunc(mans, func(m Manifest) bool { return m.ID == id })
+		if i < 0 {
+			return -1 // that file was moved or removed: archive again
+		}
+		n += mans[i].Docs
+	}
+	if ix.Docs > n {
+		return -1 // events were added after the restore
+	}
+	return n
 }
 
 func startOfDay(t time.Time) time.Time {
@@ -216,11 +272,13 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 	type entry struct {
 		Decision
 		dayT time.Time
+		info IndexInfo
 	}
 	var ents []*entry
+	var unavailable []string
 	for _, ix := range snap.Indices {
 		cat, day, ok := ParseIndex(snap.Prefix, ix.Name)
-		e := &entry{Decision: Decision{Index: ix.Name, Bytes: ix.Bytes, Docs: ix.Docs}, dayT: day}
+		e := &entry{Decision: Decision{Index: ix.Name, Bytes: ix.Bytes, Docs: ix.Docs, uuid: ix.UUID, primary: ix.PrimaryBytes}, dayT: day, info: ix}
 		if !ok {
 			e.Action, e.Reason = ActionSkip, "Not a Signalith daily index; left alone"
 			ents = append(ents, e)
@@ -233,6 +291,15 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 		e.writesBlocked, e.diskBlocked = ix.WriteBlocked || ix.DiskBlocked, ix.DiskBlocked
 		e.Action = ActionKeep
 		switch {
+		case ix.Unavailable:
+			// Its size and events are unknown, and deleting it now would
+			// lose what is on the missing shard.
+			e.hold = true
+			e.Reason = "Unavailable in OpenSearch (a primary shard is missing); left alone until it recovers"
+			unavailable = append(unavailable, ix.Name)
+		case snap.Skip[ix.Name] != "":
+			e.hold = true
+			e.Reason = "Left alone in this run: " + snap.Skip[ix.Name]
 		case day.After(today):
 			e.Reason = "Dated in the future; kept"
 		case e.age == 0:
@@ -266,10 +333,17 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 	// deletable reports whether a kept index may be deleted by the size
 	// cap or the guard.
 	deletable := func(e *entry) bool {
-		return e.Category != "" && e.Action == ActionKeep && e.age >= 1 && !e.dayT.After(today) && !e.restored
+		return e.Category != "" && e.Action == ActionKeep && e.age >= 1 && !e.dayT.After(today) && !e.restored && !e.hold
+	}
+	if len(unavailable) > 0 {
+		slices.Sort(unavailable)
+		plan.Notes = append(plan.Notes, fmt.Sprintf("OpenSearch can't read %s (a primary shard is missing), so retention leaves %s alone until OpenSearch recovers: %s.",
+			plural(len(unavailable), "index", "indices"), map[bool]string{true: "it", false: "them"}[len(unavailable) == 1], strings.Join(unavailable, ", ")))
 	}
 
-	// Size caps, oldest days first.
+	// Size caps, oldest days first. Restored days count neither toward a
+	// cap nor as something it may delete: restoring days for an
+	// investigation must not push live days out.
 	for _, c := range Categories() {
 		pol, _ := s.For(c.ID)
 		capBytes := pol.CapBytes()
@@ -278,7 +352,7 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 		}
 		var size int64
 		for _, e := range ents {
-			if e.Category == c.ID && !e.Removes() {
+			if e.Category == c.ID && !e.Removes() && !e.restored {
 				size += e.Bytes
 			}
 		}
@@ -320,52 +394,90 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 			plan.Guard.Message = fmt.Sprintf("Disk %.0f%% used; the guard acts above %d%%.", d.Percent(), g.MaxDiskPercent)
 			break
 		}
-		limit := d.Total * int64(g.MaxDiskPercent) / 100
-		need := d.Used() - limit
+		// What deleting an index frees on the full disk: on a cluster of
+		// several nodes, only its shards on that node count.
+		freed := func(e *entry) int64 {
+			if snap.NodeBytes != nil {
+				return snap.NodeBytes[e.Index]
+			}
+			return e.Bytes
+		}
+		used := d.Used()
 		for _, e := range ents {
 			if e.Removes() {
-				need -= e.Bytes
+				used -= freed(e)
 			}
 		}
+		need := used - d.Total*int64(g.MaxDiskPercent)/100
 		plan.Guard.State = GuardOver
-		if need > 0 {
-			plan.Guard.NeedBytes = need
-			var cands []*entry
-			for _, e := range ents {
-				if deletable(e) && e.age > g.MinDays {
-					cands = append(cands, e)
-				}
-			}
-			// Oldest day first; on the same day, the biggest first.
-			sort.SliceStable(cands, func(i, j int) bool {
-				if !cands[i].dayT.Equal(cands[j].dayT) {
-					return cands[i].dayT.Before(cands[j].dayT)
-				}
-				return cands[i].Bytes > cands[j].Bytes
-			})
-			for _, e := range cands {
-				if need <= 0 {
-					break
-				}
-				e.Action, e.Rule, e.Source = ActionDelete, RuleGuard, s.GuardSource
-				e.Reason = fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard", d.Percent(), g.MaxDiskPercent)
-				need -= e.Bytes
-				plan.Guard.PlannedBytes += e.Bytes
-				plan.Guard.PlannedDays++
-			}
-		}
-		switch {
-		case need > 0:
-			plan.Guard.State = GuardShort
-			plan.Guard.Message = fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard. Only the last %s are left, which the guard never deletes; add disk space or lower what is kept.",
-				d.Percent(), g.MaxDiskPercent, days(g.MinDays))
-			plan.Notes = append(plan.Notes, plan.Guard.Message)
-		case plan.Guard.PlannedDays > 0:
-			plan.Guard.Message = fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard; the oldest %s are deleted to get under it.",
-				d.Percent(), g.MaxDiskPercent, days(plan.Guard.PlannedDays))
-		default:
+		if need <= 0 {
 			plan.Guard.Message = fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard; the policies' own deletions get it under.",
 				d.Percent(), g.MaxDiskPercent)
+			break
+		}
+		plan.Guard.NeedBytes = need
+		var cands []*entry
+		var can int64
+		for _, e := range ents {
+			if deletable(e) && e.age > g.MinDays && freed(e) > 0 {
+				cands = append(cands, e)
+				can += freed(e)
+			}
+		}
+		plan.Guard.CanFreeBytes = can
+		// When even every day it may delete cannot get the disk under the
+		// limit, for example because other files fill it, deleting them all
+		// would lose history for nothing. The guard then only deletes to
+		// keep OpenSearch below its flood stage, if that is in reach.
+		target, fallback := need, false
+		if can < need {
+			target = used - d.Total*(FloodPercent-1)/100
+			fallback = true
+			if target <= 0 || can < target {
+				target = 0
+			}
+		}
+		// Oldest day first; on the same day, the biggest first.
+		sort.SliceStable(cands, func(i, j int) bool {
+			if !cands[i].dayT.Equal(cands[j].dayT) {
+				return cands[i].dayT.Before(cands[j].dayT)
+			}
+			return cands[i].Bytes > cands[j].Bytes
+		})
+		for _, e := range cands {
+			if target <= 0 {
+				break
+			}
+			e.Action, e.Rule, e.Source = ActionDelete, RuleGuard, s.GuardSource
+			e.Reason = fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard", d.Percent(), g.MaxDiskPercent)
+			target -= freed(e)
+			plan.Guard.PlannedBytes += freed(e)
+			plan.Guard.PlannedDays++
+		}
+		head := fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard.", d.Percent(), g.MaxDiskPercent)
+		switch {
+		case !fallback:
+			verb := "are"
+			if plan.Guard.PlannedDays == 1 {
+				verb = "is"
+			}
+			plan.Guard.Message = fmt.Sprintf("Disk %.0f%% used, above the %d%% disk guard; %s %s deleted to get under it.",
+				d.Percent(), g.MaxDiskPercent, oldestDays(plan.Guard.PlannedDays), verb)
+		case len(cands) == 0:
+			plan.Guard.State = GuardShort
+			plan.Guard.Message = fmt.Sprintf("%s Only the last %s are left, which the guard never deletes. Add disk space or keep less.",
+				head, days(g.MinDays))
+		case plan.Guard.PlannedDays > 0:
+			plan.Guard.State = GuardShort
+			plan.Guard.Message = fmt.Sprintf("%s Every day the guard may delete holds only %s of the %s it needs, so it deletes only %s, enough to keep the disk below %d%%, where OpenSearch stops taking events. Add disk space or keep less.",
+				head, sizeString(can), sizeString(need), oldestDays(plan.Guard.PlannedDays), FloodPercent)
+		default:
+			plan.Guard.State = GuardShort
+			plan.Guard.Message = fmt.Sprintf("%s Every day the guard may delete holds only %s of the %s it needs, so it deletes nothing. Add disk space, keep less, or look for other files on that disk.",
+				head, sizeString(can), sizeString(need))
+		}
+		if plan.Guard.State == GuardShort {
+			plan.Notes = append(plan.Notes, plan.Guard.Message)
 		}
 	}
 
@@ -376,15 +488,19 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 		}
 		pol, _ := s.For(e.Category)
 		switch {
-		case e.Removes():
-			if pol.Archive && e.Docs > 0 {
-				if snap.Archived[e.Index] >= e.Docs {
-					e.Reason += " (already archived)"
-				} else {
-					e.Action = ActionArchive
-				}
+		case e.Removes() && pol.Archive:
+			switch n := archivedCopy(e.info, snap.Archives[e.Index]); {
+			case n >= 0:
+				e.Reason += " (already archived)"
+				e.verify, e.archived = true, n
+			case e.Docs == 0:
+				// Nothing to archive, as far as OpenSearch has refreshed;
+				// the run checks again before deleting.
+				e.verify = true
+			default:
+				e.Action = ActionArchive
 			}
-		case e.Action == ActionKeep && !e.restored && !e.compacted && !e.diskBlocked && pol.CompactAfterDays > 0 &&
+		case e.Action == ActionKeep && !e.restored && !e.hold && !e.compacted && !e.diskBlocked && pol.CompactAfterDays > 0 &&
 			e.age > pol.CompactAfterDays && !e.dayT.After(today):
 			e.Action, e.Rule = ActionCompact, RuleCompact
 			e.Reason = fmt.Sprintf("Older than %s", days(pol.CompactAfterDays))
@@ -395,6 +511,21 @@ func PlanIndices(snap Snapshot, s Settings) *Plan {
 		plan.Decisions[i] = e.Decision
 	}
 	return plan
+}
+
+// oldestDays says "the oldest day" or "the oldest 3 days".
+func oldestDays(n int) string {
+	if n == 1 {
+		return "the oldest day"
+	}
+	return fmt.Sprintf("the oldest %d days", n)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 func days(n int) string {

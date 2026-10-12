@@ -395,6 +395,21 @@ func (s Settings) For(id string) (Policy, string) {
 	return s.Default, SourceDefault
 }
 
+// ShortestKeepDays returns the smallest keep_days of any event category,
+// 0 when every one is kept forever.
+func (s Settings) ShortestKeepDays() int {
+	out := 0
+	for _, c := range Categories() {
+		if c.Kind != KindEvents {
+			continue
+		}
+		if p, _ := s.For(c.ID); p.KeepDays > 0 && (out == 0 || p.KeepDays < out) {
+			out = p.KeepDays
+		}
+	}
+	return out
+}
+
 func (s Settings) clone() Settings {
 	out := s
 	out.Policies = maps.Clone(s.Policies)

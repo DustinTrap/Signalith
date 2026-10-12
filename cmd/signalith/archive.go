@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/retention"
 )
 
@@ -25,7 +26,12 @@ An archived day is a <index>.ndjson.gz file with a <index>.json manifest
 beside it. Name it by its file path or, for files in the archive folder,
 by its ID (the file name without .ndjson.gz). The archive folder is
 retention.archive_dir, SIGNALITH_ARCHIVE_DIR, or an "archive" folder next
-to lookups.dir; -dir overrides it.`
+to lookups.dir; -dir overrides it. Installs that set SIGNALITH_ARCHIVE_DIR
+for the service (the systemd unit sets /var/lib/signalith/archive) need
+the same here, or -dir.
+
+restore installs Signalith's index template first, so restored days get
+the same field types as live ones, even on a new OpenSearch.`
 
 func cmdArchive(args []string) error {
 	if len(args) == 0 {
@@ -66,9 +72,21 @@ func cmdArchive(args []string) error {
 		cl := newStore(c)
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_, herr := cl.Health(hctx)
+		if herr == nil {
+			// Without the template, OpenSearch would guess field types (text
+			// instead of keyword), and searches and stats on these days
+			// would not work like on others. Starting the server later does
+			// not fix indices that already exist.
+			herr = cl.PutIndexTemplate(hctx, c.OpenSearch.IndexPrefix, ingest.IndexTemplate(c.OpenSearch.IndexPrefix, c.OpenSearch.Replicas))
+			if herr != nil {
+				herr = fmt.Errorf("could not install the index template, so nothing was restored: %w", herr)
+			}
+		} else {
+			herr = fmt.Errorf("OpenSearch is not reachable: %w", herr)
+		}
 		cancel()
 		if herr != nil {
-			return fmt.Errorf("OpenSearch is not reachable: %w", herr)
+			return herr
 		}
 		until := time.Now().UTC().AddDate(0, 0, *keep).Format(time.DateOnly)
 		return archiveEach(folder, fs.Args(), func(a *retention.Archive, m retention.Manifest) error {
@@ -102,6 +120,12 @@ func archiveList(folder string) error {
 		return err
 	}
 	fmt.Printf("Archive folder: %s\n\n", folder)
+	if _, err := os.Stat(folder); errors.Is(err, os.ErrNotExist) {
+		fmt.Println("That folder does not exist yet. If the server archives elsewhere (systemd installs")
+		fmt.Println("use /var/lib/signalith/archive), name that folder with -dir, or set")
+		fmt.Println("SIGNALITH_ARCHIVE_DIR as the server does.")
+		return nil
+	}
 	if len(list) == 0 {
 		fmt.Println("No archived days.")
 	} else {

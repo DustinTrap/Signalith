@@ -31,7 +31,7 @@ func TestArchiveWriteReadRoundTrip(t *testing.T) {
 	name := "signalith-endpoint-2026.07.01"
 	mem.AddIndex(name, 12345, testDocs(1203)...)
 	ctx := context.Background()
-	m, err := a.Write(ctx, mem, name, "endpoint", "2026-07-01", 12345, 1203)
+	m, err := a.Write(ctx, mem, Source{Index: name, Category: "endpoint", Day: "2026-07-01", Bytes: 12345}, 1203)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +89,11 @@ func TestArchiveWriteReadRoundTrip(t *testing.T) {
 
 	// Archiving the same index again (late events recreated it) writes a
 	// second file instead of replacing the first.
-	m2, err := a.Write(ctx, mem, name, "endpoint", "2026-07-01", 1, 1203)
+	m2, err := a.Write(ctx, mem, Source{Index: name, Category: "endpoint", Day: "2026-07-01", Bytes: 1}, 1203)
 	if err != nil || m2.ID != name+".2" || m2.File != name+".2.ndjson.gz" {
 		t.Fatalf("second archive = %+v %v", m2, err)
 	}
-	if list, _, _ := a.List(); len(list) != 2 || archivedDocs(list)[name] != 2406 {
+	if list, _, _ := a.List(); len(list) != 2 || len(archivesByIndex(list)[name]) != 2 {
 		t.Errorf("list = %+v", list)
 	}
 }
@@ -103,7 +103,7 @@ func TestArchiveDetectsDamage(t *testing.T) {
 	a := &Archive{Dir: dir}
 	mem := NewMemory()
 	mem.AddIndex("signalith-change-2026.07.01", 1, testDocs(50)...)
-	m, err := a.Write(context.Background(), mem, "signalith-change-2026.07.01", "change", "2026-07-01", 1, 50)
+	m, err := a.Write(context.Background(), mem, Source{Index: "signalith-change-2026.07.01", Category: "change", Day: "2026-07-01", Bytes: 1}, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,16 +140,16 @@ func TestArchiveFailuresLeaveNoFiles(t *testing.T) {
 	mem.AddIndex(name, 1, testDocs(20)...)
 	ctx := context.Background()
 	// The index holds more events than were exported.
-	if _, err := a.Write(ctx, mem, name, "risk", "2026-07-01", 1, 21); err == nil || !strings.Contains(err.Error(), "has 20 events but the index has 21") {
+	if _, err := a.Write(ctx, mem, Source{Index: name, Category: "risk", Day: "2026-07-01", Bytes: 1}, 21); err == nil || !strings.Contains(err.Error(), "has 20 events but the index has 21") {
 		t.Errorf("count mismatch: %v", err)
 	}
 	mem.Fail["export "+name] = errors.New("scroll expired")
-	if _, err := a.Write(ctx, mem, name, "risk", "2026-07-01", 1, 20); err == nil || !strings.Contains(err.Error(), "scroll expired") {
+	if _, err := a.Write(ctx, mem, Source{Index: name, Category: "risk", Day: "2026-07-01", Bytes: 1}, 20); err == nil || !strings.Contains(err.Error(), "scroll expired") {
 		t.Errorf("export error: %v", err)
 	}
 	delete(mem.Fail, "export "+name)
 	mem.AddIndex(name, 1, Doc{ID: "x", Source: json.RawMessage(`{not json`)})
-	if _, err := a.Write(ctx, mem, name, "risk", "2026-07-01", 1, 1); err == nil {
+	if _, err := a.Write(ctx, mem, Source{Index: name, Category: "risk", Day: "2026-07-01", Bytes: 1}, 1); err == nil {
 		t.Error("bad JSON was archived")
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
@@ -158,10 +158,10 @@ func TestArchiveFailuresLeaveNoFiles(t *testing.T) {
 	// A folder that cannot be created is an error, not a panic.
 	file := filepath.Join(dir, "file")
 	os.WriteFile(file, nil, 0o600)
-	if _, err := (&Archive{Dir: filepath.Join(file, "sub")}).Write(ctx, mem, name, "risk", "2026-07-01", 1, 1); err == nil {
+	if _, err := (&Archive{Dir: filepath.Join(file, "sub")}).Write(ctx, mem, Source{Index: name, Category: "risk", Day: "2026-07-01", Bytes: 1}, 1); err == nil {
 		t.Error("archive under a file worked")
 	}
-	if _, err := (&Archive{}).Write(ctx, mem, name, "risk", "2026-07-01", 1, 1); err == nil {
+	if _, err := (&Archive{}).Write(ctx, mem, Source{Index: name, Category: "risk", Day: "2026-07-01", Bytes: 1}, 1); err == nil {
 		t.Error("archive without a folder worked")
 	}
 }
@@ -196,7 +196,7 @@ func TestArchiveSealHook(t *testing.T) {
 	mem := NewMemory()
 	name := "signalith-endpoint-2026.07.02"
 	mem.AddIndex(name, 1, testDocs(30)...)
-	m, err := sealed.Write(context.Background(), mem, name, "endpoint", "2026-07-02", 1, 30)
+	m, err := sealed.Write(context.Background(), mem, Source{Index: name, Category: "endpoint", Day: "2026-07-02", Bytes: 1}, 30)
 	if err != nil {
 		t.Fatal(err)
 	}

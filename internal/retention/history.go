@@ -30,6 +30,9 @@ type Run struct {
 	Archived       int   `json:"archived"`
 	Deleted        int   `json:"deleted"`
 	DeletedRecords int64 `json:"deleted_records"`
+	// Skipped counts steps left out because settings saved during the run
+	// no longer called for them.
+	Skipped int `json:"skipped,omitempty"`
 	// FreedBytes is what deletions and compaction freed in OpenSearch.
 	FreedBytes int64        `json:"freed_bytes"`
 	Errors     []string     `json:"errors"`

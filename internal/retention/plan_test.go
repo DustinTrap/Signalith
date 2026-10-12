@@ -251,10 +251,13 @@ func TestGuardDeletesOldestDaysAcrossCategories(t *testing.T) {
 		t.Errorf("guard = %+v", g)
 	}
 
-	// When the disk needs more than the unprotected days hold, it says so.
+	// When the days it may delete cannot get the disk under the limit, the
+	// guard only deletes to stay below OpenSearch's flood stage: 100% used,
+	// 15 GB needed, 10 GB deletable; 6 GB gets it to 94%.
 	snap.Disk = &Disk{Total: 100 * GB, Available: 0}
 	plan = PlanIndices(snap, s)
-	if len(plan.Steps()) != 4 || plan.Guard.State != GuardShort || !strings.Contains(plan.Guard.Message, "last 7 days") {
+	if len(plan.Steps()) != 3 || plan.Guard.State != GuardShort || plan.Guard.CanFreeBytes != 10*GB || plan.Guard.PlannedBytes != 6*GB ||
+		!strings.Contains(plan.Guard.Message, "deletes only the oldest 3 days, enough to keep the disk below 95%") {
 		t.Errorf("steps = %d, guard = %+v", len(plan.Steps()), plan.Guard)
 	}
 	for _, d := range plan.Steps() {
@@ -357,9 +360,10 @@ func TestRestoredIndicesAreKeptUntilTheirDay(t *testing.T) {
 
 func TestArchiveBeforeDeleting(t *testing.T) {
 	a, b, empty := ix("endpoint", 100, GB), ix("endpoint", 101, GB), ix("endpoint", 102, GB)
+	b.UUID = "uuid-b"
 	empty.Docs = 0
 	snap := snapOf(a, b, empty)
-	snap.Archived = map[string]int64{b.Name: 10}
+	snap.Archives = map[string][]Manifest{b.Name: {{ID: b.Name, Index: b.Name, IndexUUID: "uuid-b", Docs: 10}}}
 	s := noGuard(withPolicy(Effective(Config{Days: 90}, Saved{}), "endpoint", Policy{KeepDays: 90, Archive: true}))
 	d := byIndex(PlanIndices(snap, s))
 	if d[a.Name].Action != ActionArchive || d[a.Name].Source != SourceUI {

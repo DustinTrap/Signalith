@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -245,5 +246,73 @@ func TestRetentionRefusesCrossSiteChanges(t *testing.T) {
 	}
 	if s, _ := m.Settings(); s.DefaultSource != retention.SourceDays {
 		t.Error("a cross-site request changed the default")
+	}
+}
+
+func TestRetentionAPIReadOnlyServer(t *testing.T) {
+	m, mem, call := newRetentionServer(t, retention.Config{Days: 30})
+	m.ReadOnly = true
+	for _, tc := range []struct{ method, path, body string }{
+		{"PUT", "/api/retention/policies/endpoint", `{"keep_days":5}`},
+		{"DELETE", "/api/retention/policies/endpoint", ``},
+		{"PUT", "/api/retention/default", `{"keep_days":5}`},
+		{"PUT", "/api/retention/guard", `{"enabled":false}`},
+		{"POST", "/api/retention/run", ``},
+		{"POST", "/api/retention/archive/restore", `{"ids":["x"]}`},
+	} {
+		code, out := call(tc.method, tc.path, tc.body)
+		if code != http.StatusConflict || !strings.Contains(out["error"].(string), "detections.scheduler: true") {
+			t.Errorf("%s %s = %d %v", tc.method, tc.path, code, out)
+		}
+	}
+	_, out := call("GET", "/api/retention", "")
+	if sch := out["schedule"].(map[string]any); sch["read_only"] != true {
+		t.Errorf("schedule = %v", sch)
+	}
+	if ep := category(out, "endpoint"); ep["editable"] != false {
+		t.Errorf("endpoint = %v", ep)
+	}
+	// Previews still work: they change nothing.
+	if code, _ := call("POST", "/api/retention/preview", `{"default":{"keep_days":10}}`); code != 200 {
+		t.Errorf("preview = %d", code)
+	}
+	if n := len(mem.Calls); n != 0 {
+		t.Errorf("a read-only server changed OpenSearch: %v", mem.Calls)
+	}
+}
+
+func TestRetentionAPIRestoreCheckAndOpenSearchDown(t *testing.T) {
+	_, mem, call := newRetentionServer(t, retention.Config{Days: 90})
+	if code, out := call("PUT", "/api/retention/policies/endpoint", `{"keep_days":30,"archive":true}`); code != 200 || out["run_started"] != true || out["run_queued"] != false {
+		t.Fatalf("put = %d %v", code, out)
+	}
+	idle(t, call)
+	_, out := call("GET", "/api/retention/archive", "")
+	var ids []string
+	for _, a := range out["archives"].([]any)[:40] {
+		ids = append(ids, `"`+a.(map[string]any)["id"].(string)+`"`)
+	}
+	body := `{"ids":[` + strings.Join(ids, ",") + `]}`
+	// 40 restored days of 0.1 GB on a disk that is 33% full: fine.
+	code, out := call("POST", "/api/retention/archive/preview", body)
+	if code != 200 || out["needs_confirm"] != false || out["days"] != float64(40) || out["bytes"] == float64(0) {
+		t.Fatalf("check = %d %v", code, out)
+	}
+	// Nearly full: the restore must be confirmed.
+	mem.DiskBase = 81 * retention.GB
+	code, out = call("POST", "/api/retention/archive/restore", body)
+	if code != http.StatusConflict || out["check"] == nil || out["check"].(map[string]any)["needs_confirm"] != true {
+		t.Fatalf("unconfirmed = %d %v", code, out)
+	}
+	if code, out := call("POST", "/api/retention/archive/restore", strings.TrimSuffix(body, "}")+`,"confirm":true}`); code != 202 {
+		t.Errorf("confirmed = %d %v", code, out)
+	}
+	time.Sleep(20 * time.Millisecond)
+	idle(t, call)
+	// OpenSearch down: previews say so with 503, saving still works.
+	mem.Fail["indices"] = errors.New("connection refused")
+	code, out = call("POST", "/api/retention/preview", `{"default":{"keep_days":10}}`)
+	if code != http.StatusServiceUnavailable || !strings.Contains(out["error"].(string), "OpenSearch") {
+		t.Errorf("preview with OpenSearch down = %d %v", code, out)
 	}
 }

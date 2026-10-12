@@ -48,12 +48,16 @@ type Archive struct {
 type Manifest struct {
 	Format string `json:"format"`
 	// ID is the file name without extension; restores name archives by it.
-	ID       string `json:"id"`
-	Index    string `json:"index"`
-	Category string `json:"category"`
-	Day      string `json:"day"` // YYYY-MM-DD
-	Docs     int64  `json:"docs"`
-	File     string `json:"file"`
+	ID    string `json:"id"`
+	Index string `json:"index"`
+	// IndexUUID is the UUID of the index the archive was made from. An
+	// index of the same name created later, by events that arrived after
+	// the day was deleted, has another UUID and is archived again.
+	IndexUUID string `json:"index_uuid,omitempty"`
+	Category  string `json:"category"`
+	Day       string `json:"day"` // YYYY-MM-DD
+	Docs      int64  `json:"docs"`
+	File      string `json:"file"`
 	// Bytes is the archive file's size and IndexBytes the size the index
 	// had in OpenSearch.
 	Bytes      int64     `json:"bytes"`
@@ -78,9 +82,10 @@ func (a *Archive) ensureDir() error {
 	if err := os.MkdirAll(a.Dir, 0o700); err != nil {
 		return fmt.Errorf("cannot create the archive folder %s: %w", a.Dir, err)
 	}
-	// A folder made by an installer may be more open; tighten it if this
-	// server owns it.
-	_ = os.Chmod(a.Dir, 0o700)
+	// A folder made by an installer or an admin may be more open; tighten
+	// it if this server owns it. On Windows this sets an access list for
+	// SYSTEM, Administrators and the server's account only.
+	_ = restrictDir(a.Dir)
 	return nil
 }
 
@@ -115,18 +120,43 @@ type Exporter interface {
 	Export(ctx context.Context, index string, fn func(Doc) error) error
 }
 
+// Source describes the index an archive is written from.
+type Source struct {
+	Index    string
+	UUID     string
+	Category string
+	Day      string // YYYY-MM-DD
+	// Bytes is the index's size in OpenSearch, for the manifest.
+	Bytes int64
+	// Estimate is about the most the archive file can take, used to check
+	// for free space before writing; 0 skips the check.
+	Estimate int64
+}
+
+// ErrArchiveSpace means the archive folder has too little free space.
+var ErrArchiveSpace = errors.New("not enough free space in the archive folder")
+
 // Write exports an index into a new archive file and returns its
 // manifest. The file is written to a temporary name, synced to disk,
 // checked against the expected document count, renamed into place and
 // then read back in full before Write returns, so an index is only
 // deleted once its archive is known to be complete and readable. On any
 // error no archive files are left behind.
-func (a *Archive) Write(ctx context.Context, ex Exporter, index, category, day string, indexBytes, expectDocs int64) (*Manifest, error) {
+func (a *Archive) Write(ctx context.Context, ex Exporter, src Source, expectDocs int64) (*Manifest, error) {
+	index := src.Index
 	if !archiveID.MatchString(index) {
 		return nil, fmt.Errorf("%q is not an index name that can be archived", index)
 	}
 	if err := a.ensureDir(); err != nil {
 		return nil, err
+	}
+	// Check for room first rather than fill the disk and fail: the archive
+	// folder often shares a disk with OpenSearch.
+	if src.Estimate > 0 {
+		if free, _, err := diskSpace(a.Dir); err == nil && free < src.Estimate {
+			return nil, fmt.Errorf("%w: %s has %s free, and archiving %s may take up to %s; free space there or move the archive folder (retention.archive_dir)",
+				ErrArchiveSpace, a.Dir, sizeString(free), index, sizeString(src.Estimate))
+		}
 	}
 	tmp, err := os.CreateTemp(a.Dir, ".tmp-"+index+"-*")
 	if err != nil {
@@ -199,8 +229,8 @@ func (a *Archive) Write(ctx context.Context, ex Exporter, index, category, day s
 	}
 	id := a.freeID(index)
 	m := &Manifest{
-		Format: ArchiveFormat, ID: id, Index: index, Category: category, Day: day,
-		Docs: docs, File: id + dataExt, Bytes: counted.n, IndexBytes: indexBytes,
+		Format: ArchiveFormat, ID: id, Index: index, IndexUUID: src.UUID, Category: src.Category, Day: src.Day,
+		Docs: docs, File: id + dataExt, Bytes: counted.n, IndexBytes: src.Bytes,
 		SHA256: hex.EncodeToString(sum.Sum(nil)), Created: time.Now().UTC(), Encryption: enc,
 	}
 	if err := os.Rename(tmp.Name(), a.path(m.File)); err != nil {
@@ -396,12 +426,39 @@ func (a *Archive) Read(m Manifest, fn func(Doc) error) error {
 // document count.
 func (a *Archive) Verify(m Manifest) error { return a.Read(m, nil) }
 
-// archivedDocs maps each index to how many of its documents the archive
-// holds.
-func archivedDocs(list []Manifest) map[string]int64 {
-	out := map[string]int64{}
+// archivesByIndex groups archives by the index they were made from.
+func archivesByIndex(list []Manifest) map[string][]Manifest {
+	out := map[string][]Manifest{}
 	for _, m := range list {
-		out[m.Index] += m.Docs
+		out[m.Index] = append(out[m.Index], m)
 	}
 	return out
+}
+
+// sizeString prints bytes the way the page does (1 GB = 1024³ bytes).
+func sizeString(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit && exp < 4; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTP"[exp])
+}
+
+// existing returns dir, or its nearest parent that exists.
+func existing(dir string) string {
+	for {
+		if _, err := os.Stat(dir); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
 }

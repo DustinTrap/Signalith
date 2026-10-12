@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -30,7 +32,17 @@ const (
 var (
 	ErrBusy      = errors.New("a retention run is already in progress; try again when it finishes")
 	ErrRestoring = errors.New("archived days are being restored; try again when that finishes")
+	// ErrReadOnly is returned on servers that do not run retention.
+	ErrReadOnly = errors.New("this server doesn't run retention: it runs on the server with the detection scheduler (detections.scheduler: true), with that server's settings; make changes there")
+	// ErrOpenSearch wraps failures to read OpenSearch, so callers can tell
+	// them from bad settings.
+	ErrOpenSearch = errors.New("OpenSearch could not be read")
 )
+
+// maxGuardPasses is how many times one run lets the disk guard choose
+// again after days it chose could not be deleted, for example because
+// their archive failed.
+const maxGuardPasses = 3
 
 // Manager plans and enforces retention, and serves the Data retention
 // page: overview, previews, settings changes and restores.
@@ -48,10 +60,16 @@ type Manager struct {
 	Log      *slog.Logger
 	// Now returns the current time; tests set it.
 	Now func() time.Time
+	// ReadOnly is set on servers that do not run the detection scheduler.
+	// Retention runs on the server that does, with the settings saved
+	// there, so these only show retention: settings changes, runs and
+	// restores are refused.
+	ReadOnly bool
 
 	initOnce sync.Once
 	hist     *history
-	// job is held by a run or a restore, so they never overlap.
+	// job is held by a run or a restore, so they never overlap. It is
+	// released through release, which hands it to a queued run.
 	job sync.Mutex
 
 	mu        sync.Mutex
@@ -60,8 +78,17 @@ type Manager struct {
 	nextRun   time.Time
 	baseCtx   context.Context
 	restores  []*RestoreStatus
-	lastShort time.Time
+	// queued is a run asked for while another job held job; it starts as
+	// soon as that job ends.
+	queued *queuedRun
+	// guardPaused is when the disk guard last could not get the disk under
+	// its limit; it then waits for the next scheduled run instead of
+	// starting runs every few minutes.
+	guardPaused    time.Time
+	guardPausedWhy string
 }
+
+type queuedRun struct{ trigger, by string }
 
 // maxRestores is how many restores the archive view remembers.
 const maxRestores = 50
@@ -107,6 +134,24 @@ func (m *Manager) setCurrent(what string) {
 	m.mu.Unlock()
 }
 
+// release ends a job. A queued run takes the job over at once, so nothing
+// else can slip in between.
+func (m *Manager) release() {
+	m.mu.Lock()
+	q := m.queued
+	m.queued = nil
+	if q == nil {
+		m.job.Unlock()
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+	go func() {
+		defer m.release()
+		_, _ = m.run(m.ctx(), q.trigger, q.by)
+	}()
+}
+
 func (m *Manager) busy() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -142,7 +187,7 @@ func (m *Manager) snapshot(ctx context.Context) (*state, error) {
 	st := &state{snap: Snapshot{Now: m.now(), Prefix: m.Prefix}, records: map[string]IndexInfo{}}
 	all, err := m.Cluster.Indices(ctx, m.Prefix+"-*,"+m.Prefix+"_*")
 	if err != nil {
-		return nil, fmt.Errorf("could not list indices in OpenSearch: %w", err)
+		return nil, fmt.Errorf("%w: could not list indices: %w", ErrOpenSearch, err)
 	}
 	for _, ix := range all {
 		if strings.HasPrefix(ix.Name, m.Prefix+"-") {
@@ -153,20 +198,25 @@ func (m *Manager) snapshot(ctx context.Context) (*state, error) {
 	}
 	if d, err := m.Cluster.Disk(ctx); err != nil {
 		st.diskErr = err.Error()
+	} else if nb, err := m.Cluster.NodeBytes(ctx, m.Prefix+"-*", d.Node); err != nil {
+		// Without it the guard cannot tell what a deletion frees on the
+		// full disk, so it waits rather than guess.
+		st.diskErr = "could not read where shards are: " + err.Error()
 	} else {
-		st.snap.Disk = d
+		st.snap.Disk, st.snap.NodeBytes = d, nb
 	}
 	list, problems, err := m.Archive.List()
 	if err != nil {
 		st.archErr = err.Error()
 	}
 	st.archives, st.archProb = list, problems
-	st.snap.Archived = archivedDocs(list)
+	st.snap.Archives = archivesByIndex(list)
 	return st, nil
 }
 
 // planRecords counts the findings and cases the policies would delete.
-// Findings in open cases are kept with their case.
+// Findings in an investigation are kept as long as the investigation is:
+// a case holds only the IDs of its findings.
 func (m *Manager) planRecords(ctx context.Context, s Settings, now time.Time) ([]RecordStep, error) {
 	out := []RecordStep{}
 	for _, id := range []string{Findings, Cases} {
@@ -180,11 +230,12 @@ func (m *Manager) planRecords(ctx context.Context, s Settings, now time.Time) ([
 			Reason: fmt.Sprintf("Resolved or closed, and unchanged for more than %s", days(pol.KeepDays)),
 		}
 		if id == Findings {
-			open, err := m.Cluster.OpenCases(ctx, RecordIndex(m.Prefix, Cases))
+			ids, err := m.Cluster.CaseIDs(ctx, RecordIndex(m.Prefix, Cases))
 			if err != nil {
-				return out, fmt.Errorf("could not list open investigations, so no findings are deleted: %w", err)
+				return out, fmt.Errorf("could not list investigations, so no findings are deleted: %w", err)
 			}
-			step.keepCases = open
+			step.keepCases = ids
+			step.Reason = fmt.Sprintf("Resolved or closed, unchanged for more than %s, and in no investigation", days(pol.KeepDays))
 		}
 		n, err := m.Cluster.CountClosed(ctx, step.Index, step.Before, step.keepCases)
 		if err != nil {
@@ -214,21 +265,54 @@ func (m *Manager) Run(ctx context.Context, trigger, by string) (*Run, error) {
 	if !m.job.TryLock() {
 		return nil, m.busy()
 	}
-	defer m.job.Unlock()
+	defer m.release()
 	return m.run(ctx, trigger, by)
 }
 
 // RunAsync starts a run in the background, for "Run now".
 func (m *Manager) RunAsync(trigger, by string) error {
 	m.init()
+	if m.ReadOnly {
+		return ErrReadOnly
+	}
 	if !m.job.TryLock() {
 		return m.busy()
 	}
 	go func() {
-		defer m.job.Unlock()
+		defer m.release()
 		_, _ = m.run(m.ctx(), trigger, by)
 	}()
 	return nil
+}
+
+// Apply results.
+const (
+	ApplyStarted = "started"
+	// ApplyQueued: a run or restore is going; a new run starts when it ends.
+	ApplyQueued = "queued"
+)
+
+// ApplySoon starts a run after a settings change, so the change applies
+// now. When a run or restore is going, it queues a run that starts as soon
+// as that ends; a run in progress also re-reads the settings before each
+// step, so it never deletes what the new settings keep.
+func (m *Manager) ApplySoon(trigger, by string) (string, error) {
+	m.init()
+	if m.ReadOnly {
+		return "", ErrReadOnly
+	}
+	m.mu.Lock()
+	if m.job.TryLock() {
+		m.mu.Unlock()
+		go func() {
+			defer m.release()
+			_, _ = m.run(m.ctx(), trigger, by)
+		}()
+		return ApplyStarted, nil
+	}
+	m.queued = &queuedRun{trigger: trigger, by: by}
+	m.mu.Unlock()
+	return ApplyQueued, nil
 }
 
 // run does one run; the caller holds m.job.
@@ -251,51 +335,128 @@ func (m *Manager) run(ctx context.Context, trigger, by string) (*Run, error) {
 	if err != nil {
 		return finish(fmt.Errorf("retention is paused until the settings file is fixed: %w", err))
 	}
-	st, err := m.snapshot(ctx)
-	if err != nil {
-		return finish(err)
-	}
-	plan, err := m.plan(ctx, s, st)
-	if err != nil {
-		run.Errors = append(run.Errors, err.Error())
-	}
-	g := plan.Guard
-	run.Guard = &g
-	switch g.State {
-	case GuardOver:
-		m.Log.Warn("retention: disk is above the guard limit; deleting the oldest days",
-			"percent", g.Percent, "limit", g.Threshold, "days", g.PlannedDays, "bytes", g.PlannedBytes)
-	case GuardShort:
-		m.Log.Error("retention: disk is above the guard limit and only protected days are left; add disk space",
-			"percent", g.Percent, "limit", g.Threshold, "min_days", g.MinDays)
-		m.mu.Lock()
-		m.lastShort = m.now()
-		m.mu.Unlock()
-	}
-	today := startOfDay(st.snap.Now)
-	for _, d := range plan.Steps() {
-		if ctx.Err() != nil {
+	today := startOfDay(m.now())
+	// skip holds days that failed in this run, so the guard can choose
+	// others in its next pass.
+	skip := map[string]string{}
+	attempted := map[string]bool{}
+	guardFailed := false
+	for pass := 0; pass < maxGuardPasses; pass++ {
+		st, err := m.snapshot(ctx)
+		if err != nil {
+			if pass == 0 {
+				return finish(err)
+			}
+			run.Errors = append(run.Errors, err.Error())
 			break
 		}
-		act := m.apply(ctx, d, today)
-		m.record(run, act)
-		if act.Error != "" {
-			run.Errors = append(run.Errors, act.Index+": "+act.Error)
+		st.snap.Skip = skip
+		var plan *Plan
+		if pass == 0 {
+			plan, err = m.plan(ctx, s, st)
+			if err != nil {
+				run.Errors = append(run.Errors, err.Error())
+			}
+		} else {
+			plan = PlanIndices(st.snap, s)
+		}
+		g := plan.Guard
+		run.Guard = &g
+		switch g.State {
+		case GuardOver:
+			m.Log.Warn("retention: disk is above the guard limit; deleting the oldest days",
+				"percent", g.Percent, "limit", g.Threshold, "days", g.PlannedDays, "bytes", g.PlannedBytes)
+		case GuardShort:
+			m.Log.Error("retention: disk is above the guard limit and deleting old days cannot get it under; add disk space",
+				"percent", g.Percent, "limit", g.Threshold, "min_days", g.MinDays, "can_free_bytes", g.CanFreeBytes,
+				"need_bytes", g.NeedBytes, "days", g.PlannedDays)
+		}
+		wanted := m.stillWanted(s, st.snap)
+		guardFailed = false
+		for _, d := range plan.Steps() {
+			if ctx.Err() != nil {
+				break
+			}
+			// Later passes only let the guard pick other days.
+			if attempted[d.Index] || (pass > 0 && d.Rule != RuleGuard) {
+				continue
+			}
+			d, ok, why := wanted(d)
+			if !ok {
+				run.Skipped++
+				m.Log.Info("retention: step skipped", "action", d.Action, "index", d.Index, "why", why)
+				continue
+			}
+			attempted[d.Index] = true
+			act := m.apply(ctx, d, today)
+			m.record(run, act)
+			if act.Error != "" {
+				run.Errors = append(run.Errors, act.Index+": "+act.Error)
+				if d.Removes() {
+					skip[d.Index] = "it could not be " + map[bool]string{true: "archived", false: "deleted"}[act.Action == ActionArchive] + " earlier in this run"
+					if d.Rule == RuleGuard {
+						guardFailed = true
+					}
+				}
+				continue
+			}
+			run.FreedBytes += act.Freed
+			switch act.Action {
+			case ActionCompact:
+				run.Compacted++
+			case ActionArchive:
+				run.Archived++
+			case ActionDelete:
+				run.Deleted++
+			}
+		}
+		if pass == 0 {
+			m.deleteRecords(ctx, run, plan.Records)
+		}
+		if !guardFailed || ctx.Err() != nil {
+			break
+		}
+		m.Log.Warn("retention: days the disk guard chose could not be deleted; it chooses again")
+	}
+	switch {
+	case guardFailed:
+		m.pauseGuard("days it chose could not be deleted (see the errors)")
+	case run.Guard != nil && run.Guard.State == GuardShort:
+		m.pauseGuard("deleting old days cannot get the disk under its limit")
+	default:
+		m.pauseGuard("")
+	}
+	if err := ctx.Err(); err != nil {
+		return finish(fmt.Errorf("the run was stopped: %w", err))
+	}
+	if run.Compacted+run.Archived+run.Deleted > 0 || run.DeletedRecords > 0 {
+		m.Log.Info("retention run finished", "compacted", run.Compacted, "archived", run.Archived,
+			"deleted", run.Deleted, "records", run.DeletedRecords, "freed_bytes", run.FreedBytes, "errors", len(run.Errors))
+	}
+	return finish(nil)
+}
+
+// deleteRecords deletes resolved and closed findings and cases. Like index
+// steps, each re-reads the settings first and never deletes more than they
+// now say.
+func (m *Manager) deleteRecords(ctx context.Context, run *Run, recs []RecordStep) {
+	for _, r := range recs {
+		if ctx.Err() != nil {
+			return
+		}
+		cur, err := m.Settings()
+		if err != nil {
+			run.Skipped++
 			continue
 		}
-		run.FreedBytes += act.Freed
-		switch act.Action {
-		case ActionCompact:
-			run.Compacted++
-		case ActionArchive:
-			run.Archived++
-		case ActionDelete:
-			run.Deleted++
-		}
-	}
-	for _, r := range plan.Records {
-		if ctx.Err() != nil {
-			break
+		pol, _ := cur.For(r.Category)
+		switch {
+		case pol.KeepDays <= 0:
+			run.Skipped++
+			continue
+		case pol.KeepDays > r.KeepDays:
+			r.KeepDays = pol.KeepDays
+			r.Before = m.now().Add(-time.Duration(pol.KeepDays) * 24 * time.Hour)
 		}
 		n, err := m.Cluster.DeleteClosed(ctx, r.Index, r.Before, r.keepCases)
 		act := Action{Time: m.now(), Action: ActionDeleteRecords, Category: r.Category, Docs: n, Rule: RuleRecords, Reason: r.Reason}
@@ -306,14 +467,56 @@ func (m *Manager) run(ctx context.Context, trigger, by string) (*Run, error) {
 		run.DeletedRecords += n
 		m.record(run, act)
 	}
-	if err := ctx.Err(); err != nil {
-		return finish(fmt.Errorf("the run was stopped: %w", err))
+}
+
+// stillWanted re-reads the settings before each step of a run, so a
+// correction saved while the run works takes effect at once: a step the
+// new settings no longer call for is skipped. It never adds work; the run
+// that the save queued does that. The snapshot is the one the run planned
+// from, so the check sees what a run started with the new settings would.
+func (m *Manager) stillWanted(s Settings, snap Snapshot) func(Decision) (Decision, bool, string) {
+	cur := s
+	var now map[string]Decision
+	return func(d Decision) (Decision, bool, string) {
+		latest, err := m.Settings()
+		if err != nil {
+			return d, false, "the settings file has errors now"
+		}
+		if !reflect.DeepEqual(latest, cur) {
+			cur = latest
+			now = map[string]Decision{}
+			for _, x := range PlanIndices(snap, latest).Decisions {
+				now[x.Index] = x
+			}
+		}
+		if now == nil {
+			return d, true, ""
+		}
+		nd, ok := now[d.Index]
+		switch {
+		case !ok:
+			return d, false, "the index is no longer planned"
+		case d.Action == ActionArchive && nd.Removes():
+			return d, true, ""
+		case d.Removes() && nd.Removes():
+			// Archive if the new settings say so.
+			return nd, true, ""
+		case d.Action == ActionCompact && nd.Action == ActionCompact:
+			return d, true, ""
+		}
+		return d, false, "the settings saved during this run no longer call for it"
 	}
-	if run.Compacted+run.Archived+run.Deleted > 0 || run.DeletedRecords > 0 {
-		m.Log.Info("retention run finished", "compacted", run.Compacted, "archived", run.Archived,
-			"deleted", run.Deleted, "records", run.DeletedRecords, "freed_bytes", run.FreedBytes, "errors", len(run.Errors))
+}
+
+// pauseGuard stops the disk check from starting runs until the next
+// scheduled one; an empty reason ends the pause.
+func (m *Manager) pauseGuard(why string) {
+	m.mu.Lock()
+	m.guardPaused, m.guardPausedWhy = m.now(), why
+	if why == "" {
+		m.guardPaused = time.Time{}
 	}
-	return finish(nil)
+	m.mu.Unlock()
 }
 
 // record logs an action and adds it to the history.
@@ -350,12 +553,14 @@ func (m *Manager) apply(ctx context.Context, d Decision, today time.Time) Action
 		return act
 	}
 	var err error
-	switch d.Action {
-	case ActionCompact:
+	switch {
+	case d.Action == ActionCompact:
 		err = m.compact(ctx, d, &act)
-	case ActionArchive:
+	case d.Action == ActionArchive:
 		err = m.archiveAndDelete(ctx, d, &act)
-	case ActionDelete:
+	case d.verify:
+		err = m.verifiedDelete(ctx, d, &act)
+	default:
 		act.Docs = d.Docs
 		if err = m.Cluster.DeleteIndex(ctx, d.Index); err == nil {
 			act.Freed = d.Bytes
@@ -381,26 +586,106 @@ func (m *Manager) compact(ctx context.Context, d Decision, act *Action) error {
 	return nil
 }
 
-func (m *Manager) archiveAndDelete(ctx context.Context, d Decision, act *Action) error {
-	// Writes are blocked first so the archive holds exactly what is deleted.
-	// An index under OpenSearch's flood-stage block takes no writes and
-	// refuses setting changes, so it is archived as it is.
+// freeze blocks writes to an index and refreshes it, so a count and an
+// export see every event it will ever hold: events written in the last
+// seconds before the block only show after a refresh. An index under
+// OpenSearch's flood-stage block takes no writes and refuses setting
+// changes, but can still be refreshed. It reports whether it set the
+// block, which thaw undoes when the index is kept after all.
+func (m *Manager) freeze(ctx context.Context, d Decision) (bool, error) {
+	set := false
 	if !d.writesBlocked {
 		if err := m.Cluster.BlockWrites(ctx, d.Index, true); err != nil {
-			return fmt.Errorf("could not make the index read-only before archiving it, so it was kept: %w", err)
+			return false, fmt.Errorf("could not make the index read-only before archiving it, so it was kept: %w", err)
 		}
+		set = true
 	}
+	if err := m.Cluster.Refresh(ctx, d.Index); err != nil {
+		m.thaw(ctx, d, set)
+		return false, fmt.Errorf("could not refresh the index before archiving it, so it was kept: %w", err)
+	}
+	return set, nil
+}
+
+// thaw lifts the write block freeze set on an index that is kept, so it
+// keeps taking late events.
+func (m *Manager) thaw(ctx context.Context, d Decision, set bool) {
+	if !set {
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := m.Cluster.BlockWrites(cctx, d.Index, false); err != nil {
+		m.Log.Warn("retention: could not make a kept index writable again", "index", d.Index, "err", err)
+	}
+}
+
+func (m *Manager) archiveAndDelete(ctx context.Context, d Decision, act *Action) error {
+	set, err := m.freeze(ctx, d)
+	if err != nil {
+		return err
+	}
+	if err := m.archiveFrozen(ctx, d, act); err != nil {
+		if act.File == "" {
+			m.thaw(ctx, d, set)
+		}
+		return err
+	}
+	return nil
+}
+
+// archiveFrozen archives a frozen index and deletes it.
+func (m *Manager) archiveFrozen(ctx context.Context, d Decision, act *Action) error {
 	n, err := m.Cluster.Count(ctx, d.Index)
 	if err != nil {
 		return fmt.Errorf("could not count its events, so it was kept: %w", err)
 	}
-	man, err := m.Archive.Write(ctx, m.Cluster, d.Index, d.Category, d.Day, d.Bytes, n)
+	est := d.primary
+	if est <= 0 {
+		est = d.Bytes
+	}
+	man, err := m.Archive.Write(ctx, m.Cluster, Source{Index: d.Index, UUID: d.uuid, Category: d.Category, Day: d.Day,
+		Bytes: d.Bytes, Estimate: est / 2}, n)
 	if err != nil {
 		return fmt.Errorf("archiving failed, so the index was kept: %w", err)
 	}
 	act.File, act.Docs = man.File, man.Docs
 	if err := m.Cluster.DeleteIndex(ctx, d.Index); err != nil {
 		return fmt.Errorf("archived to %s, but deleting the index failed: %w", man.File, err)
+	}
+	act.Freed = d.Bytes
+	return nil
+}
+
+// verifiedDelete deletes an index in a category that archives, when the
+// archive already holds it or it looked empty. It first freezes and counts
+// the index: if it holds more than the archive does, because events
+// arrived since, it is archived again instead.
+func (m *Manager) verifiedDelete(ctx context.Context, d Decision, act *Action) error {
+	set, err := m.freeze(ctx, d)
+	if err != nil {
+		return err
+	}
+	n, err := m.Cluster.Count(ctx, d.Index)
+	if err != nil {
+		m.thaw(ctx, d, set)
+		return fmt.Errorf("could not count its events, so it was kept: %w", err)
+	}
+	if n > d.archived {
+		act.Action = ActionArchive
+		act.Reason = strings.TrimSuffix(d.Reason, " (already archived)")
+		if err := m.archiveFrozen(ctx, d, act); err != nil {
+			if act.File == "" {
+				m.thaw(ctx, d, set)
+			}
+			return err
+		}
+		return nil
+	}
+	act.Docs = n
+	if err := m.Cluster.DeleteIndex(ctx, d.Index); err != nil {
+		m.thaw(ctx, d, set)
+		return err
 	}
 	act.Freed = d.Bytes
 	return nil
@@ -443,21 +728,29 @@ func (m *Manager) Start(ctx context.Context) {
 }
 
 // guardTripped reports whether the disk is over the guard's limit. After
-// a run found nothing more it may delete, it waits for the next scheduled
-// run instead of retrying every few minutes.
+// a run in which the guard could not get the disk under its limit, it
+// waits for the next scheduled run instead of retrying every few minutes.
 func (m *Manager) guardTripped(ctx context.Context) bool {
 	s, err := m.Settings()
 	if err != nil || !s.Guard.IsEnabled() {
 		return false
 	}
-	m.mu.Lock()
-	recent := !m.lastShort.IsZero() && m.now().Sub(m.lastShort) < m.interval()
-	m.mu.Unlock()
-	if recent {
+	if _, paused := m.guardPause(); paused {
 		return false
 	}
 	d, err := m.Cluster.Disk(ctx)
 	return err == nil && d.Percent() > float64(s.Guard.MaxDiskPercent)
+}
+
+// guardPause returns when the guard's pause ends, if it is paused.
+func (m *Manager) guardPause() (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.guardPaused.IsZero() {
+		return time.Time{}, false
+	}
+	until := m.guardPaused.Add(m.interval())
+	return until, m.now().Before(until)
 }
 
 // ---- settings changes ----
@@ -489,6 +782,9 @@ func (m *Manager) SetGuard(g Guard) error {
 }
 
 func (m *Manager) change(ch Change, save func(*Saved)) error {
+	if m.ReadOnly {
+		return ErrReadOnly
+	}
 	if m.Store == nil {
 		return errors.New("retention settings cannot be saved on this server")
 	}
@@ -504,12 +800,17 @@ func (m *Manager) change(ch Change, save func(*Saved)) error {
 
 // ---- previews ----
 
-// Preview is what a settings change would do at the next run, beyond what
-// the current settings already do.
+// Preview is what saving a settings change does. Saving starts a run, so
+// besides what the change itself does (Summary, Steps, Records) it lists
+// what the current settings already call for and the new ones still do
+// (Due): that is done too, at once.
 type Preview struct {
 	Summary     Summary      `json:"summary"`
 	Steps       []Decision   `json:"steps"`
 	Records     []RecordStep `json:"records"`
+	Due         Summary      `json:"due"`
+	DueSteps    []Decision   `json:"due_steps"`
+	DueRecords  []RecordStep `json:"due_records"`
 	DeletesData bool         `json:"deletes_data"`
 	Guard       GuardStatus  `json:"guard"`
 	Notes       []string     `json:"notes"`
@@ -538,25 +839,35 @@ func (m *Manager) Preview(ctx context.Context, ch Change) (*Preview, error) {
 	for _, d := range before.Steps() {
 		was[d.Index] = d.Action
 	}
-	steps := []Decision{}
+	steps, due := []Decision{}, []Decision{}
 	for _, d := range after.Steps() {
-		if was[d.Index] != d.Action {
+		if was[d.Index] == d.Action {
+			due = append(due, d)
+		} else {
 			steps = append(steps, d)
 		}
 	}
-	recs := []RecordStep{}
+	recs, dueRecs := []RecordStep{}, []RecordStep{}
 	for _, r := range after.Records {
+		var had int64
 		for _, b := range before.Records {
 			if b.Category == r.Category {
-				r.Count -= b.Count
+				had = b.Count
 			}
 		}
-		if r.Count > 0 {
+		if n := min(had, r.Count); n > 0 {
+			d := r
+			d.Count = n
+			dueRecs = append(dueRecs, d)
+		}
+		if r.Count > had {
+			r.Count -= had
 			recs = append(recs, r)
 		}
 	}
-	sum := Summarize(steps, recs)
-	return &Preview{Summary: sum, Steps: steps, Records: recs, DeletesData: sum.DeletesData(), Guard: after.Guard, Notes: after.Notes}, nil
+	sum, dueSum := Summarize(steps, recs), Summarize(due, dueRecs)
+	return &Preview{Summary: sum, Steps: steps, Records: recs, Due: dueSum, DueSteps: due, DueRecords: dueRecs,
+		DeletesData: sum.DeletesData() || dueSum.DeletesData(), Guard: after.Guard, Notes: after.Notes}, nil
 }
 
 // ---- overview ----
@@ -630,6 +941,11 @@ type GuardView struct {
 	Editable       bool        `json:"editable"`
 	Note           string      `json:"note,omitempty"`
 	Status         GuardStatus `json:"status"`
+	// PausedUntil is set while the disk check waits for the next scheduled
+	// run, after a run in which the guard could not get the disk under its
+	// limit; PauseReason says why.
+	PausedUntil *time.Time `json:"paused_until,omitempty"`
+	PauseReason string     `json:"pause_reason,omitempty"`
 }
 
 // ArchiveSummary describes the archive folder.
@@ -639,6 +955,11 @@ type ArchiveSummary struct {
 	Bytes    int64    `json:"bytes"`
 	Error    string   `json:"error,omitempty"`
 	Problems []string `json:"problems"`
+	// Free is the space free in the archive folder, -1 when unknown.
+	Free int64 `json:"free"`
+	// SameDisk is true when the archive folder looks to be on the same
+	// disk as OpenSearch's data (this server's disk has the same size).
+	SameDisk bool `json:"same_disk,omitempty"`
 }
 
 // ScheduleView says when retention runs.
@@ -647,10 +968,14 @@ type ScheduleView struct {
 	IntervalSeconds int64  `json:"interval_seconds"`
 	// Automatic is false on servers that do not run the detection
 	// scheduler; they only run when asked.
-	Automatic bool       `json:"automatic"`
-	Running   bool       `json:"running"`
-	Current   string     `json:"current,omitempty"` // run or restore
-	NextRun   *time.Time `json:"next_run"`
+	Automatic bool `json:"automatic"`
+	// ReadOnly is true on servers that do not run retention; the page
+	// then only shows it.
+	ReadOnly bool       `json:"read_only"`
+	Running  bool       `json:"running"`
+	Current  string     `json:"current,omitempty"` // run or restore
+	Queued   bool       `json:"queued,omitempty"`  // another run starts when this one ends
+	NextRun  *time.Time `json:"next_run"`
 }
 
 const fromConfig = "From signalith.yaml"
@@ -677,21 +1002,28 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 	if serr != nil {
 		ov.SettingsError = serr.Error()
 	}
-	ov.Default = DefaultView{Policy: s.Default, Source: s.DefaultSource, Editable: s.DefaultSource != SourceConfig && m.Store != nil}
+	canEdit := m.Store != nil && !m.ReadOnly
+	ov.Default = DefaultView{Policy: s.Default, Source: s.DefaultSource, Editable: s.DefaultSource != SourceConfig && canEdit}
 	if s.DefaultSource == SourceConfig {
 		ov.Default.Note = fromConfig
 	}
 	ov.Guard = GuardView{Enabled: s.Guard.IsEnabled(), MaxDiskPercent: s.Guard.MaxDiskPercent, MinDays: s.Guard.MinDays,
-		Source: s.GuardSource, Editable: s.GuardSource != SourceConfig && m.Store != nil}
+		Source: s.GuardSource, Editable: s.GuardSource != SourceConfig && canEdit}
 	if s.GuardSource == SourceConfig {
 		ov.Guard.Note = fromConfig
 	}
+	if until, paused := m.guardPause(); paused {
+		ov.Guard.PausedUntil = &until
+		m.mu.Lock()
+		ov.Guard.PauseReason = m.guardPausedWhy
+		m.mu.Unlock()
+	}
 	ov.LastRun, ov.Recent = m.hist.get()
-	ov.Archive = ArchiveSummary{Dir: m.Archive.Dir, Problems: []string{}}
+	ov.Archive = ArchiveSummary{Dir: m.Archive.Dir, Problems: []string{}, Free: -1}
 	iv := m.interval()
 	m.mu.Lock()
 	ov.Schedule = ScheduleView{Interval: shortDuration(iv), IntervalSeconds: int64(iv / time.Second),
-		Automatic: m.automatic, Running: m.current != "", Current: m.current}
+		Automatic: m.automatic, ReadOnly: m.ReadOnly, Running: m.current != "", Current: m.current, Queued: m.queued != nil}
 	if m.automatic && !m.nextRun.IsZero() {
 		next := m.nextRun
 		ov.Schedule.NextRun = &next
@@ -725,6 +1057,17 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 		if st.archProb != nil {
 			ov.Archive.Problems = st.archProb
 		}
+		if m.Archive.Dir != "" {
+			if free, total, err := diskSpace(m.Archive.Dir); err == nil {
+				ov.Archive.Free = free
+				ov.Archive.SameDisk = st.snap.Disk != nil && total > 0 && total == st.snap.Disk.Total
+			}
+		}
+	}
+	if serr != nil {
+		// Nothing is checked or deleted until the file is fixed.
+		ov.Guard.Status = GuardStatus{State: GuardPaused, Threshold: s.Guard.MaxDiskPercent, MinDays: s.Guard.MinDays,
+			Percent: ov.Guard.Status.Percent, Message: "The disk isn't checked until the settings file is fixed."}
 	}
 	steps := plan.Steps()
 	ov.Pending = Summarize(steps, plan.Records)
@@ -733,7 +1076,7 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 	for _, c := range Categories() {
 		pol, src := s.For(c.ID)
 		cv := &CategoryView{Category: c, Policy: pol, Source: src,
-			Editable: c.Kind != KindManaged && src != SourceConfig && m.Store != nil}
+			Editable: c.Kind != KindManaged && src != SourceConfig && canEdit}
 		switch {
 		case src == SourceConfig:
 			cv.Note = fromConfig
@@ -922,35 +1265,189 @@ func (m *Manager) updateRestore(st *RestoreStatus, change func(*RestoreStatus)) 
 	m.mu.Unlock()
 }
 
-// Restore queues archived days to be restored in the background, one
-// after another and never during a run. Each stays searchable for
-// keepDays (0 means DefaultRestoreDays) before retention may delete it
-// again.
-func (m *Manager) Restore(ids []string, keepDays int, by string) ([]RestoreStatus, error) {
-	m.init()
+// restoreManifests checks a restore request and returns its archives.
+func (m *Manager) restoreManifests(ids []string, keepDays int) ([]Manifest, int, error) {
 	if keepDays == 0 {
 		keepDays = DefaultRestoreDays
 	}
 	if keepDays < 1 || keepDays > MaxRestoreDays {
-		return nil, &PolicyError{Problems: []string{fmt.Sprintf("keep_days must be between 1 and %d", MaxRestoreDays)}}
+		return nil, 0, &PolicyError{Problems: []string{fmt.Sprintf("keep_days must be between 1 and %d", MaxRestoreDays)}}
 	}
 	if len(ids) == 0 {
-		return nil, &PolicyError{Problems: []string{"choose at least one archived day to restore"}}
+		return nil, 0, &PolicyError{Problems: []string{"choose at least one archived day to restore"}}
 	}
 	var mans []Manifest
 	for _, id := range slices.Compact(slices.Sorted(slices.Values(ids))) {
 		man, err := m.Archive.Get(id)
 		if err != nil {
 			if errors.Is(err, ErrArchiveNotFound) {
-				return nil, fmt.Errorf("%w: %s", ErrArchiveNotFound, id)
+				return nil, 0, fmt.Errorf("%w: %s", ErrArchiveNotFound, id)
 			}
-			return nil, fmt.Errorf("%s: %w", id, err)
+			return nil, 0, fmt.Errorf("%s: %w", id, err)
 		}
 		if cat, _, ok := ParseIndex(m.Prefix, man.Index); !ok || cat != man.Category {
-			return nil, &PolicyError{Problems: []string{fmt.Sprintf("%s was archived from %s, which is not a %s-* daily index on this server",
+			return nil, 0, &PolicyError{Problems: []string{fmt.Sprintf("%s was archived from %s, which is not a %s-* daily index on this server",
 				id, man.Index, m.Prefix)}}
 		}
 		mans = append(mans, man)
+	}
+	return mans, keepDays, nil
+}
+
+// RestoreCheck is what restoring archived days does to OpenSearch's disk.
+// Restored days are spared by size caps and the disk guard, so when they
+// push the disk over the guard's limit, the guard makes room by deleting
+// the oldest live days of other categories at the next run.
+type RestoreCheck struct {
+	Days int   `json:"days"`
+	Docs int64 `json:"docs"`
+	// Bytes is about what the days take in OpenSearch once restored: their
+	// size when they were archived. Days still in OpenSearch add nothing.
+	Bytes int64 `json:"bytes"`
+	// Disk is the fullest data disk now, and PercentAfter its use after
+	// the restore if every restored shard lands on it.
+	Disk         *Disk       `json:"disk"`
+	PercentAfter float64     `json:"percent_after"`
+	Guard        GuardStatus `json:"guard"`
+	// Steps are the live days the next run would delete to make room, and
+	// Deletes counts them; Unarchived counts those not archived first.
+	Steps      []Decision `json:"steps"`
+	Deletes    Summary    `json:"deletes"`
+	Unarchived int        `json:"unarchived"`
+	// OverLimit is true when the restore takes the disk above the guard's
+	// limit; Flood when it reaches OpenSearch's flood stage, where it stops
+	// taking events.
+	OverLimit bool `json:"over_limit"`
+	Flood     bool `json:"flood"`
+	// NeedsConfirm is true when the restore deletes live days or fills the
+	// disk; Restore then refuses unless confirmed.
+	NeedsConfirm bool   `json:"needs_confirm"`
+	Message      string `json:"message,omitempty"`
+}
+
+// ConfirmError is returned by Restore when the restore needs to be
+// confirmed; Check says why.
+type ConfirmError struct{ Check *RestoreCheck }
+
+func (e *ConfirmError) Error() string { return e.Check.Message }
+
+// CheckRestore works out what restoring archived days would do, without
+// restoring anything.
+func (m *Manager) CheckRestore(ctx context.Context, ids []string, keepDays int) (*RestoreCheck, error) {
+	m.init()
+	mans, keepDays, err := m.restoreManifests(ids, keepDays)
+	if err != nil {
+		return nil, err
+	}
+	s, err := m.Settings()
+	if err != nil {
+		return nil, err
+	}
+	st, err := m.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	until := startOfDay(m.now()).AddDate(0, 0, keepDays).Format(time.DateOnly)
+	before := PlanIndices(st.snap, s)
+	sim := st.snap
+	sim.Indices = slices.Clone(st.snap.Indices)
+	if st.snap.NodeBytes != nil {
+		sim.NodeBytes = maps.Clone(st.snap.NodeBytes)
+	}
+	chk := &RestoreCheck{Days: len(mans), Steps: []Decision{}}
+	for _, man := range mans {
+		chk.Docs += man.Docs
+		i := slices.IndexFunc(sim.Indices, func(ix IndexInfo) bool { return ix.Name == man.Index })
+		if i < 0 {
+			sim.Indices = append(sim.Indices, IndexInfo{Name: man.Index, Health: "green"})
+			i = len(sim.Indices) - 1
+		}
+		ix := &sim.Indices[i]
+		if !slices.Contains(ix.RestoredFrom, man.ID) {
+			ix.RestoredFrom = append(slices.Clone(ix.RestoredFrom), man.ID)
+			// A day whose archive was written but whose index was not
+			// deleted is still in OpenSearch: restoring it adds nothing.
+			if ix.UUID == "" || ix.UUID != man.IndexUUID {
+				ix.Bytes += man.IndexBytes
+				ix.PrimaryBytes += man.IndexBytes
+				ix.Docs += man.Docs
+				chk.Bytes += man.IndexBytes
+				if sim.NodeBytes != nil {
+					sim.NodeBytes[man.Index] += man.IndexBytes
+				}
+			}
+		}
+		ix.RestoredUntil = until
+	}
+	if d := st.snap.Disk; d != nil {
+		after := *d
+		after.Available = max(after.Available-chk.Bytes, 0)
+		sim.Disk = &after
+		chk.Disk = d
+		chk.PercentAfter = roundPercent(after.Percent())
+		chk.Flood = after.Percent() >= FloodPercent && d.Percent() < FloodPercent
+		chk.OverLimit = s.Guard.IsEnabled() && chk.Bytes > 0 && after.Percent() > float64(s.Guard.MaxDiskPercent)
+	}
+	plan := PlanIndices(sim, s)
+	chk.Guard = plan.Guard
+	was := map[string]bool{}
+	for _, d := range before.Steps() {
+		was[d.Index] = d.Removes()
+	}
+	for _, d := range plan.Steps() {
+		if d.Removes() && !was[d.Index] {
+			chk.Steps = append(chk.Steps, d)
+			if d.Action != ActionArchive {
+				chk.Unarchived++
+			}
+		}
+	}
+	chk.Deletes = Summarize(chk.Steps, nil)
+	chk.NeedsConfirm = chk.Flood || chk.OverLimit || len(chk.Steps) > 0
+	switch {
+	case chk.Flood:
+		chk.Message = fmt.Sprintf("Restoring %s (%s) could fill OpenSearch's disk to %.0f%%. At %d%% it stops taking new events. Free space first, or restore fewer days.",
+			days(len(mans)), sizeString(chk.Bytes), chk.PercentAfter, FloodPercent)
+	case len(chk.Steps) > 0:
+		chk.Message = fmt.Sprintf("Restoring %s (%s) takes the disk to about %.0f%%, above the %d%% disk guard, so the next run deletes %s of live data (%s) to make room",
+			days(len(mans)), sizeString(chk.Bytes), chk.PercentAfter, s.Guard.MaxDiskPercent, days(chk.Deletes.DeleteDays), sizeString(chk.Deletes.DeleteBytes))
+		if chk.Unarchived > 0 {
+			verb := "are"
+			if chk.Unarchived == 1 {
+				verb = "is"
+			}
+			chk.Message += fmt.Sprintf("; %d of them %s not archived and can't be brought back", chk.Unarchived, verb)
+		}
+		chk.Message += "."
+	case chk.OverLimit:
+		chk.Message = fmt.Sprintf("Restoring %s (%s) takes the disk to about %.0f%%, above the %d%% disk guard, and the guard can't free enough to get back under it. Free space first, or restore fewer days.",
+			days(len(mans)), sizeString(chk.Bytes), chk.PercentAfter, s.Guard.MaxDiskPercent)
+	}
+	return chk, nil
+}
+
+// Restore queues archived days to be restored in the background, one
+// after another and never during a run. Each stays searchable for
+// keepDays (0 means DefaultRestoreDays) before retention may delete it
+// again. Unless confirm is set, a restore that would make the disk guard
+// delete live days, or fill the disk, is refused with a ConfirmError.
+func (m *Manager) Restore(ctx context.Context, ids []string, keepDays int, by string, confirm bool) ([]RestoreStatus, error) {
+	m.init()
+	if m.ReadOnly {
+		return nil, ErrReadOnly
+	}
+	mans, keepDays, err := m.restoreManifests(ids, keepDays)
+	if err != nil {
+		return nil, err
+	}
+	if !confirm {
+		chk, err := m.CheckRestore(ctx, ids, keepDays)
+		if err != nil {
+			return nil, err
+		}
+		if chk.NeedsConfirm {
+			return nil, &ConfirmError{Check: chk}
+		}
 	}
 	m.mu.Lock()
 	for _, r := range m.restores {
@@ -978,7 +1475,7 @@ func (m *Manager) Restore(ids []string, keepDays int, by string) ([]RestoreStatu
 
 	go func() {
 		m.job.Lock()
-		defer m.job.Unlock()
+		defer m.release()
 		m.setCurrent("restore")
 		defer m.setCurrent("")
 		ctx := m.ctx()
@@ -1024,8 +1521,19 @@ func (m *Manager) RestoreArchive(ctx context.Context, man Manifest, until string
 	if err := m.Cluster.BlockWrites(ctx, man.Index, false); err != nil {
 		return 0, fmt.Errorf("could not make %s writable: %w", man.Index, err)
 	}
-	// Mark first, so a run that starts meanwhile keeps the index.
-	if err := m.Cluster.MarkRestored(ctx, man.Index, until); err != nil {
+	// Mark first, so a run that starts meanwhile keeps the index. The mark
+	// also names every archive restored into the index, so retention knows
+	// the archive holds its events and does not archive them again.
+	from := []string{man.ID}
+	if cur, err := m.Cluster.Indices(ctx, man.Index); err == nil && len(cur) == 1 {
+		for _, id := range cur[0].RestoredFrom {
+			if !slices.Contains(from, id) {
+				from = append(from, id)
+			}
+		}
+		slices.Sort(from)
+	}
+	if err := m.Cluster.MarkRestored(ctx, man.Index, until, from); err != nil {
 		return 0, fmt.Errorf("could not mark %s as restored: %w", man.Index, err)
 	}
 	var done, size int64

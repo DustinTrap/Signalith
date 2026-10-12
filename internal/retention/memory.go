@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 )
 
@@ -21,6 +20,7 @@ type Memory struct {
 	mu      sync.Mutex
 	indices map[string]*memIndex
 	records map[string][]Record
+	uuids   int
 
 	DiskTotal int64
 	DiskBase  int64
@@ -36,6 +36,9 @@ type Memory struct {
 type memIndex struct {
 	info IndexInfo
 	docs []Doc
+	// unrefreshed documents are written but not searchable yet: counts
+	// and exports miss them until a refresh, as in OpenSearch.
+	unrefreshed []Doc
 }
 
 // Record is a finding or case as Memory stores it.
@@ -57,8 +60,34 @@ func NewMemory() *Memory {
 func (m *Memory) AddIndex(name string, bytes int64, docs ...Doc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.indices[name] = &memIndex{info: IndexInfo{Name: name, Bytes: bytes, PrimaryBytes: bytes, Docs: int64(len(docs)),
-		Segments: 5, Copies: 1}, docs: slices.Clone(docs)}
+	m.indices[name] = &memIndex{info: IndexInfo{Name: name, UUID: m.uuid(), Health: "green", Bytes: bytes, PrimaryBytes: bytes,
+		Docs: int64(len(docs)), Segments: 5, Copies: 1}, docs: slices.Clone(docs)}
+}
+
+// uuid returns a new index UUID; the caller holds m.mu.
+func (m *Memory) uuid() string {
+	m.uuids++
+	return fmt.Sprintf("mem-%06d", m.uuids)
+}
+
+// AddUnrefreshed writes documents that searches, counts and exports
+// only see after the next refresh.
+func (m *Memory) AddUnrefreshed(name string, docs ...Doc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ix, ok := m.indices[name]; ok {
+		ix.unrefreshed = append(ix.unrefreshed, docs...)
+	}
+}
+
+// AddDocs adds documents to an index, as late events would.
+func (m *Memory) AddDocs(name string, docs ...Doc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ix, ok := m.indices[name]; ok {
+		ix.docs = append(ix.docs, docs...)
+		ix.info.Docs = int64(len(ix.docs))
+	}
 }
 
 // SetIndex changes an index's info; the name and documents stay.
@@ -68,6 +97,9 @@ func (m *Memory) SetIndex(name string, change func(*IndexInfo)) {
 	if ix, ok := m.indices[name]; ok {
 		change(&ix.info)
 		ix.info.Name = name
+		if ix.info.UUID == "" {
+			ix.info.UUID = m.uuid()
+		}
 	}
 }
 
@@ -135,6 +167,28 @@ func (m *Memory) Disk(context.Context) (*Disk, error) {
 		used += ix.info.Bytes
 	}
 	return &Disk{Node: "memory", Total: m.DiskTotal, Available: max(m.DiskTotal-used, 0)}, nil
+}
+
+// NodeBytes treats the cluster as one node that holds every index.
+func (m *Memory) NodeBytes(_ context.Context, pattern, node string) (map[string]int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("nodebytes", ""); err != nil {
+		return nil, err
+	}
+	out := map[string]int64{}
+	if node != "memory" {
+		return out, nil
+	}
+	for name, ix := range m.indices {
+		for _, p := range strings.Split(pattern, ",") {
+			if ok, _ := path.Match(p, name); ok {
+				out[name] = ix.info.Bytes
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func (m *Memory) get(index string) (*memIndex, error) {
@@ -245,20 +299,20 @@ func (m *Memory) CreateIndex(_ context.Context, index string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.indices[index]; !ok {
-		m.indices[index] = &memIndex{info: IndexInfo{Name: index, Segments: 1, Copies: 1}}
+		m.indices[index] = &memIndex{info: IndexInfo{Name: index, UUID: m.uuid(), Health: "green", Segments: 1, Copies: 1}}
 		m.call("create", index)
 	}
 	return nil
 }
 
-func (m *Memory) MarkRestored(_ context.Context, index, until string) error {
+func (m *Memory) MarkRestored(_ context.Context, index, until string, from []string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ix, err := m.get(index)
 	if err != nil {
 		return err
 	}
-	ix.info.RestoredUntil = until
+	ix.info.RestoredUntil, ix.info.RestoredFrom = until, slices.Clone(from)
 	return nil
 }
 
@@ -289,7 +343,20 @@ func (m *Memory) Import(_ context.Context, index string, docs []Doc) error {
 	return nil
 }
 
-func (m *Memory) Refresh(context.Context, string) error { return nil }
+func (m *Memory) Refresh(_ context.Context, index string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.fail("refresh", index); err != nil {
+		return err
+	}
+	if ix, ok := m.indices[index]; ok && len(ix.unrefreshed) > 0 {
+		ix.docs = append(ix.docs, ix.unrefreshed...)
+		ix.unrefreshed = nil
+		ix.info.Docs = int64(len(ix.docs))
+	}
+	m.call("refresh", index)
+	return nil
+}
 
 func closed(r Record, before time.Time, keep []string) bool {
 	return (r.Status == findings.StatusResolved || r.Status == findings.StatusClosed) &&
@@ -320,14 +387,15 @@ func (m *Memory) DeleteClosed(_ context.Context, index string, before time.Time,
 	return int64(n - len(m.records[index])), nil
 }
 
-func (m *Memory) OpenCases(_ context.Context, index string) ([]string, error) {
+func (m *Memory) CaseIDs(_ context.Context, index string) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.fail("caseids", index); err != nil {
+		return nil, err
+	}
 	var ids []string
 	for _, r := range m.records[index] {
-		if slices.Contains(cases.OpenStatuses, r.Status) {
-			ids = append(ids, r.ID)
-		}
+		ids = append(ids, r.ID)
 	}
 	return ids, nil
 }

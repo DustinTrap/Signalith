@@ -104,7 +104,7 @@ syslog (including the usual variations, such as Cisco IOS, IOS XR, NX-OS and ASA
 land in Authentication and Change like agent data, so the built-in detections apply.
 Events have `sourcetype=syslog` (or `cef`), `host` from the message, `dvc` set to the
 sender's address, and `facility` and `severity`. The event time is the one in the message,
-unless it is more than a week old (or older than `retention.days`) or more than a day
+unless it is more than a week old (or older than any event category is kept) or more than a day
 ahead; then it is the time Signalith received the message, and the device's own time is
 kept in `device_time`.
 
@@ -416,29 +416,32 @@ Each event category can have its own policy, or use the default policy:
   first. You can restore it later from the page or with `signalith archive restore`.
 
 Findings and investigations can be set to delete resolved and closed ones after a
-number of days. Open ones are never deleted, and neither are findings in an open
-case. **Preview** shows exactly which days a change deletes, archives or compacts
-before you save it. Saving applies the change at once, with no restart.
+number of days. Open ones are never deleted, and neither are findings that belong to
+an investigation that is kept. Before you save, the dialog shows exactly which days
+the change deletes, archives or compacts, including days already due, and asks
+before deleting anything. Saving applies the change at once, with no restart.
+Restoring archived days shows how full the disk will be first.
 
 The **disk guard**, on by default, deletes the oldest event days when OpenSearch's
 disk passes 85% and spares the last 7 days. This keeps OpenSearch from reaching 95%,
-where it makes every index read-only and ingest stops. A server upgraded while its
-OpenSearch disk is already above 85% trims old days at its first run. To avoid
-that, set `retention.guard` in signalith.yaml first.
+where it makes every index read-only and ingest stops. It deletes only when that
+helps: if other files fill the disk, it keeps your history and the page says to add
+space. A server upgraded while its OpenSearch disk is already above 85% trims old
+days at its first run. To avoid that, set `retention.guard` in signalith.yaml first.
 
-Retention runs every hour on the server with the detection scheduler. It never
-deletes today's data or indices that are not Signalith daily indices. The page keeps
-the last 50 actions with the reason for each.
+Retention runs every hour on the server with the detection scheduler; other servers
+show the page read-only. It never deletes today's data or indices that are not
+Signalith daily indices. The page keeps the last 200 actions with the reason for each.
 
-Page settings are saved in `retention.yaml` in `lookups.dir`. `retention.days` stays
-the default until you save a default on the page. Anything set under `retention` in
-signalith.yaml is shown as read-only on the page:
+Page settings are saved in `retention.yaml` in `lookups.dir`. Anything set under
+`retention` in signalith.yaml is read-only on the page, except `retention.days`,
+which is the default only until you save a default on the page:
 
 ```yaml
 retention:
   days: 90
   policies:
-    authentication: {keep_days: 365, compact_after_days: 7}
+    authentication: {keep_days: 365, compact_after_days: 14}
     endpoint: {keep_days: 30, max_size_gb: 500, archive: true}
     cases: {keep_days: 1095}
   guard: {enabled: true, max_disk_percent: 85, min_days: 7}

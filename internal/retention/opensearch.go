@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -54,7 +53,7 @@ func atoi64(s string) int64 {
 func (o *OpenSearch) Indices(ctx context.Context, pattern string) ([]IndexInfo, error) {
 	var rows []map[string]*string
 	err := o.Client.Do(ctx, http.MethodGet, "/_cat/indices/"+esc(pattern)+
-		"?format=json&bytes=b&expand_wildcards=open&h=index,pri,rep,docs.count,store.size,pri.store.size,segments.count", nil, &rows)
+		"?format=json&bytes=b&expand_wildcards=open&h=index,uuid,health,pri,rep,docs.count,store.size,pri.store.size,segments.count", nil, &rows)
 	if err != nil {
 		if notFound(err) {
 			return nil, nil
@@ -73,12 +72,17 @@ func (o *OpenSearch) Indices(ctx context.Context, pattern string) ([]IndexInfo, 
 		pri, rep := atoi64(get(r, "pri")), atoi64(get(r, "rep"))
 		ix := IndexInfo{
 			Name:         get(r, "index"),
+			UUID:         get(r, "uuid"),
+			Health:       get(r, "health"),
 			Docs:         atoi64(get(r, "docs.count")),
 			Bytes:        atoi64(get(r, "store.size")),
 			PrimaryBytes: atoi64(get(r, "pri.store.size")),
 			Segments:     int(atoi64(get(r, "segments.count"))),
 			Copies:       int(pri * (1 + rep)),
 		}
+		// A red index (a primary shard is not available) reports no
+		// documents or size at all, which must not read as empty.
+		ix.Unavailable = ix.Health == "red" || r["docs.count"] == nil
 		byName[ix.Name] = len(out)
 		out = append(out, ix)
 	}
@@ -103,7 +107,8 @@ func (o *OpenSearch) Indices(ctx context.Context, pattern string) ([]IndexInfo, 
 		Mappings struct {
 			Meta struct {
 				Signalith struct {
-					RestoredUntil string `json:"restored_until"`
+					RestoredUntil string   `json:"restored_until"`
+					RestoredFrom  []string `json:"restored_from"`
 				} `json:"signalith"`
 			} `json:"_meta"`
 		} `json:"mappings"`
@@ -115,6 +120,7 @@ func (o *OpenSearch) Indices(ctx context.Context, pattern string) ([]IndexInfo, 
 	for name, m := range meta {
 		if i, ok := byName[name]; ok {
 			out[i].RestoredUntil = m.Mappings.Meta.Signalith.RestoredUntil
+			out[i].RestoredFrom = m.Mappings.Meta.Signalith.RestoredFrom
 		}
 	}
 	return out, nil
@@ -163,6 +169,29 @@ func (o *OpenSearch) Disk(ctx context.Context) (*Disk, error) {
 		return nil, errors.New("OpenSearch reported no data disks")
 	}
 	return worst, nil
+}
+
+// NodeBytes adds up the shard copies of each index on one node, from
+// _cat/shards.
+func (o *OpenSearch) NodeBytes(ctx context.Context, pattern, node string) (map[string]int64, error) {
+	var rows []map[string]*string
+	err := o.Client.Do(ctx, http.MethodGet, "/_cat/shards/"+esc(pattern)+
+		"?format=json&bytes=b&h=index,node,store", nil, &rows)
+	if err != nil && !notFound(err) {
+		return nil, err
+	}
+	out := map[string]int64{}
+	for _, r := range rows {
+		if r["index"] == nil || r["node"] == nil || *r["node"] != node {
+			continue
+		}
+		var n int64
+		if r["store"] != nil {
+			n = atoi64(*r["store"])
+		}
+		out[*r["index"]] += n
+	}
+	return out, nil
 }
 
 func (o *OpenSearch) BlockWrites(ctx context.Context, index string, block bool) error {
@@ -296,9 +325,10 @@ func (o *OpenSearch) CreateIndex(ctx context.Context, index string) error {
 	return err
 }
 
-func (o *OpenSearch) MarkRestored(ctx context.Context, index, until string) error {
+// MarkRestored sets the index's _meta, which replaces what was there.
+func (o *OpenSearch) MarkRestored(ctx context.Context, index, until string, from []string) error {
 	return o.Client.Do(ctx, http.MethodPut, "/"+esc(index)+"/_mapping",
-		map[string]any{"_meta": map[string]any{"signalith": map[string]any{"restored_until": until}}}, nil)
+		map[string]any{"_meta": map[string]any{"signalith": map[string]any{"restored_until": until, "restored_from": from}}}, nil)
 }
 
 // Import indexes documents with the bulk API, keeping their IDs.
@@ -412,28 +442,45 @@ func (o *OpenSearch) DeleteClosed(ctx context.Context, index string, before time
 	return res.Deleted, nil
 }
 
-func (o *OpenSearch) OpenCases(ctx context.Context, index string) ([]string, error) {
-	var out struct {
-		Hits struct {
-			Hits []struct {
-				ID string `json:"_id"`
-			} `json:"hits"`
-		} `json:"hits"`
-	}
-	err := o.Client.Do(ctx, http.MethodPost, "/"+esc(index)+"/_search", map[string]any{
-		"size":    10000,
-		"_source": false,
-		"query":   map[string]any{"terms": map[string]any{"status": cases.OpenStatuses}},
-	}, &out)
+// maxCaseIDs is how many cases the findings policy can protect: a terms
+// query takes at most 65,536 values by default.
+const maxCaseIDs = 60000
+
+// CaseIDs reads the ID of every case with the scroll API.
+func (o *OpenSearch) CaseIDs(ctx context.Context, index string) ([]string, error) {
+	var ids []string
+	var page hitsPage
+	err := o.Client.Do(ctx, http.MethodPost, "/"+esc(index)+"/_search?scroll=1m",
+		map[string]any{"size": 1000, "_source": false, "sort": []string{"_doc"}}, &page)
 	if notFound(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(out.Hits.Hits))
-	for _, h := range out.Hits.Hits {
-		ids = append(ids, h.ID)
+	defer func() {
+		if page.ScrollID != "" {
+			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			_ = o.Client.Do(cctx, http.MethodDelete, "/_search/scroll", map[string]any{"scroll_id": []string{page.ScrollID}}, nil)
+			cancel()
+		}
+	}()
+	for len(page.Hits.Hits) > 0 {
+		for _, h := range page.Hits.Hits {
+			ids = append(ids, h.ID)
+		}
+		if len(ids) > maxCaseIDs {
+			return nil, fmt.Errorf("there are more than %d investigations, too many to check which findings they hold", maxCaseIDs)
+		}
+		id := page.ScrollID
+		page = hitsPage{}
+		if err := o.Client.Do(ctx, http.MethodPost, "/_search/scroll", map[string]any{"scroll": "1m", "scroll_id": id}, &page); err != nil {
+			page.ScrollID = id
+			return nil, err
+		}
+		if page.ScrollID == "" {
+			page.ScrollID = id
+		}
 	}
 	return ids, nil
 }

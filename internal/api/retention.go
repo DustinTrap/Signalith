@@ -24,6 +24,7 @@ func (s *Server) routeRetention(api *router) {
 	api.admin("POST /api/retention/preview", s.handleRetentionPreview)
 	api.admin("POST /api/retention/run", s.handleRetentionRun)
 	api.admin("GET /api/retention/archive", s.handleRetentionArchive)
+	api.admin("POST /api/retention/archive/preview", s.handleRetentionRestorePreview)
 	api.admin("POST /api/retention/archive/restore", s.handleRetentionRestore)
 }
 
@@ -43,7 +44,11 @@ var policyFields = []string{"keep_days", "max_size_gb", "compact_after_days", "a
 
 func writeRetentionError(w http.ResponseWriter, err error) {
 	var pe *retention.PolicyError
+	var ce *retention.ConfirmError
 	switch {
+	case errors.As(err, &ce):
+		// The restore needs confirming; check says what it would do.
+		writeJSON(w, http.StatusConflict, map[string]any{"error": ce.Error(), "check": ce.Check})
 	case errors.As(err, &pe):
 		fields := []string{}
 		for _, p := range pe.Problems {
@@ -63,8 +68,11 @@ func writeRetentionError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, retention.ErrManaged):
 		writeError(w, http.StatusBadRequest, err)
-	case errors.Is(err, retention.ErrFromConfig), errors.Is(err, retention.ErrBusy), errors.Is(err, retention.ErrRestoring):
+	case errors.Is(err, retention.ErrFromConfig), errors.Is(err, retention.ErrBusy), errors.Is(err, retention.ErrRestoring),
+		errors.Is(err, retention.ErrReadOnly):
 		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, retention.ErrOpenSearch):
+		writeError(w, http.StatusServiceUnavailable, err)
 	default:
 		writeError(w, http.StatusInternalServerError, err)
 	}
@@ -94,11 +102,14 @@ func (s *Server) handleRetention(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.Retention.Overview(ctx))
 }
 
-// changed logs a settings change and starts a run so it applies now.
+// changed logs a settings change and starts a run so it applies now, or
+// queues one when a run or restore is going.
 func (s *Server) retentionChanged(w http.ResponseWriter, r *http.Request, what string, out map[string]any) {
 	user := userOf(r)
 	s.Log.Info("retention settings changed", "what", what, "by", user)
-	out["run_started"] = s.Retention.RunAsync(retention.TriggerChange, user) == nil
+	got, _ := s.Retention.ApplySoon(retention.TriggerChange, user)
+	out["run_started"] = got == retention.ApplyStarted
+	out["run_queued"] = got == retention.ApplyQueued
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -216,22 +227,51 @@ func (s *Server) handleRetentionArchive(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, list)
 }
 
+type restoreRequest struct {
+	IDs      []string `json:"ids"`
+	KeepDays int      `json:"keep_days"`
+	// Confirm restores even when that makes the disk guard delete live
+	// days or fills the disk; without it such a restore returns 409 with
+	// the check.
+	Confirm bool `json:"confirm"`
+}
+
+// handleRetentionRestorePreview says what restoring archived days does to
+// the disk: {"ids": [...], "keep_days": 14}.
+func (s *Server) handleRetentionRestorePreview(w http.ResponseWriter, r *http.Request) {
+	if !s.retentionOK(w) {
+		return
+	}
+	var req restoreRequest
+	if err := readStrict(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	chk, err := s.Retention.CheckRestore(ctx, req.IDs, req.KeepDays)
+	if err != nil {
+		writeRetentionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, chk)
+}
+
 // handleRetentionRestore queues archived days to be restored:
 // {"ids": ["signalith-endpoint-2026.07.01"], "keep_days": 14}.
 func (s *Server) handleRetentionRestore(w http.ResponseWriter, r *http.Request) {
 	if !s.retentionOK(w) {
 		return
 	}
-	var req struct {
-		IDs      []string `json:"ids"`
-		KeepDays int      `json:"keep_days"`
-	}
+	var req restoreRequest
 	if err := readStrict(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	user := userOf(r)
-	sts, err := s.Retention.Restore(req.IDs, req.KeepDays, user)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	sts, err := s.Retention.Restore(ctx, req.IDs, req.KeepDays, user, req.Confirm)
 	if err != nil {
 		writeRetentionError(w, err)
 		return

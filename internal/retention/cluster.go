@@ -28,12 +28,18 @@ type Cluster interface {
 	// so memory use does not grow with the index.
 	Export(ctx context.Context, index string, fn func(Doc) error) error
 
+	// NodeBytes returns how many bytes each index matching a pattern
+	// holds on one node, counting every shard copy there. The disk guard
+	// uses it to know what deleting an index frees on the fullest disk.
+	NodeBytes(ctx context.Context, pattern, node string) (map[string]int64, error)
+
 	// CreateIndex creates an index unless it exists; the index template
 	// supplies its settings and mappings.
 	CreateIndex(ctx context.Context, index string) error
 	// MarkRestored records on the index that it was restored from the
-	// archive and is kept until the day given (YYYY-MM-DD).
-	MarkRestored(ctx context.Context, index, until string) error
+	// archive and is kept until the day given (YYYY-MM-DD), and which
+	// archives it was restored from.
+	MarkRestored(ctx context.Context, index, until string, from []string) error
 	// Import writes documents to an index, keeping their IDs, so importing
 	// the same documents twice does not duplicate them.
 	Import(ctx context.Context, index string, docs []Doc) error
@@ -45,8 +51,9 @@ type Cluster interface {
 	CountClosed(ctx context.Context, index string, before time.Time, keepCases []string) (int64, error)
 	// DeleteClosed deletes what CountClosed counts and returns how many.
 	DeleteClosed(ctx context.Context, index string, before time.Time, keepCases []string) (int64, error)
-	// OpenCases lists the IDs of cases that are not resolved or closed.
-	OpenCases(ctx context.Context, index string) ([]string, error)
+	// CaseIDs lists the IDs of every case, open or closed. A missing index
+	// has none.
+	CaseIDs(ctx context.Context, index string) ([]string, error)
 	// RecordRange returns when the oldest and newest records were created;
 	// both are zero for an empty or missing index.
 	RecordRange(ctx context.Context, index string) (oldest, newest time.Time, err error)
@@ -55,6 +62,15 @@ type Cluster interface {
 // IndexInfo describes one index.
 type IndexInfo struct {
 	Name string `json:"index"`
+	// UUID tells apart indices of the same name, such as a day deleted
+	// and then created again by events that arrived late.
+	UUID string `json:"uuid,omitempty"`
+	// Health is green, yellow or red. A red index has a primary shard
+	// that is not available, so its size and document count are unknown.
+	Health string `json:"health,omitempty"`
+	// Unavailable is true when OpenSearch cannot report the index's
+	// documents (a red index); retention then leaves it alone.
+	Unavailable bool `json:"unavailable,omitempty"`
 	// Bytes is the size on disk of every copy; PrimaryBytes of the
 	// primary shards only.
 	Bytes        int64 `json:"bytes"`
@@ -72,6 +88,8 @@ type IndexInfo struct {
 	// RestoredUntil is the day (YYYY-MM-DD) a restored index is kept
 	// until; empty for indices that were not restored.
 	RestoredUntil string `json:"restored_until,omitempty"`
+	// RestoredFrom lists the archives (IDs) restored into the index.
+	RestoredFrom []string `json:"restored_from,omitempty"`
 }
 
 // Compacted reports whether an index is read-only and merged into one

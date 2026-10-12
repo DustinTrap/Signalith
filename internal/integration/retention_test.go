@@ -72,7 +72,8 @@ func TestRetentionEndToEnd(t *testing.T) {
 		var names []string
 		for _, ix := range ixs {
 			names = append(names, ix.Name)
-			if ix.Bytes <= 0 || ix.PrimaryBytes <= 0 || ix.Copies != 1 || ix.Segments < 1 || ix.WriteBlocked || ix.RestoredUntil != "" {
+			if ix.Bytes <= 0 || ix.PrimaryBytes <= 0 || ix.Copies != 1 || ix.Segments < 1 || ix.WriteBlocked || ix.RestoredUntil != "" ||
+				ix.UUID == "" || ix.Health == "" || ix.Health == "red" || ix.Unavailable {
 				t.Errorf("%+v", ix)
 			}
 		}
@@ -88,7 +89,15 @@ func TestRetentionEndToEnd(t *testing.T) {
 		}
 		d, err := os.Disk(ctx)
 		if err != nil || d.Total <= 0 || d.Available <= 0 || d.Available > d.Total || d.Node == "" {
-			t.Errorf("disk = %+v %v", d, err)
+			t.Fatalf("disk = %+v %v", d, err)
+		}
+		// What each index keeps on the node whose disk the guard watches.
+		nb, err := os.NodeBytes(ctx, prefix+"-*,"+prefix+"_*", d.Node)
+		if err != nil || len(nb) != 3 || nb[old] <= 0 || nb[warm] <= 0 || nb[today] <= 0 {
+			t.Errorf("node bytes = %v %v", nb, err)
+		}
+		if nb, err := os.NodeBytes(ctx, prefix+"-*", "no-such-node"); err != nil || len(nb) != 0 {
+			t.Errorf("other node = %v %v", nb, err)
 		}
 	})
 
@@ -132,6 +141,21 @@ func TestRetentionEndToEnd(t *testing.T) {
 		if ov := mgr.Overview(ctx); ov.Error != "" || ov.Disk == nil || ov.Pending.ArchiveDays != 1 || ov.Pending.CompactDays != 1 {
 			t.Fatalf("overview = %+v", ov)
 		}
+		// Late events that no refresh has made searchable yet: the archive
+		// must hold them too, or deleting the index loses them.
+		if err := cl.Do(ctx, http.MethodPut, "/"+old+"/_settings", map[string]any{"index.refresh_interval": "-1"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		late := make([]store.IndexedDoc, 7)
+		for i := range late {
+			late[i] = store.IndexedDoc{Index: old, Doc: map[string]any{"user": "late", "process_id": 100000 + i}}
+		}
+		if errs, err := cl.Bulk(ctx, late); err != nil || len(errs) > 0 {
+			t.Fatalf("bulk: %v %v", err, errs)
+		}
+		if n, _ := os.Count(ctx, old); n != 1203 {
+			t.Fatalf("the late events are already searchable (%d), so this checks nothing", n)
+		}
 		run, err := mgr.Run(ctx, retention.TriggerManual, "test")
 		if err != nil || run.Archived != 1 || run.Compacted != 1 || len(run.Errors) != 0 {
 			t.Fatalf("run = %+v %v", run, err)
@@ -146,7 +170,7 @@ func TestRetentionEndToEnd(t *testing.T) {
 			t.Errorf("today = %+v", ix)
 		}
 		man, err := mgr.Archive.Get(old)
-		if err != nil || man.Docs != 1203 || mgr.Archive.Verify(man) != nil {
+		if err != nil || man.Docs != 1210 || man.IndexUUID == "" || mgr.Archive.Verify(man) != nil {
 			t.Fatalf("archive = %+v %v", man, err)
 		}
 		// Deleting a missing index is not an error.
@@ -157,14 +181,14 @@ func TestRetentionEndToEnd(t *testing.T) {
 		until := now.AddDate(0, 0, 3).Format(time.DateOnly)
 		for i := 0; i < 2; i++ { // twice: no duplicates
 			n, err := mgr.RestoreArchive(ctx, man, until, nil)
-			if err != nil || n != 1203 {
+			if err != nil || n != 1210 {
 				t.Fatalf("restore %d: %d %v", i, n, err)
 			}
 		}
-		if n, _ := os.Count(ctx, old); n != 1203 {
+		if n, _ := os.Count(ctx, old); n != 1210 {
 			t.Errorf("restored count = %d", n)
 		}
-		if ix := infoOf(t, os, old); ix.RestoredUntil != until {
+		if ix := infoOf(t, os, old); ix.RestoredUntil != until || !slices.Equal(ix.RestoredFrom, []string{man.ID}) || ix.UUID == man.IndexUUID {
 			t.Errorf("restored = %+v", ix)
 		}
 		var out struct {
@@ -178,6 +202,23 @@ func TestRetentionEndToEnd(t *testing.T) {
 		if err != nil || len(out.Hits.Hits) != 1 || out.Hits.Hits[0].Source["message"] != "event 77\nsecond line" {
 			t.Errorf("search restored = %+v %v", out, err)
 		}
+		// The index template applies to the restored index: user is a
+		// keyword, so it can be counted by value.
+		var agg struct {
+			Aggregations struct {
+				Users struct {
+					Buckets []struct {
+						Key   string `json:"key"`
+						Count int64  `json:"doc_count"`
+					} `json:"buckets"`
+				} `json:"users"`
+			} `json:"aggregations"`
+		}
+		err = cl.Do(ctx, http.MethodPost, "/"+old+"/_search", map[string]any{"size": 0,
+			"aggs": map[string]any{"users": map[string]any{"terms": map[string]any{"field": "user", "size": 20}}}}, &agg)
+		if err != nil || len(agg.Aggregations.Users.Buckets) != 8 {
+			t.Errorf("users = %+v %v", agg, err)
+		}
 		// The next run keeps the restored day.
 		if run, err := mgr.Run(ctx, retention.TriggerSchedule, ""); err != nil || run.Deleted+run.Archived != 0 {
 			t.Errorf("run after restore = %+v %v", run, err)
@@ -189,7 +230,7 @@ func TestRetentionEndToEnd(t *testing.T) {
 		if err := os.BlockWrites(ctx, old, true); err != nil {
 			t.Fatal(err)
 		}
-		if n, err := mgr.RestoreArchive(ctx, man, until, nil); err != nil || n != 1203 {
+		if n, err := mgr.RestoreArchive(ctx, man, until, nil); err != nil || n != 1210 {
 			t.Errorf("restore into read-only index: %d %v", n, err)
 		}
 	})
@@ -270,15 +311,18 @@ func TestRetentionRecordsEndToEnd(t *testing.T) {
 	os := retention.NewOpenSearch(cl)
 	os.Poll = 200 * time.Millisecond
 	fi, ci := retention.RecordIndex(prefix, retention.Findings), retention.RecordIndex(prefix, retention.Cases)
-	open, err := os.OpenCases(ctx, ci)
-	if err != nil || !slices.Equal(open, []string{"CASE-open"}) {
-		t.Fatalf("open cases = %v %v", open, err)
+	// Findings in any case are kept, open or closed: a case holds only the
+	// IDs of its findings.
+	kept, err := os.CaseIDs(ctx, ci)
+	slices.Sort(kept)
+	if err != nil || !slices.Equal(kept, []string{"CASE-closed", "CASE-open", "CASE-recent"}) {
+		t.Fatalf("case IDs = %v %v", kept, err)
 	}
 	before := now.AddDate(-1, 0, 0)
-	if n, err := os.CountClosed(ctx, fi, before, open); err != nil || n != 3 {
+	if n, err := os.CountClosed(ctx, fi, before, kept); err != nil || n != 2 {
 		t.Errorf("count findings = %d %v", n, err)
 	}
-	if n, err := os.DeleteClosed(ctx, fi, before, open); err != nil || n != 3 {
+	if n, err := os.DeleteClosed(ctx, fi, before, kept); err != nil || n != 2 {
 		t.Errorf("delete findings = %d %v", n, err)
 	}
 	left, _, err := fs.Search(ctx, findings.Filter{})
@@ -287,7 +331,7 @@ func TestRetentionRecordsEndToEnd(t *testing.T) {
 		ids = append(ids, f.ID)
 	}
 	slices.Sort(ids)
-	if err != nil || !slices.Equal(ids, []string{"f-open", "f-open-case", "f-recent"}) {
+	if err != nil || !slices.Equal(ids, []string{"f-closed-case", "f-open", "f-open-case", "f-recent"}) {
 		t.Errorf("findings left = %v %v", ids, err)
 	}
 	if n, err := os.DeleteClosed(ctx, ci, before, nil); err != nil || n != 1 {
@@ -306,5 +350,66 @@ func TestRetentionRecordsEndToEnd(t *testing.T) {
 	}
 	if lo, _, err := os.RecordRange(ctx, prefix+"_nothing"); err != nil || !lo.IsZero() {
 		t.Errorf("missing range = %v %v", lo, err)
+	}
+	if ids, err := os.CaseIDs(ctx, prefix+"_nothing"); err != nil || len(ids) != 0 {
+		t.Errorf("missing cases = %v %v", ids, err)
+	}
+
+	// More cases than one page of the scroll.
+	many := prefix + "-caseids"
+	docs := make([]store.IndexedDoc, 2345)
+	for i := range docs {
+		docs[i] = store.IndexedDoc{Index: many, Doc: map[string]any{"title": fmt.Sprintf("case %d", i)}}
+	}
+	if errs, err := cl.Bulk(ctx, docs); err != nil || len(errs) > 0 {
+		t.Fatalf("bulk: %v %v", err, errs)
+	}
+	if err := cl.Do(ctx, http.MethodPost, "/"+many+"/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	ids, err = os.CaseIDs(ctx, many)
+	slices.Sort(ids)
+	if err != nil || len(slices.Compact(ids)) != len(docs) {
+		t.Errorf("case IDs over several pages = %d %v", len(ids), err)
+	}
+}
+
+// TestRetentionLeavesUnavailableDaysAlone checks that a day whose primary
+// shard is missing (a red index) is neither deleted nor archived: OpenSearch
+// cannot say what it holds.
+func TestRetentionLeavesUnavailableDaysAlone(t *testing.T) {
+	cl, _, prefix := setup(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	red := retention.IndexName(prefix, "endpoint", now.AddDate(0, 0, -60))
+	// No node matches, so the primary is never assigned.
+	err := cl.Do(ctx, http.MethodPut, "/"+red+"?wait_for_active_shards=0", map[string]any{"settings": map[string]any{
+		"index.routing.allocation.require._name": "no-such-node", "index.number_of_replicas": 0}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os := retention.NewOpenSearch(cl)
+	os.Poll = 200 * time.Millisecond
+	if ix := infoOf(t, os, red); ix.Health != "red" || !ix.Unavailable || ix.UUID == "" {
+		t.Fatalf("red index = %+v", ix)
+	}
+	off := false
+	mgr := &retention.Manager{
+		Cluster: os, Prefix: prefix,
+		Config: retention.Config{Guard: &retention.Guard{Enabled: &off},
+			Policies: map[string]retention.Policy{"endpoint": {KeepDays: 30, Archive: true}}},
+		Archive:     &retention.Archive{Dir: filepath.Join(t.TempDir(), "archive")},
+		HistoryFile: filepath.Join(t.TempDir(), "history.json"),
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	run, err := mgr.Run(ctx, retention.TriggerManual, "test")
+	if err != nil || run.Archived+run.Deleted != 0 {
+		t.Fatalf("run = %+v %v", run, err)
+	}
+	if ixs, _ := os.Indices(ctx, red); len(ixs) != 1 {
+		t.Errorf("red index gone: %v", ixs)
+	}
+	if list, _, _ := mgr.Archive.List(); len(list) != 0 {
+		t.Errorf("archived = %+v", list)
 	}
 }

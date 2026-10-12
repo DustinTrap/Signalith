@@ -286,14 +286,19 @@ func TestFindingsAndCasesRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.DeletedRecords != 3 {
+	if run.DeletedRecords != 2 {
 		t.Errorf("run = %+v", run)
 	}
-	var left []string
-	for _, r := range f.mem.Records("signalith_findings") {
-		left = append(left, r.ID)
+	findingsLeft := func() []string {
+		var left []string
+		for _, r := range f.mem.Records("signalith_findings") {
+			left = append(left, r.ID)
+		}
+		return left
 	}
-	if !slices.Equal(left, []string{"f-open", "f-closed-recent", "f-in-open-case"}) {
+	// A finding in an investigation stays as long as the investigation
+	// does, open or closed: a case holds only its findings' IDs.
+	if left := findingsLeft(); !slices.Equal(left, []string{"f-open", "f-closed-recent", "f-in-open-case", "f-in-closed-case"}) {
 		t.Errorf("findings left = %v", left)
 	}
 	if len(f.mem.Records("signalith_cases")) != 3 {
@@ -309,6 +314,18 @@ func TestFindingsAndCasesRetention(t *testing.T) {
 	_, acts := f.m.hist.get()
 	if acts[0].Action != ActionDeleteRecords || acts[0].Category != Cases || acts[0].Docs != 1 {
 		t.Errorf("actions = %+v", acts)
+	}
+	// Once its investigation is gone, the finding goes at the next run.
+	f.m.Run(context.Background(), TriggerSchedule, "")
+	if left := findingsLeft(); !slices.Equal(left, []string{"f-open", "f-closed-recent", "f-in-open-case"}) {
+		t.Errorf("findings left after the case went = %v", left)
+	}
+	// If the investigations cannot be listed, no finding is deleted.
+	f.mem.AddRecords("signalith_findings", Record{ID: "f-later", Status: "closed", Updated: old})
+	f.mem.Fail["caseids signalith_cases"] = errors.New("boom")
+	run, _ = f.m.Run(context.Background(), TriggerSchedule, "")
+	if run.DeletedRecords != 0 || len(run.Errors) != 1 || !strings.Contains(run.Errors[0], "no findings are deleted") {
+		t.Errorf("run without case list = %+v", run)
 	}
 }
 
@@ -342,13 +359,13 @@ func TestRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("archives = %+v %v", list, err)
 	}
 
-	if _, err := f.m.Restore([]string{"nope"}, 0, "admin"); !errors.Is(err, ErrArchiveNotFound) {
+	if _, err := f.m.Restore(context.Background(), []string{"nope"}, 0, "admin", false); !errors.Is(err, ErrArchiveNotFound) {
 		t.Errorf("unknown archive: %v", err)
 	}
-	if _, err := f.m.Restore([]string{name}, 400, "admin"); err == nil {
+	if _, err := f.m.Restore(context.Background(), []string{name}, 400, "admin", false); err == nil {
 		t.Error("keep_days 400 accepted")
 	}
-	sts, err := f.m.Restore([]string{name, name}, 0, "admin")
+	sts, err := f.m.Restore(context.Background(), []string{name, name}, 0, "admin", false)
 	if err != nil || len(sts) != 1 || sts[0].KeepUntil != "2026-10-26" || sts[0].State != RestoreQueued {
 		t.Fatalf("restore = %+v %v", sts, err)
 	}
@@ -363,7 +380,7 @@ func TestRestoreRoundTrip(t *testing.T) {
 		}
 	}
 	// Restoring again does not duplicate events.
-	if _, err := f.m.Restore([]string{name}, 7, "admin"); err != nil {
+	if _, err := f.m.Restore(context.Background(), []string{name}, 7, "admin", false); err != nil {
 		t.Fatal(err)
 	}
 	waitRestore(t, f.m, name)
@@ -426,10 +443,10 @@ func TestRestoreRefusesOtherPrefixes(t *testing.T) {
 	other := &Archive{Dir: f.m.Archive.Dir}
 	mem := NewMemory()
 	mem.AddIndex("otherprefix-endpoint-2026.07.01", 1, testDocs(2)...)
-	if _, err := other.Write(context.Background(), mem, "otherprefix-endpoint-2026.07.01", "endpoint", "2026-07-01", 1, 2); err != nil {
+	if _, err := other.Write(context.Background(), mem, Source{Index: "otherprefix-endpoint-2026.07.01", Category: "endpoint", Day: "2026-07-01", Bytes: 1}, 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.m.Restore([]string{"otherprefix-endpoint-2026.07.01"}, 0, "admin"); err == nil || !strings.Contains(err.Error(), "not a signalith-* daily index") {
+	if _, err := f.m.Restore(context.Background(), []string{"otherprefix-endpoint-2026.07.01"}, 0, "admin", false); err == nil || !strings.Contains(err.Error(), "not a signalith-* daily index") {
 		t.Errorf("restore = %v", err)
 	}
 }
@@ -451,9 +468,14 @@ func TestPreviewShowsOnlyTheChange(t *testing.T) {
 	if s.DeleteDays != 89 || s.ArchiveDays != 89 || s.DeleteBytes != 89*GB || !slices.Equal(s.Categories, []string{"endpoint"}) || !pv.DeletesData {
 		t.Errorf("summary = %+v", s)
 	}
+	// What the current settings already delete is listed apart (Due): the
+	// run a save starts does it too.
+	if pv.Due.DeleteDays != 29 || !slices.Equal(pv.Due.Categories, []string{"authentication"}) {
+		t.Errorf("due = %+v", pv.Due)
+	}
 	pv, _ = f.m.Preview(ctx, Change{Category: "endpoint", Policy: &Policy{KeepDays: 90, CompactAfterDays: 7}})
-	if pv.Summary.DeleteDays != 0 || pv.Summary.CompactDays != 83 || pv.DeletesData {
-		t.Errorf("compact preview = %+v", pv.Summary)
+	if pv.Summary.DeleteDays != 0 || pv.Summary.CompactDays != 83 || pv.Due.DeleteDays != 58 || !pv.DeletesData {
+		t.Errorf("compact preview = %+v due %+v", pv.Summary, pv.Due)
 	}
 	pv, _ = f.m.Preview(ctx, Change{Default: &Policy{KeepDays: 100}})
 	if pv.Summary.DeleteDays != 0 {
