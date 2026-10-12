@@ -20,19 +20,79 @@ service or a systemd unit.
 
 ### Docker (evaluation)
 
+From the folder you cloned Signalith into:
+
 ```sh
 docker compose -f deploy/docker/docker-compose.yml up -d
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password
 ```
 
-Open https://localhost:8080 and sign in as `admin` with the password set in
-`deploy/docker/docker-compose.yml` (change it first). Signalith serves HTTPS with a
-certificate it makes for itself, so the browser warns until you trust it; the sign-in page
-has a **Download the server certificate** link, and [docs/https.md](docs/https.md) says
-how to trust it.
-To update, run `git pull` and then the same command. It rebuilds Signalith from the
-new code each time. After a reboot both containers start again by themselves once
-Docker is running; in Docker Desktop turn on Settings > General > "Start Docker
-Desktop when you sign in".
+The first command starts OpenSearch and Signalith. On first start a setup step makes the
+admin password, the agents' ingest token and the certificates OpenSearch and Signalith use
+with each other, and keeps them in Docker volumes; no password is written in the compose
+files. The second command shows the admin password. Open https://localhost:8080 and sign
+in as `admin` with it. Signalith serves HTTPS with a certificate it makes for itself, so
+the browser warns until you trust it; the sign-in page has a **Download the server
+certificate** link, and [docs/https.md](docs/https.md) says how to trust it.
+
+OpenSearch runs with its security plugin on: it answers only over HTTPS, publishes no
+port, and lets in only Signalith's certificate, which may use only Signalith's own
+indices. See [docs/opensearch-security.md](docs/opensearch-security.md).
+
+To change the admin password (the first one then stops working):
+
+```sh
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith passwd
+docker compose -f deploy/docker/docker-compose.yml restart signalith
+```
+
+To update, run `git pull` and then the first command again. It rebuilds Signalith from the
+new code each time. After a reboot everything starts again by itself once Docker is
+running; in Docker Desktop turn on Settings > General > "Start Docker Desktop when you
+sign in".
+
+#### Upgrading the Docker quick start
+
+Earlier versions of the quick start served plain HTTP, ran OpenSearch without security,
+and took the admin password and ingest token from `docker-compose.yml`
+(`change-me-please` and `change-this-ingest-token` unless you changed them). To upgrade,
+in the folder you cloned Signalith into (PowerShell or a terminal, the commands are the
+same):
+
+1. Put your own edits aside and update:
+   ```sh
+   git stash
+   git pull
+   ```
+   `git stash` keeps what you changed (such as the admin password in
+   `docker-compose.yml`, which is no longer needed); `git stash show -p` shows it later.
+2. Start it as usual:
+   ```sh
+   docker compose -f deploy/docker/docker-compose.yml up -d
+   ```
+   This rebuilds Signalith, runs the setup step once and restarts OpenSearch with its
+   security plugin on; the first start takes a minute or two longer. Events, findings,
+   investigations, users, detections and dashboards are kept: they are in the
+   `opensearch-data` and `signalith-data` volumes, which stay.
+3. Show the new admin password:
+   ```sh
+   docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password
+   ```
+   The old one no longer works. People you added on the **Users** page keep theirs.
+4. Open **https**://localhost:8080 (old `http://` bookmarks are redirected) and sign in as
+   `admin`. Trust the certificate as described in [docs/https.md](docs/https.md).
+5. Update the agents. The old ingest token was public, so it is refused; agents set up
+   from **Add data** keep their events on disk and keep retrying until you update them.
+   On each machine, install the configuration from the **Add data** page again; it also
+   moves the agent to HTTPS. Syslog devices need no change. If agents must keep sending
+   for a while, add
+   `- SIGNALITH_INGEST_TOKEN=change-this-ingest-token` (or the token you had set) under
+   `environment:` of the `signalith` service in `docker-compose.yml` and run step 2 again;
+   the **Health** page warns while it is accepted. Remove it once every agent is updated.
+6. If you had changed other things, such as ports or `SIGNALITH_PUBLIC_URL`, make the same
+   changes in the new files (`SIGNALITH_PUBLIC_URL` now starts with `https://`).
+7. Once the **Health** page lists no agent still sending over plain `http://`, set
+   `plaintext_ingest: deny` in `deploy/docker/signalith.yaml` and run step 2 again.
 
 ### Linux
 
@@ -48,6 +108,9 @@ Desktop when you sign in".
    ```
    `init` prints the admin password once. Open `https://<server>:8080`: Signalith serves
    HTTPS with a certificate it makes for itself (see [HTTPS](#https)).
+3. Replace OpenSearch's demo security setup, whose passwords and certificates are public,
+   and have Signalith sign in with a certificate of its own:
+   [docs/opensearch-security.md](docs/opensearch-security.md).
 
 ### Windows
 
@@ -58,6 +121,8 @@ Desktop when you sign in".
    ```
    This writes `C:\ProgramData\Signalith\signalith.yaml`, installs the **Signalith** service and starts it.
    Open https://localhost:8080 (see [HTTPS](#https) to stop the certificate warning).
+3. Secure OpenSearch and have Signalith sign in with a certificate:
+   [docs/opensearch-security.md](docs/opensearch-security.md).
 
 ### Send data
 
@@ -233,6 +298,11 @@ them. All of this, with the commands to trust the CA on Windows, macOS and Linux
 - **Logs**: values in log lines are cut to a sensible length, and the Windows service log
   (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
   quick start caps container logs the same way; under systemd, journald limits the log.
+- **OpenSearch**: Signalith can sign in to OpenSearch with a client certificate over
+  HTTPS, with a role limited to its own indices. The Docker quick start sets this up by
+  itself, with no default passwords anywhere; `signalith opensearch-certs` makes the same
+  files for OpenSearch on Linux or Windows. See
+  [docs/opensearch-security.md](docs/opensearch-security.md).
 - **Secrets**: passwords and keys in configured URLs are hidden (`***`) everywhere a URL is
   shown or logged, and agents get a generic error rather than OpenSearch details.
 
@@ -304,7 +374,13 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`,
 `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
 `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
-`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). `SIGNALITH_STATE_DIR` is the folder
+`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). Secrets can also be read from a file,
+as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PASSWORD_FILE`,
+`SIGNALITH_ADMIN_PASSWORD_FILE`, `SIGNALITH_INGEST_TOKEN_FILE`, `SIGNALITH_LDAP_BIND_PASSWORD_FILE` or
+`SIGNALITH_ASSISTANT_API_KEY_FILE` to the file's path. Setting both forms of one is an error, except for the
+ingest token, where both tokens are accepted. When the admin password comes from
+`SIGNALITH_ADMIN_PASSWORD_FILE`, `signalith passwd` keeps the new one in `admin-password-hash` in
+the state folder, where it replaces the file's password. `SIGNALITH_STATE_DIR` is the folder
 where Signalith keeps files it makes for itself, such as its HTTPS certificate (in `tls`); it
 defaults to the folder that holds `lookups.dir`, and the systemd unit and Docker image set it to
 `/var/lib/signalith`.
@@ -632,6 +708,7 @@ syslog devices ─UDP/TCP/TLS▶ query compiler,
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
 | `internal/httpserver` | Web server timeouts, connection limits, HTTPS and plain HTTP on one port |
+| `internal/ospki` | Certificates and security settings for a secured OpenSearch (`bootstrap-docker`, `opensearch-certs`) |
 | `internal/tlsauto` | Signalith's own certificate authority and HTTPS certificate: issue, renew, reload |
 | `internal/safelog` | Length limits for log values, rotating log file |
 | `internal/redact` | Hides secrets in URLs before they are shown or logged |

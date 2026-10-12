@@ -68,6 +68,13 @@ disabled or deleted there. Change its password on the server:
 signalith passwd -c /etc/signalith/signalith.yaml
 ```
 
+With the Docker quick start, run
+`docker compose -f deploy/docker/docker-compose.yml exec signalith signalith passwd` and
+then `docker compose -f deploy/docker/docker-compose.yml restart signalith`. There the
+first password comes from a file the setup step made (`signalith initial-password` shows
+it), and the new one is kept in `admin-password-hash` in the `signalith-data` volume,
+where it replaces the first one.
+
 Keep its password somewhere safe and use your own account day to day. No local user
 or directory user can have the built-in admin's name.
 

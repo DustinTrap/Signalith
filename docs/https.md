@@ -231,8 +231,8 @@ and events cross the network unencrypted.
 Earlier versions served plain HTTP unless `server.tls_cert` was set. Nothing breaks when
 you upgrade:
 
-- **A config without `server.tls` and without `tls_cert`** (the usual case, and the Docker
-  quick start) gets `mode: auto` on the same port. An `http://` `public_url` is read as
+- **A config without `server.tls` and without `tls_cert`** (the usual case) gets
+  `mode: auto` on the same port. An `http://` `public_url` is read as
   `https://` with the same host and port (the file is not changed). Browsers on old
   `http://` bookmarks are redirected, and are signed out once, since the session cookie
   changes. Agents set up for `http://` keep sending: for these configs
@@ -240,6 +240,9 @@ you upgrade:
 - **A config with `tls_cert`** gets `mode: files` and works as before.
 - **A config without `tls_cert` whose `public_url` is `https://`** was behind a proxy that
   adds HTTPS, so it gets `mode: off` and works as before.
+- **The Docker quick start** has HTTPS set in its own files now. Updating it also brings
+  generated passwords and a secured OpenSearch; see
+  [Upgrading the Docker quick start](../README.md#upgrading-the-docker-quick-start).
 
 While agents still send over plain HTTP, the **Health** page names them (by address) and
 says how to move them over:

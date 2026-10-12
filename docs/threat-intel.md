@@ -301,8 +301,8 @@ follow these rules:
   environment may be on this machine either way.
 - Signalith's own OpenSearch (the host and port of `opensearch.url`) is never
   allowed, by name or by any address the name resolves to, even with
-  `allow_loopback_feeds`. In the Docker setup OpenSearch answers without a password
-  on the Docker network, so this keeps a feed URL from reading it.
+  `allow_loopback_feeds`. An OpenSearch without its security plugin answers anyone
+  who reaches it, so this keeps a feed URL from reading it.
 - Through a proxy, the proxy looks up host names and connects, so only addresses
   written in the URL are checked; limit what the proxy may reach if that matters.
   Only the connection to the proxy itself skips the check: a feed URL that names

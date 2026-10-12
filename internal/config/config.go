@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"net/url"
@@ -50,6 +51,15 @@ type Config struct {
 	// ldapBindPassword comes from SIGNALITH_LDAP_BIND_PASSWORD. It is kept
 	// apart from Auth.LDAP so saving the file never writes it out.
 	ldapBindPassword string
+	// adminHashFile is AdminHashFile when the built-in admin's password
+	// came from it.
+	adminHashFile string
+	// publicAdminPassword is set when SIGNALITH_ADMIN_PASSWORD is the
+	// example from an older docker-compose.yml.
+	publicAdminPassword bool
+	// publicURLFromEnv is set when SIGNALITH_PUBLIC_URL set
+	// server.public_url.
+	publicURLFromEnv bool
 	// sections are the top-level keys in that file.
 	sections map[string]bool
 }
@@ -801,13 +811,105 @@ func Load(path string) (*Config, error) {
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
+	if err := c.applyAdminHashFile(); err != nil {
+		return nil, err
+	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
 }
 
-// applyEnv lets secrets come from the environment instead of the file.
+// envSecret returns the secret in the environment variable name, or in
+// the file named by name_FILE (how Docker and Kubernetes pass secrets),
+// without its trailing newline. An unreadable or empty file is an error,
+// and so is setting both, except for SIGNALITH_INGEST_TOKEN, where each
+// adds a token.
+func envSecret(name string) ([]string, error) {
+	var out []string
+	if v := os.Getenv(name); v != "" {
+		out = append(out, v)
+	}
+	file := os.Getenv(name + "_FILE")
+	if file == "" {
+		return out, nil
+	}
+	if len(out) > 0 && name != "SIGNALITH_INGEST_TOKEN" {
+		return nil, fmt.Errorf("%s and %s_FILE are both set; set only one of them", name, name)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, fmt.Errorf("%s_FILE is set to %s, which cannot be read: %v", name, file, err)
+	}
+	v := strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+	if strings.TrimSpace(v) == "" {
+		return nil, fmt.Errorf("%s_FILE is set to %s, which is empty", name, file)
+	}
+	return append(out, v), nil
+}
+
+// AdminHashFile is where signalith passwd keeps the built-in admin's
+// password hash when signalith.yaml cannot hold it: the password comes
+// from SIGNALITH_ADMIN_PASSWORD or SIGNALITH_ADMIN_PASSWORD_FILE (as in
+// Docker, where the first password is generated and signalith.yaml is
+// read-only). While the file exists it replaces both.
+func (c *Config) AdminHashFile() string { return AdminHashFileIn(c.StateDir()) }
+
+// AdminHashFileIn is AdminHashFile for the state folder dir.
+func AdminHashFileIn(dir string) string { return filepath.Join(dir, "admin-password-hash") }
+
+// AdminPasswordChanged returns AdminHashFile when the built-in admin's
+// password comes from it, else "".
+func (c *Config) AdminPasswordChanged() string { return c.adminHashFile }
+
+// StateDirFor returns StateDir for the config file at path, reading only
+// lookups.dir from it, so it works when the rest of the file does not
+// load without the server's environment.
+func StateDirFor(path string) string {
+	c := Default()
+	c.path = path
+	if data, err := os.ReadFile(path); err == nil {
+		var f struct {
+			Lookups Lookups `yaml:"lookups"`
+		}
+		if yaml.Unmarshal(data, &f) == nil && f.Lookups.Dir != "" {
+			c.Lookups.Dir = f.Lookups.Dir
+		}
+	}
+	if v := os.Getenv("SIGNALITH_LOOKUPS_DIR"); v != "" {
+		c.Lookups.Dir = v
+	}
+	return c.StateDir()
+}
+
+// applyAdminHashFile uses the password hash in AdminHashFile when there
+// is one.
+func (c *Config) applyAdminHashFile() error {
+	path := c.AdminHashFile()
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("the built-in admin's password, as changed with signalith passwd: %w", err)
+	}
+	h := strings.TrimSpace(string(b))
+	if _, err := bcrypt.Cost([]byte(h)); err != nil {
+		return fmt.Errorf("%s does not hold a password hash. Set the password again with signalith passwd, "+
+			"or delete the file to go back to the password in signalith.yaml or SIGNALITH_ADMIN_PASSWORD(_FILE)", path)
+	}
+	c.Auth.AdminPasswordHash = h
+	c.adminHashFile = path
+	return nil
+}
+
+// applyEnv lets secrets come from the environment instead of the file,
+// either in the variable itself or in a file it names (the variable's name
+// with _FILE added).
 func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_URL"); v != "" {
 		c.OpenSearch.URL = v
@@ -815,8 +917,10 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_USERNAME"); v != "" {
 		c.OpenSearch.Username = v
 	}
-	if v := os.Getenv("SIGNALITH_OPENSEARCH_PASSWORD"); v != "" {
-		c.OpenSearch.Password = v
+	if v, err := envSecret("SIGNALITH_OPENSEARCH_PASSWORD"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.OpenSearch.Password = v[0]
 	}
 	if v := strings.TrimSpace(os.Getenv("SIGNALITH_OPENSEARCH_PROXY")); v != "" {
 		c.OpenSearch.Proxy = v
@@ -829,19 +933,25 @@ func (c *Config) applyEnv() error {
 			return fmt.Errorf("SIGNALITH_PUBLIC_URL %q: %v", v, err)
 		}
 		c.Server.PublicURL = v
+		c.publicURLFromEnv = true
 	}
-	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
-		h, err := HashPassword(v)
+	if v, err := envSecret("SIGNALITH_ADMIN_PASSWORD"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		h, err := HashPassword(v[0])
 		if err != nil {
-			return err
+			return fmt.Errorf("SIGNALITH_ADMIN_PASSWORD: %w", err)
 		}
 		c.Auth.AdminPasswordHash = h
+		c.publicAdminPassword = v[0] == publicAdminPassword
 	}
 	if v := os.Getenv("SIGNALITH_USERS_FILE"); v != "" {
 		c.Auth.UsersFile = v
 	}
-	if v := os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD"); v != "" {
-		c.ldapBindPassword = v
+	if v, err := envSecret("SIGNALITH_LDAP_BIND_PASSWORD"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.ldapBindPassword = v[0]
 	}
 	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
 		c.Detections.Dir = v
@@ -858,11 +968,15 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_ARCHIVE_DIR"); v != "" {
 		c.Retention.ArchiveDir = v
 	}
-	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
-		c.Assistant.APIKey = v
+	if v, err := envSecret("SIGNALITH_ASSISTANT_API_KEY"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.Assistant.APIKey = v[0]
 	}
-	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
-		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
+	if v, err := envSecret("SIGNALITH_INGEST_TOKEN"); err != nil {
+		return err
+	} else {
+		c.Ingest.Tokens = append(c.Ingest.Tokens, v...)
 	}
 	// "off" turns a syslog listener off, since an empty variable is
 	// indistinguishable from an unset one.
@@ -912,9 +1026,10 @@ func (c *Config) Validate() error {
 	} else if u, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	} else if u.Scheme == "http" && c.Server.HTTPS() {
-		if c.Server.legacyHTTP() {
-			// Written when Signalith served plain HTTP; the same port
-			// serves HTTPS now.
+		if c.Server.legacyHTTP() || c.publicURLFromEnv {
+			// Written when Signalith served plain HTTP (in the file, or
+			// in SIGNALITH_PUBLIC_URL as older Docker examples show it);
+			// the same port serves HTTPS now.
 			c.Server.PublicURL = "https://" + u.Host
 		} else {
 			p = append(p, fmt.Sprintf("server.public_url %s is plain http, but Signalith serves HTTPS on its port (server.tls.mode: %s), "+
@@ -1038,6 +1153,17 @@ func (c *Config) Warnings() []string {
 	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
+	if c.publicAdminPassword && c.adminHashFile == "" {
+		w = append(w, "The built-in admin's password is "+publicAdminPassword+", the example in an older docker-compose.yml, which anyone can look up. "+
+			"Remove SIGNALITH_ADMIN_PASSWORD (the Docker quick start now makes a password: docker compose exec signalith signalith initial-password), "+
+			"or set a new one with signalith passwd.")
+	}
+	for _, t := range c.Ingest.Tokens {
+		if slices.Contains(publicIngestTokens, t) {
+			w = append(w, "ingest.tokens includes "+t+", the example token in an older docker-compose.yml, which anyone can look up and use to send events. "+
+				"Give each agent a new configuration from the Add data page (it has this server's own token), then remove "+t+" (SIGNALITH_INGEST_TOKEN).")
+		}
+	}
 	if host, _, err := net.SplitHostPort(c.Server.Listen); err == nil && !c.Server.HTTPS() && !isLoopback(host) && len(c.Server.TrustedProxies) == 0 {
 		w = append(w, "HTTPS is off (server.tls.mode: off) and server.listen accepts connections from other machines, so passwords, sessions, "+
 			"the ingest token and events cross the network unencrypted unless a reverse proxy in front adds HTTPS. Turn it on with server.tls.mode: auto, "+
@@ -1045,6 +1171,12 @@ func (c *Config) Warnings() []string {
 	}
 	return w
 }
+
+// Secrets from older example files, which anyone can look up. Warnings
+// names them while they are in use.
+const publicAdminPassword = "change-me-please"
+
+var publicIngestTokens = []string{"change-this-ingest-token"}
 
 // OpenSearchTLSFiles returns opensearch.ca_file, cert_file and key_file,
 // with relative paths made relative to the folder this config file is in.
@@ -1136,7 +1268,8 @@ const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
-# SIGNALITH_LDAP_BIND_PASSWORD.
+# SIGNALITH_LDAP_BIND_PASSWORD, or from files named by the same variables with
+# _FILE added (such as SIGNALITH_ADMIN_PASSWORD_FILE).
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)

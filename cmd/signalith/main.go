@@ -57,10 +57,13 @@ Usage:
   signalith serve     [-c file]           run the server
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
+  signalith initial-password [-c file]    print the first admin password the Docker quick start made
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith service   install|uninstall|start|stop     manage the Windows service
+  signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
+  signalith bootstrap-docker -opensearch-dir DIR -signalith-dir DIR   prepare the Docker quick start (its setup service runs this)
   signalith version
 
 The config file defaults to %s
@@ -97,6 +100,12 @@ func main() {
 		err = cmdValidate(args)
 	case "passwd":
 		err = cmdPasswd(args)
+	case "initial-password":
+		err = cmdInitialPassword(args)
+	case "bootstrap-docker":
+		err = cmdBootstrapDocker(args)
+	case "opensearch-certs":
+		err = cmdOpenSearchCerts(args)
 	case "query":
 		err = cmdQuery(args)
 	case "ask":
@@ -373,6 +382,19 @@ func cmdPasswd(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Where the first password was generated and passed in a file (the
+	// Docker quick start, whose signalith.yaml is read-only), the new one
+	// is kept in the state folder and replaces it. So is every later one.
+	hashFile := config.AdminHashFileIn(config.StateDirFor(*path))
+	_, statErr := os.Stat(hashFile)
+	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || statErr == nil {
+		if err := writeAdminHash(hashFile, h); err != nil {
+			return err
+		}
+		fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
+		fmt.Println("Restart the server to apply it (with the Docker quick start: docker compose restart signalith).")
+		return nil
+	}
 	// Only the hash changes in the file; settings from the environment
 	// (such as SIGNALITH_OPENSEARCH_PASSWORD) are not written into it.
 	if err := config.SetAdminPasswordHash(*path, h); err != nil {
@@ -604,6 +626,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	for _, w := range c.Warnings() {
 		log.Warn(w)
 	}
+	if f := c.AdminPasswordChanged(); f != "" {
+		log.Info("the built-in admin's password was set with signalith passwd and is kept in a file of its own", "file", f)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cl := newStore(c)
@@ -693,7 +718,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	n := people.Count()
 	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
-	if os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" && c.Auth.LDAP == nil {
+	if (os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" || os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD_FILE") != "") && c.Auth.LDAP == nil {
 		log.Warn("SIGNALITH_LDAP_BIND_PASSWORD is set but signalith.yaml has no auth.ldap, so it is not used; directory sign-in set up on the Users page keeps its own bind password")
 	}
 	if s := dir.Settings(); s.IsEnabled() {

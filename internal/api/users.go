@@ -74,7 +74,8 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 	switch p.Source {
 	case users.SourceBuiltin:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": "builtin",
-			"error": "The built-in admin's password is set in signalith.yaml. Change it on the server with: signalith passwd"})
+			"error": "The built-in admin's password is kept on the server. Change it there with: signalith passwd " +
+				"(with the Docker quick start: docker compose exec signalith signalith passwd)"})
 		return
 	case users.SourceDirectory:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": "directory",
