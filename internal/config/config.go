@@ -115,6 +115,11 @@ type Syslog struct {
 	// Allow lists the sender IP addresses or CIDRs that may send syslog.
 	// Empty allows any sender.
 	Allow []string `yaml:"allow"`
+	// PublicPort is the port devices send UDP and TCP syslog to, when it
+	// is not the one Signalith listens on: Docker or a firewall forwards
+	// 514 to 5514, say. The Add data page puts it in the setup it shows.
+	// Zero means the listen port.
+	PublicPort int `yaml:"public_port,omitempty"`
 }
 
 // Enabled reports whether any syslog listener is set.
@@ -181,6 +186,9 @@ func (s *Syslog) problems(server Server) []string {
 	}
 	if s.TLS != "" && (server.TLSCert == "" || server.TLSKey == "") {
 		p = append(p, "syslog.tls needs server.tls_cert and server.tls_key; syslog over TLS uses the same certificate as the web UI")
+	}
+	if s.PublicPort < 0 || s.PublicPort > 65535 {
+		p = append(p, fmt.Sprintf("syslog.public_port %d must be 1-65535 (or 0 for the port syslog.udp and syslog.tcp listen on)", s.PublicPort))
 	}
 	for i, a := range s.Allow {
 		if _, err := parseAllow(a); err != nil {
@@ -711,6 +719,7 @@ const header = `# Signalith configuration.
 #                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)
 # syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses server.tls_cert and tls_key
 # syslog.allow       sender IPs or CIDRs allowed to send syslog (empty = any sender)
+# syslog.public_port port devices send to, if forwarded to another (Docker: 514 -> 5514)
 # detections.dir     folder for custom detections (relative to this file)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
 # dashboards.dir     folder for custom dashboards, one YAML file each (relative to this file)

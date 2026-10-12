@@ -57,7 +57,8 @@ Desktop when you sign in".
 ### Send data
 
 Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
-Fluent Bit, paste the generated configuration, restart it. The configuration already
+Fluent Bit, paste the generated configuration, restart it. For network devices, pick
+Syslog (see [Syslog](#syslog)). The configuration already
 contains the server address and ingest token.
 
 Agents on other machines must send to an address they can reach, such as
@@ -83,8 +84,13 @@ Supported sources in Phase 1:
 Firewalls, switches, routers, appliances and servers without an agent can send syslog.
 Point them at this server's address on **UDP or TCP port 514** (or the TLS port, if
 you set `syslog.tls`). `signalith init` turns UDP and TCP 514 on; the Docker quick start
-publishes port 514 too. To forward a Linux server's logs with rsyslog, add one line to
-`/etc/rsyslog.d/90-signalith.conf` and restart rsyslog:
+publishes port 514 too.
+
+Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
+and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
+address filled in. Send the test message it shows and watch it arrive on the same page.
+By hand, forwarding a Linux server's logs with rsyslog is one line in
+`/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
 
 ```
 *.* @@siem.example.com:514
@@ -115,9 +121,12 @@ restrict the port with a firewall as well. The Windows installer limits its fire
 rules to the `syslog.allow` senders.
 
 Ports below 1024 need extra permission on Linux. The systemd unit grants it; when
-running Signalith another way, use a port such as `0.0.0.0:1514`. `/api/health` shows,
-under `syslog`, the listeners, how many messages were received, dropped, not written
-and rejected, and the most recent senders.
+running Signalith another way, use a port such as `0.0.0.0:1514`. When devices send to a
+different port than Signalith listens on, because Docker or a firewall forwards it, set
+`syslog.public_port` so Add data shows the right one (the Docker quick start listens on
+5514 and sets it to 514). The **Health** page (and `/api/health`, under `syslog`) shows the
+listeners, how many messages were received, dropped, not written and rejected, and the
+most recent senders.
 
 ### Sign in
 
@@ -150,6 +159,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
 | `syslog.tls` | off | Address for syslog over TLS, such as `0.0.0.0:6514`; uses `server.tls_cert` and `server.tls_key` |
 | `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |
+| `syslog.public_port` | the listen port | Port devices send UDP and TCP syslog to, when it is forwarded to the listen port; shown on Add data |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |

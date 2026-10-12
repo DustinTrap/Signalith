@@ -426,10 +426,43 @@ func TestBindErrors(t *testing.T) {
 func TestNilReceiver(t *testing.T) {
 	var r *Receiver
 	s := r.Stats()
-	if s.Enabled || s.Listeners == nil || s.Senders == nil {
+	if s.Enabled || s.Listeners == nil || s.Allow == nil || s.Senders == nil {
 		t.Errorf("stats = %+v", s)
 	}
 	r.Wait()
+}
+
+// TestStatsSayWhereToSend checks what the Add data page builds the setup
+// from: the port senders use for each listener, and who may send.
+func TestStatsSayWhereToSend(t *testing.T) {
+	certFile, keyFile := writeCert(t)
+	r, _, _ := start(t, Config{UDP: "127.0.0.1:0", TCP: "127.0.0.1:0", TLS: "127.0.0.1:0", CertFile: certFile, KeyFile: keyFile}, &capture{})
+	s := r.Stats()
+	if len(s.Listeners) != 3 || len(s.Allow) != 0 || s.Allow == nil {
+		t.Fatalf("stats = %+v", s)
+	}
+	for _, l := range s.Listeners {
+		if _, port, _ := net.SplitHostPort(l.Address); port != fmt.Sprint(l.Port) || l.Port == 0 {
+			t.Errorf("%s listener on %s, port %d: want the port listened on", l.Protocol, l.Address, l.Port)
+		}
+	}
+
+	// Forwarded (Docker publishes 514 as 5514): UDP and TCP senders use
+	// the public port; TLS keeps its own.
+	allow := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("192.0.2.7/32"), netip.MustParsePrefix("2001:db8::1/128")}
+	r, _, _ = start(t, Config{UDP: "127.0.0.1:0", TCP: "127.0.0.1:0", TLS: "127.0.0.1:0", CertFile: certFile, KeyFile: keyFile, PublicPort: 514, Allow: allow}, &capture{})
+	s = r.Stats()
+	got := map[string]int{}
+	for _, l := range s.Listeners {
+		got[l.Protocol] = l.Port
+	}
+	_, tlsPort, _ := net.SplitHostPort(addr(t, r, "tls"))
+	if got["udp"] != 514 || got["tcp"] != 514 || fmt.Sprint(got["tls"]) != tlsPort {
+		t.Errorf("ports = %v, TLS listens on %s", got, tlsPort)
+	}
+	if strings.Join(s.Allow, " ") != "10.0.0.0/8 192.0.2.7 2001:db8::1" {
+		t.Errorf("allow = %q", s.Allow)
+	}
 }
 
 func TestSenderTableKeepsTheMostRecent(t *testing.T) {

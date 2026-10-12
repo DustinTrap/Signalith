@@ -259,6 +259,16 @@ syslog:
 		}
 	}
 
+	// Docker: listen on 5514, devices send to the 514 published for it.
+	os.WriteFile(path, []byte("syslog:\n  udp: 0.0.0.0:5514\n  tcp: 0.0.0.0:5514\n  public_port: 514\n"), 0o600)
+	if c, err := Load(path); err != nil || c.Syslog.PublicPort != 514 {
+		t.Errorf("public_port: %v %+v", err, c.Syslog)
+	}
+	os.WriteFile(path, []byte("syslog:\n  udp: 0.0.0.0:5514\n  public_port: 70000\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "syslog.public_port 70000 must be 1-65535") {
+		t.Errorf("public_port 70000: %v", err)
+	}
+
 	os.WriteFile(path, []byte("syslog:\n  udp: myhost:514\n  tcp: 0.0.0.0:514\n  tls: :514\n"), 0o600)
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), `syslog.udp host "myhost"`) || !strings.Contains(err.Error(), "syslog.tcp and syslog.tls both use :514") {
 		t.Errorf("err = %v", err)

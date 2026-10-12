@@ -845,12 +845,12 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     <header class="page-head">
       <div>
         <h2 class="page-head__title">Add data</h2>
-        <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent.</p>
+        <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent, or receive syslog from network devices.</p>
       </div>
     </header>
     <div class="agent">
       <fieldset class="agent-os">
-        <legend class="sr-only">Operating system</legend>
+        <legend class="sr-only">Source</legend>
         <label class="card agent-os__card">
           <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-square-terminal"/></svg></span>
           <span class="agent-os__text"><b>Linux</b><span>SSH, sudo and account changes</span></span>
@@ -861,9 +861,14 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
           <span class="agent-os__text"><b>Windows</b><span>Security event log and Sysmon</span></span>
           <input type="radio" name="os" value="windows">
         </label>
+        <label class="card agent-os__card">
+          <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-router"/></svg></span>
+          <span class="agent-os__text"><b>Syslog</b><span>Firewalls, switches, routers and appliances</span></span>
+          <input type="radio" name="os" value="syslog">
+        </label>
       </fieldset>
 
-      <div class="card agent-setup">
+      <div class="card agent-setup" id="agent-setup">
         <div class="card__head">
           <div>
             <h3 class="card__title" id="agent-title">Set up the agent</h3>
@@ -899,6 +904,27 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
             </div>
             <pre id="agent-config" class="editor"></pre>
           </div>
+        </div>
+      </div>
+
+      <div class="card agent-setup hidden" id="syslog-setup">
+        <div class="card__head">
+          <div>
+            <h3 class="card__title">Send syslog to Signalith</h3>
+            <p class="card__sub">Set up each device to send to this address. No agent needed.</p>
+          </div>
+        </div>
+        <div class="card__body" id="syslog-body" aria-busy="true">
+          <div class="agent-addr" id="syslog-addr">
+            <div class="agent-addr__row">
+              <label class="label" for="syslog-host">Devices send to</label>
+              <input id="syslog-host" class="input input--sm" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="syslog-ports syslog-host-error syslog-host-note">
+              <span id="syslog-ports" class="sl-ports"></span>
+            </div>
+            <p id="syslog-host-error" class="field-error hidden" role="alert"></p>
+            <div id="syslog-host-note" class="sl-notes"></div>
+          </div>
+          <div id="syslog-main"></div>
         </div>
       </div>
     </div>

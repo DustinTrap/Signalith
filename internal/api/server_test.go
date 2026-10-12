@@ -132,7 +132,7 @@ func TestAuthRequired(t *testing.T) {
 func TestHealthShowsSyslog(t *testing.T) {
 	var rcv *syslog.Receiver
 	ts, _ := newTestServerWith(t, func(s *Server) {
-		rcv = syslog.New(syslog.Config{UDP: "127.0.0.1:0"}, s.Pipeline, s.Log)
+		rcv = syslog.New(syslog.Config{UDP: "127.0.0.1:0", PublicPort: 514}, s.Pipeline, s.Log)
 		ctx, cancel := context.WithCancel(context.Background())
 		if err := rcv.Start(ctx); err != nil {
 			t.Fatal(err)
@@ -158,8 +158,12 @@ func TestHealthShowsSyslog(t *testing.T) {
 	}
 	listeners, _ := sl["listeners"].([]any)
 	senders, _ := sl["senders"].([]any)
-	if len(listeners) != 1 || listeners[0].(map[string]any)["address"] != addr || len(senders) != 1 || senders[0].(map[string]any)["host"] != "fw1" {
+	if len(listeners) != 1 || listeners[0].(map[string]any)["address"] != addr || listeners[0].(map[string]any)["port"] != float64(514) ||
+		len(senders) != 1 || senders[0].(map[string]any)["host"] != "fw1" {
 		t.Errorf("listeners %v senders %v", listeners, senders)
+	}
+	if allow, ok := sl["allow"].([]any); !ok || len(allow) != 0 {
+		t.Errorf("allow = %v, want [] (any sender)", sl["allow"])
 	}
 }
 

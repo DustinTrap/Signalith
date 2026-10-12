@@ -184,7 +184,11 @@ func syslogSummary(c *config.Config) string {
 			parts = append(parts, l.name+" "+l.addr)
 		}
 	}
-	return strings.Join(parts, ", ")
+	s := strings.Join(parts, ", ")
+	if c.Syslog.PublicPort > 0 && (c.Syslog.UDP != "" || c.Syslog.TCP != "") {
+		s += fmt.Sprintf(" (devices send UDP and TCP to port %d)", c.Syslog.PublicPort)
+	}
+	return s
 }
 
 // printSyslogPorts prints the syslog listeners for install scripts, such
@@ -488,7 +492,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
-			MaxAge: syslogMaxAge(c.Retention.Days),
+			MaxAge: syslogMaxAge(c.Retention.Days), PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err

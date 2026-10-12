@@ -46,7 +46,8 @@ services:
       - "8080:8080"
       # Syslog: devices send to this machine on port 514, which reaches the
       # container's 5514 (it cannot open ports below 1024). If another syslog
-      # server already uses 514 here, change the left side, e.g. "1514:5514/udp".
+      # server already uses 514 here, change the left side, e.g. "1514:5514/udp",
+      # and syslog.public_port in signalith.yaml to match.
       - "514:5514/udp"
       - "514:5514/tcp"
     environment:
