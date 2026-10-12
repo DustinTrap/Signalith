@@ -114,6 +114,7 @@ function renderFindings(total) {
     cb.addEventListener('click', (ev) => ev.stopPropagation());
     cb.addEventListener('change', () => { cb.checked ? selected.add(f.id) : selected.delete(f.id); updateBulk(); });
     const ents = Object.entries(f.entities || {}).slice(0, 3).map(([k, v]) => el('span', { class: 'entity' }, `${k}: ${v}`));
+    if (f.case_id) ents.unshift(el('span', { class: 'entity case-chip', title: 'Part of case ' + f.case_id }, 'in case'));
     return el('tr', { class: openFinding === f.id ? 'sel' : '', onclick: () => showFinding(f.id) },
       el('td', {}, cb),
       el('td', { title: new Date(f.created).toLocaleString() }, ago(f.created)),
@@ -208,7 +209,8 @@ async function showFinding(id) {
     el('div', { class: 'detail-head' }, el('h3', {}, f.title), el('button', { class: 'link', onclick: () => { box.classList.add('hidden'); openFinding = null; } }, 'Close')),
     el('div', { class: 'meta' }, sevBadge(f.urgency || f.severity),
       (f.urgency || f.severity) !== f.severity ? el('span', { class: 'muted small' }, `urgency (severity ${f.severity}, adjusted for priority)`) : null,
-      statusBadge(f.status), el('span', { class: 'muted' }, 'Created ' + new Date(f.created).toLocaleString()), el('span', { class: 'muted' }, 'ID ' + f.id)),
+      statusBadge(f.status), el('span', { class: 'muted' }, 'Created ' + new Date(f.created).toLocaleString()), el('span', { class: 'muted' }, 'ID ' + f.id),
+      f.case_id ? el('a', { class: 'link', onclick: () => openCase(f.case_id) }, 'Case ' + f.case_id) : null),
     f.description ? el('p', {}, f.description) : null,
     d && d.guidance ? el('div', { class: 'notice' }, el('b', {}, 'How to triage: '), d.guidance) : null,
     (f.mitre || []).length ? el('div', { class: 'meta' }, 'ATT&CK: ', ...f.mitre.map(techLink)) : null,
@@ -217,7 +219,9 @@ async function showFinding(id) {
       el('label', {}, 'Severity', severity), el('label', {}, 'Disposition', disposition)),
     comment,
     el('div', { class: 'row' }, save, mine,
-      el('button', { onclick: () => openSearch(f.query, f.earliest, f.latest), title: f.query }, 'View contributing events')),
+      el('button', { onclick: () => openSearch(f.query, f.earliest, f.latest), title: f.query }, 'View contributing events'),
+      f.case_id ? el('button', { onclick: () => openCase(f.case_id), title: 'This finding is part of case ' + f.case_id }, 'Open case')
+        : el('button', { onclick: () => addFindingsToCase([f.id], f.title), title: 'Group this finding into an investigation' }, 'Add to case')),
     Object.keys(f.entities || {}).length ? el('h4', {}, 'Entities') : null,
     el('table', { class: 'kv' }, el('tbody', {}, ...Object.entries(f.entities || {}).filter(([k]) => k !== 'risk_object_type').map(([k, v]) => el('tr', {},
       el('th', {}, k),

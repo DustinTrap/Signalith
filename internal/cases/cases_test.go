@@ -1,0 +1,123 @@
+package cases
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/findings"
+)
+
+func TestCaseFindingsAndEntities(t *testing.T) {
+	now := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	c := &Case{ID: NewID(now), Title: "Suspicious logons", Severity: "low", Status: findings.StatusNew, Created: now, Updated: now}
+	if !strings.HasPrefix(c.ID, "CASE-20261012-") {
+		t.Errorf("id = %s", c.ID)
+	}
+	f := &findings.Finding{ID: "f1", Title: "Brute force from 10.0.0.9", Severity: "medium", Urgency: "high",
+		Entities: map[string]any{"src": "10.0.0.9", "user": "bob", "risk_object_type": "system"}}
+	added, err := c.AddFinding(f, "ana", now)
+	if err != nil || !added {
+		t.Fatalf("add = %v %v", added, err)
+	}
+	if again, _ := c.AddFinding(f, "ana", now); again {
+		t.Error("finding added twice")
+	}
+	if c.Severity != "high" {
+		t.Errorf("severity = %s, want the finding's urgency", c.Severity)
+	}
+	if got := c.EntityValues(); strings.Join(got, ",") != "10.0.0.9,bob" {
+		t.Errorf("entities = %v", got)
+	}
+	if len(c.Entries) != 1 || c.Entries[0].Kind != KindFinding || c.Entries[0].FindingID != "f1" {
+		t.Errorf("entries = %+v", c.Entries)
+	}
+	c.AddEntities(map[string]any{"dest": []any{"web1", "web2"}, "user": "bob", "_raw": "x"})
+	if got := c.EntityValues(); strings.Join(got, ",") != "10.0.0.9,bob,web1,web2" {
+		t.Errorf("entities after event = %v", got)
+	}
+	if !c.RemoveFinding("f1", "ana", now) || len(c.Findings) != 0 || len(c.Entries) != 0 {
+		t.Errorf("remove left %v %v", c.Findings, c.Entries)
+	}
+}
+
+func TestApplyAndNotes(t *testing.T) {
+	now := time.Now().UTC()
+	c := &Case{Title: "x", Severity: "medium", Status: findings.StatusNew}
+	st, owner, res := findings.StatusResolved, "ana", "Password spray, blocked at the firewall"
+	u := Update{Status: &st, Owner: &owner, Resolution: &res, Comment: "  checked VPN logs  "}
+	if err := u.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Apply(u, "ana", now) {
+		t.Fatal("no change")
+	}
+	if c.Status != st || c.Owner != "ana" || c.Resolution != res {
+		t.Errorf("case = %+v", c)
+	}
+	if len(c.Entries) != 1 || c.Entries[0].Text != "checked VPN logs" || c.Entries[0].ID == "" {
+		t.Errorf("note = %+v", c.Entries)
+	}
+	if c.Apply(Update{Status: &st}, "ana", now) {
+		t.Error("same status counted as a change")
+	}
+	if err := c.RemoveEntry(c.Entries[0].ID, "ana", now); err != nil || len(c.Entries) != 0 {
+		t.Errorf("remove entry = %v", err)
+	}
+	if err := c.RemoveEntry("nope", "ana", now); err != ErrEntryNotFound {
+		t.Errorf("remove unknown = %v", err)
+	}
+	bad := "urgent"
+	if (Update{Severity: &bad}).Validate() == nil {
+		t.Error("bad severity accepted")
+	}
+	empty := " "
+	if (Update{Title: &empty}).Validate() == nil {
+		t.Error("empty title accepted")
+	}
+}
+
+func TestTrimEvent(t *testing.T) {
+	ev := map[string]any{"user": "bob", "_raw": strings.Repeat("x", MaxEventBytes)}
+	out, err := TrimEvent(ev)
+	if err != nil || out["_raw"] != nil || out["user"] != "bob" {
+		t.Errorf("trim = %v %v", out, err)
+	}
+	if _, err := TrimEvent(map[string]any{"a": strings.Repeat("x", MaxEventBytes)}); err == nil {
+		t.Error("huge event accepted")
+	}
+}
+
+func TestMemorySearch(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	t0 := time.Now().UTC()
+	a := &Case{ID: "A", Title: "Phishing wave", Status: findings.StatusNew, Updated: t0, Findings: []string{"f1"},
+		Entities: []Entity{{"user", "bob"}}, Entries: []Entry{{ID: "e", Kind: KindNote}}}
+	b := &Case{ID: "B", Title: "Malware on web1", Status: findings.StatusClosed, Owner: "ana", Updated: t0.Add(time.Minute)}
+	_ = m.Create(ctx, a)
+	_ = m.Create(ctx, b)
+	list, total, _ := m.Search(ctx, Filter{})
+	if total != 2 || list[0].ID != "B" || list[1].Entries != nil {
+		t.Errorf("all = %d %v", total, list)
+	}
+	for _, tc := range []struct {
+		f    Filter
+		want string
+	}{
+		{Filter{Status: OpenStatuses}, "A"},
+		{Filter{Owner: "ana"}, "B"},
+		{Filter{Text: "BOB"}, "A"},
+		{Filter{Text: "web1"}, "B"},
+		{Filter{FindingID: "f1"}, "A"},
+	} {
+		list, _, _ := m.Search(ctx, tc.f)
+		if len(list) != 1 || list[0].ID != tc.want {
+			t.Errorf("%+v = %v", tc.f, list)
+		}
+	}
+	if _, err := m.Get(ctx, "nope"); err != ErrNotFound {
+		t.Errorf("get unknown = %v", err)
+	}
+}

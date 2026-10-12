@@ -42,7 +42,7 @@ func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
 			"dynamic": "false",
 			"properties": map[string]any{
 				"id": kw, "detection_id": kw, "severity": kw, "urgency": kw, "status": kw, "owner": kw,
-				"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw,
+				"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw, "case_id": kw,
 				"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
 				"description": map[string]any{"type": "text"},
 				"created":     map[string]any{"type": "date"},
