@@ -60,6 +60,9 @@ services:
     volumes:
       - ./signalith.yaml:/etc/signalith/signalith.yaml:ro
       - signalith-data:/var/lib/signalith
+      # Days archived before retention deletes them go to /var/lib/signalith/archive.
+      # To keep them on another disk, mount a folder there (writable by uid 65532):
+      # - /mnt/archive/signalith:/var/lib/signalith/archive
 
 volumes:
   opensearch-data:
