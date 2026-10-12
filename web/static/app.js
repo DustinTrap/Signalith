@@ -1809,6 +1809,7 @@ let agentSetupErrEl = null;
 let agentServerGuess = ''; // known once the server has answered without server=
 let agentServerSent = null;
 let agentServerTimer = 0;
+let agentSetupPending = null; // the latest load, which Copy and Download may wait for
 try { agentServerEl.value = localStorage.getItem(agentServerKey) || ''; } catch (_) { /* storage may be blocked */ }
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', loadAgentConfig));
 $('linux-source').addEventListener('change', loadAgentConfig);
@@ -1817,7 +1818,10 @@ agentServerEl.addEventListener('input', () => {
   clearTimeout(agentServerTimer);
   agentServerTimer = setTimeout(agentServerChanged, 400);
 });
-agentServerEl.addEventListener('change', agentServerChanged);
+agentServerEl.addEventListener('change', () => {
+  if (!agentServerEl.value.trim()) agentServerEl.value = agentServerGuess; // cleared: back to the default
+  agentServerChanged();
+});
 
 function agentServerChanged() {
   clearTimeout(agentServerTimer);
@@ -1826,9 +1830,14 @@ function agentServerChanged() {
 
 // agentServerValue is the address to ask for: what is typed, else the guess.
 const agentServerValue = () => agentServerEl.value.trim() || agentServerGuess;
-const agentLoopbackHost = (h) => /^(localhost|.+\.localhost|127(\.\d{1,3}){3}|\[::1\]|::1)$/i.test(h);
+const agentLoopbackHost = (h) => /^(localhost|.+\.localhost|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\])$/i.test(h);
 
-async function loadAgentConfig() {
+function loadAgentConfig() {
+  agentSetupPending = agentSetupLoad();
+  return agentSetupPending;
+}
+
+async function agentSetupLoad() {
   const os = document.querySelector('input[name=os]:checked').value;
   $('linux-opts').classList.toggle('hidden', os !== 'linux');
   $('windows-opts').classList.toggle('hidden', os !== 'windows');
@@ -1844,10 +1853,7 @@ async function loadAgentConfig() {
   try {
     const a = await api('api/agents/config?' + q);
     if (seq !== agentSetupSeq) return;
-    if (!server && agentServerFirst(a)) {
-      loadAgentConfig();
-      return;
-    }
+    if (!server && agentServerFirst(a)) return loadAgentConfig();
     agentServerError('');
     try {
       if (server && server !== agentServerGuess) localStorage.setItem(agentServerKey, server);
@@ -2045,8 +2051,33 @@ async function agentSetupCopy(text, btn) {
     btn.classList.remove('is-copied');
   }, 1800);
 }
-$('copy-config').addEventListener('click', () => agentSetupCopy(agentSetupConfig, $('copy-config')));
-$('agent-download').addEventListener('click', () => {
+
+// agentSetupFresh waits for a config still on its way (the address was
+// just typed, or the OS changed), so Copy and Download never hand out one
+// for an older address. It is false when the address in the field is
+// wrong; the field then takes focus so its error is read out.
+async function agentSetupFresh() {
+  clearTimeout(agentServerTimer);
+  if (agentServerValue() !== agentServerSent) loadAgentConfig();
+  for (let p; p !== agentSetupPending;) {
+    p = agentSetupPending;
+    await p;
+  }
+  if (agentServerEl.getAttribute('aria-invalid') === 'true') {
+    agentServerEl.focus();
+    return false;
+  }
+  return !!agentSetupConfig;
+}
+const agentSetupStale = () => agentServerValue() !== agentServerSent || $('agent-steps').hasAttribute('aria-busy') ||
+  agentServerEl.getAttribute('aria-invalid') === 'true';
+
+$('copy-config').addEventListener('click', async () => {
+  if (agentSetupStale() && !(await agentSetupFresh())) return;
+  agentSetupCopy(agentSetupConfig, $('copy-config'));
+});
+$('agent-download').addEventListener('click', async () => {
+  if (agentSetupStale() && !(await agentSetupFresh())) return;
   if (!agentSetupConfig) return;
   const url = URL.createObjectURL(new Blob([agentSetupConfig], { type: 'text/plain' }));
   const a = el('a', { href: url, download: 'fluent-bit.conf', class: 'hidden' });

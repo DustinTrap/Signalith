@@ -362,6 +362,9 @@ func (c *Config) applyEnv() error {
 		c.Server.Listen = v
 	}
 	if v := strings.TrimSpace(os.Getenv("SIGNALITH_PUBLIC_URL")); v != "" {
+		if _, err := agents.ParseServerURL(v); err != nil {
+			return fmt.Errorf("SIGNALITH_PUBLIC_URL %q: %v", v, err)
+		}
 		c.Server.PublicURL = v
 	}
 	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
@@ -410,7 +413,7 @@ func (c *Config) Validate() error {
 	if c.Server.PublicURL == "" {
 		c.Server.PublicURL = defaultPublicURL(c.Server)
 	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
-		p = append(p, fmt.Sprintf("server.public_url %q: %v (it must look like https://siem.example.com:8080)", c.Server.PublicURL, err))
+		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	}
 	if u, err := url.Parse(c.OpenSearch.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		p = append(p, fmt.Sprintf("opensearch.url %q must be http(s)://host:port", c.OpenSearch.URL))
@@ -492,16 +495,18 @@ func defaultPublicURL(s Server) string {
 	if err != nil {
 		return ""
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "localhost"
-		}
-	}
 	scheme := "http"
 	if s.TLSCert != "" {
 		scheme = "https"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+		// The machine's name, if it can go into an agent config as is.
+		if h, err := os.Hostname(); err == nil {
+			if _, err := agents.ParseServerURL(scheme + "://" + net.JoinHostPort(h, port)); err == nil {
+				host = h
+			}
+		}
 	}
 	return scheme + "://" + net.JoinHostPort(host, port)
 }

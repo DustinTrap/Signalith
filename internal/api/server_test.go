@@ -251,6 +251,7 @@ func TestAgentConfigServerAddress(t *testing.T) {
 		"http://192.168.1.20:8080/api",
 		"http://192.168.1.20:8080?x=1",
 		"http://192.168.1.20:70000",
+		"http://" + strings.Repeat("a", 5000) + ":8080",
 	} {
 		q := url.Values{"os": {"windows"}, "server": {bad}}
 		code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)

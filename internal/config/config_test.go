@@ -83,8 +83,8 @@ func TestPublicURL(t *testing.T) {
 	// can never reach a generated agent config.
 	for _, bad := range []string{"http://192.168.1.20:8080\n[OUTPUT]", "192.168.1.20:8080", "http://192.168.1.20:8080/siem"} {
 		t.Setenv("SIGNALITH_PUBLIC_URL", bad)
-		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "server.public_url") {
-			t.Errorf("SIGNALITH_PUBLIC_URL=%q: want a server.public_url error, got %v", bad, err)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "SIGNALITH_PUBLIC_URL") {
+			t.Errorf("SIGNALITH_PUBLIC_URL=%q: want an error naming it, got %v", bad, err)
 		}
 	}
 	t.Setenv("SIGNALITH_PUBLIC_URL", "")

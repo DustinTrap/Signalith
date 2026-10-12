@@ -16,6 +16,8 @@ func TestParseServerURLAccepts(t *testing.T) {
 		"http://[::1]:8080",
 		"https://[2001:db8::20]:8443",
 		"http://localhost:8080",
+		"http://a-b_c.example:8080",
+		"http://10.0.0.1",
 	} {
 		if _, err := ParseServerURL(in); err != nil {
 			t.Errorf("ParseServerURL(%q) = %v, want ok", in, err)
@@ -67,6 +69,12 @@ func TestParseServerURLRejects(t *testing.T) {
 		"http://[fe80::1%25eth0]:8080",
 		"http://[127.0.0.1]:8080",
 		"http://::1:8080",
+		"http://127.1:8080",
+		"http://256.1.1.1",
+		"http://999:8080",
+		"http://1.2.3.4.5",
+		"http://a-:8080",
+		"http://" + strings.Repeat("a.", 200) + "com",
 	} {
 		if u, err := ParseServerURL(in); err == nil {
 			t.Errorf("ParseServerURL(%q) = %v, want an error", in, u)
@@ -111,6 +119,14 @@ func TestGenerateUsesServerAddress(t *testing.T) {
 	}
 	if a.ServerURL != "https://192.168.1.20:8443" || a.ServerLoopback {
 		t.Errorf("server_url = %q, loopback = %v", a.ServerURL, a.ServerLoopback)
+	}
+
+	a, err = Generate(Options{OS: "linux", ServerURL: "https://[2001:db8::20]:8443", Token: "tok-0123456789abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.Config, "Host             2001:db8::20\n") || !strings.Contains(a.Config, "tls              On\n") {
+		t.Errorf("IPv6 address:\n%s", a.Config)
 	}
 
 	a, err = Generate(Options{OS: "windows", ServerURL: "http://localhost", Token: "tok-0123456789abcdef"})

@@ -37,7 +37,7 @@ type Agent struct {
 	Steps          []string `json:"steps"`
 }
 
-var hostLabel = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,62})$`)
+var hostLabel = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$`)
 
 // ParseServerURL checks an address agents send to: http or https, a host
 // name or IP address and an optional port, nothing else. It is strict
@@ -45,6 +45,9 @@ var hostLabel = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,62})$`)
 func ParseServerURL(raw string) (*url.URL, error) {
 	if raw == "" {
 		return nil, errors.New("address is empty; use one such as http://192.168.1.20:8080")
+	}
+	if len(raw) > 300 {
+		return nil, errors.New("address is too long")
 	}
 	for _, r := range raw {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {
@@ -82,7 +85,8 @@ func ParseServerURL(raw string) (*url.URL, error) {
 }
 
 // validHost accepts an IPv4 address, a bracketed IPv6 address (no zone) or
-// a DNS name made of letters, digits, - and _.
+// a DNS name made of letters, digits, - and _. A name ending in a number
+// must be a whole IPv4 address, so 127.1 or 300.1.1.1 are refused.
 func validHost(host string, bracketed bool) bool {
 	if bracketed {
 		return strings.Contains(host, ":") && net.ParseIP(host) != nil
@@ -90,10 +94,15 @@ func validHost(host string, bracketed bool) bool {
 	if host == "" || len(host) > 253 {
 		return false
 	}
-	for _, l := range strings.Split(host, ".") {
+	labels := strings.Split(host, ".")
+	for _, l := range labels {
 		if !hostLabel.MatchString(l) {
 			return false
 		}
+	}
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		ip := net.ParseIP(host)
+		return ip != nil && ip.To4() != nil
 	}
 	return true
 }
