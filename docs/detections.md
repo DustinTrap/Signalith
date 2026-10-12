@@ -34,6 +34,10 @@ mitre: [T1110]        # ATT&CK technique or sub-technique IDs
 throttle:
   fields: [src, dest] # one finding per distinct src and dest...
   window: 1h          # ...per hour
+risk:                 # optional; see "Risk" below
+  score: 30
+  objects:
+    - {field: src, type: system}
 enabled: true
 tags: [authentication]
 guidance: Check whether the source is internal and whether any attempt succeeded.
@@ -47,11 +51,38 @@ Rules of thumb:
 - Without `throttle.fields`, the whole result row is the throttle key.
 - Use `stats ... by` to raise one finding per entity instead of one per event.
 
+## Risk
+
+A `risk` section makes the detection add risk to the users and systems in each
+result row:
+
+| Key | Meaning |
+| --- | --- |
+| `score` | Base risk, 1 to 1000. Multiplied by the object's priority from the asset and identity lists (critical ×2, high ×1.5, medium ×1, low ×0.5; a watchlisted user at least ×1.5) |
+| `objects` | Result fields that hold a risk object, each with `type` `user`, `system` or `other`. Empty or missing values are skipped |
+| `only` | `true` records risk without raising a finding. Throttling still applies, per risk object row |
+
+Each object gets one risk event in the Risk data model with `risk_object`,
+`risk_object_type`, `risk_score`, `risk_base_score`, `risk_priority`,
+`risk_message` (the rendered title), `detection_id`, `mitre` and `mitre_tactic`,
+plus the row's entity fields. Search them with `datamodel=Risk`.
+
+Ten built-in detections are risk-only. Two **risk incident** detections (tagged
+`risk-incident`) read the Risk data model and raise findings:
+
+- `risk-threshold-exceeded`: total risk of 100 or more for one object in 24 hours.
+- `risk-multiple-tactics`: three or more ATT&CK tactics from three or more
+  detections on one object in 7 days.
+
+Write your own the same way, for example
+`datamodel=Risk risk_object_type=user | stats sum(risk_score) as risk_score by risk_object | where risk_score >= 200`.
+
 ## What a finding contains
 
 The result row, the entities found in it (`user`, `src_user`, `src`, `src_host`,
 `dest`, `dest_host`, `host`, `process_name`, `object`, `member`), the detection's
-severity and ATT&CK techniques, and a drilldown search. For `stats` and `top`
+severity and ATT&CK techniques, a drilldown search, the asset and identity context
+of each entity, and an **urgency** that combines severity with that context. For `stats` and `top`
 detections the drilldown is the detection's filter plus the row's group-by values,
 so **View contributing events** shows exactly the events behind that row.
 
@@ -93,8 +124,13 @@ Imported rules start disabled with a 5 minute schedule and 10 minute lookback.
 | `POST /api/detections/{id}/run` | Run now and raise findings |
 | `POST /api/detections/sigma` | Convert a Sigma rule (YAML body, or JSON `{"rule": "..."}`) |
 | `GET /api/coverage` | ATT&CK matrix with coverage |
-| `GET /api/findings?status=&severity=&owner=&detection=&q=&since=7d&limit=` | Queue |
+| `GET /api/findings?status=&severity=&urgency=&owner=&detection=&q=&since=7d&limit=` | Queue |
 | `GET`, `PATCH /api/findings/{id}` | Read; update status, owner, severity, disposition, comment |
 | `POST /api/findings/bulk` | `{"ids": [...], "update": {...}}` |
 | `POST /api/findings` | Raise a finding by hand |
-| `GET /api/findings/summary` | Open counts by status and severity |
+| `GET /api/findings/summary` | Open counts by status, severity and urgency |
+| `GET /api/risk?since=24h&type=` | Risk objects by total score, with context |
+| `GET /api/risk/object?object=&type=&since=7d` | Risk events for one object |
+| `GET`, `PUT /api/lookups/assets`, `/api/lookups/identities` | List or replace a list (CSV body; 400 lists every bad line) |
+| `GET /api/lookups/assets.csv`, `/api/lookups/identities.csv` | Download the current CSV |
+| `GET /api/lookups/context?field=&value=` | Context for one value |

@@ -10,5 +10,10 @@ mitre: [T1078.003, T1021.004]
 throttle:
   fields: [dest, src]
   window: 24h
+risk:
+  score: 25
+  objects:
+    - {field: dest, type: system}
+  only: true
 enabled: true
 tags: [authentication, linux]

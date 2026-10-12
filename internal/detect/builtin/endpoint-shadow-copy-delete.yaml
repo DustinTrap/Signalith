@@ -14,6 +14,11 @@ mitre: [T1490]
 throttle:
   fields: [dest]
   window: 1h
+risk:
+  score: 80
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
 enabled: true
 tags: [impact, ransomware, windows]
 guidance: Isolate the host immediately. This usually happens seconds before files are encrypted.

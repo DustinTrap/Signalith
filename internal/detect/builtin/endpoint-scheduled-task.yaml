@@ -10,5 +10,11 @@ mitre: [T1053.005]
 throttle:
   fields: [dest, process]
   window: 24h
+risk:
+  score: 20
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
+  only: true
 enabled: true
 tags: [persistence, windows]

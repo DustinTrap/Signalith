@@ -4,13 +4,14 @@ An open-source SIEM for Windows and Linux, modeled on Splunk Enterprise Security
 Signalith stores events in [OpenSearch](https://opensearch.org), collects them with
 [Fluent Bit](https://fluentbit.io), and adds the security layer on top: a pipe-based
 query language that reads like SPL, a visual query builder, CIM-style data models,
-scheduled detections with a findings queue for triage, Sigma rule import, and a
-MITRE ATT&CK coverage map. Risk scoring and investigations come in later phases.
+scheduled detections with a findings queue for triage, Sigma rule import, a
+MITRE ATT&CK coverage map, and risk-based alerting with asset and identity context.
+Threat intel and investigations come in later phases.
 
 The server is a single Go binary with the web UI embedded. It runs as a Windows
 service or a systemd unit.
 
-> Status: Phase 2 (detect and triage). See the [roadmap](#roadmap).
+> Status: Phase 3 (risk and context), in progress. See the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -86,18 +87,19 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
+| `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`).
+`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`).
 
 ## Detections and findings
 
 A detection is a query that runs on a schedule. Each row it returns becomes a
-**finding** in the queue, like a notable event in Splunk ES. Signalith ships 19
+**finding** in the queue, like a notable event in Splunk ES. Signalith ships 21
 detections mapped to MITRE ATT&CK (brute force, password spray, encoded PowerShell,
 Office spawning shells, shadow copy deletion, credential dumping, privileged group
-changes and more); 17 are on by default.
+changes and more, plus two risk incident rules); 19 are on by default.
 
 - **Findings** is the triage queue: filter by status, severity, owner or entity;
   assign, change status and disposition, comment, and update many at once. Each
@@ -115,6 +117,52 @@ changes and more); 17 are on by default.
 
 Detections are YAML files, so they can live in Git. See
 [docs/detections.md](docs/detections.md) for the format.
+
+## Risk and context
+
+Signalith does risk-based alerting the way Splunk ES does. Most detections add
+**risk** to the users and systems in their results instead of (or as well as)
+raising a finding. Risk adds up per object, and two risk incident detections raise
+one finding when an object crosses a total of 100 in 24 hours, or trips three ATT&CK
+tactics from three detections in a week. Many weak signals about one user become
+one alert, and noisy rules (new services, scheduled tasks, discovery commands) stop
+flooding the queue.
+
+- **Risk** lists the users and systems with the most risk, with a bar per score, the
+  number of detections and tactics, and the asset or identity context. Click one to
+  see every detection that added risk, oldest first.
+- **Assets & identities** takes two CSV files, like the ES asset and identity
+  lookups. Upload them on that page, or put them in `lookups.dir` (they reload within
+  a minute). Every bad line is reported and nothing is saved until the file is clean.
+  Download the current file from the same page to edit it.
+
+```csv
+host,ip,cidr,owner,priority,category,bunit,location
+web1|web1.corp.local,10.0.1.10,,web team,critical,web|pci,ecommerce,dc1
+,,10.20.0.0/16,it,low,workstation,,office
+```
+
+```csv
+identity,name,email,manager,priority,category,bunit,watchlist
+alice|CORP\alice|alice@corp.local,Alice Ng,alice@corp.local,bob,high,admin,it,true
+```
+
+Use `|` between several values in one cell. Hosts match by short name or FQDN,
+IPs exactly or by the most specific CIDR, and users with or without `DOMAIN\` or
+`@domain`. Priority is `low`, `medium`, `high` or `critical`.
+
+Context changes three things:
+
+- **Risk scores** are multiplied by the object's priority: critical ×2, high ×1.5,
+  medium ×1, low ×0.5. A watchlisted user counts at least ×1.5.
+- **Urgency** on each finding starts at its severity, goes up one level when a
+  critical asset or watchlisted user is involved, and down one level when every
+  known entity is low priority. The queue shows and filters by urgency.
+- **`| enrich`** in any search adds `<field>_priority`, `_owner`, `_category` and more
+  next to each user, host and IP field.
+
+Risk events are stored under the Risk data model (`datamodel=Risk`) in
+`<prefix>-risk-YYYY.MM.DD` indices, which ordinary searches leave out.
 
 ## Writing queries
 
@@ -153,10 +201,12 @@ Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSea
 | `internal/query` | Query language lexer, parser, canonical printer, builder model |
 | `internal/search` | Compiles queries to OpenSearch DSL and runs remaining commands in memory |
 | `internal/ingest` | Fluent Bit record parsing for Windows and Linux, index template |
-| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Other |
+| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Risk, Other |
 | `internal/agents` | Fluent Bit configuration generator |
 | `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
 | `internal/findings` | Findings model and its OpenSearch store |
+| `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
+| `internal/risk` | Risk event store |
 | `internal/config` | YAML config, validation, password hashing |
 | `internal/api` | REST API, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
@@ -175,8 +225,8 @@ GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 ## Roadmap
 
 1. **Search foundation**: agents, parsing, data models, query language, builder, installers.
-2. **Detect and triage** (this release): scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
-3. **ES depth**: risk-based alerting, asset and identity enrichment, threat intel feeds, posture dashboards, plain-English to query.
+2. **Detect and triage**: scheduled detections in Sigma or Signalith queries, throttling, a findings queue, ATT&CK coverage.
+3. **ES depth** (in progress): risk-based alerting and asset and identity context are in; threat intel feeds, posture dashboards and plain-English to query are next.
 4. **Respond and scale**: investigation cases, response actions, playbooks, multi-node deployments.
 
 ## License

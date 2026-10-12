@@ -10,5 +10,10 @@ mitre: [T1003.008]
 throttle:
   fields: [src_user, dest, process]
   window: 24h
+risk:
+  score: 60
+  objects:
+    - {field: src_user, type: user}
+    - {field: dest, type: system}
 enabled: true
 tags: [credential-access, linux]

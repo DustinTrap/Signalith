@@ -100,6 +100,21 @@ var Models = []Model{
 		},
 	},
 	{
+		Name:        "Risk",
+		Description: "Risk that detections attributed to users and systems; not included in searches unless you ask for datamodel=Risk",
+		Fields: []Field{
+			{Name: "risk_object", Type: "string", Description: "User or system the risk is attributed to"},
+			{Name: "risk_object_type", Type: "string", Description: "Kind of risk object", Examples: []string{"user", "system", "other"}},
+			{Name: "risk_score", Type: "number", Description: "Score after the asset or identity priority multiplier"},
+			{Name: "risk_base_score", Type: "number", Description: "Score the detection assigned before the multiplier"},
+			{Name: "risk_priority", Type: "string", Description: "Priority of the risk object from the asset or identity list"},
+			{Name: "risk_message", Type: "string", Description: "What happened, from the detection title"},
+			{Name: "detection_id", Type: "string", Description: "Detection that added the risk"},
+			{Name: "mitre", Type: "string", Description: "ATT&CK techniques of the detection"},
+			{Name: "mitre_tactic", Type: "string", Description: "ATT&CK tactics of those techniques"},
+		},
+	},
+	{
 		Name:        "Other",
 		Description: "Events no parser recognized yet; still searchable by text",
 		Fields: []Field{
@@ -150,6 +165,10 @@ func FieldsFor(model string) []Field {
 	})
 	return out
 }
+
+// RiskModel is the data model risk events are stored under. The default
+// "all data" search leaves it out so risk events do not mix with raw events.
+const RiskModel = "Risk"
 
 // IndexName returns the daily index an event of a model goes to.
 func IndexName(prefix, model, day string) string {

@@ -13,5 +13,11 @@ mitre: [T1105]
 throttle:
   fields: [dest, process]
   window: 24h
+risk:
+  score: 30
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
+  only: true
 enabled: true
 tags: [command-and-control, windows]

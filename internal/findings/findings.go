@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/assets"
 )
 
 // Statuses a finding moves through.
@@ -31,25 +33,30 @@ var Dispositions = []string{"", "true_positive", "benign_true_positive", "false_
 
 // Finding is one alert.
 type Finding struct {
-	ID          string         `json:"id"`
-	DetectionID string         `json:"detection_id"`
-	Title       string         `json:"title"`
-	Description string         `json:"description,omitempty"`
-	Severity    string         `json:"severity"`
+	ID          string `json:"id"`
+	DetectionID string `json:"detection_id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Severity    string `json:"severity"`
+	// Urgency is severity adjusted by the priority of the assets and
+	// identities involved; the queue sorts and filters on it.
+	Urgency     string         `json:"urgency,omitempty"`
 	Status      string         `json:"status"`
 	Owner       string         `json:"owner,omitempty"`
 	Disposition string         `json:"disposition,omitempty"`
 	MITRE       []string       `json:"mitre,omitempty"`
 	Entities    map[string]any `json:"entities,omitempty"` // user, src, dest, host values from the result
-	Result      map[string]any `json:"result"`             // the result row that fired
-	Query       string         `json:"query"`              // drilldown search
-	Earliest    string         `json:"earliest,omitempty"` // drilldown window, absolute
-	Latest      string         `json:"latest,omitempty"`
-	GroupKey    string         `json:"group_key,omitempty"` // throttle key
-	Created     time.Time      `json:"created"`
-	Updated     time.Time      `json:"updated"`
-	Comments    []Comment      `json:"comments,omitempty"`
-	History     []Change       `json:"history,omitempty"`
+	// Context is what the asset and identity lists say about each entity.
+	Context  map[string]*assets.Context `json:"context,omitempty"`
+	Result   map[string]any             `json:"result"`             // the result row that fired
+	Query    string                     `json:"query"`              // drilldown search
+	Earliest string                     `json:"earliest,omitempty"` // drilldown window, absolute
+	Latest   string                     `json:"latest,omitempty"`
+	GroupKey string                     `json:"group_key,omitempty"` // throttle key
+	Created  time.Time                  `json:"created"`
+	Updated  time.Time                  `json:"updated"`
+	Comments []Comment                  `json:"comments,omitempty"`
+	History  []Change                   `json:"history,omitempty"`
 }
 
 // Comment is an analyst note.
@@ -72,6 +79,7 @@ type Change struct {
 type Filter struct {
 	Status      []string `json:"status,omitempty"`
 	Severity    []string `json:"severity,omitempty"`
+	Urgency     []string `json:"urgency,omitempty"`
 	Owner       string   `json:"owner,omitempty"`
 	DetectionID string   `json:"detection_id,omitempty"`
 	Text        string   `json:"text,omitempty"`
@@ -119,6 +127,11 @@ func (f *Finding) Apply(u Update, author string, now time.Time) bool {
 	}
 	set("status", &f.Status, u.Status)
 	set("owner", &f.Owner, u.Owner)
+	if u.Severity != nil && *u.Severity != f.Severity && f.Urgency != "" {
+		// An analyst's severity call replaces the computed urgency.
+		urg := *u.Severity
+		set("urgency", &f.Urgency, &urg)
+	}
 	set("severity", &f.Severity, u.Severity)
 	set("disposition", &f.Disposition, u.Disposition)
 	if c := strings.TrimSpace(u.Comment); c != "" {
@@ -136,6 +149,16 @@ type Summary struct {
 	Open       int            `json:"open"`
 	ByStatus   map[string]int `json:"by_status"`
 	BySeverity map[string]int `json:"by_severity"` // open findings only
+	ByUrgency  map[string]int `json:"by_urgency"`  // open findings only
+}
+
+// EffectiveUrgency is the urgency, or the severity for findings raised
+// before urgency existed.
+func (f *Finding) EffectiveUrgency() string {
+	if f.Urgency != "" {
+		return f.Urgency
+	}
+	return f.Severity
 }
 
 // Store persists findings.

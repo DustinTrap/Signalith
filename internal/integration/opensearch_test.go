@@ -13,10 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -217,7 +219,19 @@ func TestDetectionsEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs}
+	lists, err := assets.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lists.SetAssets([]byte("host,ip,priority,owner\nweb1,,critical,web team\nWS1,,low,\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lists.SetIdentities([]byte("identity,priority,watchlist\nalice,medium,true\n")); err != nil {
+		t.Fatal(err)
+	}
+	eng.Assets = lists
+	rs := &risk.Store{Client: cl, Prefix: prefix}
+	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Risk: rs, Assets: lists}
 	run := func(id string, want int) []*findings.Finding {
 		t.Helper()
 		d, err := lib.Get(id)
@@ -245,8 +259,18 @@ func TestDetectionsEndToEnd(t *testing.T) {
 		t.Errorf("drilldown %q: %v matched %v", dq, err, res)
 	}
 	run("auth-brute-force", 0) // throttled
-	run("auth-shadow-file-access", 1)
-	run("change-account-created", 1)
+	sh := run("auth-shadow-file-access", 1)
+	// web1 is a critical asset, so a high finding there is critical.
+	if sh[0].Urgency != "critical" || sh[0].Context["dest"] == nil || sh[0].Context["dest"].Owner != "web team" {
+		t.Errorf("shadow finding urgency %q context %v", sh[0].Urgency, sh[0].Context)
+	}
+	run("change-account-created", 0) // risk only
+	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-risk-*/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := sched.Run(ctx, mustGet(t, lib, "change-account-created", "1h")); err != nil || res.Throttled != 1 || res.Risk != 0 {
+		t.Errorf("risk-only rerun = %+v %v", res, err)
+	}
 	ps := run("endpoint-encoded-powershell", 1)
 	if ps[0].Entities["dest"] != "WS1" || ps[0].Entities["user"] != "bob" {
 		t.Errorf("entities = %v", ps[0].Entities)
@@ -287,7 +311,7 @@ tags: [attack.t1059.001]
 		t.Fatalf("after save = %+v %v", got, err)
 	}
 	list, total, err := fs.Search(ctx, findings.Filter{Status: []string{findings.StatusNew}})
-	if err != nil || total != 3 || len(list) != 3 {
+	if err != nil || total != 2 || len(list) != 2 {
 		t.Errorf("new findings = %d %v", total, err)
 	}
 	list, _, err = fs.Search(ctx, findings.Filter{Text: "203.0.113.9"})
@@ -299,16 +323,73 @@ tags: [attack.t1059.001]
 		t.Errorf("title search = %v %v", list, err)
 	}
 	sum, err := fs.Summary(ctx)
-	if err != nil || sum.Open != 4 || sum.ByStatus[findings.StatusInProgress] != 1 || sum.BySeverity["high"] != 2 {
+	if err != nil || sum.Open != 3 || sum.ByStatus[findings.StatusInProgress] != 1 || sum.BySeverity["high"] != 2 || sum.ByUrgency["critical"] != 1 {
 		t.Errorf("summary = %+v %v", sum, err)
 	}
 	if _, err := fs.Get(ctx, "nope"); err != findings.ErrNotFound {
 		t.Errorf("missing = %v", err)
 	}
-	// Event searches never see findings.
+	// Event searches never see findings or risk.
 	if res := run1(t, eng, `*`); res.Matched != 22 {
-		t.Errorf("events matched %d; findings may be leaking into searches", res.Matched)
+		t.Errorf("events matched %d; findings or risk may be leaking into searches", res.Matched)
 	}
+
+	// Risk: brute force 30 on the source, shadow access 60 on alice
+	// (watchlist, x1.5) and web1 (critical, x2), account created 20 on web1
+	// (x2), encoded PowerShell 40 on bob and WS1 (low, x0.5).
+	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-risk-*/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	rr := run1(t, eng, `datamodel=Risk | stats sum(risk_score) as score by risk_object | sort -score`)
+	want := map[string]string{"web1": "160", "alice": "90", "bob": "40", "203.0.113.9": "30", "WS1": "20"}
+	scores := map[string]string{}
+	for _, r := range rr.Rows {
+		scores[fmt.Sprint(r["risk_object"])] = fmt.Sprint(r["score"])
+	}
+	if fmt.Sprint(scores) != fmt.Sprint(want) {
+		t.Errorf("risk by object = %v, want %v", scores, want)
+	}
+	inc := run("risk-threshold-exceeded", 1)
+	if inc[0].Title != "Risk score 160 for system web1" || inc[0].Urgency != "critical" {
+		t.Errorf("risk incident = %q urgency %q", inc[0].Title, inc[0].Urgency)
+	}
+	run("risk-threshold-exceeded", 0) // throttled
+
+	// enrich adds asset context to search results.
+	er := run1(t, eng, `datamodel=Authentication | stats count by dest | enrich dest`)
+	found := false
+	for _, r := range er.Rows {
+		if r["dest"] == "web1" {
+			found = r["dest_priority"] == "critical" && r["dest_owner"] == "web team"
+		}
+	}
+	if !found {
+		t.Errorf("enrich rows = %v", er.Rows)
+	}
+
+	// Findings stored before urgency existed get it when the index is
+	// upgraded.
+	legacy := map[string]any{"id": "legacy", "detection_id": "x", "title": "old", "severity": "low", "status": "new", "created": time.Now().UTC().Format(time.RFC3339)}
+	if err := cl.Do(ctx, http.MethodPut, "/"+prefix+"_findings/_doc/legacy?refresh=true", legacy, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err = fs.Search(ctx, findings.Filter{Urgency: []string{"low"}})
+	if err != nil || len(list) != 1 || list[0].ID != "legacy" {
+		t.Errorf("legacy urgency = %v %v", list, err)
+	}
+}
+
+func mustGet(t *testing.T, lib *detect.Library, id, lookback string) *detect.Detection {
+	t.Helper()
+	d, err := lib.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Lookback = lookback
+	return d
 }
 
 func run1(t *testing.T, eng *search.Engine, q string) *search.Result { return run(t, eng, q) }

@@ -11,5 +11,11 @@ mitre: [T1098]
 throttle:
   fields: [member, object, dest]
   window: 24h
+risk:
+  score: 50
+  objects:
+    - {field: member, type: user}
+    - {field: user, type: user}
+    - {field: dest, type: system}
 enabled: true
 tags: [persistence, privilege-escalation]

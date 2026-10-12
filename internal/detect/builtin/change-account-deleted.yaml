@@ -10,5 +10,11 @@ mitre: [T1531]
 throttle:
   fields: [object, dest]
   window: 24h
+risk:
+  score: 15
+  objects:
+    - {field: user, type: user}
+    - {field: dest, type: system}
+  only: true
 enabled: false
 tags: [impact]

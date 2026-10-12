@@ -61,6 +61,9 @@ func Matches(f *Finding, flt Filter) bool {
 	if len(flt.Severity) > 0 && !slices.Contains(flt.Severity, f.Severity) {
 		return false
 	}
+	if len(flt.Urgency) > 0 && !slices.Contains(flt.Urgency, f.EffectiveUrgency()) {
+		return false
+	}
 	if flt.Owner != "" && f.Owner != flt.Owner {
 		return false
 	}
@@ -110,12 +113,13 @@ func (m *Memory) Exists(_ context.Context, detectionID, groupKey string, since t
 func (m *Memory) Summary(_ context.Context) (*Summary, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := &Summary{ByStatus: map[string]int{}, BySeverity: map[string]int{}}
+	s := &Summary{ByStatus: map[string]int{}, BySeverity: map[string]int{}, ByUrgency: map[string]int{}}
 	for _, f := range m.byID {
 		s.ByStatus[f.Status]++
 		if IsOpen(f.Status) {
 			s.Open++
 			s.BySeverity[f.Severity]++
+			s.ByUrgency[f.EffectiveUrgency()]++
 		}
 	}
 	return s, nil

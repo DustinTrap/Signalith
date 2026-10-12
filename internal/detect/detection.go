@@ -33,7 +33,9 @@ type Detection struct {
 	Severity string   `yaml:"severity" json:"severity"`
 	MITRE    []string `yaml:"mitre,omitempty" json:"mitre,omitempty"` // ATT&CK technique IDs, such as T1110.001
 	Throttle Throttle `yaml:"throttle,omitempty" json:"throttle"`
-	Enabled  bool     `yaml:"enabled" json:"enabled"`
+	// Risk adds risk to the users and systems in each result.
+	Risk    *Risk `yaml:"risk,omitempty" json:"risk,omitempty"`
+	Enabled bool  `yaml:"enabled" json:"enabled"`
 	// Tags are free-form labels for filtering.
 	Tags []string `yaml:"tags,omitempty" json:"tags,omitempty"`
 	// Notes for the analyst: how to triage, known false positives.
@@ -86,6 +88,10 @@ func (d *Detection) Defaults() {
 	if d.Throttle.Window == "" && len(d.Throttle.Fields) > 0 {
 		d.Throttle.Window = "1h"
 	}
+	if d.Risk != nil && d.Risk.Only && d.Throttle.Window == "" {
+		// Overlapping runs would otherwise count the same risk twice.
+		d.Throttle.Window = d.Lookback
+	}
 	for i, t := range d.MITRE {
 		d.MITRE[i] = strings.ToUpper(strings.TrimSpace(t))
 	}
@@ -125,6 +131,9 @@ func (d *Detection) Validate() error {
 		if !mitrePattern.MatchString(t) {
 			p = append(p, fmt.Sprintf("mitre %q must be a technique ID like T1110 or T1110.001", t))
 		}
+	}
+	if d.Risk != nil {
+		p = append(p, d.Risk.problems()...)
 	}
 	if d.Throttle.Window != "" {
 		if _, err := ParseDuration(d.Throttle.Window); err != nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/query"
 )
 
@@ -267,5 +268,51 @@ func TestWhereWildcardAndIn(t *testing.T) {
 		if got := evalExpr(q.Commands[0].(*query.Where).Expr, r); got != want {
 			t.Errorf("%s = %v, want %v", src, got, want)
 		}
+	}
+}
+
+func TestEnrichAddsAssetAndIdentityContext(t *testing.T) {
+	a, _ := assets.NewStore("")
+	if _, err := a.SetAssets([]byte("host,owner,priority,category\nDC01,it-ops,critical,dc|pci\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetIdentities([]byte("identity,name,priority,watchlist\nbob,Bob Smith,high,true\n")); err != nil {
+		t.Fatal(err)
+	}
+	fs := &fakeStore{responses: []string{`{"hits":{"total":{"value":3},"hits":[
+		{"_source":{"@timestamp":"2026-10-11T10:00:00Z","user":"bob","dest":"DC01","message":"x"}},
+		{"_source":{"@timestamp":"2026-10-11T09:00:00Z","user":"bob","dest":"WS9","message":"y"}},
+		{"_source":{"@timestamp":"2026-10-11T08:00:00Z","user":"amy","dest":"dc01.corp.local","message":"z"}}]}}`}}
+	e := &Engine{Store: fs, Assets: a}
+	res, err := e.Run(context.Background(), `* | enrich | where dest_priority="critical" | stats count, dc(user) as users by dest_owner`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DC01 and dc01.corp.local are the same asset; WS9 is unknown.
+	if len(res.Rows) != 1 || res.Rows[0]["dest_owner"] != "it-ops" || res.Rows[0]["count"] != int64(2) || res.Rows[0]["users"] != int64(2) {
+		t.Errorf("rows = %v", res.Rows)
+	}
+	if fs.bodies[0]["size"] != 10000 {
+		t.Errorf("enrich before stats must fetch all events, size = %v", fs.bodies[0]["size"])
+	}
+
+	fs = &fakeStore{responses: []string{`{"hits":{"total":{"value":1},"hits":[{"_source":{"@timestamp":"2026-10-11T10:00:00Z","user":"bob","dest":"DC01","message":"x"}}]}}`}}
+	e = &Engine{Store: fs, Assets: a}
+	res, err = e.Run(context.Background(), `* | enrich user | table user, user_watchlist, dest_owner`)
+	if err != nil || res.Rows[0]["user_watchlist"] != "true" || res.Rows[0]["dest_owner"] != nil {
+		t.Errorf("enrich user = %v %v", res.Rows, err)
+	}
+	if _, err := (&Engine{Store: fs}).Run(context.Background(), `* | enrich`); err == nil {
+		t.Error("enrich without lists should explain it is not configured")
+	}
+}
+
+func TestDefaultPatternExcludesRisk(t *testing.T) {
+	e := &Engine{Opt: Options{IndexPrefix: "sig"}}
+	if got := e.IndexPattern(&query.Query{}); got != "sig-*,-sig-risk-*" {
+		t.Errorf("pattern = %s", got)
+	}
+	if got := e.IndexPattern(&query.Query{Datamodel: "Risk"}); got != "sig-risk-*" {
+		t.Errorf("risk pattern = %s", got)
 	}
 }

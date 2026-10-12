@@ -12,8 +12,10 @@
   <nav>
     <button class="tab active" data-page="search">Search</button>
     <button class="tab" data-page="findings">Findings <span id="open-count" class="count-badge hidden"></span></button>
+    <button class="tab" data-page="risk">Risk</button>
     <button class="tab" data-page="detections">Detections</button>
     <button class="tab" data-page="coverage">ATT&amp;CK coverage</button>
+    <button class="tab" data-page="assets">Assets &amp; identities</button>
     <button class="tab" data-page="data">Add data</button>
     <button class="tab" data-page="health">Health</button>
     <button class="tab" data-page="help">Query guide</button>
@@ -122,8 +124,8 @@
         <option value="resolved,closed">Resolved or closed</option>
         <option value="">Any status</option>
       </select>
-      <select id="f-severity" title="Severity">
-        <option value="">Any severity</option>
+      <select id="f-severity" title="Urgency: severity adjusted for how critical the assets and users are">
+        <option value="">Any urgency</option>
         <option value="critical">Critical</option>
         <option value="high,critical">High and above</option>
         <option value="medium,high,critical">Medium and above</option>
@@ -161,6 +163,60 @@
     <div class="split">
       <div id="f-list" class="results"></div>
       <aside id="f-detail" class="detail hidden"></aside>
+    </div>
+  </section>
+
+  <!-- Risk -->
+  <section id="page-risk" class="page">
+    <div class="page-head">
+      <h2>Risk</h2>
+      <div class="toolbar">
+        <select id="r-type">
+          <option value="">Users and systems</option>
+          <option value="user">Users</option>
+          <option value="system">Systems</option>
+          <option value="other">Other</option>
+        </select>
+        <select id="r-since">
+          <option value="24h" selected>Last 24 hours</option>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+        </select>
+        <button id="r-refresh">Refresh</button>
+      </div>
+    </div>
+    <p class="muted">Detections add risk to the users and systems in their results. Scores are multiplied by asset and identity priority (critical &times;2, high or watchlisted &times;1.5, low &times;0.5). The risk incident detections raise a finding when an object passes 100 in a day or spans three ATT&amp;CK tactics in a week.</p>
+    <div class="split">
+      <div id="r-list" class="results"></div>
+      <aside id="r-detail" class="detail hidden"></aside>
+    </div>
+  </section>
+
+  <!-- Assets and identities -->
+  <section id="page-assets" class="page">
+    <h2>Assets &amp; identities</h2>
+    <p class="muted">Tell Signalith which hosts and accounts matter. Priority raises the urgency of findings and multiplies risk; owner and category show next to findings and in search with <code>| enrich</code>. Export these from your CMDB or directory as CSV. Separate multiple values in one cell with <code>|</code>.</p>
+    <div class="lists">
+      <div class="panel" data-kind="assets">
+        <div class="detail-head"><h3>Assets <span class="muted l-count"></span></h3><a class="button-link" href="/api/lookups/assets.csv">Download CSV</a></div>
+        <p class="muted small">Columns: <code>host, ip, cidr, owner, priority, category, bunit, location</code>. Each row needs a host, ip or cidr. Priority is low, medium, high or critical.</p>
+        <pre class="code small">host,ip,cidr,owner,priority,category,bunit,location
+DC01.corp.local|DC01,10.0.0.10,,it-ops,critical,domain_controller|pci,IT,HQ
+,,10.20.0.0/16,,low,workstation,Corp,</pre>
+        <div class="row"><input type="file" accept=".csv,text/csv" class="l-file"><button class="primary l-upload">Upload and replace</button></div>
+        <div class="l-msg"></div>
+        <div class="l-table results"></div>
+      </div>
+      <div class="panel" data-kind="identities">
+        <div class="detail-head"><h3>Identities <span class="muted l-count"></span></h3><a class="button-link" href="/api/lookups/identities.csv">Download CSV</a></div>
+        <p class="muted small">Columns: <code>identity, name, email, manager, priority, category, bunit, watchlist</code>. List every username form in identity, for example <code>bob|CORP\bob|bob@corp.com</code>. Watchlisted users count as high priority.</p>
+        <pre class="code small">identity,name,email,manager,priority,category,bunit,watchlist
+bob|CORP\bob,Bob Smith,bob@corp.com,alice,high,admin,IT,true
+svc_backup,Backup service,,it-ops,critical,service,IT,</pre>
+        <div class="row"><input type="file" accept=".csv,text/csv" class="l-file"><button class="primary l-upload">Upload and replace</button></div>
+        <div class="l-msg"></div>
+        <div class="l-table results"></div>
+      </div>
     </div>
   </section>
 
@@ -239,7 +295,7 @@
     <p>A query is a search followed by commands joined with <code>|</code>. The search picks events; each command reshapes the results.</p>
     <h3>Search</h3>
     <table class="ref">
-      <tr><td><code>datamodel=Authentication</code></td><td>Only events of one data model (Authentication, Endpoint, Network_Traffic, Change, Other)</td></tr>
+      <tr><td><code>datamodel=Authentication</code></td><td>Only events of one data model (Authentication, Endpoint, Network_Traffic, Change, Other, Risk)</td></tr>
       <tr><td><code>user=admin</code></td><td>Field equals a value (case-insensitive)</td></tr>
       <tr><td><code>user=adm*</code></td><td>Wildcards with <code>*</code></td></tr>
       <tr><td><code>dest_port&gt;=1024</code></td><td>Comparisons: <code>= != &lt; &lt;= &gt; &gt;=</code></td></tr>
@@ -258,6 +314,7 @@
       <tr><td><code>| head 10</code></td><td>Keep the first N rows</td></tr>
       <tr><td><code>| table _time, user, src</code></td><td>Choose columns</td></tr>
       <tr><td><code>| rename src as source_ip</code></td><td>Rename columns</td></tr>
+      <tr><td><code>| enrich</code></td><td>Add owner, priority and category from the asset and identity lists, as <code>dest_owner</code>, <code>user_priority</code> and so on</td></tr>
     </table>
     <h3>Tips</h3>
     <ul>
@@ -270,5 +327,6 @@
 </main>
 <script src="app.js"></script>
 <script src="detections.js"></script>
+<script src="risk.js"></script>
 </body>
 </html>

@@ -352,7 +352,9 @@ function renderResult(res) {
   if (res.kind === 'events') {
     // Events read best as time, a few key fields, then the raw text.
     const preferred = ['_time', 'host', 'sourcetype', 'action', 'user', 'src', 'dest', 'process_name', 'signature'];
-    cols = preferred.filter((c) => cols.includes(c)).concat(cols.includes('_raw') ? ['_raw'] : []);
+    // Columns added by | enrich follow the field they describe.
+    const enriched = (c) => cols.filter((x) => x.startsWith(c + '_') && /_(name|owner|priority|category|watchlist)$/.test(x));
+    cols = preferred.filter((c) => cols.includes(c)).flatMap((c) => [c, ...enriched(c)]).concat(cols.includes('_raw') ? ['_raw'] : []);
   }
   if (!rows.length) {
     $('results').replaceChildren(el('div', { class: 'muted', style: 'padding:12px' }, 'No results. Try a longer time range, or check the Health page to confirm data is arriving.'));
