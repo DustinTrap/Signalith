@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -216,6 +217,50 @@ func TestAgentConfig(t *testing.T) {
 	for _, want := range []string{"winevtlog", "Microsoft-Windows-Sysmon/Operational", "Bearer tok-0123456789abcdef", "Port             8080", "Header_Tag"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("windows config missing %q:\n%s", want, cfg)
+		}
+	}
+}
+
+func TestAgentConfigServerAddress(t *testing.T) {
+	ts, _ := newTestServer(t)
+	// The default public_url is http://127.0.0.1:8080, which only this
+	// machine can reach; the response says so.
+	_, body := do(t, ts, "GET", "/api/agents/config?os=linux", "", true)
+	if body["server_url"] != "http://127.0.0.1:8080" || body["server_loopback"] != true {
+		t.Errorf("default address: server_url = %v, server_loopback = %v", body["server_url"], body["server_loopback"])
+	}
+
+	q := url.Values{"os": {"linux"}, "server": {"http://192.168.1.20:9000"}}
+	code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
+	cfg, _ := body["config"].(string)
+	if code != http.StatusOK || !strings.Contains(cfg, "Host             192.168.1.20\n") || !strings.Contains(cfg, "Port             9000\n") {
+		t.Fatalf("override: %d %v", code, body)
+	}
+	if body["server_url"] != "http://192.168.1.20:9000" || body["server_loopback"] != false {
+		t.Errorf("override: server_url = %v, server_loopback = %v", body["server_url"], body["server_loopback"])
+	}
+
+	for _, bad := range []string{
+		"http://192.168.1.20:8080\n[OUTPUT]\n    Name stdout\n    Match *",
+		"http://192.168.1.20:8080\r\n    Header X-Evil 1",
+		"http://192.168.1.20%0A:8080",
+		" http://192.168.1.20:8080",
+		"192.168.1.20:8080",
+		"ftp://192.168.1.20",
+		"http://admin:pw@192.168.1.20:8080",
+		"http://192.168.1.20:8080/api",
+		"http://192.168.1.20:8080?x=1",
+		"http://192.168.1.20:70000",
+		"http://" + strings.Repeat("a", 5000) + ":8080",
+	} {
+		q := url.Values{"os": {"windows"}, "server": {bad}}
+		code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
+		msg, _ := body["error"].(string)
+		if code != http.StatusBadRequest || msg == "" || body["field"] != "server" || body["config"] != nil {
+			t.Errorf("server=%q: %d %v", bad, code, body)
+		}
+		if strings.ContainsAny(msg, "\r\n") {
+			t.Errorf("server=%q: error has a line break: %q", bad, msg)
 		}
 	}
 }

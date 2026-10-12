@@ -58,6 +58,11 @@ Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: 
 Fluent Bit, paste the generated configuration, restart it. The configuration already
 contains the server address and ingest token.
 
+Agents on other machines must send to an address they can reach, such as
+`http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
+(or set `server.public_url` or `SIGNALITH_PUBLIC_URL`), and allow the port, 8080 by default,
+through this computer's firewall.
+
 Supported sources in Phase 1:
 
 | Source | Data model |
@@ -88,7 +93,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
-| `server.public_url` | from `listen` | URL agents use; goes into generated agent configs |
+| `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials |
@@ -116,8 +121,8 @@ Unknown keys are rejected, so typos do not silently do nothing.
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
-`SIGNALITH_ASSISTANT_API_KEY`).
+`SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
+`SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_ASSISTANT_API_KEY`).
 
 ## Detections and findings
 

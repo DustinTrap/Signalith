@@ -429,15 +429,26 @@ func (s *Server) handleLanguage(w http.ResponseWriter, r *http.Request) {
 
 // ---- agents and health ----
 
+// handleAgentConfig writes a Fluent Bit config. server=<url> replaces
+// server.public_url as the address agents send to, for when the configured
+// one (often localhost) is not reachable from the hosts being set up.
 func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
+	server := s.Config.Server.PublicURL
+	if o := v.Get("server"); o != "" {
+		if _, err := agents.ParseServerURL(o); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "server"})
+			return
+		}
+		server = o
+	}
 	token := ""
 	if len(s.Config.Ingest.Tokens) > 0 {
 		token = s.Config.Ingest.Tokens[0]
 	}
 	a, err := agents.Generate(agents.Options{
 		OS:          v.Get("os"),
-		ServerURL:   s.Config.Server.PublicURL,
+		ServerURL:   server,
 		Token:       token,
 		LinuxSource: v.Get("source"),
 		Sysmon:      v.Get("sysmon") == "true",

@@ -3,9 +3,14 @@
 package agents
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Options select what an agent collects.
@@ -22,17 +27,103 @@ type Options struct {
 
 // Agent is a generated agent setup.
 type Agent struct {
-	OS         string   `json:"os"`
-	ConfigPath string   `json:"config_path"`
-	Config     string   `json:"config"`
-	Steps      []string `json:"steps"`
+	OS         string `json:"os"`
+	ConfigPath string `json:"config_path"`
+	Config     string `json:"config"`
+	// ServerURL is the address the config sends to, and ServerLoopback
+	// says it only works on the Signalith machine itself (localhost).
+	ServerURL      string   `json:"server_url"`
+	ServerLoopback bool     `json:"server_loopback"`
+	Steps          []string `json:"steps"`
+}
+
+var hostLabel = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$`)
+
+// ParseServerURL checks an address agents send to: http or https, a host
+// name or IP address and an optional port, nothing else. It is strict
+// because the host and port are written into a config file.
+func ParseServerURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, errors.New("address is empty; use one such as http://192.168.1.20:8080")
+	}
+	if len(raw) > 300 {
+		return nil, errors.New("address is too long")
+	}
+	for _, r := range raw {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return nil, errors.New("address must not contain spaces or line breaks")
+		}
+	}
+	if strings.ContainsAny(raw, "?#") {
+		return nil, errors.New("address must not include ? or #")
+	}
+	if l := strings.ToLower(raw); !strings.HasPrefix(l, "http://") && !strings.HasPrefix(l, "https://") {
+		return nil, errors.New("address needs http:// or https:// at the start")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, errors.New("address is not valid; use one such as http://192.168.1.20:8080")
+	}
+	if u.User != nil {
+		return nil, errors.New("address must not include a user name or password")
+	}
+	if u.Host == "" {
+		return nil, errors.New("address needs a host name or IP address, such as http://192.168.1.20:8080")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return nil, errors.New("address must not include a path; agents always send to /api/ingest")
+	}
+	if port := u.Port(); port != "" || strings.HasSuffix(u.Host, ":") {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+			return nil, errors.New("port must be a number from 1 to 65535")
+		}
+	}
+	if host := u.Hostname(); !validHost(host, strings.HasPrefix(u.Host, "[")) {
+		return nil, fmt.Errorf("%q is not a host name or IP address", host)
+	}
+	return u, nil
+}
+
+// validHost accepts an IPv4 address, a bracketed IPv6 address (no zone) or
+// a DNS name made of letters, digits, - and _. A name ending in a number
+// must be a whole IPv4 address, so 127.1 or 300.1.1.1 are refused.
+func validHost(host string, bracketed bool) bool {
+	if bracketed {
+		return strings.Contains(host, ":") && net.ParseIP(host) != nil
+	}
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, l := range labels {
+		if !hostLabel.MatchString(l) {
+			return false
+		}
+	}
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		ip := net.ParseIP(host)
+		return ip != nil && ip.To4() != nil
+	}
+	return true
+}
+
+// IsLoopback reports whether only the Signalith machine itself can use the
+// address: localhost, 127.0.0.0/8 or ::1 (and 0.0.0.0 or ::, which mean
+// "this machine" too).
+func IsLoopback(u *url.URL) bool {
+	h := strings.ToLower(u.Hostname())
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
 // Generate returns a Fluent Bit config and install steps.
 func Generate(o Options) (*Agent, error) {
-	u, err := url.Parse(o.ServerURL)
-	if err != nil || u.Host == "" {
-		return nil, fmt.Errorf("server.public_url %q is not a valid URL; set it in the config file", o.ServerURL)
+	u, err := ParseServerURL(o.ServerURL)
+	if err != nil {
+		return nil, fmt.Errorf("server address %q: %w", o.ServerURL, err)
 	}
 	if o.Token == "" {
 		return nil, fmt.Errorf("no ingest token configured; add one under ingest.tokens")
@@ -50,7 +141,7 @@ func Generate(o Options) (*Agent, error) {
 	}
 
 	var b strings.Builder
-	a := &Agent{OS: o.OS}
+	a := &Agent{OS: o.OS, ServerURL: u.Scheme + "://" + u.Host, ServerLoopback: IsLoopback(u)}
 	switch o.OS {
 	case "linux":
 		a.ConfigPath = "/etc/fluent-bit/fluent-bit.conf"

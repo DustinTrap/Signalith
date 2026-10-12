@@ -2,6 +2,8 @@
 # variables in docker-compose.yml.
 server:
   listen: 0.0.0.0:8080
+  # Agents on other machines need this computer's address instead; set
+  # SIGNALITH_PUBLIC_URL in docker-compose.yml or use the Add data page.
   public_url: http://localhost:8080
 opensearch:
   url: http://opensearch:9200
