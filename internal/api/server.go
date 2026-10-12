@@ -31,6 +31,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
+	"github.com/jrsamsanchez/signalith/internal/syslog"
 )
 
 // Backend is what the API needs from OpenSearch beyond searching.
@@ -66,6 +67,9 @@ type Server struct {
 	UI        fs.FS // web UI files; nil disables the UI
 	Log       *slog.Logger
 	Version   string
+
+	// Syslog is the syslog receiver, for its stats; nil when it is off.
+	Syslog *syslog.Receiver
 
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
 	Sessions *auth.Sessions
@@ -452,7 +456,7 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "config_file": s.Config.Path()}
+	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.Config.Path()}
 	if status, err := s.Backend.Health(ctx); err != nil {
 		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": s.Config.OpenSearch.URL}
 	} else {

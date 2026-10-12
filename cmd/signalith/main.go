@@ -33,6 +33,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/web"
 )
 
@@ -117,6 +118,8 @@ func cmdInit(args []string) error {
 	osURL := fs.String("opensearch", "http://127.0.0.1:9200", "OpenSearch URL")
 	osUser := fs.String("opensearch-user", "", "OpenSearch username")
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
+	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
+	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	fs.Parse(args)
 
@@ -128,6 +131,10 @@ func cmdInit(args []string) error {
 	c.Server.PublicURL = *publicURL
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
+	// New installs receive syslog right away; existing configs without a
+	// syslog section keep it off.
+	c.Syslog.UDP = *syslogUDP
+	c.Syslog.TCP = *syslogTCP
 	pw := *password
 	generated := pw == ""
 	if generated {
@@ -151,8 +158,22 @@ func cmdInit(args []string) error {
 	if generated {
 		fmt.Printf("  Password:  %s   (shown once; change it with: signalith passwd)\n", pw)
 	}
+	if s := syslogSummary(c); s != "" {
+		fmt.Printf("  Syslog:    %s\n", s)
+	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
+}
+
+// syslogSummary describes the syslog listeners, or "" when syslog is off.
+func syslogSummary(c *config.Config) string {
+	var parts []string
+	for _, l := range []struct{ name, addr string }{{"UDP", c.Syslog.UDP}, {"TCP", c.Syslog.TCP}, {"TLS", c.Syslog.TLS}} {
+		if l.addr != "" {
+			parts = append(parts, l.name+" "+l.addr)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func cmdValidate(args []string) error {
@@ -194,6 +215,15 @@ func cmdValidate(args []string) error {
 			}
 		}
 		fmt.Printf("%d threat intel feeds configured, %d enabled.\n", len(feeds), on)
+	}
+	if s := syslogSummary(c); s != "" {
+		allow := "any sender"
+		if len(c.Syslog.Allow) > 0 {
+			allow = strings.Join(c.Syslog.Allow, ", ")
+		}
+		fmt.Printf("Syslog receiver on %s, accepting %s.\n", s, allow)
+	} else {
+		fmt.Println("Syslog receiver is off (set syslog.udp or syslog.tcp to turn it on).")
 	}
 	if boards, err := dashboards.NewStore(c.DashboardsDir()); err != nil {
 		fmt.Printf("Warning: dashboards folder %s: %v\n", c.DashboardsDir(), err)
@@ -408,7 +438,40 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cl := newStore(c)
+	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix}
+	// Closed once the index template is in place, so syslog does not
+	// create the day's first indices with the wrong field types.
+	templateReady := make(chan struct{})
+	var receiver *syslog.Receiver
+	if c.Syslog.Enabled() {
+		receiver = syslog.New(syslog.Config{
+			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
+			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
+			Allow: c.Syslog.AllowList(), Ready: templateReady,
+		}, pipeline, log)
+		if err := receiver.Start(ctx); err != nil {
+			return err
+		}
+		// On the way out: stop receiving and write out what is queued.
+		defer func() {
+			cancel()
+			receiver.Wait()
+			s := receiver.Stats()
+			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "rejected", s.Rejected)
+		}()
+		var addrs []any
+		for _, l := range receiver.Stats().Listeners {
+			addrs = append(addrs, l.Protocol, l.Address)
+		}
+		allow := "any sender"
+		if len(c.Syslog.Allow) > 0 {
+			allow = strings.Join(c.Syslog.Allow, ", ")
+		}
+		log.Info("syslog receiver listening", append(addrs, "allow", allow)...)
+	}
 	eng := newEngine(c, cl)
 	lists, err := assets.NewStore(c.LookupsDir())
 	if err != nil {
@@ -449,7 +512,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	srv := &api.Server{
 		Config:     c,
 		Engine:     eng,
-		Pipeline:   &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix},
+		Pipeline:   pipeline,
+		Syslog:     receiver,
 		Backend:    cl,
 		Detections: lib,
 		Scheduler:  sched,
@@ -468,6 +532,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
 		}
+		close(templateReady)
 		if err := ibackend.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
