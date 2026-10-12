@@ -69,8 +69,8 @@ var (
 	bodyTimeout = time.Minute
 	// uploadTimeout is how long a signed-in upload (asset lists,
 	// indicators) may take to arrive over a slow link. Agent batches have
-	// their own, shorter, deadline (ingestReadTimeout in server.go)
-	// because each holds one of the pipeline's slots while it arrives.
+	// their own deadlines, which stretch while a batch keeps arriving
+	// (ingestReadTimeout and the rest in server.go).
 	uploadTimeout = 10 * time.Minute
 )
 

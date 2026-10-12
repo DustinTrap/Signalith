@@ -6,11 +6,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/api"
+	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
@@ -162,5 +168,66 @@ func TestIngestLimitsEndToEnd(t *testing.T) {
 	}
 	if r := run(t, eng, "index="+prefix+"-other-* app_user=u25 | stats count"); r.Rows[0]["count"] != int64(3) {
 		t.Errorf("index= inside the prefix: %v", r.Rows)
+	}
+}
+
+// TestIngestOverHTTPWhileSendersAreSlow sends agent batches through the
+// real handler into OpenSearch while more slow senders than there are
+// pipeline slots trickle bodies they never finish: the batches are
+// stored at once, since a slow sender holds no slot.
+func TestIngestOverHTTPWhileSendersAreSlow(t *testing.T) {
+	cl, eng, prefix := setup(t)
+	cfg := config.Default()
+	cfg.OpenSearch.IndexPrefix = prefix
+	cfg.Ingest.Tokens = []string{"integration-token-0123"}
+	h, _ := config.HashPassword("ingest-test-pass")
+	cfg.Auth.AdminPasswordHash = h
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer((&api.Server{Config: cfg, Engine: eng, Backend: cl,
+		Pipeline: &ingest.Pipeline{Store: cl, Prefix: prefix, MaxConcurrent: 2},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler())
+	defer srv.Close()
+	head := func(n int) string {
+		return "POST /api/ingest HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer integration-token-0123\r\nX-Signalith-Tag: linux.auth\r\n" +
+			"Content-Length: " + fmt.Sprint(n) + "\r\n\r\n"
+	}
+	var slow []net.Conn
+	for range 5 {
+		c, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		io.WriteString(c, head(8_000_000)+`[{"log":"`)
+		slow = append(slow, c)
+	}
+	time.Sleep(200 * time.Millisecond)
+	now := time.Now()
+	for i := range 3 {
+		body := fmt.Sprintf(`[{"log":%q}]`, syslogTime(now.Add(-time.Minute))+fmt.Sprintf(" web1 sshd[%d]: Failed password for slowtest from 192.0.2.77 port 1 ssh2", i))
+		req, _ := http.NewRequest("POST", srv.URL+"/api/ingest", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer integration-token-0123")
+		req.Header.Set("X-Signalith-Tag", "linux.auth")
+		start := time.Now()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || time.Since(start) > 5*time.Second {
+			t.Fatalf("batch %d while senders were slow: %d %s after %v", i, resp.StatusCode, b, time.Since(start))
+		}
+	}
+	if err := cl.Do(context.Background(), http.MethodPost, "/"+prefix+"-*/_refresh", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if r := run(t, eng, `datamodel=Authentication user=slowtest | stats count`); r.Rows[0]["count"] != int64(3) {
+		t.Errorf("stored: %v", r.Rows)
+	}
+	for _, c := range slow {
+		c.Close()
 	}
 }

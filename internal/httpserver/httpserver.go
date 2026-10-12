@@ -1,11 +1,13 @@
 // Package httpserver builds the web server Signalith serves its UI, API
-// and agent ingest on, with timeouts and connection limits so slow, idle
-// or numerous clients cannot tie it up before anyone has signed in.
+// and agent ingest on, with timeouts and connection and request limits so
+// slow, idle or numerous clients cannot tie it up before anyone has signed
+// in.
 package httpserver
 
 import (
 	"bytes"
 	"crypto/tls"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -14,6 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 )
 
 // Timeouts and limits for every connection. Request bodies have their own
@@ -40,18 +44,25 @@ const (
 	// some memory, so this keeps a flood of connections from using up
 	// either while leaving room for thousands of agents.
 	DefaultMaxConnections = 10000
+	// MaxStreamsPerConnection is how many requests one HTTP/2 connection
+	// (HTTPS only) may have in progress at once. Go's default is 250, which
+	// would let each counted connection carry hundreds of requests; a
+	// browser page needs far fewer, and more simply wait their turn.
+	MaxStreamsPerConnection = 32
 )
 
-// New returns a server for handler with Signalith's timeouts. Use Serve to
-// run it on a listener from Listen.
-func New(handler http.Handler, logger *slog.Logger) *http.Server {
+// New returns a server for handler with Signalith's timeouts, and with
+// lim applied to requests in progress. Use Serve to run it on a listener
+// from Listen with the same lim.
+func New(handler http.Handler, lim Limits, logger *slog.Logger) *http.Server {
 	return &http.Server{
-		Handler:           handler,
+		Handler:           limitRequests(handler, lim, logger),
 		ReadHeaderTimeout: ReadHeaderTimeout,
 		IdleTimeout:       IdleTimeout,
 		WriteTimeout:      WriteTimeout,
 		MaxHeaderBytes:    MaxHeaderBytes,
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+		HTTP2:             &http.HTTP2Config{MaxConcurrentStreams: MaxStreamsPerConnection},
 		ErrorLog:          errorLog(logger),
 	}
 }
@@ -65,17 +76,27 @@ func Serve(hs *http.Server, ln net.Listener, certFile, keyFile string) error {
 	return hs.Serve(ln)
 }
 
-// Limits caps a listener's open connections.
+// Limits caps a listener's open connections and a server's requests in
+// progress.
 type Limits struct {
 	// Max is the most connections open at once; zero uses
 	// DefaultMaxConnections. Beyond it, new clients wait for a free slot.
+	// It also caps requests in progress, which only matters over HTTP/2,
+	// where one connection carries many: beyond it, requests get 503.
 	Max int
-	// PerClient is the most connections open at once from one address;
-	// zero uses a tenth of Max, at least 16. Beyond it, new connections
-	// from that address are closed at once, so one client cannot take
-	// every slot. Connections from this machine (loopback) are not
-	// counted, so a reverse proxy on the same machine is not held back.
+	// PerClient is the most connections, and the most requests in
+	// progress, from one client; zero uses a tenth of Max, at least 16.
+	// Beyond it, new connections from that client are closed at once (and
+	// its extra HTTP/2 requests get 503), so one client cannot take every
+	// slot. A client is one IPv4 address or one IPv6 /64 network (see
+	// clientaddr.Key). Connections from this machine (loopback) and from
+	// Shared networks are not limited per client, so a reverse proxy is
+	// not held back.
 	PerClient int
+	// Shared lists networks whose addresses stand for many clients, such
+	// as a reverse proxy, load balancer or NAT gateway on another machine
+	// (server.shared_addresses).
+	Shared []netip.Prefix
 }
 
 func (l Limits) withDefaults() Limits {
@@ -95,6 +116,15 @@ func Listen(addr string, lim Limits, logger *slog.Logger) (net.Listener, error) 
 		return nil, err
 	}
 	return Limit(ln, lim, logger), nil
+}
+
+// client returns what a connection or request from addr is counted
+// under, and false when it is not limited per client.
+func (l Limits) client(addr netip.Addr) (netip.Addr, bool) {
+	if clientaddr.Shared(addr, l.Shared) {
+		return netip.Addr{}, false
+	}
+	return clientaddr.Key(addr), true
 }
 
 // Limit wraps ln so it holds at most lim connections open.
@@ -143,16 +173,27 @@ func (l *limitListener) Accept() (net.Conn, error) {
 			<-l.slots
 			return nil, err
 		}
-		from := remoteAddr(c)
-		if l.admit(from) {
-			return &limitConn{Conn: c, l: l, from: from}, nil
+		from := clientaddr.Of(c.RemoteAddr())
+		key, limited := l.lim.client(from)
+		if !limited || l.admit(key) {
+			return &limitConn{Conn: c, l: l, key: key, limited: limited}, nil
 		}
 		<-l.slots
 		c.Close()
 		n := l.refused.Add(1)
-		l.warn(&l.lastRefused, "connection refused: this address has too many connections open (logged at most once a minute)",
-			"client", from.String(), "limit", l.lim.PerClient, "refused_so_far", n)
+		l.warn(&l.lastRefused, "connection refused: this client has too many connections open. If many clients reach Signalith through this address "+
+			"(a proxy, load balancer or NAT), list it under server.shared_addresses (logged at most once a minute)",
+			"client", from.String(), "counted_as", countedAs(key), "limit", l.lim.PerClient, "refused_so_far", n)
 	}
+}
+
+// countedAs describes a client key for the log: an IPv4 address, or an
+// IPv6 /64 network.
+func countedAs(key netip.Addr) string {
+	if key.Is6() {
+		return netip.PrefixFrom(key, clientaddr.IPv6Prefix).String()
+	}
+	return key.String()
 }
 
 func (l *limitListener) Close() error {
@@ -160,65 +201,137 @@ func (l *limitListener) Close() error {
 	return l.Listener.Close()
 }
 
-// admit counts a new connection from an address, or reports false when
-// that address already has PerClient open.
-func (l *limitListener) admit(from netip.Addr) bool {
-	if from.IsLoopback() {
-		return true
-	}
+// admit counts a new connection from a client, or reports false when
+// that client already has PerClient open.
+func (l *limitListener) admit(key netip.Addr) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.open[from] >= l.lim.PerClient {
+	if l.open[key] >= l.lim.PerClient {
 		return false
 	}
-	l.open[from]++
+	l.open[key]++
 	return true
 }
 
-func (l *limitListener) release(from netip.Addr) {
+func (l *limitListener) release(key netip.Addr, limited bool) {
 	<-l.slots
-	if from.IsLoopback() {
+	if !limited {
 		return
 	}
 	l.mu.Lock()
-	if l.open[from] <= 1 {
-		delete(l.open, from)
+	if l.open[key] <= 1 {
+		delete(l.open, key)
 	} else {
-		l.open[from]--
+		l.open[key]--
 	}
 	l.mu.Unlock()
 }
 
-// warn logs at most once a minute per kind of message, so a flood of
-// connections cannot flood the log too.
 func (l *limitListener) warn(last *atomic.Int64, msg string, args ...any) {
-	now := time.Now().UnixNano()
-	prev := last.Load()
-	if l.log == nil || (prev != 0 && now-prev < int64(time.Minute)) || !last.CompareAndSwap(prev, now) {
-		return
-	}
-	l.log.Warn(msg, args...)
+	warnOnceAMinute(l.log, last, msg, args...)
 }
 
-func remoteAddr(c net.Conn) netip.Addr {
-	if a, ok := c.RemoteAddr().(*net.TCPAddr); ok {
-		return a.AddrPort().Addr().Unmap().WithZone("")
+// warnOnceAMinute logs at most once a minute per kind of message (one
+// last per kind), so a flood of connections cannot flood the log too.
+func warnOnceAMinute(logger *slog.Logger, last *atomic.Int64, msg string, args ...any) {
+	now := time.Now().UnixNano()
+	prev := last.Load()
+	if logger == nil || (prev != 0 && now-prev < int64(time.Minute)) || !last.CompareAndSwap(prev, now) {
+		return
 	}
-	ap, _ := netip.ParseAddrPort(c.RemoteAddr().String())
-	return ap.Addr().Unmap().WithZone("")
+	logger.Warn(msg, args...)
 }
 
 type limitConn struct {
 	net.Conn
-	l    *limitListener
-	from netip.Addr
-	once sync.Once
+	l       *limitListener
+	key     netip.Addr
+	limited bool
+	once    sync.Once
 }
 
 func (c *limitConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(func() { c.l.release(c.from) })
+	c.once.Do(func() { c.l.release(c.key, c.limited) })
 	return err
+}
+
+// limitRequests answers 503 to a request when its client already has
+// PerClient requests in progress, or the server Max. Over HTTP/1.1 a
+// connection carries one request at a time, so the connection limits
+// already hold and this never triggers; over HTTP/2 one connection can
+// carry many, each with its own goroutine and buffers, and this keeps
+// those within the same budget.
+func limitRequests(next http.Handler, lim Limits, logger *slog.Logger) http.Handler {
+	lim = lim.withDefaults()
+	rl := &requestLimiter{lim: lim, perClient: map[netip.Addr]int{}, log: logger}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		from := clientaddr.Parse(r.RemoteAddr)
+		key, limited := lim.client(from)
+		if ok, clientFull := rl.begin(key, limited); !ok {
+			rl.refuse(w, from, key, clientFull)
+			return
+		}
+		defer rl.end(key, limited)
+		next.ServeHTTP(w, r)
+	})
+}
+
+type requestLimiter struct {
+	lim       Limits
+	mu        sync.Mutex
+	total     int
+	perClient map[netip.Addr]int
+
+	log                    *slog.Logger
+	lastClient, lastServer atomic.Int64
+}
+
+// begin counts a request in, or reports why it cannot be: clientFull
+// when its client is at PerClient, otherwise the server is at Max.
+func (rl *requestLimiter) begin(key netip.Addr, limited bool) (ok, clientFull bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if limited && rl.perClient[key] >= rl.lim.PerClient {
+		return false, true
+	}
+	if rl.total >= rl.lim.Max {
+		return false, false
+	}
+	rl.total++
+	if limited {
+		rl.perClient[key]++
+	}
+	return true, false
+}
+
+func (rl *requestLimiter) end(key netip.Addr, limited bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.total--
+	if !limited {
+		return
+	}
+	if rl.perClient[key] <= 1 {
+		delete(rl.perClient, key)
+	} else {
+		rl.perClient[key]--
+	}
+}
+
+func (rl *requestLimiter) refuse(w http.ResponseWriter, from, key netip.Addr, clientFull bool) {
+	msg := "Signalith has too many requests in progress; try again in a few seconds"
+	if clientFull {
+		msg = "this client has too many requests in progress; try again in a few seconds"
+		warnOnceAMinute(rl.log, &rl.lastClient, "request refused: this client has too many requests in progress (logged at most once a minute)",
+			"client", from.String(), "counted_as", countedAs(key), "limit", rl.lim.PerClient)
+	} else {
+		warnOnceAMinute(rl.log, &rl.lastServer, "request refused: too many requests in progress (logged at most once a minute)", "limit", rl.lim.Max)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "5")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	io.WriteString(w, `{"error":"`+msg+`"}`+"\n")
 }
 
 // errorLog sends net/http's own messages (such as "TLS handshake error

@@ -100,9 +100,10 @@ func (b *blockingBulk) Bulk(ctx context.Context, docs []store.IndexedDoc) ([]sto
 	return nil, nil
 }
 
-// TestIngestTellsSendersToRetryWhenBusy: ingest requests take a slot
-// before their body is read, so many agents sending at once cannot hold
-// many bodies in memory; the rest are told to retry with 503.
+// TestIngestTellsSendersToRetryWhenBusy: only a few batches are decoded
+// and written at once, so many agents sending at once cannot make the
+// server decode many batches in memory; the rest are told to retry with
+// 503.
 func TestIngestTellsSendersToRetryWhenBusy(t *testing.T) {
 	saved := ingestQueueWait
 	ingestQueueWait = 50 * time.Millisecond

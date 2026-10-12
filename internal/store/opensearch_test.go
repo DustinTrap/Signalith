@@ -169,3 +169,61 @@ func TestURLCredentialsAreUsedButNeverShown(t *testing.T) {
 		t.Fatalf("error: %v", err)
 	}
 }
+
+// TestQueryInURLIsNotRepeatedInErrors: Go's own error repeats the request
+// URL with only the password hidden; the rest is redacted as well.
+func TestQueryInURLIsNotRepeatedInErrors(t *testing.T) {
+	c := New(Config{URL: "http://admin:OS-PASS@127.0.0.1:1/?apikey=URLKEY"})
+	_, err := c.Health(context.Background())
+	if err == nil || strings.Contains(err.Error(), "URLKEY") || strings.Contains(err.Error(), "OS-PASS") || !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Errorf("error: %v", err)
+	}
+}
+
+// clearProxyEnv unsets the proxy variables for one test.
+func clearProxyEnv(t *testing.T) {
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
+}
+
+// TestUnusedProxyEnvironmentIsExplained: after an upgrade, an OpenSearch
+// only reachable through HTTPS_PROXY fails; the error says why and which
+// setting to use.
+func TestUnusedProxyEnvironmentIsExplained(t *testing.T) {
+	clearProxyEnv(t)
+	t.Setenv("HTTPS_PROXY", "http://proxy.corp:3128")
+	// 192.0.2.1 is a documentation address nobody answers on.
+	c := New(Config{URL: "https://192.0.2.1:9200", Timeout: 200 * time.Millisecond})
+	_, err := c.Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTPS_PROXY is set") || !strings.Contains(err.Error(), "opensearch.proxy or SIGNALITH_OPENSEARCH_PROXY") {
+		t.Errorf("error: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		env  map[string]string
+	}{
+		{"opensearch.proxy set", Config{URL: "https://os.corp:9200", Proxy: "http://proxy.corp:3128"}, nil},
+		{"OpenSearch on this machine", Config{URL: "https://localhost:9200"}, nil},
+		{"loopback address", Config{URL: "https://127.0.0.1:9200"}, nil},
+		{"only HTTP_PROXY, for an https URL", Config{URL: "https://os.corp:9200"}, map[string]string{"HTTPS_PROXY": "", "HTTP_PROXY": "http://p:1"}},
+		{"NO_PROXY names the domain", Config{URL: "https://os.corp:9200"}, map[string]string{"NO_PROXY": "example.com, .corp"}},
+		{"NO_PROXY names the network", Config{URL: "https://10.1.2.3:9200"}, map[string]string{"no_proxy": "10.0.0.0/8"}},
+		{"NO_PROXY is *", Config{URL: "https://os.corp:9200"}, map[string]string{"NO_PROXY": "*"}},
+		{"no proxy at all", Config{URL: "https://os.corp:9200"}, map[string]string{"HTTPS_PROXY": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if h := New(tc.cfg).proxyHint; h != "" {
+				t.Errorf("hint: %s", h)
+			}
+		})
+	}
+	t.Setenv("HTTP_PROXY", "http://p:1")
+	if h := New(Config{URL: "http://os.corp:9200"}).proxyHint; !strings.Contains(h, "HTTP_PROXY is set") {
+		t.Errorf("plain http with HTTP_PROXY: %q", h)
+	}
+}

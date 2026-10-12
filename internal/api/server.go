@@ -11,9 +11,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/agents"
@@ -21,6 +24,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
@@ -166,28 +170,23 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 		return
 	}
-	// The sender has proved who it is, so its batch may arrive more slowly
-	// than other request bodies, over a slow link, but not forever, since
-	// it holds one of the pipeline's slots meanwhile.
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(ingestReadTimeout))
-	release, err := s.Pipeline.Admit(r.Context(), ingestQueueWait)
+	// The whole batch is read before a pipeline slot is taken, so a
+	// sender that sends slowly holds only its connection and the bytes it
+	// has sent, never a slot other agents are waiting for.
+	body, release, err := s.readBatch(w, r)
+	if err != nil {
+		s.batchReadFailed(w, r, err)
+		return
+	}
+	defer release()
+	slot, err := s.Pipeline.Admit(r.Context(), ingestQueueWait)
 	if err != nil {
 		// 503 makes Fluent Bit retry later instead of dropping data.
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	defer release()
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, ingest.MaxBodyBytes))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20))
-			return
-		}
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
+	defer slot()
 	tag := r.Header.Get("X-Signalith-Tag")
 	if tag == "" {
 		tag = r.URL.Query().Get("tag")
@@ -211,12 +210,129 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// ingestReadTimeout is how long a sender has to send one request body,
-// and ingestQueueWait how long a request waits for a free pipeline slot
-// before the sender is told to retry (a variable so tests can shorten it).
-const ingestReadTimeout = 2 * time.Minute
+// Agent batches. The sender has proved who it is, so its batch may arrive
+// more slowly than other request bodies, over a slow link: it has
+// ingestReadTimeout, and while it keeps arriving (ingestProgressBytes at
+// least every ingestProgressWindow) up to ingestMaxReadTime in all. A
+// sender that stalls part way is cut off at the deadline. ingestQueueWait
+// is how long a batch that has arrived waits for a free pipeline slot
+// before the sender is told to retry. They are variables so tests can
+// shorten them.
+var (
+	ingestReadTimeout    = 2 * time.Minute
+	ingestMaxReadTime    = 10 * time.Minute
+	ingestProgressWindow = 30 * time.Second
+	ingestProgressBytes  = int64(16 << 10)
+	ingestQueueWait      = 15 * time.Second
+)
 
-var ingestQueueWait = 15 * time.Second
+// ingestReplyTimeout is how long, once a batch has arrived, Signalith has
+// to write it and reply: the server's usual write time, counted from then
+// rather than from the request headers.
+const ingestReplyTimeout = 10 * time.Minute
+
+// readBatch reads an agent's request body within the ingest deadlines
+// and the ingest memory budget (see ingest.Pipeline.ReadBody). Call release
+// once the batch has been written.
+func (s *Server) readBatch(w http.ResponseWriter, r *http.Request) (body []byte, release func(), err error) {
+	rc := http.NewResponseController(w)
+	in := &batchBody{ReadCloser: r.Body, rc: rc, start: time.Now()}
+	in.deadline = in.start.Add(ingestReadTimeout)
+	_ = rc.SetReadDeadline(in.deadline)
+	sender := netip.Addr{}
+	if from := clientaddr.Parse(r.RemoteAddr); !clientaddr.Shared(from, s.Config.Server.SharedList()) {
+		sender = clientaddr.Key(from)
+	}
+	body, release, err = s.Pipeline.ReadBody(http.MaxBytesReader(w, in, ingest.MaxBodyBytes), sender, r.ContentLength)
+	if err != nil {
+		return nil, nil, &batchError{err: err, received: in.n, took: time.Since(in.start)}
+	}
+	_ = rc.SetWriteDeadline(time.Now().Add(ingestReplyTimeout))
+	return body, release, nil
+}
+
+// batchError is why an agent's batch could not be read, with how much of
+// it had arrived.
+type batchError struct {
+	err      error
+	received int64
+	took     time.Duration
+}
+
+func (e *batchError) Error() string { return e.err.Error() }
+func (e *batchError) Unwrap() error { return e.err }
+
+// batchReadFailed answers a batch that could not be read: 413 when it is
+// too large, 408 when it did not arrive in time, and 503 (retry shortly)
+// when too many batches are arriving at once.
+func (s *Server) batchReadFailed(w http.ResponseWriter, r *http.Request, err error) {
+	var tooBig *http.MaxBytesError
+	var bad *ingest.BodyError
+	var be *batchError
+	errors.As(err, &be)
+	switch {
+	case errors.As(err, &tooBig):
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20))
+	case errors.As(err, &bad):
+		writeError(w, bad.Status, bad)
+	case errors.Is(err, ingest.ErrBusy), errors.Is(err, ingest.ErrSenderBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, errors.Unwrap(err))
+	case errors.Is(err, os.ErrDeadlineExceeded) && be != nil:
+		took := be.took.Round(time.Second)
+		s.warnSlowBatch("an agent batch took too long to arrive and was refused; the agent will send it again (logged at most once a minute)",
+			"client", r.RemoteAddr, "received_bytes", be.received, "took", took.String())
+		writeError(w, http.StatusRequestTimeout, fmt.Errorf("the batch took too long to arrive (%d KB in %s). A batch must arrive within %s, "+
+			"or within %s while at least %d KB arrives every %s. Send smaller batches (for example a lower Flush in Fluent Bit's [SERVICE] section) or check the network",
+			be.received>>10, took, ingestReadTimeout, ingestMaxReadTime, ingestProgressBytes>>10, ingestProgressWindow))
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("the request body could not be read: %w", errors.Unwrap(err)))
+	}
+}
+
+var lastSlowBatchWarning atomic.Int64
+
+// warnSlowBatch logs at most once a minute.
+func (s *Server) warnSlowBatch(msg string, args ...any) {
+	now := time.Now().UnixNano()
+	prev := lastSlowBatchWarning.Load()
+	if s.Log == nil || (prev != 0 && now-prev < int64(time.Minute)) || !lastSlowBatchWarning.CompareAndSwap(prev, now) {
+		return
+	}
+	s.Log.Warn(msg, args...)
+}
+
+// batchBody gives an agent's batch more time while it keeps arriving:
+// each ingestProgressBytes received moves the read deadline to at least
+// ingestProgressWindow from then, but never past ingestMaxReadTime after
+// the batch began.
+type batchBody struct {
+	io.ReadCloser
+	rc              *http.ResponseController
+	start, deadline time.Time
+	n, sinceMove    int64
+}
+
+func (b *batchBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.n += int64(n)
+	b.sinceMove += int64(n)
+	// Not once the body has ended: the deadline is lifted then (see
+	// deadlineBody), and one set again would cancel the request when it
+	// passed.
+	if err == nil && b.sinceMove >= ingestProgressBytes {
+		b.sinceMove = 0
+		next := time.Now().Add(ingestProgressWindow)
+		if last := b.start.Add(ingestMaxReadTime); next.After(last) {
+			next = last
+		}
+		if next.After(b.deadline) {
+			b.deadline = next
+			_ = b.rc.SetReadDeadline(next)
+		}
+	}
+	return n, err
+}
 
 func (s *Server) validToken(r *http.Request) bool {
 	tok := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))

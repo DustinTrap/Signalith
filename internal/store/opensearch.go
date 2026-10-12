@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -63,6 +65,9 @@ type Client struct {
 	// request then fails with it. config.Validate reports the same
 	// problems before the server starts.
 	setupErr error
+	// proxyHint is added to connection errors when the environment names
+	// a proxy that OpenSearch traffic does not use.
+	proxyHint string
 }
 
 // New returns a client for one OpenSearch endpoint.
@@ -78,7 +83,7 @@ func New(cfg Config) *Client {
 	}
 	base := strings.TrimRight(cfg.URL, "/")
 	tr, err := Transport(cfg)
-	return &Client{
+	c := &Client{
 		base:     base,
 		shown:    redact.URL(base),
 		cfg:      cfg,
@@ -89,6 +94,8 @@ func New(cfg Config) *Client {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
+	c.proxyHint = proxyHint(cfg, base)
+	return c
 }
 
 // Transport returns the HTTP transport for cfg: TLS 1.2 or newer, the
@@ -128,6 +135,73 @@ func Transport(cfg Config) (*http.Transport, error) {
 		}
 	}
 	return tr, errors.Join(errs...)
+}
+
+// proxyHint explains, for connection errors, that a proxy named in the
+// environment is not used for OpenSearch: after an upgrade, an OpenSearch
+// that was only reachable through HTTPS_PROXY otherwise fails with a bare
+// dial or DNS error. It is empty when cfg.Proxy is set, OpenSearch is on
+// this machine, or NO_PROXY covers its host.
+func proxyHint(cfg Config, base string) string {
+	if cfg.Proxy != "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return ""
+	}
+	if a, err := netip.ParseAddr(host); err == nil && a.Unmap().IsLoopback() {
+		return ""
+	}
+	names := []string{"HTTP_PROXY", "http_proxy"}
+	if u.Scheme == "https" {
+		names = []string{"HTTPS_PROXY", "https_proxy"}
+	}
+	for _, name := range names {
+		if os.Getenv(name) == "" {
+			continue
+		}
+		if noProxy(host) {
+			return ""
+		}
+		return fmt.Sprintf(" (%s is set, but Signalith never sends OpenSearch traffic through proxies named in the environment; "+
+			"if OpenSearch can only be reached through that proxy, set opensearch.proxy or SIGNALITH_OPENSEARCH_PROXY)", name)
+	}
+	return ""
+}
+
+// noProxy reports whether NO_PROXY names host (exactly, as a parent
+// domain, as a CIDR holding it, or with "*").
+func noProxy(host string) bool {
+	list := os.Getenv("NO_PROXY")
+	if list == "" {
+		list = os.Getenv("no_proxy")
+	}
+	a, aErr := netip.ParseAddr(host)
+	for _, e := range strings.Split(list, ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "*" {
+			return true
+		}
+		if p, err := netip.ParsePrefix(e); err == nil {
+			if aErr == nil && p.Contains(a.Unmap()) {
+				return true
+			}
+			continue
+		}
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			e = h
+		}
+		e = strings.TrimPrefix(strings.TrimPrefix(e, "*"), ".")
+		if e != "" && (host == e || strings.HasSuffix(host, "."+e)) {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadCAFile returns the system's certificate authorities plus those in
@@ -244,7 +318,12 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, out any)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("opensearch unreachable at %s: %w", c.shown, err)
+		// Go hides the password in the URL it repeats, but not the rest.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = redact.URL(ue.URL)
+		}
+		return fmt.Errorf("opensearch unreachable at %s: %w%s", c.shown, err, c.proxyHint)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)

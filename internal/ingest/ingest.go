@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,8 +69,12 @@ type Pipeline struct {
 	// event time (zero: DefaultMaxEventAge); see TimeUsable.
 	MaxEventAge time.Duration
 	// MaxConcurrent caps the ingest requests Admit lets in at once
-	// (default 8), which bounds the memory ingest can use.
+	// (default 8), which bounds the memory decoding and writing use.
 	MaxConcurrent int
+	// MaxReceiving caps the memory request bodies hold, from their first
+	// byte until they have been written (default DefaultMaxReceiving); one
+	// sender may hold a quarter of it. See ReadBody.
+	MaxReceiving int64
 	// Log, when set, gets a warning (at most once a minute per kind) when
 	// events are refiled under their arrival time or lose fields.
 	Log *slog.Logger
@@ -80,6 +85,12 @@ type Pipeline struct {
 	slotsMu sync.Mutex
 	warnMu  sync.Mutex
 	warned  map[string]time.Time
+
+	// recvUsed is the receive budget in use, and recvBy each sender's
+	// part of it (see ReadBody).
+	recvMu   sync.Mutex
+	recvUsed int64
+	recvBy   map[netip.Addr]int64
 }
 
 // Stats counts what the pipeline has processed since start, for the health page.
@@ -362,9 +373,10 @@ func (p *Pipeline) warn(kind, msg string, args ...any) {
 var ErrBusy = errors.New("Signalith is busy writing other events; send again in a few seconds")
 
 // Admit waits up to wait for one of MaxConcurrent ingest slots and returns
-// the function that frees it, or ErrBusy. Taking a slot before reading a
-// request body bounds the memory ingest can use however many agents send
-// at once.
+// the function that frees it, or ErrBusy. Take a slot once the request
+// body has arrived (see ReadBody) and hold it while the body is decoded
+// and written: that bounds the memory and OpenSearch writes ingest uses
+// however many agents send at once, and a slow sender cannot hold a slot.
 func (p *Pipeline) Admit(ctx context.Context, wait time.Duration) (func(), error) {
 	p.slotsMu.Lock()
 	if p.slots == nil {

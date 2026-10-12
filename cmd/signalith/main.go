@@ -636,8 +636,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}()
 	go retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log)
 
-	hs := httpserver.New(srv.Handler(), log)
-	ln, err := httpserver.Listen(c.Server.Listen, httpserver.Limits{Max: c.Server.MaxConnections}, log)
+	lim := httpserver.Limits{Max: c.Server.MaxConnections, Shared: c.Server.SharedList()}
+	hs := httpserver.New(srv.Handler(), lim, log)
+	ln, err := httpserver.Listen(c.Server.Listen, lim, log)
 	if err != nil {
 		return err
 	}

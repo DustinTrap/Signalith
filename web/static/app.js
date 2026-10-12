@@ -1260,7 +1260,7 @@ function renderEvents(box, res, opts) {
     const d = new Date(r._time);
     const time = el('td', { class: 'time' });
     if (r._time != null) {
-      time.append(...(isNaN(d) ? [fmtValue(r._time)] : [
+      time.append(...(isNaN(d) ? [showText(fmtValue(r._time))] : [
         el('span', { class: 'ev-date' }, d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })),
         el('span', { class: 'ev-clock' }, d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }))]));
       time.title = fmtTime(r._time);
@@ -1312,7 +1312,7 @@ function renderTable(box, res, opts) {
   const head = cols.map((c) => {
     const th = el('th', { scope: 'col' });
     if (numCols.has(c)) th.className = 'num';
-    if (!opts.sortable) { th.append(c); return th; }
+    if (!opts.sortable) { th.append(showText(String(c))); return th; }
     const on = sort && sort.col === c;
     th.setAttribute('aria-sort', on ? (sort.desc ? 'descending' : 'ascending') : 'none');
     th.append(
@@ -1335,7 +1335,7 @@ function renderTable(box, res, opts) {
     } else if (kind) {
       td.append(el('span', { class: 'chip', 'data-kind': kind, title: text }, el('span', {}, text)));
     } else {
-      td.append(text);
+      td.append(showText(text));
     }
     return td;
   })));

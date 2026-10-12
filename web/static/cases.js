@@ -433,20 +433,23 @@ function renderCase() {
 
 // ----- header: editable title, status line, resolve or reopen -----
 function caseHead(c, linked) {
-  const title = el('input', { class: 'c-title', type: 'text', value: c.title, 'aria-label': 'Case title', spellcheck: 'false', title: 'Click to rename; Enter saves' });
+  // A title made from a finding carries text from events, so characters
+  // that hide or reorder text are shown as markers here too.
+  const shown = visibleText(c.title);
+  const title = el('input', { class: 'c-title', type: 'text', value: shown, 'aria-label': 'Case title', spellcheck: 'false', title: 'Click to rename; Enter saves' });
   let saving = false;
   const saveTitle = async () => {
     const t = title.value.trim();
-    if (saving || t === c.title) return;
-    if (!t) { title.value = c.title; return; }
+    if (saving || t === shown || t === c.title) return;
+    if (!t) { title.value = shown; return; }
     saving = true;
     if (await caseCall(c.id, '', { title: t }, 'PATCH', 'Couldn’t rename the case')) toast('Case renamed.');
-    else title.value = c.title;
+    else title.value = shown;
     saving = false;
   };
   title.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') { ev.preventDefault(); title.blur(); }
-    if (ev.key === 'Escape') { ev.preventDefault(); title.value = c.title; title.blur(); }
+    if (ev.key === 'Escape') { ev.preventDefault(); title.value = shown; title.blur(); }
   });
   title.addEventListener('blur', saveTitle);
 
@@ -944,7 +947,7 @@ function pickCase({ title = '', heading = 'Add to case', only = '' } = {}) {
     const err = formAlert();
     const list = el('div', { class: 'cp-list', role: 'radiogroup', 'aria-label': 'Open cases', 'aria-busy': 'true' },
       ...[0, 1].map(() => el('div', { class: 'cp-option cp-option--loading' }, el('span', { class: 'skeleton', style: 'width:60%' }))));
-    const newTitle = el('input', { id: 'cp-new-title', class: 'input', type: 'text', value: title, placeholder: 'What is this investigation about?', autocomplete: 'off' });
+    const newTitle = el('input', { id: 'cp-new-title', class: 'input', type: 'text', value: visibleText(title), placeholder: 'What is this investigation about?', autocomplete: 'off' });
     const titleErr = el('div', { class: 'field-error hidden', id: 'cp-title-err' }, icon('circle-alert'), 'Give the new case a title.');
     const newSev = caseSelect('cp-sev', SEVERITIES.map((s) => [s, SEVERITY_LABEL[s] || s]), 'medium');
     const newFields = el('div', { class: 'cp-new' + (newOnly ? '' : ' cp-new--nested') },

@@ -157,12 +157,14 @@ func (e *ValidationError) Error() string {
 }
 
 // RenderTitle replaces $field$ tokens with values from a result row.
+// Characters in the result that hide or disguise text are written as
+// visible markers (see ShowHidden), since the values come from events.
 func RenderTitle(title string, row map[string]any) string {
-	return tokenPattern.ReplaceAllStringFunc(title, func(tok string) string {
+	return ShowHidden(tokenPattern.ReplaceAllStringFunc(title, func(tok string) string {
 		v, ok := row[tok[1:len(tok)-1]]
 		if !ok || v == nil {
 			return "unknown"
 		}
 		return fmt.Sprint(v)
-	})
+	}))
 }

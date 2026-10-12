@@ -3,13 +3,25 @@ package httpserver
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -18,7 +30,7 @@ import (
 // timeouts shortened, and returns its address.
 func startServer(t *testing.T, handler http.Handler, change func(*http.Server)) string {
 	t.Helper()
-	hs := New(handler, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hs := New(handler, Limits{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if change != nil {
 		change(hs)
 	}
@@ -40,13 +52,16 @@ func closedWithin(c net.Conn, d time.Duration) bool {
 }
 
 func TestServerSettings(t *testing.T) {
-	hs := New(http.NotFoundHandler(), nil)
+	hs := New(http.NotFoundHandler(), Limits{}, nil)
 	if hs.ReadHeaderTimeout != ReadHeaderTimeout || hs.IdleTimeout != IdleTimeout || hs.WriteTimeout != WriteTimeout ||
 		hs.MaxHeaderBytes != MaxHeaderBytes || hs.TLSConfig.MinVersion < 0x0303 {
 		t.Errorf("server settings: %+v", hs)
 	}
 	if hs.ReadTimeout != 0 {
 		t.Error("ReadTimeout would cancel long searches; request bodies have their own deadline")
+	}
+	if hs.HTTP2 == nil || hs.HTTP2.MaxConcurrentStreams != MaxStreamsPerConnection {
+		t.Errorf("HTTP/2 settings: %+v", hs.HTTP2)
 	}
 }
 
@@ -236,4 +251,233 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// TestIPv6ClientsCountedByNetwork reproduces the IPv6 part of dos-2: one
+// host picking a new address from its /64 for every connection must not
+// get a new budget each time.
+func TestIPv6ClientsCountedByNetwork(t *testing.T) {
+	fl := &fakeListener{conns: make(chan net.Conn, 100), done: make(chan struct{})}
+	var logs syncBuffer
+	ln := Limit(fl, Limits{Max: 1000, PerClient: 3}, slog.New(slog.NewTextHandler(&logs, nil)))
+	defer ln.Close()
+	var others []net.Conn
+	for i := range 50 {
+		others = append(others, fl.dial(fmt.Sprintf("2001:db8:7:9::%x", i+1)))
+	}
+	for range 3 {
+		if _, err := ln.Accept(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The rest of that /64 is refused; a client in the next /64, and an
+	// IPv4 client reaching a dual-stack listener, still get in.
+	fl.dial("2001:db8:7:a::1")
+	fl.dial("::ffff:198.51.100.7")
+	for _, want := range []string{"[2001:db8:7:a::1]:40000", "198.51.100.7:40000"} {
+		c, err := ln.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := clientaddrOf(c); got != want {
+			t.Errorf("accepted %s, want %s", got, want)
+		}
+	}
+	for _, c := range others[3:] {
+		c.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("connection from the same /64: %v, want it closed", err)
+		}
+	}
+	if !strings.Contains(logs.String(), "counted_as=2001:db8:7:9::/64") || !strings.Contains(logs.String(), "server.shared_addresses") {
+		t.Errorf("log: %s", logs.String())
+	}
+}
+
+func clientaddrOf(c net.Conn) string {
+	a := c.RemoteAddr().(*net.TCPAddr)
+	return netip.AddrPortFrom(a.AddrPort().Addr().Unmap(), a.AddrPort().Port()).String()
+}
+
+// TestSharedAddressesAreNotLimitedPerClient: a proxy, load balancer or
+// NAT listed in Shared is not held to one client's share.
+func TestSharedAddressesAreNotLimitedPerClient(t *testing.T) {
+	fl := &fakeListener{conns: make(chan net.Conn, 10), done: make(chan struct{})}
+	ln := Limit(fl, Limits{Max: 10, PerClient: 2, Shared: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/28")}}, nil)
+	defer ln.Close()
+	for range 5 {
+		fl.dial("192.0.2.2")
+	}
+	for range 5 {
+		if _, err := ln.Accept(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Outside the listed network the share still applies.
+	fl.dial("192.0.2.200")
+	fl.dial("192.0.2.200")
+	fl.dial("192.0.2.200")
+	fl.dial("192.0.2.3")
+	ln.Accept()
+	ln.Accept()
+	if c, _ := ln.Accept(); clientaddrOf(c) != "192.0.2.3:40000" {
+		t.Errorf("third connection from 192.0.2.200 was accepted")
+	}
+}
+
+// TestRequestsInProgressAreLimited: requests in progress are capped per
+// client and in total, and refused ones get 503 with Retry-After at once.
+func TestRequestsInProgressAreLimited(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 10)
+	h := limitRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-release
+	}), Limits{Max: 4, PerClient: 2, Shared: []netip.Prefix{netip.MustParsePrefix("192.0.2.9/32")}}, nil)
+	send := func(remote string) chan *httptest.ResponseRecorder {
+		out := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = remote
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			out <- w
+		}()
+		return out
+	}
+	refused := func(what string, ch chan *httptest.ResponseRecorder, msg string) {
+		t.Helper()
+		select {
+		case w := <-ch:
+			if w.Code != 503 || w.Header().Get("Retry-After") == "" || !strings.Contains(w.Body.String(), msg) {
+				t.Errorf("%s: %d %v %s", what, w.Code, w.Header(), w.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s was let in", what)
+		}
+	}
+	var held []chan *httptest.ResponseRecorder
+	for _, from := range []string{"[2001:db8::1]:1", "[2001:db8::2]:2"} {
+		held = append(held, send(from))
+		<-started
+	}
+	// A third request from the same /64 waits for nothing: 503 at once.
+	refused("third request from one client", send("[2001:db8::3]:3"), "this client has too many requests")
+	// Shared addresses only count towards the total.
+	for range 2 {
+		held = append(held, send("192.0.2.9:4"))
+		<-started
+	}
+	refused("request over the total", send("198.51.100.1:5"), "Signalith has too many requests")
+	close(release)
+	for _, ch := range held {
+		if w := <-ch; w.Code != 200 {
+			t.Errorf("held request: %d", w.Code)
+		}
+	}
+	// Finished requests free their places.
+	for range 2 {
+		if w := <-send("[2001:db8::4]:6"); w.Code != 200 {
+			t.Errorf("after the others finished: %d", w.Code)
+		}
+	}
+}
+
+// TestHTTP2StreamsCountAgainstTheClient reproduces the HTTP/2 part of
+// dos-2: over HTTPS one connection carries many requests, and each must
+// count against its client's budget, not just the connection.
+func TestHTTP2StreamsCountAgainstTheClient(t *testing.T) {
+	release := make(chan struct{})
+	var running atomic.Int32
+	hs := New(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 2 {
+			t.Errorf("request over %s", r.Proto)
+		}
+		if r.URL.Path == "/first" {
+			return
+		}
+		running.Add(1)
+		<-release
+	}), Limits{Max: 100, PerClient: 4}, nil)
+	hs.TLSConfig.Certificates = []tls.Certificate{testCertificate(t)}
+	fl := &fakeListener{conns: make(chan net.Conn, 10), done: make(chan struct{})}
+	go hs.ServeTLS(Limit(fl, Limits{Max: 100, PerClient: 4}, nil), "", "")
+	defer hs.Close()
+	tr := &http.Transport{
+		ForceAttemptHTTP2: true,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c := tls.Client(fl.dial("203.0.113.50"), &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h2"}})
+			return c, c.HandshakeContext(ctx)
+		},
+	}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr}
+	// One request first, so the rest share its connection, as a browser's
+	// would.
+	if resp, err := client.Get("https://signalith.test/first"); err != nil {
+		t.Fatal(err)
+	} else {
+		resp.Body.Close()
+	}
+	codes := make(chan string, 10)
+	for range 10 {
+		go func() {
+			resp, err := client.Get("https://signalith.test/")
+			if err != nil {
+				codes <- err.Error()
+				return
+			}
+			resp.Body.Close()
+			codes <- resp.Status
+		}()
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	refused := 0
+	for range 6 {
+		select {
+		case c := <-codes:
+			if !strings.HasPrefix(c, "503") {
+				t.Fatalf("%s while 4 requests were held", c)
+			}
+			refused++
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of the extra requests were refused; %d running", refused, running.Load())
+		}
+	}
+	if n := running.Load(); n != 4 {
+		t.Errorf("%d requests running, want 4", n)
+	}
+	close(release)
+	released = true
+	for range 4 {
+		if c := <-codes; !strings.HasPrefix(c, "200") {
+			t.Errorf("held request: %s", c)
+		}
+	}
+}
+
+// testCertificate returns a self-signed certificate for signalith.test.
+func testCertificate(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "signalith.test"},
+		DNSNames:     []string{"signalith.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }

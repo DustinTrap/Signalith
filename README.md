@@ -86,6 +86,15 @@ far smaller. A request over a limit is refused with 413 (400 for broken JSON) an
 message saying what to change, and nothing from it is stored. When many agents send at
 once, the extra requests wait their turn and then get 503, so Fluent Bit sends them again.
 
+A batch is read in full before it waits for its turn, so a slow sender never holds up
+other agents. Batches still arriving may hold 256 MB of memory in all, and one sender (an
+IPv4 address or an IPv6 /64) a quarter of that; past it, the sender gets 503 and sends
+again shortly. Senders behind one proxy or NAT can be listed in `server.shared_addresses`.
+A batch has 2 minutes to arrive; one still arriving at least 16 KB every 30 seconds gets
+more time, up to 10 minutes, so slow links work. A batch that stalls or takes longer is
+refused with 408 and a message saying to send smaller batches (a lower `Flush` in Fluent
+Bit's `[SERVICE]` section), and the server log notes it.
+
 Each event keeps its own time unless that is older than `ingest.max_event_age` (a week
 by default, or `retention.days` if shorter) or more than an hour ahead. Then it is filed
 under the time it arrived and its own time is kept in `device_time`, so a wrong clock or
@@ -153,10 +162,14 @@ with the same username and password.
 ### Hardening built in
 
 - **Connections**: clients get 10 seconds to send request headers and a minute to send a
-  request body (after their token or sign-in is checked, agent batches get 2 minutes and
-  signed-in uploads 10 minutes); idle kept-alive connections close after 2 minutes, and
-  headers are limited to 64 KB. Open connections are capped (`server.max_connections`).
-  Agent batches are also limited in size and in how many are written at once (see
+  request body (after their token or sign-in is checked, agent batches get 2 minutes, more
+  while they keep arriving, and signed-in uploads 10 minutes); idle kept-alive connections
+  close after 2 minutes, and headers are limited to 64 KB. Open connections are capped
+  (`server.max_connections`), and one client may hold a tenth of them; a client is one IPv4
+  address or one IPv6 /64 network, since an IPv6 host can pick any address in its /64. Over
+  HTTPS (HTTP/2) each request in progress counts too, at most 32 per connection, so one
+  connection cannot carry hundreds. Agent batches are also limited in size, in the memory one
+  sender's batches may hold while they arrive, and in how many are written at once (see
   [Ingest limits](#ingest-limits)).
 - **Browser**: every response carries a strict Content-Security-Policy (no framing, no
   plugins, no forms or base URLs pointing elsewhere) and, over HTTPS, HSTS. API replies are
@@ -164,7 +177,9 @@ with the same username and password.
   query; display preferences such as the theme stay.
 - **Disguised text**: invisible and text-reordering Unicode characters in event data are
   shown as a marked `⟨U+202E⟩`. U+202E, for example, would otherwise make `invoice`,
-  U+202E, `fdp.exe` look like `invoiceexe.pdf`. The stored data is unchanged.
+  U+202E, `fdp.exe` look like `invoiceexe.pdf`. The stored events are unchanged; finding
+  titles, which copy values from events and become the titles of new cases, are stored with
+  the marker.
 - **Logs**: values in log lines are cut to a sensible length, and the Windows service log
   (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
   quick start caps container logs the same way; under systemd, journald limits the log.
@@ -183,13 +198,14 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
 | `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
-| `server.max_connections` | `10000` | Open connections allowed at once; one address may hold a tenth of them (this machine, such as a local reverse proxy, is not limited that way). Raise it for very large fleets behind one proxy |
-| `opensearch.url` | `http://127.0.0.1:9200` | Event store. A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
+| `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
+| `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
+| `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials. Sent only over https, or plain http to this machine, unless `allow_insecure_http` is on |
 | `opensearch.ca_file` | none | PEM file with the CA that signed OpenSearch's certificate (for a private CA); system CAs are trusted too. Relative to the config file |
 | `opensearch.cert_file`, `opensearch.key_file` | none | Client certificate and key for certificate sign-in to OpenSearch; reloaded when they change |
 | `opensearch.tls_skip_verify` | `false` | Skip OpenSearch certificate checks. Lab use only: anyone on the path can read and change traffic; Signalith warns while it is on |
-| `opensearch.proxy` | none | Proxy for OpenSearch traffic (`http://`, `https://` or `socks5://`). `HTTP_PROXY` and `HTTPS_PROXY` are never used for OpenSearch |
+| `opensearch.proxy` | none | Proxy for OpenSearch traffic (`http://`, `https://` or `socks5://`; or `SIGNALITH_OPENSEARCH_PROXY`). `HTTP_PROXY` and `HTTPS_PROXY` are never used for OpenSearch; when one is set and OpenSearch cannot be reached, the error says so |
 | `opensearch.allow_insecure_http` | `false` | Allow `username`/`password` over plain http to another machine. Off, such a config is refused with an explanation |
 | `opensearch.index_prefix` | `signalith` | Indices are `<prefix>-<datamodel>-YYYY.MM.DD` |
 | `search.default_earliest` | `-24h` | Time range when a query sets none |
@@ -219,7 +235,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
+`SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
 `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
 `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
 

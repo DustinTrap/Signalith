@@ -224,3 +224,74 @@ func TestSetAdminPasswordHashAddsMissingKeys(t *testing.T) {
 		t.Errorf("missing file: %v", err)
 	}
 }
+
+// TestOpenSearchURLSecretsStayOutOfErrors covers the rest of
+// authz-secrets-in-urls: a URL written without its scheme, or with a
+// query string, is refused without repeating the secret in it.
+func TestOpenSearchURLSecretsStayOutOfErrors(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"admin:S3CR3T@opensearch.corp:9200", `"***@opensearch.corp:9200" must be http(s)://host:port`},
+		{"admin:p@ss/S3CR3T@opensearch.corp:9200/x", `"***@opensearch.corp:9200" must be http(s)://host:port`},
+		{"https://opensearch.corp:9200/?token=S3CR3T", "opensearch.url https://opensearch.corp:9200 must not have a query string"},
+		{"https://opensearch.corp:9200/?x=S3CR3T", "opensearch.url https://opensearch.corp:9200 must not have a query string"},
+		{"https://opensearch.corp:9200/#S3CR3T", "must not have a query string (?...) or fragment"},
+	} {
+		c := validConfig(t)
+		c.OpenSearch.URL = tc.url
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "S3CR3T") {
+			t.Errorf("%s: %v", tc.url, err)
+		}
+	}
+	// The environment variable is checked the same way.
+	t.Setenv("SIGNALITH_OPENSEARCH_URL", "admin:S3CR3T@opensearch.corp:9200")
+	path := filepath.Join(t.TempDir(), "s.yaml")
+	if err := validConfig(t).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || strings.Contains(err.Error(), "S3CR3T") {
+		t.Errorf("env: %v", err)
+	}
+}
+
+func TestOpenSearchProxyFromEnvironment(t *testing.T) {
+	t.Setenv("SIGNALITH_OPENSEARCH_PROXY", " http://proxy.corp:3128 ")
+	path := filepath.Join(t.TempDir(), "s.yaml")
+	if err := validConfig(t).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil || c.OpenSearch.Proxy != "http://proxy.corp:3128" {
+		t.Errorf("%v %q", err, c.OpenSearch.Proxy)
+	}
+}
+
+func TestSharedAddresses(t *testing.T) {
+	c := validConfig(t)
+	c.Server.SharedAddresses = []string{"10.0.0.5", " 192.0.2.0/24", "2001:db8:aa::/48", "::ffff:198.51.100.7"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range c.Server.SharedList() {
+		got = append(got, p.String())
+	}
+	if strings.Join(got, " ") != "10.0.0.5/32 192.0.2.0/24 2001:db8:aa::/48 198.51.100.7/32" {
+		t.Errorf("shared = %v", got)
+	}
+	c.Server.SharedAddresses = []string{"proxy.corp", "10.0.0.0/33"}
+	err := c.Validate()
+	for _, want := range []string{`server.shared_addresses[0] "proxy.corp" must be an IP address or a CIDR`, `server.shared_addresses[1]`} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q in %v", want, err)
+		}
+	}
+	// Saved files explain the setting.
+	path := filepath.Join(t.TempDir(), "s.yaml")
+	if err := validConfig(t).Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "server.shared_addresses") {
+		t.Error("the saved file does not mention server.shared_addresses")
+	}
+}

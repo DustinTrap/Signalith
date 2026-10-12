@@ -18,12 +18,16 @@ func TestURL(t *testing.T) {
 		"http://u:p@[::1]:9200/path":                                             "http://***@[::1]:9200/path",
 		"http://user:pa ss@host:9200/%zz":                                        "http://***@host:9200",
 		"not a url with secret\x7f":                                              "***",
+		// No scheme: the parser takes the user name for one.
+		"admin:S3CR3T@opensearch.corp:9200":          "***@opensearch.corp:9200",
+		"admin:p@ss/S3CR3T@opensearch.corp:9200/x?y": "***@opensearch.corp:9200",
+		"S3CR3T@opensearch.corp":                     "***@opensearch.corp",
 	} {
 		got := URL(in)
 		if got != want {
 			t.Errorf("URL(%q) = %q, want %q", in, got, want)
 		}
-		for _, secret := range []string{"OsAdm1nPass", "URL-SECRET-KEY", "s1&", "tokenonly", "abc"} {
+		for _, secret := range []string{"OsAdm1nPass", "URL-SECRET-KEY", "s1&", "tokenonly", "abc", "S3CR3T"} {
 			if strings.Contains(got, secret) {
 				t.Errorf("URL(%q) = %q still shows %q", in, got, secret)
 			}

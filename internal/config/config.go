@@ -59,10 +59,28 @@ type Server struct {
 	TLSCert   string `yaml:"tls_cert,omitempty"`
 	TLSKey    string `yaml:"tls_key,omitempty"`
 	// MaxConnections caps open connections to the UI, API and ingest;
-	// 0 means 10000. One address may hold a tenth of them (connections
-	// from this machine, such as a local reverse proxy, are not limited
-	// that way). Raise it for very large agent fleets behind one proxy.
+	// 0 means 10000. One client (an IPv4 address, or an IPv6 /64 network)
+	// may hold a tenth of them; connections from this machine, such as a
+	// local reverse proxy, and from SharedAddresses are not limited that
+	// way.
 	MaxConnections int `yaml:"max_connections,omitempty"`
+	// SharedAddresses lists IP addresses or CIDRs that stand for many
+	// clients, such as a reverse proxy, load balancer or NAT gateway on
+	// another machine. They are not limited to one client's share of
+	// connections, requests and ingest memory, only by the totals.
+	SharedAddresses []string `yaml:"shared_addresses,omitempty"`
+}
+
+// SharedList returns server.shared_addresses as prefixes; single addresses
+// become /32 or /128. Invalid entries are skipped (Validate reports them).
+func (s Server) SharedList() []netip.Prefix {
+	var out []netip.Prefix
+	for _, a := range s.SharedAddresses {
+		if p, err := parseAllow(a); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // OpenSearch is the event store connection.
@@ -86,9 +104,10 @@ type OpenSearch struct {
 	// CAFile instead.
 	TLSSkipVerify bool `yaml:"tls_skip_verify,omitempty"`
 	// Proxy is a proxy for OpenSearch traffic, such as
-	// http://proxy:3128. Empty connects directly: HTTP_PROXY and
-	// HTTPS_PROXY are not used for OpenSearch, since a proxy would see
-	// every event and the OpenSearch password.
+	// http://proxy:3128 (SIGNALITH_OPENSEARCH_PROXY overrides it). Empty
+	// connects directly: HTTP_PROXY and HTTPS_PROXY are not used for
+	// OpenSearch, since a proxy would see every event and the OpenSearch
+	// password.
 	Proxy string `yaml:"proxy,omitempty"`
 	// AllowInsecureHTTP lets the username and password go to OpenSearch
 	// over plain http on another machine, where anyone on the network
@@ -105,6 +124,11 @@ func (o *OpenSearch) problems(resolve func(string) string) []string {
 	u, err := url.Parse(o.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return []string{fmt.Sprintf("opensearch.url %q must be http(s)://host:port", redact.URL(o.URL))}
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		// Only the scheme and host are repeated: the rest may hold a key.
+		p = append(p, fmt.Sprintf("opensearch.url %s://%s must not have a query string (?...) or fragment (#...); "+
+			"put credentials in opensearch.username and password instead", u.Scheme, u.Host))
 	}
 	if u.Scheme == "http" && (o.Username != "" || o.Password != "") && !isLoopback(u.Hostname()) && !o.AllowInsecureHTTP {
 		p = append(p, fmt.Sprintf("opensearch.url is plain http to %s, so the OpenSearch username and password would cross the network unencrypted. "+
@@ -576,6 +600,9 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_PASSWORD"); v != "" {
 		c.OpenSearch.Password = v
 	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_OPENSEARCH_PROXY")); v != "" {
+		c.OpenSearch.Proxy = v
+	}
 	if v := os.Getenv("SIGNALITH_LISTEN"); v != "" {
 		c.Server.Listen = v
 	}
@@ -642,6 +669,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.MaxConnections < 0 {
 		p = append(p, "server.max_connections cannot be negative (0 uses the default, 10000)")
+	}
+	for i, a := range c.Server.SharedAddresses {
+		if _, err := parseAllow(a); err != nil {
+			p = append(p, fmt.Sprintf("server.shared_addresses[%d] %q must be an IP address or a CIDR such as 10.0.0.0/24", i, a))
+		}
 	}
 	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
 		p = append(p, "server.tls_cert and server.tls_key must be set together")
@@ -847,7 +879,10 @@ const header = `# Signalith configuration.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
-# server.max_connections  open connections allowed at once (default 10000)
+# server.max_connections  open connections allowed at once (default 10000); one
+#                    client may hold a tenth of them
+# server.shared_addresses  IPs or CIDRs of a proxy, load balancer or NAT that many
+#                    clients reach Signalith through; not limited as one client
 # auth.session_timeout  sign the web UI out after this long idle (default 12h)
 # opensearch.*       where events are stored; for https with a private CA set
 #                    ca_file (cert_file and key_file for certificate sign-in)

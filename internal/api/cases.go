@@ -11,6 +11,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
 )
@@ -147,7 +148,9 @@ func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
 	if title == "" && len(req.Findings) > 0 && s.Findings != nil {
 		// Name the case after its first finding when no title is given.
 		if f, err := s.Findings.Get(r.Context(), req.Findings[0]); err == nil {
-			title = f.Title
+			// Findings raised before titles were made safe may still
+			// hold hidden characters.
+			title = detect.ShowHidden(f.Title)
 		}
 	}
 	if title == "" {

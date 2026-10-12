@@ -41,6 +41,16 @@ func URL(s string) string {
 		}
 		return Mask
 	}
+	if u.Host == "" && strings.Contains(s, "@") {
+		// No "scheme://", as in user:password@host:9200: the parser reads
+		// the user name as the scheme and keeps the password in the rest.
+		// Keep only the host.
+		rest := s[strings.LastIndex(s, "@")+1:]
+		if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+			rest = rest[:j]
+		}
+		return Mask + "@" + rest
+	}
 	if u.User != nil {
 		u.User = url.User(Mask)
 	}
