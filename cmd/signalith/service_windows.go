@@ -6,11 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/safelog"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -38,10 +38,12 @@ type service struct{ configPath string }
 func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	status <- svc.Status{State: svc.StartPending}
 	elog, _ := eventlog.Open(serviceName)
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if f, err := os.OpenFile(filepath.Join(filepath.Dir(s.configPath), "signalith.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640); err == nil {
+	log := newLogger(os.Stderr)
+	// The log file rotates by size (signalith.log.1 and so on), so it
+	// cannot fill the disk.
+	if f, err := safelog.OpenRotating(filepath.Join(filepath.Dir(s.configPath), "signalith.log"), safelog.DefaultMaxSize, safelog.DefaultBackups); err == nil {
 		defer f.Close()
-		log = slog.New(slog.NewTextHandler(f, nil))
+		log = newLogger(f)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

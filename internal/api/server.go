@@ -29,6 +29,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 )
@@ -106,28 +107,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	s.routeLogin(mux)
 	mux.Handle("/", s.requireAdmin(api))
-	return securityHeaders(mux)
-}
-
-// revalidate makes browsers check with the server before reusing a cached
-// copy of a signed-in page, so after signing out the app sends them to the
-// sign-in page instead of showing a stale copy.
-func revalidate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
-		next.ServeHTTP(w, r)
-	})
+	return limitBodies(s.securityHeaders(mux))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -186,8 +166,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 		return
 	}
-	// A sender gets a while to send its batch, not forever, since it holds
-	// one of the pipeline's slots meanwhile.
+	// The sender has proved who it is, so its batch may arrive more slowly
+	// than other request bodies, over a slow link, but not forever, since
+	// it holds one of the pipeline's slots meanwhile.
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(ingestReadTimeout))
 	release, err := s.Pipeline.Admit(r.Context(), ingestQueueWait)
 	if err != nil {
@@ -219,8 +200,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Log.Error("ingest failed", "err", err, "bytes", len(body))
-		// 503 makes Fluent Bit retry later instead of dropping data.
-		writeError(w, http.StatusServiceUnavailable, err)
+		// 503 makes Fluent Bit retry later instead of dropping data. The
+		// details, such as where OpenSearch is, stay in the server log.
+		writeError(w, http.StatusServiceUnavailable, errors.New("events could not be stored right now; try again later"))
 		return
 	}
 	if len(res.Errors) > 0 {
@@ -467,13 +449,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats(), "config_file": s.Config.Path()}
+	osURL := redact.URL(s.Config.OpenSearch.URL)
 	if status, err := s.Backend.Health(ctx); err != nil {
-		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": s.Config.OpenSearch.URL}
+		out["opensearch"] = map[string]any{"status": "unreachable", "error": err.Error(), "url": osURL}
 	} else {
-		out["opensearch"] = map[string]any{"status": status, "url": s.Config.OpenSearch.URL}
+		out["opensearch"] = map[string]any{"status": status, "url": osURL}
 	}
+	warnings := s.Config.Warnings()
 	if len(s.Config.Ingest.Tokens) == 0 {
-		out["warnings"] = []string{"No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens."}
+		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, out)
 }

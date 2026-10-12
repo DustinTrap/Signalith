@@ -150,6 +150,27 @@ signed in for up to 7 days. Ten wrong passwords from one address within 15 minut
 that address out for 15 minutes. Scripts and API clients can keep using HTTP Basic auth
 with the same username and password.
 
+### Hardening built in
+
+- **Connections**: clients get 10 seconds to send request headers and a minute to send a
+  request body (after their token or sign-in is checked, agent batches get 2 minutes and
+  signed-in uploads 10 minutes); idle kept-alive connections close after 2 minutes, and
+  headers are limited to 64 KB. Open connections are capped (`server.max_connections`).
+  Agent batches are also limited in size and in how many are written at once (see
+  [Ingest limits](#ingest-limits)).
+- **Browser**: every response carries a strict Content-Security-Policy (no framing, no
+  plugins, no forms or base URLs pointing elsewhere) and, over HTTPS, HSTS. API replies are
+  never stored in the browser cache, and signing out clears this site's cache and the last
+  query; display preferences such as the theme stay.
+- **Disguised text**: invisible and text-reordering Unicode characters in event data are
+  shown as a marked `⟨U+202E⟩`. U+202E, for example, would otherwise make `invoice`,
+  U+202E, `fdp.exe` look like `invoiceexe.pdf`. The stored data is unchanged.
+- **Logs**: values in log lines are cut to a sensible length, and the Windows service log
+  (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
+  quick start caps container logs the same way; under systemd, journald limits the log.
+- **Secrets**: passwords and keys in configured URLs are hidden (`***`) everywhere a URL is
+  shown or logged, and agents get a generic error rather than OpenSearch details.
+
 ## Configuration
 
 Everything lives in one YAML file (`/etc/signalith/signalith.yaml` or
@@ -161,13 +182,19 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
 | `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
-| `server.tls_cert`, `server.tls_key` | none | Serve HTTPS |
-| `opensearch.url` | `http://127.0.0.1:9200` | Event store |
-| `opensearch.username`, `opensearch.password` | none | OpenSearch credentials |
+| `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
+| `server.max_connections` | `10000` | Open connections allowed at once; one address may hold a tenth of them (this machine, such as a local reverse proxy, is not limited that way). Raise it for very large fleets behind one proxy |
+| `opensearch.url` | `http://127.0.0.1:9200` | Event store. A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
+| `opensearch.username`, `opensearch.password` | none | OpenSearch credentials. Sent only over https, or plain http to this machine, unless `allow_insecure_http` is on |
+| `opensearch.ca_file` | none | PEM file with the CA that signed OpenSearch's certificate (for a private CA); system CAs are trusted too. Relative to the config file |
+| `opensearch.cert_file`, `opensearch.key_file` | none | Client certificate and key for certificate sign-in to OpenSearch; reloaded when they change |
+| `opensearch.tls_skip_verify` | `false` | Skip OpenSearch certificate checks. Lab use only: anyone on the path can read and change traffic; Signalith warns while it is on |
+| `opensearch.proxy` | none | Proxy for OpenSearch traffic (`http://`, `https://` or `socks5://`). `HTTP_PROXY` and `HTTPS_PROXY` are never used for OpenSearch |
+| `opensearch.allow_insecure_http` | `false` | Allow `username`/`password` over plain http to another machine. Off, such a config is refused with an explanation |
 | `opensearch.index_prefix` | `signalith` | Indices are `<prefix>-<datamodel>-YYYY.MM.DD` |
 | `search.default_earliest` | `-24h` | Time range when a query sets none |
 | `retention.days` | `90` | Days of events to keep; `0` keeps everything |
-| `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` |
+| `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` (it asks twice without showing the password, or reads one line from a pipe or `SIGNALITH_NEW_PASSWORD`, and changes only this line of the file) |
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
 | `ingest.max_event_age` | `7d` (or `retention.days` if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
@@ -294,7 +321,8 @@ file hashes and email addresses.
 
 - **Feeds** listed under `intel.feeds` in signalith.yaml are downloaded on their
   interval by the server running the detection scheduler. Nothing is fetched until
-  you add one. Proxy settings come from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
+  you add one. Proxy settings come from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`
+  (OpenSearch traffic never uses them; see `opensearch.proxy`).
   An indicator that disappears from a feed is removed at the next download; if a
   feed keeps failing, its indicators expire after `max_age`. Disabling or removing a
   feed removes its indicators.
@@ -446,6 +474,9 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
 | `internal/config` | YAML config, validation, password hashing |
+| `internal/httpserver` | Web server timeouts and connection limits |
+| `internal/safelog` | Length limits for log values, rotating log file |
+| `internal/redact` | Hides secrets in URLs before they are shown or logged |
 | `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |
 | `internal/api` | REST API, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |

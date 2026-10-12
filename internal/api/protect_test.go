@@ -1,0 +1,262 @@
+package api
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"testing/fstest"
+	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/store"
+)
+
+func withUI(s *Server) {
+	s.UI = fstest.MapFS{
+		"index.html":     {Data: []byte("<h1>app</h1>")},
+		"app.js":         {Data: []byte("1")},
+		"login.html":     {Data: []byte("<h1>sign in</h1>")},
+		"assets/app.css": {Data: []byte("body{}")},
+	}
+}
+
+func TestSecurityHeadersOnEveryResponse(t *testing.T) {
+	ts, _ := newTestServerWith(t, withUI)
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/login"}, {"GET", "/assets/app.css"}, {"GET", "/assets/missing.css"},
+		{"GET", "/api/health"}, {"POST", "/api/login"}, {"GET", "/nope"},
+	} {
+		resp := send(t, tc.method, ts.URL+tc.path, "{}", nil)
+		csp := resp.Header.Get("Content-Security-Policy")
+		for _, d := range []string{"default-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"} {
+			if !strings.Contains(csp, d) {
+				t.Errorf("%s %s (%d): CSP %q lacks %q", tc.method, tc.path, resp.StatusCode, csp, d)
+			}
+		}
+		if resp.Header.Get("X-Frame-Options") != "DENY" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s %s: headers %v", tc.method, tc.path, resp.Header)
+		}
+		// Plain HTTP with an http public_url: no HSTS.
+		if resp.Header.Get("Strict-Transport-Security") != "" {
+			t.Errorf("%s %s: HSTS over plain HTTP", tc.method, tc.path)
+		}
+	}
+}
+
+func TestHSTSWhenServingHTTPS(t *testing.T) {
+	// Served over TLS by Signalith itself.
+	var srv *Server
+	plain, _ := newTestServerWith(t, func(s *Server) { srv = s })
+	plain.Close()
+	ts := httptest.NewTLSServer(srv.Handler())
+	defer ts.Close()
+	resp, err := ts.Client().Get(ts.URL + "/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Strict-Transport-Security"); !strings.HasPrefix(got, "max-age=") {
+		t.Errorf("HSTS over TLS = %q", got)
+	}
+	// Behind a TLS proxy, with an https public_url.
+	proxied, _ := newTestServerWith(t, func(s *Server) { s.Config.Server.PublicURL = "https://siem.example.com" })
+	if got := send(t, "GET", proxied.URL+"/api/health", "", nil).Header.Get("Strict-Transport-Security"); got == "" {
+		t.Error("no HSTS with an https public_url")
+	}
+}
+
+func TestAPIResponsesAreNotStored(t *testing.T) {
+	ts, _ := newTestServerWith(t, withUI)
+	code, body := do(t, ts, "POST", "/api/cases", `{"title":"Note: svc_backup password rotated"}`, true)
+	if code != 201 {
+		t.Fatalf("create case = %d %v", code, body)
+	}
+	id := body["case"].(map[string]any)["id"].(string)
+	for _, path := range []string{"/api/cases/" + id, "/api/cases", "/api/agents/config?os=linux", "/api/lookups/assets.csv", "/api/health"} {
+		req, _ := http.NewRequest("GET", ts.URL+path, nil)
+		req.SetBasicAuth("admin", "s3cret-pass")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s (%d): Cache-Control %q", path, resp.StatusCode, got)
+		}
+	}
+	// Signed-out errors too.
+	if got := send(t, "GET", ts.URL+"/api/cases/"+id, "", nil).Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("401: Cache-Control %q", got)
+	}
+	// The app's scripts may be cached but are always revalidated; public
+	// assets are cached normally.
+	req, _ := http.NewRequest("GET", ts.URL+"/app.js", nil)
+	req.SetBasicAuth("admin", "s3cret-pass")
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("app.js: Cache-Control %q", got)
+	}
+	if got := send(t, "GET", ts.URL+"/assets/app.css", "", nil).Header.Get("Cache-Control"); got != "" {
+		t.Errorf("public asset: Cache-Control %q", got)
+	}
+}
+
+func TestSignOutClearsTheBrowserCache(t *testing.T) {
+	ts, _ := newTestServerWith(t, withUI)
+	resp := send(t, "POST", ts.URL+"/api/logout", "", nil)
+	if got := resp.Header.Get("Clear-Site-Data"); got != `"cache"` {
+		t.Errorf("Clear-Site-Data = %q", got)
+	}
+	if got := send(t, "POST", ts.URL+"/api/login", "{}", nil).Header.Get("Clear-Site-Data"); got != "" {
+		t.Errorf("sign-in clears data: %q", got)
+	}
+}
+
+// shortBodyTimeouts shortens the body deadlines for one test.
+func shortBodyTimeouts(t *testing.T, body, upload time.Duration) {
+	oldBody, oldUpload := bodyTimeout, uploadTimeout
+	bodyTimeout, uploadTimeout = body, upload
+	t.Cleanup(func() { bodyTimeout, uploadTimeout = oldBody, oldUpload })
+}
+
+// rawRequest writes head and then body on a new connection to ts, pausing
+// before the body, and returns the status line (or "" if the server
+// closed the connection without one) and how long the reply took.
+func rawRequest(t *testing.T, ts *httptest.Server, head, body string, pause time.Duration) (string, time.Duration) {
+	t.Helper()
+	c, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	start := time.Now()
+	io.WriteString(c, head)
+	if pause > 0 {
+		time.Sleep(pause)
+	}
+	io.WriteString(c, body)
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	line, _ := bufio.NewReader(c).ReadString('\n')
+	return strings.TrimSpace(line), time.Since(start)
+}
+
+func TestSlowRequestBodyIsCutOff(t *testing.T) {
+	shortBodyTimeouts(t, 300*time.Millisecond, 5*time.Second)
+	ts, _ := newTestServer(t)
+	// Headers for a sign-in, then only part of the body, never the rest.
+	c, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	io.WriteString(c, "POST /api/login HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"username\":")
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
+	reply, _ := io.ReadAll(c) // until the server closes the connection
+	if time.Since(start) > 3*time.Second || !strings.Contains(string(reply), "400 Bad Request") {
+		t.Errorf("after %v: %q", time.Since(start), reply)
+	}
+}
+
+func TestLongRequestOutlivesTheBodyDeadline(t *testing.T) {
+	shortBodyTimeouts(t, 200*time.Millisecond, time.Second)
+	errc := make(chan error, 2)
+	ts := httptest.NewServer(limitBodies(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		// A long search after a small body.
+		select {
+		case <-time.After(4 * bodyTimeout):
+			errc <- nil
+		case <-r.Context().Done():
+			errc <- fmt.Errorf("%s: request cancelled after %v", r.Method, 4*bodyTimeout)
+		}
+		io.WriteString(w, "done")
+	})))
+	defer ts.Close()
+	for _, req := range []*http.Request{
+		mustRequest("POST", ts.URL, `{"query":"*"}`),
+		mustRequest("GET", ts.URL, ""),
+	} {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err := <-errc; err != nil || string(b) != "done" {
+			t.Errorf("%v %q", err, b)
+		}
+	}
+}
+
+func mustRequest(method, url, body string) *http.Request {
+	req, _ := http.NewRequest(method, url, strings.NewReader(body))
+	if body == "" {
+		req.Body = http.NoBody
+	}
+	return req
+}
+
+func TestAgentBatchesMayArriveSlowly(t *testing.T) {
+	shortBodyTimeouts(t, 200*time.Millisecond, 5*time.Second)
+	ts, _ := newTestServer(t)
+	body := `[{"log":"Oct 11 09:15:02 web1 sshd[811]: Failed password for bob from 192.0.2.4 port 1 ssh2"}]`
+	head := "POST /api/ingest HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok-0123456789abcdef\r\nContent-Length: " + fmt.Sprint(len(body)) + "\r\n\r\n"
+	if status, _ := rawRequest(t, ts, head, body, 600*time.Millisecond); !strings.Contains(status, "200") {
+		t.Errorf("slow agent batch: %q", status)
+	}
+	// Without the token, the body is not waited for.
+	bad := strings.Replace(head, "tok-0123456789abcdef", "wrong-token-000000", 1)
+	if status, took := rawRequest(t, ts, bad, "", 0); !strings.Contains(status, "401") || took > 2*time.Second {
+		t.Errorf("bad token: %q after %v", status, took)
+	}
+	// A signed-in user's slow JSON request is still cut off.
+	slow := "POST /api/search HTTP/1.1\r\nHost: x\r\nAuthorization: Basic YWRtaW46czNjcmV0LXBhc3M=\r\nContent-Length: 15\r\n\r\n"
+	if status, _ := rawRequest(t, ts, slow, `{"query":"*"} `, 600*time.Millisecond); !strings.Contains(status, "400") {
+		t.Errorf("slow search body: %q", status)
+	}
+}
+
+type failingBulk struct{}
+
+func (failingBulk) Bulk(context.Context, []store.IndexedDoc) ([]store.BulkItemError, error) {
+	return nil, errors.New("opensearch unreachable at http://10.20.30.40:9200: dial tcp: connection refused")
+}
+
+func TestIngestErrorsDoNotRevealOpenSearch(t *testing.T) {
+	ts, _ := newTestServerWith(t, func(s *Server) { s.Pipeline = &ingest.Pipeline{Store: failingBulk{}} })
+	req, _ := http.NewRequest("POST", ts.URL+"/api/ingest", strings.NewReader(`[{"log":"x"}]`))
+	req.Header.Set("Authorization", "Bearer tok-0123456789abcdef")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 503 || strings.Contains(string(b), "10.20.30.40") || !strings.Contains(string(b), "try again") {
+		t.Errorf("%d %s", resp.StatusCode, b)
+	}
+}
+
+func TestHealthHidesSecretsAndShowsWarnings(t *testing.T) {
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Config.OpenSearch.URL = "https://admin:OsAdm1nPass@os.internal:9200/?api_key=K3Y"
+		s.Config.OpenSearch.TLSSkipVerify = true
+	})
+	_, body := do(t, ts, "GET", "/api/health", "", true)
+	os := body["opensearch"].(map[string]any)
+	if os["url"] != "https://***@os.internal:9200/?api_key=***" {
+		t.Errorf("url = %v", os["url"])
+	}
+	if w := fmt.Sprint(body["warnings"]); !strings.Contains(w, "tls_skip_verify") {
+		t.Errorf("warnings = %v", w)
+	}
+}

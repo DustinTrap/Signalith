@@ -50,8 +50,8 @@
   const SVGNS = 'http://www.w3.org/2000/svg';
   function svg(parent, tag, a, text) {
     const n = document.createElementNS(SVGNS, tag);
-    for (const [k, v] of Object.entries(a || {})) n.setAttribute(k, v);
-    if (text !== undefined) n.textContent = text;
+    for (const [k, v] of Object.entries(a || {})) n.setAttribute(k, TEXT_ATTRS.has(k) ? visibleText(v) : v);
+    if (text !== undefined) n.textContent = visibleText(text);
     if (parent) parent.append(n);
     return n;
   }

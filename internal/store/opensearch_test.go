@@ -1,0 +1,171 @@
+package store
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"io"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func green(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"status":"green"}`) }
+
+func writePEM(t *testing.T, dir, name, typ string, der []byte) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestProxyEnvironmentIsIgnored(t *testing.T) {
+	var proxied atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxied.Add(1)
+		green(w, r)
+	}))
+	defer proxy.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	tr, err := Transport(Config{})
+	if err != nil || tr.Proxy != nil {
+		t.Fatalf("transport proxy set from the environment: %v", err)
+	}
+	// 192.0.2.1 is a documentation address nobody answers on.
+	c := New(Config{URL: "http://192.0.2.1:9200", Username: "signalith", Password: "OS-SECRET", Timeout: 300 * time.Millisecond})
+	if _, err := c.Health(context.Background()); err == nil || proxied.Load() != 0 {
+		t.Fatalf("health went through the proxy: err=%v proxied=%d", err, proxied.Load())
+	}
+
+	// An explicit opensearch.proxy is used.
+	c = New(Config{URL: "http://192.0.2.1:9200", Proxy: proxy.URL, Timeout: 5 * time.Second})
+	if status, err := c.Health(context.Background()); err != nil || status != "green" || proxied.Load() != 1 {
+		t.Fatalf("explicit proxy: %q %v proxied=%d", status, err, proxied.Load())
+	}
+}
+
+func TestPrivateCA(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(green))
+	defer ts.Close()
+	ca := writePEM(t, t.TempDir(), "ca.pem", "CERTIFICATE", ts.Certificate().Raw)
+
+	if _, err := New(Config{URL: ts.URL}).Health(context.Background()); err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("an unknown CA was trusted: %v", err)
+	}
+	if status, err := New(Config{URL: ts.URL, CAFile: ca}).Health(context.Background()); err != nil || status != "green" {
+		t.Fatalf("with ca_file: %q %v", status, err)
+	}
+	if status, err := New(Config{URL: ts.URL, TLSSkipVerify: true}).Health(context.Background()); err != nil || status != "green" {
+		t.Fatalf("with tls_skip_verify: %q %v", status, err)
+	}
+	// A CA file that cannot be used fails every request with a clear error.
+	_, err := New(Config{URL: ts.URL, CAFile: filepath.Join(t.TempDir(), "missing.pem")}).Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "opensearch CA file") {
+		t.Fatalf("missing CA file: %v", err)
+	}
+	notPEM := filepath.Join(t.TempDir(), "ca.pem")
+	os.WriteFile(notPEM, []byte("hello"), 0o600)
+	if _, err := LoadCAFile(notPEM); err == nil || !strings.Contains(err.Error(), "no PEM certificates") {
+		t.Fatalf("not PEM: %v", err)
+	}
+}
+
+func TestOldTLSRefused(t *testing.T) {
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(green))
+	ts.TLS = &tls.Config{MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS11}
+	ts.StartTLS()
+	defer ts.Close()
+	if _, err := New(Config{URL: ts.URL, TLSSkipVerify: true}).Health(context.Background()); err == nil {
+		t.Fatal("connected with TLS 1.1")
+	}
+}
+
+func TestClientCertificate(t *testing.T) {
+	dir := t.TempDir()
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test CA"}, IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	caDER, _ := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	caCert, _ := x509.ParseCertificate(caDER)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "signalith"}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		KeyUsage: x509.KeyUsageDigitalSignature, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	keyDER, _ := x509.MarshalPKCS8PrivateKey(key)
+	certFile := writePEM(t, dir, "client.pem", "CERTIFICATE", der)
+	keyFile := writePEM(t, dir, "client-key.pem", "PRIVATE KEY", keyDER)
+
+	var user atomic.Value
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user.Store(r.TLS.PeerCertificates[0].Subject.CommonName)
+		green(w, r)
+	}))
+	pool := x509.NewCertPool()
+	pool.AddCert(caCert)
+	ts.TLS = &tls.Config{ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool}
+	ts.StartTLS()
+	defer ts.Close()
+
+	if _, err := New(Config{URL: ts.URL, TLSSkipVerify: true}).Health(context.Background()); err == nil {
+		t.Fatal("connected without a client certificate")
+	}
+	status, err := New(Config{URL: ts.URL, TLSSkipVerify: true, CertFile: certFile, KeyFile: keyFile}).Health(context.Background())
+	if err != nil || status != "green" || user.Load() != "signalith" {
+		t.Fatalf("with a client certificate: %q %v %v", status, err, user.Load())
+	}
+	if _, err := Transport(Config{CertFile: certFile, KeyFile: filepath.Join(dir, "nope.pem")}); err == nil || !strings.Contains(err.Error(), "client certificate") {
+		t.Fatalf("missing key: %v", err)
+	}
+}
+
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	var leaked atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked.Store(r.Header.Get("Authorization") + "|" + r.URL.Path)
+		green(w, r)
+	}))
+	defer other.Close()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer ts.Close()
+	_, err := New(Config{URL: ts.URL, Username: "signalith", Password: "OS-SECRET"}).Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "redirect") || leaked.Load() != nil {
+		t.Fatalf("err=%v, other host got %v", err, leaked.Load())
+	}
+}
+
+func TestURLCredentialsAreUsedButNeverShown(t *testing.T) {
+	var auth atomic.Value
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, _ := r.BasicAuth()
+		auth.Store(u + ":" + p)
+		green(w, r)
+	}))
+	defer ts.Close()
+	withCreds := strings.Replace(ts.URL, "http://", "http://signalith:S3cr3tPass@", 1)
+	if _, err := New(Config{URL: withCreds}).Health(context.Background()); err != nil || auth.Load() != "signalith:S3cr3tPass" {
+		t.Fatalf("credentials from the URL: %v %v", err, auth.Load())
+	}
+	// Bulk to a closed port: the error names the address but not the password.
+	c := New(Config{URL: "http://signalith:S3cr3tPass@127.0.0.1:1"})
+	_, err := c.Bulk(context.Background(), []IndexedDoc{{Index: "x", Doc: map[string]any{"a": 1}}})
+	if err == nil || strings.Contains(err.Error(), "S3cr3tPass") || !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Fatalf("error: %v", err)
+	}
+}

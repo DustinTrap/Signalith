@@ -299,10 +299,15 @@ func TrimEvent(ev map[string]any) (map[string]any, error) {
 	return out, nil
 }
 
-// NewID returns a case ID such as "CASE-20261012-3fa9c1".
+// NewID returns a case ID such as "CASE-20261012-3fa9c1d27b40e865". The
+// 64 random bits make two cases with one ID practically impossible, and
+// stores refuse to create a case whose ID exists (ErrExists) rather than
+// replace it.
 func NewID(now time.Time) string {
-	b := make([]byte, 3)
-	_, _ = rand.Read(b)
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
 	return "CASE-" + now.UTC().Format("20060102") + "-" + hex.EncodeToString(b)
 }
 
@@ -315,6 +320,8 @@ func NewEntryID() string {
 
 // Store persists cases.
 type Store interface {
+	// Create adds a new case. It returns ErrExists, and changes nothing,
+	// when a case with that ID exists.
 	Create(ctx context.Context, c *Case) error
 	Get(ctx context.Context, id string) (*Case, error)
 	Save(ctx context.Context, c *Case) error
@@ -326,6 +333,7 @@ type Store interface {
 // Errors returned by stores and case methods.
 var (
 	ErrNotFound      = errors.New("case not found")
+	ErrExists        = errors.New("a case with this ID exists")
 	ErrEntryNotFound = errors.New("timeline entry not found")
 )
 

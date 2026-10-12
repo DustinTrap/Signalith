@@ -421,7 +421,7 @@ function draftFor(id) {
 
 function renderCase() {
   const { case: c, findings: linked = [], missing_findings: missing, entity_context: ectx } = caseState.data;
-  document.title = c.title + ' · Investigations · Signalith';
+  document.title = visibleText(c.title) + ' · Investigations · Signalith';
   // Unsaved edits in the details form survive a redraw of the same case,
   // such as the one after adding a note.
   const edits = caseState.detailsEdits ? caseState.detailsEdits(c.id) : null;

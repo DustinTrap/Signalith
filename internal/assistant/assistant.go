@@ -16,11 +16,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/redact"
 )
 
 // Providers are the supported endpoint kinds.
@@ -57,7 +59,30 @@ func New(provider, url, model, apiKey string) *Client {
 		model = DefaultModel[provider]
 	}
 	return &Client{Provider: provider, URL: strings.TrimRight(url, "/"), Model: model, APIKey: apiKey,
-		HTTP: &http.Client{Timeout: 60 * time.Second}}
+		HTTP: &http.Client{Timeout: 60 * time.Second, CheckRedirect: sameOriginRedirects}}
+}
+
+// sameOriginRedirects follows a redirect only to the same scheme, host and
+// port. Go would otherwise send the x-api-key header (and the question)
+// wherever the redirect points, including over plain http.
+func sameOriginRedirects(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("stopped after 5 redirects")
+	}
+	if origin(req.URL) != origin(via[0].URL) {
+		return fmt.Errorf("the AI model's address redirected to %s; Signalith only follows redirects within the same host, "+
+			"so the API key is not sent elsewhere. Set assistant.url to the final address", redact.URL(req.URL.String()))
+	}
+	return nil
+}
+
+// origin is a URL's scheme, host and port, with the default port filled in.
+func origin(u *neturl.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	return u.Scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
 }
 
 // Name describes the model for the UI.
@@ -122,7 +147,12 @@ func (c *Client) complete(ctx context.Context, msgs []message) (string, error) {
 	req.Header = hdr
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("could not reach the AI model at %s: %w", c.URL, err)
+		// Go's error repeats the request URL, which may hold a key.
+		var ue *neturl.Error
+		if errors.As(err, &ue) {
+			ue.URL = redact.URL(ue.URL)
+		}
+		return "", fmt.Errorf("could not reach the AI model at %s: %w", redact.URL(c.URL), err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

@@ -174,6 +174,10 @@ func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
 	}
 	s.caseMu.Lock()
 	err := s.Cases.Create(r.Context(), c)
+	for try := 0; errors.Is(err, cases.ErrExists) && try < 3; try++ {
+		c.ID = cases.NewID(now) // practically never needed
+		err = s.Cases.Create(r.Context(), c)
+	}
 	s.caseMu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
