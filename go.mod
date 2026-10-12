@@ -1,6 +1,6 @@
 module github.com/jrsamsanchez/signalith
 
-go 1.24
+go 1.26.9
 
 require (
 	golang.org/x/crypto v0.36.0
