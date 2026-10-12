@@ -175,7 +175,7 @@ directory user at their next request.
 
 ### Set it up
 
-On the **Users** page, open **Directory sign-in**:
+On the **Users** page, open **Directory sign-in** and click **Set up directory sign-in**:
 
 1. Pick **Active Directory** or **OpenLDAP**. This fills in the filter and attribute
    defaults below; change any of them if your directory differs.
@@ -359,7 +359,7 @@ user filter. With the Active Directory preset, disabled accounts are never found
 **"More than one entry matches."** The filter is too loose, for example two accounts
 with the same `uid` in different branches. Narrow the base DN or the filter.
 
-**A user is refused with "not in a group that can use Signalith".** **Test a user**
+**A user is refused with "Your account can’t use Signalith yet".** **Test a user**
 lists every group found. Map one of them to a role, or set `default_role: viewer`.
 Check that the DN in the mapping is the group's full DN. Group changes in the
 directory apply at the user's next sign-in.

@@ -135,7 +135,7 @@ func TestManagingLocalUsers(t *testing.T) {
 	if code, body, _ := call(t, ts, "GET", "/api/health", "", "", "", c); code != 403 || body["code"] != "password_change_required" {
 		t.Errorf("health before change = %d %v", code, body)
 	}
-	if resp := send(t, "GET", ts.URL+"/", "", map[string]string{"Sec-Fetch-Mode": "navigate"}, c); resp.StatusCode != 303 || resp.Header.Get("Location") != "/login" {
+	if resp := send(t, "GET", ts.URL+"/", "", map[string]string{"Sec-Fetch-Mode": "navigate"}, c); resp.StatusCode != 303 || resp.Header.Get("Location") != "/login?change=1" {
 		t.Errorf("app page before change = %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	if resp := send(t, "GET", ts.URL+"/login", "", nil, c); resp.StatusCode != 200 {

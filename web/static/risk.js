@@ -471,7 +471,8 @@ function renderList() {
   const items = res.items || [];
   if (!items.length) {
     toolbar.classList.add('hidden');
-    box.replaceChildren(riEmpty({ icon: info.icon, title: `No ${info.nouns} yet`, text: info.empty, action: { label: 'Upload CSV', icon: 'upload', run: openListUpload } }));
+    box.replaceChildren(can('admin') ? riEmpty({ icon: info.icon, title: `No ${info.nouns} yet`, text: info.empty, action: { label: 'Upload CSV', icon: 'upload', run: openListUpload } })
+      : riEmpty({ icon: info.icon, title: `No ${info.nouns} yet`, text: `An admin uploads the ${info.noun} list.` }));
     return;
   }
   toolbar.classList.remove('hidden');

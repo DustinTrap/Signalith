@@ -182,7 +182,8 @@
     <div class="nav__group" data-group="Configure">
       <div class="nav__label">Configure</div>
       <a class="nav__item" href="#assets" data-page="assets"><svg class="icon" aria-hidden="true"><use href="#i-fingerprint"/></svg><span>Assets &amp; identities</span></a>
-      <a class="nav__item" href="#data" data-page="data"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#data" data-page="data" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
@@ -210,8 +211,10 @@
         <div class="menu__sep"></div>
         <div class="menu__row"><span>Theme</span><div class="seg seg--sm" role="group" aria-label="Theme"><button type="button" data-set-theme="light" aria-label="Light" title="Light"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button><button type="button" data-set-theme="dark" aria-label="Dark" title="Dark"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button><button type="button" data-set-theme="" aria-label="Match system" title="Match system"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></button></div></div>
         <div class="menu__sep"></div>
+        <button class="menu__item hidden" type="button" id="change-password"><svg class="icon" aria-hidden="true"><use href="#i-key-round"/></svg>Change password</button>
         <button class="menu__item menu__item--danger" type="button" id="sign-out"><svg class="icon" aria-hidden="true"><use href="#i-log-out"/></svg>Sign out</button>
         <p class="menu__note hidden" id="basic-note">Signed in with HTTP Basic auth. Close the browser to sign out.</p>
+        <p class="menu__note menu__version" id="user-menu-version"></p>
       </div>
     </details>
   </div>
@@ -222,14 +225,14 @@
     <div class="search-layout">
       <div class="workspace">
         <div class="card query">
-          <form id="ask-form" class="ask" role="search" autocomplete="off">
+          <form id="ask-form" class="ask" data-min-role="analyst" role="search" autocomplete="off">
             <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
             <input id="ask" type="search" placeholder="Ask in plain English, e.g. top 10 users with failed logins today" aria-label="Ask in plain English" enterkeyhint="go">
             <label id="ask-ai-wrap" class="switch hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"><span>Use AI</span></label>
             <button id="ask-go" class="btn btn--ghost btn--sm hide-sm" type="submit">Write query<kbd aria-hidden="true">↵</kbd></button>
           </form>
-          <div id="ask-try" class="try hidden"><span>Try</span><span id="ask-examples" class="try__list"></span></div>
-          <div id="ask-result" class="ask-read hidden" aria-live="polite"></div>
+          <div id="ask-try" class="try hidden" data-min-role="analyst"><span>Try</span><span id="ask-examples" class="try__list"></span></div>
+          <div id="ask-result" class="ask-read hidden" data-min-role="analyst" aria-live="polite"></div>
           <div class="editor" id="editor">
             <div class="editor__hl" id="query-hl" aria-hidden="true"></div>
             <textarea id="query" class="editor__input" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Query" aria-describedby="query-error" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
@@ -238,9 +241,9 @@
           <div id="query-error" class="alert query-error hidden" data-tone="danger" role="alert"></div>
           <div class="query__bar">
             <button id="explain" class="btn btn--ghost btn--sm" type="button" title="Explain this query in plain English" aria-pressed="false" aria-controls="explanation"><svg class="icon" aria-hidden="true"><use href="#i-book-open"/></svg><span>Explain</span></button>
-            <button id="save-detection" class="btn btn--ghost btn--sm" type="button" title="Run this query on a schedule and raise findings"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Save as detection</span></button>
-            <button id="add-to-dashboard" class="btn btn--ghost btn--sm" type="button" title="Show this query as a panel on a dashboard"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Add to dashboard</span></button>
-            <button id="search-to-case" class="btn btn--ghost btn--sm" type="button" title="Save this search and a snapshot of its results to an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Add to case</span></button>
+            <button id="save-detection" data-min-role="admin" class="btn btn--ghost btn--sm" type="button" title="Run this query on a schedule and raise findings"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Save as detection</span></button>
+            <button id="add-to-dashboard" data-min-role="analyst" class="btn btn--ghost btn--sm" type="button" title="Show this query as a panel on a dashboard"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Add to dashboard</span></button>
+            <button id="search-to-case" data-min-role="analyst" class="btn btn--ghost btn--sm" type="button" title="Save this search and a snapshot of its results to an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Add to case</span></button>
             <div class="run">
               <span class="hint" aria-hidden="true"><kbd class="mod-key">Ctrl</kbd><kbd>↵</kbd></span>
               <select id="time" class="select" aria-label="Time range">
@@ -363,11 +366,11 @@
         </div>
         <label class="switch db-auto" title="Reload the dashboard while this page is open"><input type="checkbox" id="db-auto">Auto-refresh</label>
         <div class="db-tools hidden" id="db-tools">
-          <button class="btn btn--ghost" type="button" id="db-edit" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
+          <button class="btn btn--ghost" type="button" id="db-edit" data-min-role="analyst" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
           <a class="btn btn--ghost btn--icon" id="db-yaml" href="#" download title="Download YAML" aria-label="Download YAML"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></a>
-          <button class="btn btn--secondary" type="button" id="db-add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add panel</button>
+          <button class="btn btn--secondary" type="button" id="db-add" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add panel</button>
         </div>
-        <button class="btn btn--secondary" type="button" id="db-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New dashboard</button>
+        <button class="btn btn--secondary" type="button" id="db-new" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New dashboard</button>
       </div>
     </div>
     <div id="db-problems" class="alert hidden" data-tone="warning" role="status"></div>
@@ -415,7 +418,7 @@
           <button class="btn btn--ghost btn--icon hide-sm hidden" type="button" id="f-clear" aria-label="Clear filters" title="Clear filters"><svg class="icon" aria-hidden="true"><use href="#i-filter-x"/></svg></button>
           <button class="btn btn--ghost btn--icon hide-sm" type="button" id="f-export" aria-label="Export these findings as CSV" title="Export as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></button>
         </div>
-        <div class="bulkbar hidden" id="f-bulk" role="toolbar" aria-label="Selected findings">
+        <div class="bulkbar hidden" id="f-bulk" data-min-role="analyst" role="toolbar" aria-label="Selected findings">
           <button class="btn btn--ghost btn--icon btn--sm" type="button" id="f-bulk-clear" aria-label="Clear selection" title="Clear selection"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
           <b id="f-bulk-count" aria-live="polite"></b>
           <span class="spacer"></span>
@@ -479,7 +482,7 @@
           <p class="page-head__desc">Cases group related findings with your notes, searches and pinned events.</p>
         </div>
         <div class="page-head__actions">
-          <button id="c-new" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New case</button>
+          <button id="c-new" class="btn btn--primary" type="button" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New case</button>
         </div>
       </div>
       <div class="queue">
@@ -553,7 +556,7 @@
       <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="l-find" class="input" type="search" placeholder="Find a host, IP or owner" aria-label="Find in this list" autocomplete="off" spellcheck="false"></div>
       <span class="spacer"></span>
       <a id="l-download" class="btn btn--ghost" href="api/lookups/assets.csv" download aria-label="Download CSV" title="Download the list as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span class="hide-sm">Download CSV</span></a>
-      <button id="l-upload-open" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload CSV</button>
+      <button id="l-upload-open" data-min-role="admin" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload CSV</button>
     </div>
     <div class="card" id="l-panel" role="tabpanel" aria-labelledby="l-tab-assets">
       <div id="l-table" class="table-wrap"></div>
@@ -597,7 +600,7 @@
       </div>
       <div class="page-head__actions">
         <button id="ti-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
-        <button id="ti-add-open" class="btn btn--secondary" type="button" aria-label="Add indicators"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="hide-sm">Add indicators</span></button>
+        <button id="ti-add-open" data-min-role="analyst" class="btn btn--secondary" type="button" aria-label="Add indicators"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="hide-sm">Add indicators</span></button>
         <button id="ti-hunt" class="btn btn--primary" type="button" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg>Find matching events</button>
       </div>
     </div>
@@ -611,7 +614,7 @@
             <h3 class="card__title">Feeds</h3>
             <p class="card__sub" id="ti-feeds-sub"></p>
           </div>
-          <div class="card__actions"><button id="ti-examples-open" class="btn btn--ghost btn--sm hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>Example settings</button></div>
+          <div class="card__actions"><button id="ti-examples-open" data-min-role="admin" class="btn btn--ghost btn--sm hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>Example settings</button></div>
         </div>
         <div id="ti-feeds" class="ti-feeds__body"></div>
       </div>
@@ -648,7 +651,7 @@
         </div>
         <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
-      <div class="tabs ti-add-tabs" role="tablist" aria-label="How to add">
+      <div class="tabs ti-add-tabs" data-min-role="admin" role="tablist" aria-label="How to add">
         <button class="tab" type="button" role="tab" id="ti-tab-one" aria-controls="ti-add" aria-selected="true">One indicator</button>
         <button class="tab" type="button" role="tab" id="ti-tab-upload" aria-controls="ti-upload-panel" aria-selected="false" tabindex="-1">Upload a list</button>
       </div>
@@ -782,8 +785,8 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
         <p class="page-head__desc" id="d-desc">Scheduled searches that raise a finding for each result.</p>
       </div>
       <div class="page-head__actions">
-        <button class="btn btn--secondary" type="button" id="d-sigma"><svg class="icon" aria-hidden="true"><use href="#i-sigma"/></svg>Import Sigma rule</button>
-        <button class="btn btn--primary" type="button" id="d-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
+        <button class="btn btn--secondary" type="button" id="d-sigma" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-sigma"/></svg>Import Sigma rule</button>
+        <button class="btn btn--primary" type="button" id="d-new" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
       </div>
     </div>
     <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b>The scheduler is off on this server.</b><p>Detections only run when you choose Run now.</p></div></div>
@@ -897,6 +900,33 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     <p class="sr-only" id="agent-status" role="status"></p>
   </section>
 
+  <!-- Users (admins) -->
+  <section id="page-users" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Users</h2>
+        <p class="page-head__desc">Who can sign in, and what their role lets them do.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="u-add" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"/></svg>Add user</button>
+      </div>
+    </div>
+    <div class="tabs u-tabs" role="tablist" aria-label="Users and sign-in">
+      <button class="tab" type="button" role="tab" id="u-tab-users" aria-controls="u-panel-users" aria-selected="true">Users <span class="count hidden" id="u-count"></span></button>
+      <button class="tab" type="button" role="tab" id="u-tab-directory" aria-controls="u-panel-directory" aria-selected="false" tabindex="-1">Directory sign-in <span class="badge badge--success hidden" id="u-dir-on">On</span></button>
+    </div>
+    <div id="u-panel-users" class="u-panel" role="tabpanel" aria-labelledby="u-tab-users">
+      <div class="toolbar hidden" id="u-toolbar" role="search">
+        <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="u-find" class="input" type="search" placeholder="Find a user" aria-label="Find a user" autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="card">
+        <div id="u-list" class="u-list"></div>
+        <div id="u-foot" class="table-foot hidden"></div>
+      </div>
+    </div>
+    <div id="u-panel-directory" class="u-panel" role="tabpanel" aria-labelledby="u-tab-directory" hidden></div>
+  </section>
+
   <!-- Health -->
   <section id="page-health" class="page">
     <div id="health" class="health-page"></div>
@@ -959,5 +989,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="intel.js"></script>
 <script src="dashboards.js"></script>
 <script src="cases.js"></script>
+<script src="users.js"></script>
 </body>
 </html>

@@ -33,9 +33,9 @@ type RoleInfo struct {
 
 // RoleInfos describes every role, lowest first.
 var RoleInfos = []RoleInfo{
-	{Viewer, "Viewer", "Runs searches and sees dashboards, findings, investigations, detections, risk and intel. Cannot change anything."},
-	{Analyst, "Analyst", "Viewer, plus triages findings, works investigations, builds dashboards, asks questions in plain English and adds intel indicators."},
-	{Admin, "Admin", "Analyst, plus manages detections, threat intel feeds, asset lists, data collection, users and directory sign-in."},
+	{Viewer, "Viewer", "Searches and looks at everything, but changes nothing."},
+	{Analyst, "Analyst", "Also triages findings, works investigations and builds dashboards."},
+	{Admin, "Admin", "Also manages detections, threat intel, data collection and users."},
 }
 
 // rank orders roles; unknown roles rank below viewer, so they can do

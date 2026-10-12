@@ -112,7 +112,7 @@ func (s *Server) allow(rt route, next http.Handler) http.Handler {
 		if p.MustChangePassword && !rt.Anytime {
 			if !strings.HasPrefix(r.URL.Path, "/api/") && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 				// The sign-in page asks for the new password.
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				http.Redirect(w, r, "/login?change=1", http.StatusSeeOther)
 				return
 			}
 			writeJSON(w, http.StatusForbidden, map[string]any{

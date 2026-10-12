@@ -123,9 +123,10 @@ function renderFeeds(feeds, downloads) {
   $('ti-examples-open').classList.toggle('hidden', !feeds.length);
   if (!feeds.length) {
     $('ti-feeds-sub').textContent = 'Downloaded indicator lists';
-    box.replaceChildren(riEmpty({ icon: 'rss', title: 'No feeds yet',
+    box.replaceChildren(can('admin') ? riEmpty({ icon: 'rss', title: 'No feeds yet',
       text: 'Add feeds under intel.feeds in signalith.yaml and restart. Nothing is downloaded until then.',
-      action: { label: 'Show example settings', icon: 'file-code', run: openExamples } }));
+      action: { label: 'Show example settings', icon: 'file-code', run: openExamples } })
+      : riEmpty({ icon: 'rss', title: 'No feeds yet', text: 'An admin sets up feeds. Nothing is downloaded until then.' }));
     return;
   }
   const sub = [`${enabled} of ${feeds.length} enabled`];
@@ -141,7 +142,7 @@ function renderFeeds(feeds, downloads) {
         `${st.skipped.toLocaleString()} ${st.skipped === 1 ? 'line' : 'lines'} skipped as not valid`));
     }
     let action = null;
-    if (f.enabled) {
+    if (f.enabled && can('admin')) {
       action = riIconBtn('cloud-download', `Download ${f.name} now`, async () => {
         action.disabled = true;
         stateCell.firstChild.dataset.state = 'run';
@@ -241,7 +242,7 @@ function renderIndicators() {
   if (!shown.length) {
     box.replaceChildren(tiFiltered()
       ? riEmpty({ icon: 'search', title: 'No indicators match', text: 'Nothing matches these filters. A value inside a listed network still counts as a match.', action: { label: 'Clear filters', run: clearIntelFilters } })
-      : riEmpty({ icon: 'radar', title: 'No indicators yet', text: 'Indicators come from feeds. Add your own with Add indicators.' }));
+      : riEmpty({ icon: 'radar', title: 'No indicators yet', text: can('analyst') ? 'Indicators come from feeds. Add your own with Add indicators.' : 'Indicators come from feeds and from analysts.' }));
     return;
   }
   const rows = shown.map((ind) => {
@@ -325,7 +326,7 @@ function showIndicator(id) {
       el('div', {}, 'This comes from the feed ', el('b', {}, ind.source), ' and returns with its next download. To remove it, disable the feed.')) : null);
   const foot = el('div', { class: 'inspector__foot' },
     el('button', { class: 'btn btn--secondary', type: 'button', title: 'Search the last 7 days for this indicator', onclick: () => openSearch(huntQuery(ind), '-7d') }, icon('search'), 'Search events'));
-  if (ind.source === 'manual') {
+  if (ind.source === 'manual' && can('analyst')) {
     foot.append(el('span', { class: 'spacer' }), el('button', { class: 'btn btn--ghost', type: 'button', onclick: () => confirmDelete(ind) }, icon('trash-2'), 'Delete'));
   }
   box.replaceChildren(bar, el('div', { class: 'inspector__head' }, title, meta), body, foot);
