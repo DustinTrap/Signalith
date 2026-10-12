@@ -4,6 +4,7 @@ package search
 
 import (
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -110,6 +111,9 @@ func equalsQuery(field, value string) map[string]any {
 	if value == "*" {
 		return map[string]any{"exists": map[string]any{"field": field}}
 	}
+	if q, ok := cidrQuery(field, value); ok {
+		return q
+	}
 	if strings.ContainsAny(value, "*?") {
 		// Backslash is the wildcard escape character; Windows paths need it literal.
 		escaped := strings.ReplaceAll(value, `\`, `\\`)
@@ -120,6 +124,45 @@ func equalsQuery(field, value string) map[string]any {
 		return map[string]any{"term": map[string]any{field: map[string]any{"value": value}}}
 	}
 	return map[string]any{"term": map[string]any{field: map[string]any{"value": value, "case_insensitive": true}}}
+}
+
+// cidrQuery matches an IPv4 range such as 10.0.0.0/8 against a field that
+// stores addresses as text. The range becomes at most 128 prefix patterns
+// ("10.*", "10.0.4.*") or, below /24, exact addresses. IPv6 ranges are not
+// expanded and match as plain text.
+func cidrQuery(field, value string) (map[string]any, bool) {
+	p, err := netip.ParsePrefix(value)
+	if err != nil || !p.Addr().Is4() {
+		return nil, false
+	}
+	p = p.Masked()
+	bits := p.Bits()
+	a := p.Addr().As4()
+	if bits == 0 {
+		return map[string]any{"exists": map[string]any{"field": field}}, true
+	}
+	// Round the prefix up to the next octet and list every value of the
+	// partial octet.
+	octets := (bits + 7) / 8
+	free := octets*8 - bits
+	base := int(a[octets-1])
+	var qs []any
+	for i := 0; i < 1<<free; i++ {
+		parts := make([]string, 0, 4)
+		for k := 0; k < octets-1; k++ {
+			parts = append(parts, strconv.Itoa(int(a[k])))
+		}
+		parts = append(parts, strconv.Itoa(base+i))
+		if octets == 4 {
+			qs = append(qs, map[string]any{"term": map[string]any{field: map[string]any{"value": strings.Join(parts, ".")}}})
+		} else {
+			qs = append(qs, map[string]any{"prefix": map[string]any{field: map[string]any{"value": strings.Join(parts, ".") + "."}}})
+		}
+	}
+	if len(qs) == 1 {
+		return qs[0].(map[string]any), true
+	}
+	return map[string]any{"bool": map[string]any{"should": qs, "minimum_should_match": 1}}, true
 }
 
 var queryStringReserved = regexp.MustCompile(`[+\-=&|><!(){}\[\]^"~:\\/]`)

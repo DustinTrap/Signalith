@@ -18,6 +18,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
+	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -193,6 +194,28 @@ func TestEndToEnd(t *testing.T) {
 			t.Errorf("no src has both outcomes, got %v", res.Rows)
 		}
 	})
+	t.Run("plain-English questions run", func(t *testing.T) {
+		ip, err := nlq.Translate("failed logins from 203.0.113.9", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cidr, _ := nlq.Translate("failed logins from 203.0.113.0/24", nil)
+		a, b := run(t, eng, ip.Query), run(t, eng, cidr.Query)
+		if a.Matched == 0 || a.Matched != b.Matched {
+			t.Errorf("ip matched %d, cidr matched %d", a.Matched, b.Matched)
+		}
+		for _, q := range []string{"top 5 users with failed logins", "users with more than 2 failed logins per hour",
+			"which sources failed against at least 2 users", "processes containing enc", "how many distinct users logged in"} {
+			r, err := nlq.Translate(q, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res := run(t, eng, r.Query); len(res.Rows) == 0 {
+				t.Errorf("%q (%s) returned nothing", q, r.Query)
+			}
+		}
+	})
+
 	t.Run("mapping discovers fields", func(t *testing.T) {
 		m, err := cl.Mapping(context.Background(), prefix+"-authentication-*")
 		if err != nil {

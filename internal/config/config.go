@@ -29,6 +29,7 @@ type Config struct {
 	Ingest     Ingest     `yaml:"ingest"`
 	Detections Detections `yaml:"detections"`
 	Lookups    Lookups    `yaml:"lookups"`
+	Assistant  Assistant  `yaml:"assistant"`
 
 	// path is where the file was loaded from.
 	path string
@@ -97,6 +98,19 @@ type Lookups struct {
 	// Dir holds assets.csv and identities.csv. A relative path is relative
 	// to the folder this config file is in.
 	Dir string `yaml:"dir"`
+}
+
+// Assistant is an optional AI model for questions the built-in
+// plain-English translator cannot fully understand. Off when Provider is
+// empty. Only the question and the field list are sent, never events.
+type Assistant struct {
+	// Provider is "anthropic" or "openai" (any OpenAI-compatible API,
+	// including Ollama and LM Studio on your own hardware).
+	Provider string `yaml:"provider,omitempty"`
+	// URL overrides the endpoint, for example http://localhost:11434/v1.
+	URL    string `yaml:"url,omitempty"`
+	Model  string `yaml:"model,omitempty"`
+	APIKey string `yaml:"api_key,omitempty"`
 }
 
 // LookupsDir returns the absolute lookups folder.
@@ -181,6 +195,9 @@ func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_LOOKUPS_DIR"); v != "" {
 		c.Lookups.Dir = v
 	}
+	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
+		c.Assistant.APIKey = v
+	}
 	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
 		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
 	}
@@ -238,6 +255,24 @@ func (c *Config) Validate() error {
 	}
 	if c.Lookups.Dir == "" {
 		p = append(p, "lookups.dir is required, for example: lookups")
+	}
+	switch c.Assistant.Provider {
+	case "":
+	case "anthropic":
+		if c.Assistant.APIKey == "" {
+			p = append(p, "assistant.api_key is required for anthropic; set it or SIGNALITH_ASSISTANT_API_KEY")
+		}
+	case "openai":
+		if c.Assistant.Model == "" {
+			p = append(p, "assistant.model is required for openai, for example gpt-4.1 or, with Ollama, llama3.1")
+		}
+	default:
+		p = append(p, fmt.Sprintf("assistant.provider %q must be anthropic, openai or empty (off)", c.Assistant.Provider))
+	}
+	if c.Assistant.URL != "" {
+		if u, err := url.Parse(c.Assistant.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			p = append(p, fmt.Sprintf("assistant.url %q must be http(s)://host[:port][/path]", c.Assistant.URL))
+		}
 	}
 	if c.Detections.MaxFindingsPerRun < 1 || c.Detections.MaxFindingsPerRun > 10000 {
 		p = append(p, "detections.max_findings_per_run must be between 1 and 10000")
@@ -316,7 +351,7 @@ func (c *Config) Save(path string) error {
 const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
-# SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN.
+# SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server
@@ -326,5 +361,7 @@ const header = `# Signalith configuration.
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
 # detections.dir     folder for custom detections (relative to this file)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
+# assistant.*        optional AI model for "Ask in English" (provider: anthropic or openai);
+#                    off by default, and only the question and field names are sent
 
 `

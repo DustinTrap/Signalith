@@ -43,6 +43,12 @@ func (f *fakeOS) Mapping(context.Context, string) (map[string]string, error) {
 
 func newTestServer(t *testing.T) (*httptest.Server, *fakeOS) {
 	t.Helper()
+	return newTestServerWith(t, nil)
+}
+
+// newTestServerWith lets a test change the server before it starts.
+func newTestServerWith(t *testing.T, change func(*Server)) (*httptest.Server, *fakeOS) {
+	t.Helper()
 	cfg := config.Default()
 	h, _ := config.HashPassword("s3cret-pass")
 	cfg.Auth.AdminPasswordHash = h
@@ -70,6 +76,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *fakeOS) {
 		Assets:     lists,
 		Log:        logger,
 		Version:    "test",
+	}
+	if change != nil {
+		change(s)
 	}
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)

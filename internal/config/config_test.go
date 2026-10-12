@@ -66,3 +66,24 @@ func TestEnvOverrides(t *testing.T) {
 		t.Errorf("env not applied: %+v", c)
 	}
 }
+
+func TestAssistantSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ai.yaml")
+	os.WriteFile(path, []byte("assistant:\n  provider: openia\n  url: localhost:11434\n"), 0o600)
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	_, err := Load(path)
+	for _, want := range []string{"assistant.provider", "assistant.url"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	os.WriteFile(path, []byte("assistant:\n  provider: anthropic\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "SIGNALITH_ASSISTANT_API_KEY") {
+		t.Errorf("missing key not reported: %v", err)
+	}
+	t.Setenv("SIGNALITH_ASSISTANT_API_KEY", "sk-test")
+	c, err := Load(path)
+	if err != nil || c.Assistant.APIKey != "sk-test" {
+		t.Errorf("env key: %v %+v", err, c)
+	}
+}
