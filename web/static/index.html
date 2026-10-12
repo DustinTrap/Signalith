@@ -182,7 +182,9 @@
     <div class="nav__group" data-group="Configure">
       <div class="nav__label">Configure</div>
       <a class="nav__item" href="#assets" data-page="assets"><svg class="icon" aria-hidden="true"><use href="#i-fingerprint"/></svg><span>Assets &amp; identities</span></a>
-      <a class="nav__item" href="#data" data-page="data"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#data" data-page="data" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
+      <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
@@ -210,8 +212,10 @@
         <div class="menu__sep"></div>
         <div class="menu__row"><span>Theme</span><div class="seg seg--sm" role="group" aria-label="Theme"><button type="button" data-set-theme="light" aria-label="Light" title="Light"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button><button type="button" data-set-theme="dark" aria-label="Dark" title="Dark"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button><button type="button" data-set-theme="" aria-label="Match system" title="Match system"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></button></div></div>
         <div class="menu__sep"></div>
+        <button class="menu__item hidden" type="button" id="change-password"><svg class="icon" aria-hidden="true"><use href="#i-key-round"/></svg>Change password</button>
         <button class="menu__item menu__item--danger" type="button" id="sign-out"><svg class="icon" aria-hidden="true"><use href="#i-log-out"/></svg>Sign out</button>
         <p class="menu__note hidden" id="basic-note">Signed in with HTTP Basic auth. Close the browser to sign out.</p>
+        <p class="menu__note menu__version" id="user-menu-version"></p>
       </div>
     </details>
   </div>
@@ -222,14 +226,14 @@
     <div class="search-layout">
       <div class="workspace">
         <div class="card query">
-          <form id="ask-form" class="ask" role="search" autocomplete="off">
+          <form id="ask-form" class="ask" data-min-role="analyst" role="search" autocomplete="off">
             <svg class="icon" aria-hidden="true"><use href="#i-sparkles"/></svg>
             <input id="ask" type="search" placeholder="Ask in plain English, e.g. top 10 users with failed logins today" aria-label="Ask in plain English" enterkeyhint="go">
             <label id="ask-ai-wrap" class="switch hidden" title="Send the question (not your data) to the configured AI model"><input type="checkbox" id="ask-ai"><span>Use AI</span></label>
             <button id="ask-go" class="btn btn--ghost btn--sm hide-sm" type="submit">Write query<kbd aria-hidden="true">↵</kbd></button>
           </form>
-          <div id="ask-try" class="try hidden"><span>Try</span><span id="ask-examples" class="try__list"></span></div>
-          <div id="ask-result" class="ask-read hidden" aria-live="polite"></div>
+          <div id="ask-try" class="try hidden" data-min-role="analyst"><span>Try</span><span id="ask-examples" class="try__list"></span></div>
+          <div id="ask-result" class="ask-read hidden" data-min-role="analyst" aria-live="polite"></div>
           <div class="editor" id="editor">
             <div class="editor__hl" id="query-hl" aria-hidden="true"></div>
             <textarea id="query" class="editor__input" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Query" aria-describedby="query-error" placeholder="datamodel=Authentication action=failure | stats count by src"></textarea>
@@ -238,9 +242,9 @@
           <div id="query-error" class="alert query-error hidden" data-tone="danger" role="alert"></div>
           <div class="query__bar">
             <button id="explain" class="btn btn--ghost btn--sm" type="button" title="Explain this query in plain English" aria-pressed="false" aria-controls="explanation"><svg class="icon" aria-hidden="true"><use href="#i-book-open"/></svg><span>Explain</span></button>
-            <button id="save-detection" class="btn btn--ghost btn--sm" type="button" title="Run this query on a schedule and raise findings"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Save as detection</span></button>
-            <button id="add-to-dashboard" class="btn btn--ghost btn--sm" type="button" title="Show this query as a panel on a dashboard"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Add to dashboard</span></button>
-            <button id="search-to-case" class="btn btn--ghost btn--sm" type="button" title="Save this search and a snapshot of its results to an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Add to case</span></button>
+            <button id="save-detection" data-min-role="admin" class="btn btn--ghost btn--sm" type="button" title="Run this query on a schedule and raise findings"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Save as detection</span></button>
+            <button id="add-to-dashboard" data-min-role="analyst" class="btn btn--ghost btn--sm" type="button" title="Show this query as a panel on a dashboard"><svg class="icon" aria-hidden="true"><use href="#i-layout-dashboard"/></svg><span>Add to dashboard</span></button>
+            <button id="search-to-case" data-min-role="analyst" class="btn btn--ghost btn--sm" type="button" title="Save this search and a snapshot of its results to an investigation"><svg class="icon" aria-hidden="true"><use href="#i-briefcase"/></svg><span>Add to case</span></button>
             <div class="run">
               <span class="hint" aria-hidden="true"><kbd class="mod-key">Ctrl</kbd><kbd>↵</kbd></span>
               <select id="time" class="select" aria-label="Time range">
@@ -363,11 +367,11 @@
         </div>
         <label class="switch db-auto" title="Reload the dashboard while this page is open"><input type="checkbox" id="db-auto">Auto-refresh</label>
         <div class="db-tools hidden" id="db-tools">
-          <button class="btn btn--ghost" type="button" id="db-edit" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
+          <button class="btn btn--ghost" type="button" id="db-edit" data-min-role="analyst" title="Title, time range, refresh, delete"><svg class="icon" aria-hidden="true"><use href="#i-settings-2"/></svg>Settings</button>
           <a class="btn btn--ghost btn--icon" id="db-yaml" href="#" download title="Download YAML" aria-label="Download YAML"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></a>
-          <button class="btn btn--secondary" type="button" id="db-add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add panel</button>
+          <button class="btn btn--secondary" type="button" id="db-add" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add panel</button>
         </div>
-        <button class="btn btn--secondary" type="button" id="db-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New dashboard</button>
+        <button class="btn btn--secondary" type="button" id="db-new" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New dashboard</button>
       </div>
     </div>
     <div id="db-problems" class="alert hidden" data-tone="warning" role="status"></div>
@@ -415,7 +419,7 @@
           <button class="btn btn--ghost btn--icon hide-sm hidden" type="button" id="f-clear" aria-label="Clear filters" title="Clear filters"><svg class="icon" aria-hidden="true"><use href="#i-filter-x"/></svg></button>
           <button class="btn btn--ghost btn--icon hide-sm" type="button" id="f-export" aria-label="Export these findings as CSV" title="Export as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg></button>
         </div>
-        <div class="bulkbar hidden" id="f-bulk" role="toolbar" aria-label="Selected findings">
+        <div class="bulkbar hidden" id="f-bulk" data-min-role="analyst" role="toolbar" aria-label="Selected findings">
           <button class="btn btn--ghost btn--icon btn--sm" type="button" id="f-bulk-clear" aria-label="Clear selection" title="Clear selection"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
           <b id="f-bulk-count" aria-live="polite"></b>
           <span class="spacer"></span>
@@ -479,7 +483,7 @@
           <p class="page-head__desc">Cases group related findings with your notes, searches and pinned events.</p>
         </div>
         <div class="page-head__actions">
-          <button id="c-new" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New case</button>
+          <button id="c-new" class="btn btn--primary" type="button" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New case</button>
         </div>
       </div>
       <div class="queue">
@@ -553,7 +557,7 @@
       <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="l-find" class="input" type="search" placeholder="Find a host, IP or owner" aria-label="Find in this list" autocomplete="off" spellcheck="false"></div>
       <span class="spacer"></span>
       <a id="l-download" class="btn btn--ghost" href="api/lookups/assets.csv" download aria-label="Download CSV" title="Download the list as CSV"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span class="hide-sm">Download CSV</span></a>
-      <button id="l-upload-open" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload CSV</button>
+      <button id="l-upload-open" data-min-role="admin" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-upload"/></svg>Upload CSV</button>
     </div>
     <div class="card" id="l-panel" role="tabpanel" aria-labelledby="l-tab-assets">
       <div id="l-table" class="table-wrap"></div>
@@ -597,8 +601,8 @@
       </div>
       <div class="page-head__actions">
         <button id="ti-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
-        <button id="ti-add-open" class="btn btn--secondary" type="button" aria-label="Add indicators"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="hide-sm">Add indicators</span></button>
-        <button id="ti-hunt" class="btn btn--primary" type="button" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg>Find matching events</button>
+        <button id="ti-hunt" class="btn btn--secondary" type="button" aria-label="Find matching events" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg><span class="hide-sm">Find matching events</span></button>
+        <button id="ti-feed-add" data-min-role="admin" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add feed</button>
       </div>
     </div>
 
@@ -611,7 +615,6 @@
             <h3 class="card__title">Feeds</h3>
             <p class="card__sub" id="ti-feeds-sub"></p>
           </div>
-          <div class="card__actions"><button id="ti-examples-open" class="btn btn--ghost btn--sm hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>Example settings</button></div>
         </div>
         <div id="ti-feeds" class="ti-feeds__body"></div>
       </div>
@@ -624,6 +627,8 @@
         <div class="toolbar" role="search">
           <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="ti-q" class="input" type="search" placeholder="Find a value, description or tag" aria-label="Find indicators" autocomplete="off" spellcheck="false"></div>
           <select id="ti-source" class="select" aria-label="Source"><option value="">Any source</option></select>
+          <span class="spacer hide-sm"></span>
+          <button id="ti-add-open" data-min-role="analyst" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add indicators</button>
         </div>
         <div class="split">
           <div class="card">
@@ -640,6 +645,10 @@
       </div>
     </div>
 
+    <!-- Add feed and Edit feed; intel.js fills it -->
+    <dialog id="ti-feed-dialog" class="modal ti-feed-dialog" aria-labelledby="ti-feed-title"></dialog>
+    <dialog id="ti-feed-delete" class="modal" aria-labelledby="ti-feed-delete-title" aria-describedby="ti-feed-delete-desc"></dialog>
+
     <dialog id="ti-add-dialog" class="modal" aria-labelledby="ti-add-title">
       <div class="modal__head">
         <div>
@@ -648,7 +657,7 @@
         </div>
         <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
-      <div class="tabs ti-add-tabs" role="tablist" aria-label="How to add">
+      <div class="tabs ti-add-tabs" data-min-role="admin" role="tablist" aria-label="How to add">
         <button class="tab" type="button" role="tab" id="ti-tab-one" aria-controls="ti-add" aria-selected="true">One indicator</button>
         <button class="tab" type="button" role="tab" id="ti-tab-upload" aria-controls="ti-upload-panel" aria-selected="false" tabindex="-1">Upload a list</button>
       </div>
@@ -718,49 +727,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
       </div>
     </dialog>
 
-    <dialog id="ti-examples" class="modal ti-examples" aria-labelledby="ti-examples-title" aria-describedby="ti-examples-desc">
-      <div class="modal__head">
-        <div>
-          <h3 class="modal__title" id="ti-examples-title">Example feed settings</h3>
-          <p class="modal__desc" id="ti-examples-desc">Paste into signalith.yaml, run <code>signalith validate</code> and restart. Check each provider's terms of use.</p>
-        </div>
-        <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
-      </div>
-      <div class="modal__body">
-        <pre class="code-block" id="ti-example-yaml">intel:
-  feeds:
-    # Botnet command-and-control servers (abuse.ch Feodo Tracker)
-    - name: feodo-tracker
-      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
-      tags: [botnet, c2]
-      weight: 1.5
-    # Malware download URLs from the last 30 days (abuse.ch URLhaus)
-    - name: urlhaus
-      url: https://urlhaus.abuse.ch/downloads/csv_recent/
-      format: csv
-      column: url
-      type: url
-    # Malware file hashes (abuse.ch MalwareBazaar, last 48 hours)
-    - name: malwarebazaar
-      url: https://bazaar.abuse.ch/export/txt/sha256/recent/
-      type: sha256
-    # Compromised hosts (Proofpoint Emerging Threats)
-    - name: et-compromised
-      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
-      type: ip
-      interval: 12h
-    # A STIX 2.1 bundle from your own platform, with an API key
-    - name: our-misp
-      url: https://misp.example.com/feeds/signalith.json
-      format: stix
-      headers: {Authorization: "${MISP_API_KEY}"}</pre>
-      </div>
-      <div class="modal__foot">
-        <button class="btn btn--ghost" type="button" id="ti-example-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy</button>
-        <button class="btn btn--secondary" type="button" data-close>Close</button>
-      </div>
-    </dialog>
-
     <dialog id="ti-confirm" class="modal" aria-labelledby="ti-confirm-title" aria-describedby="ti-confirm-desc">
       <div class="modal__head">
         <div>
@@ -782,8 +748,8 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
         <p class="page-head__desc" id="d-desc">Scheduled searches that raise a finding for each result.</p>
       </div>
       <div class="page-head__actions">
-        <button class="btn btn--secondary" type="button" id="d-sigma"><svg class="icon" aria-hidden="true"><use href="#i-sigma"/></svg>Import Sigma rule</button>
-        <button class="btn btn--primary" type="button" id="d-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
+        <button class="btn btn--secondary" type="button" id="d-sigma" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-sigma"/></svg>Import Sigma rule</button>
+        <button class="btn btn--primary" type="button" id="d-new" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
       </div>
     </div>
     <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b>The scheduler is off on this server.</b><p>Detections only run when you choose Run now.</p></div></div>
@@ -845,12 +811,12 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     <header class="page-head">
       <div>
         <h2 class="page-head__title">Add data</h2>
-        <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent.</p>
+        <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent, or receive syslog from network devices.</p>
       </div>
     </header>
     <div class="agent">
       <fieldset class="agent-os">
-        <legend class="sr-only">Operating system</legend>
+        <legend class="sr-only">Source</legend>
         <label class="card agent-os__card">
           <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-square-terminal"/></svg></span>
           <span class="agent-os__text"><b>Linux</b><span>SSH, sudo and account changes</span></span>
@@ -861,9 +827,14 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
           <span class="agent-os__text"><b>Windows</b><span>Security event log and Sysmon</span></span>
           <input type="radio" name="os" value="windows">
         </label>
+        <label class="card agent-os__card">
+          <span class="agent-os__icon"><svg class="icon" aria-hidden="true"><use href="#i-router"/></svg></span>
+          <span class="agent-os__text"><b>Syslog</b><span>Firewalls, switches, routers and appliances</span></span>
+          <input type="radio" name="os" value="syslog">
+        </label>
       </fieldset>
 
-      <div class="card agent-setup">
+      <div class="card agent-setup" id="agent-setup">
         <div class="card__head">
           <div>
             <h3 class="card__title" id="agent-title">Set up the agent</h3>
@@ -901,8 +872,272 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
           </div>
         </div>
       </div>
+
+      <div class="card agent-setup hidden" id="syslog-setup">
+        <div class="card__head">
+          <div>
+            <h3 class="card__title">Send syslog to Signalith</h3>
+            <p class="card__sub" id="syslog-sub">Set up each device to send to this address. No agent needed.</p>
+          </div>
+        </div>
+        <div class="card__body" id="syslog-body" aria-busy="true">
+          <div class="agent-addr" id="syslog-addr">
+            <div class="agent-addr__row">
+              <label class="label" for="syslog-host">Devices send to</label>
+              <input id="syslog-host" class="input input--sm" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="syslog-ports syslog-host-error syslog-host-note">
+              <span id="syslog-ports" class="sl-ports"></span>
+            </div>
+            <p id="syslog-host-error" class="field-error hidden" role="alert"></p>
+            <div id="syslog-host-note" class="sl-notes"></div>
+          </div>
+          <div id="syslog-main"></div>
+        </div>
+      </div>
     </div>
     <p class="sr-only" id="agent-status" role="status"></p>
+  </section>
+
+  <!-- Users (admins) -->
+  <section id="page-users" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Users</h2>
+        <p class="page-head__desc">Who can sign in, and what their role lets them do.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="u-add" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-user-plus"/></svg>Add user</button>
+      </div>
+    </div>
+    <div class="tabs u-tabs" role="tablist" aria-label="Users and sign-in">
+      <button class="tab" type="button" role="tab" id="u-tab-users" aria-controls="u-panel-users" aria-selected="true">Users <span class="count hidden" id="u-count"></span></button>
+      <button class="tab" type="button" role="tab" id="u-tab-directory" aria-controls="u-panel-directory" aria-selected="false" tabindex="-1">Directory sign-in <span class="badge badge--success hidden" id="u-dir-on">On</span></button>
+    </div>
+    <div id="u-panel-users" class="u-panel" role="tabpanel" aria-labelledby="u-tab-users">
+      <div class="toolbar hidden" id="u-toolbar" role="search">
+        <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="u-find" class="input" type="search" placeholder="Find a user" aria-label="Find a user" autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="card">
+        <div id="u-list" class="u-list"></div>
+        <div id="u-foot" class="table-foot hidden"></div>
+      </div>
+    </div>
+    <div id="u-panel-directory" class="u-panel" role="tabpanel" aria-labelledby="u-tab-directory" hidden></div>
+  </section>
+
+  <!-- Data retention -->
+  <section id="page-retention" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Data retention</h2>
+        <p class="page-head__desc">How long each kind of data stays searchable, and what happens to it on the way out.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="rt-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
+        <button id="rt-run" class="btn btn--secondary" type="button" title="Apply every policy now instead of at the next scheduled run" disabled><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Run now</button>
+      </div>
+    </div>
+
+    <div id="rt-summary" class="card rt-summary" aria-busy="true"></div>
+    <div id="rt-alerts" class="rt-alerts"></div>
+
+    <div id="rt-main">
+    <div class="tabs rt-tabs" role="tablist" aria-label="Data retention">
+      <button class="tab" type="button" role="tab" id="rt-tab-policies" data-tab="policies" aria-controls="rt-panel-policies" aria-selected="true">Policies</button>
+      <button class="tab" type="button" role="tab" id="rt-tab-archive" data-tab="archive" aria-controls="rt-panel-archive" aria-selected="false" tabindex="-1">Archive <span class="count hidden" id="rt-archive-count"></span></button>
+      <button class="tab" type="button" role="tab" id="rt-tab-activity" data-tab="activity" aria-controls="rt-panel-activity" aria-selected="false" tabindex="-1">Activity <span class="count rt-count--bad hidden" id="rt-activity-count"></span></button>
+    </div>
+
+    <div id="rt-panel-policies" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-policies">
+      <div class="card">
+        <div id="rt-table" class="table-wrap"></div>
+        <div id="rt-foot" class="table-foot hidden"></div>
+      </div>
+      <div id="rt-defaults" class="card rt-defaults" aria-label="Defaults"></div>
+    </div>
+
+    <div id="rt-panel-archive" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-archive" hidden>
+      <div class="toolbar hidden" id="rt-arch-bar">
+        <select id="rt-arch-cat" class="select" aria-label="Category"><option value="">All categories</option></select>
+        <select id="rt-arch-month" class="select" aria-label="Month"><option value="">All months</option></select>
+        <span class="spacer"></span>
+        <button id="rt-restore-open" class="btn btn--primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-rotate-ccw"/></svg><span id="rt-restore-label">Restore</span></button>
+      </div>
+      <div id="rt-arch-msg"></div>
+      <div class="card">
+        <div id="rt-arch" class="table-wrap"></div>
+        <div id="rt-arch-foot" class="table-foot hidden">
+          <span id="rt-arch-count"></span>
+          <span class="spacer"></span>
+          <span id="rt-arch-dir" class="rt-dir" title="Archive folder on this server"></span>
+          <span id="rt-arch-pager" class="rt-pager hidden">
+            <span id="rt-arch-range" class="num"></span>
+            <button id="rt-arch-prev" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Previous page" title="Previous page"><svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
+            <button id="rt-arch-next" class="btn btn--ghost btn--icon btn--sm" type="button" aria-label="Next page" title="Next page"><svg class="icon" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div id="rt-panel-activity" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-activity" hidden>
+      <div id="rt-lastrun" class="card"></div>
+      <div class="card">
+        <div class="card__head"><div><h3 class="card__title">Recent actions</h3><p class="card__sub">What retention compacted, archived, deleted or restored, newest first.</p></div></div>
+        <div id="rt-actions" class="table-wrap"></div>
+      </div>
+    </div>
+    </div>
+
+    <dialog id="rt-edit" class="modal rt-dialog" aria-labelledby="rt-edit-title" aria-describedby="rt-edit-desc">
+      <form id="rt-edit-form" novalidate autocomplete="off">
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="rt-edit-title">Policy</h3>
+            <p class="modal__desc" id="rt-edit-desc"></p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="rt-edit-msg"></div>
+          <div id="rt-mode" class="seg rt-mode" role="radiogroup" aria-label="Which policy">
+            <button type="button" role="radio" data-mode="default" aria-checked="true">Use the default</button>
+            <button type="button" role="radio" data-mode="own" aria-checked="false" tabindex="-1">Own policy</button>
+          </div>
+          <div id="rt-mode-note" class="callout rt-mode-note"></div>
+          <div class="rt-settings" id="rt-settings">
+            <div class="rt-set" id="rt-f-keep">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-keep" id="rt-keep-label">Keep searchable for</label>
+                <p class="rt-set__hint" id="rt-keep-hint"></p>
+              </div>
+              <div class="rt-set__ctl">
+                <div class="rt-unit"><input id="rt-keep" class="input" type="number" inputmode="numeric" min="1" max="36500" step="1" placeholder="–" aria-describedby="rt-keep-hint"><span aria-hidden="true">days</span></div>
+                <label class="check"><input type="checkbox" id="rt-forever"><span id="rt-forever-label">Forever</span></label>
+              </div>
+            </div>
+            <div class="rt-set rt-events-only" id="rt-f-cap">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-cap">Size cap</label>
+                <p class="rt-set__hint" id="rt-cap-hint"></p>
+              </div>
+              <div class="rt-set__ctl">
+                <div class="rt-unit"><input id="rt-cap" class="input" type="number" inputmode="decimal" min="0" step="any" placeholder="None" aria-describedby="rt-cap-hint"><span aria-hidden="true">GB</span></div>
+              </div>
+            </div>
+            <div class="rt-set rt-events-only" id="rt-f-compact">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-compact">Compact after</label>
+                <p class="rt-set__hint" id="rt-compact-hint">Older days become read-only and smaller. Events that arrive later for a compacted day are refused and lost, so keep it above how long agents can be offline.</p>
+              </div>
+              <div class="rt-set__ctl">
+                <div class="rt-unit"><input id="rt-compact" class="input" type="number" inputmode="numeric" min="0" step="1" placeholder="Never" aria-describedby="rt-compact-hint"><span aria-hidden="true">days</span></div>
+              </div>
+            </div>
+            <div class="rt-set rt-events-only" id="rt-f-archive">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-archive">Archive before deleting</label>
+                <p class="rt-set__hint" id="rt-archive-hint"></p>
+              </div>
+              <div class="rt-set__ctl">
+                <span class="switch"><input type="checkbox" id="rt-archive" role="switch" aria-describedby="rt-archive-hint"></span>
+              </div>
+            </div>
+          </div>
+          <div id="rt-preview" class="rt-preview" aria-live="polite"></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="rt-edit-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rt-guard" class="modal rt-dialog" aria-labelledby="rt-guard-title" aria-describedby="rt-guard-desc">
+      <form id="rt-guard-form" novalidate autocomplete="off">
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="rt-guard-title">Disk guard</h3>
+            <p class="modal__desc" id="rt-guard-desc">Deletes the oldest event days before OpenSearch&rsquo;s disk fills up. At 95% OpenSearch makes every index read-only, and new events stop.</p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="rt-guard-msg"></div>
+          <div class="rt-settings">
+            <div class="rt-set" id="rt-f-gon">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-guard-on">Disk guard on</label>
+                <p class="rt-set__hint">Checks the fullest OpenSearch data disk every 5 minutes.</p>
+              </div>
+              <div class="rt-set__ctl"><span class="switch"><input type="checkbox" id="rt-guard-on" role="switch"></span></div>
+            </div>
+            <div class="rt-set" id="rt-f-pct">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-pct">Max disk use</label>
+                <p class="rt-set__hint" id="rt-pct-hint">From 50% to 94%. Above it, the oldest days go first.</p>
+              </div>
+              <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-pct" class="input" type="number" inputmode="numeric" min="50" max="94" step="1" aria-describedby="rt-pct-hint"><span aria-hidden="true">%</span></div></div>
+            </div>
+            <div class="rt-set" id="rt-f-min">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-min">Min days</label>
+                <p class="rt-set__hint" id="rt-min-hint">The guard never deletes today or these last days.</p>
+              </div>
+              <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-min" class="input" type="number" inputmode="numeric" min="1" max="36500" step="1" aria-describedby="rt-min-hint"><span aria-hidden="true">days</span></div></div>
+            </div>
+          </div>
+          <div id="rt-guard-disk" class="rt-guard-disk"></div>
+          <div id="rt-guard-preview" class="rt-preview" aria-live="polite"></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="rt-guard-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rt-confirm" class="modal" aria-labelledby="rt-confirm-title" aria-describedby="rt-confirm-desc">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="rt-confirm-title">Delete data now?</h3>
+          <div class="modal__desc" id="rt-confirm-desc"></div>
+        </div>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+        <button class="btn btn--danger" type="button" id="rt-confirm-ok">Delete and save</button>
+      </div>
+    </dialog>
+
+    <dialog id="rt-restore" class="modal rt-dialog" aria-labelledby="rt-restore-title" aria-describedby="rt-restore-desc">
+
+      <form id="rt-restore-form" novalidate autocomplete="off">
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="rt-restore-title">Restore</h3>
+            <p class="modal__desc" id="rt-restore-desc"></p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="rt-restore-msg"></div>
+          <div class="rt-settings">
+            <div class="rt-set" id="rt-f-rkeep">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-rkeep">Keep searchable for</label>
+                <p class="rt-set__hint" id="rt-rkeep-hint"></p>
+              </div>
+              <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-rkeep" class="input" type="number" inputmode="numeric" min="1" max="365" step="1" value="14" aria-describedby="rt-rkeep-hint"><span aria-hidden="true">days</span></div></div>
+            </div>
+          </div>
+          <div id="rt-restore-check" class="rt-preview" aria-live="polite"></div>
+        </div>
+
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="rt-restore-ok">Restore</button>
+        </div>
+      </form>
+    </dialog>
   </section>
 
   <!-- Health -->
@@ -967,5 +1202,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="intel.js"></script>
 <script src="dashboards.js"></script>
 <script src="cases.js"></script>
+<script src="users.js"></script>
+<script src="retention.js"></script>
 </body>
 </html>

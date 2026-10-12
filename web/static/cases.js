@@ -297,7 +297,8 @@ function renderCases() {
       el('span', { class: 'empty__icon' }, icon(filtered ? 'filter-x' : 'briefcase')),
       el('div', { class: 'empty__title' }, filtered ? 'No cases match these filters' : 'No open investigations'),
       el('p', { class: 'empty__text' }, filtered ? 'Try another status or owner, or clear the search.'
-        : 'Start one with New case, or select findings on the Findings page and choose Add to case.'),
+        : can('analyst') ? 'Start one with New case, or select findings on the Findings page and choose Add to case.'
+          : 'Cases that analysts open appear here.'),
       filtered ? el('div', { class: 'empty__actions' }, el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: clearCaseFilters }, 'Clear filters')) : null));
     return;
   }
@@ -461,21 +462,24 @@ function caseHead(c, linked) {
       else done();
     } }, icon('rotate-ccw'), 'Reopen case');
 
+  // Viewers read the case; analysts and admins work it.
+  const editable = can('analyst');
   return el('div', { class: 'c-head' },
     el('div', { class: 'c-head__main' },
-      el('h2', { class: 'c-head__title' }, title),
+      el('h2', { class: editable ? 'c-head__title' : 'c-head__title c-head__title--ro' }, editable ? title : c.title),
       el('div', { class: 'c-head__meta' }, sevBadge(c.severity), statusBadge(c.status),
         el('span', { class: 'mono c-id' }, c.id)),
       el('p', { class: 'c-head__when' },
         el('span', { title: fullTime(c.created) }, `Opened ${ago(c.created)}` + (c.created_by ? ` by ${c.created_by}` : '')),
         dotsep(),
         el('span', { title: fullTime(c.updated) }, `Updated ${ago(c.updated)}`))),
-    el('div', { class: 'c-head__actions' }, action));
+    editable ? el('div', { class: 'c-head__actions' }, action) : null);
 }
 
 // ----- details: status, severity, owner, description -----
 const DETAIL_EDITS = ['severity', 'owner', 'description', 'resolution'];
 function detailsCard(c, linked, edits) {
+  if (!can('analyst')) return detailsView(c);
   const open = caseIsOpen(c.status);
   const status = caseSelect('cd-status', Object.entries(STATUS_LABEL), c.status);
   const severity = caseSelect('cd-severity', SEVERITIES.map((s) => [s, SEVERITY_LABEL[s] || s]), c.severity);
@@ -546,6 +550,19 @@ function detailsCard(c, linked, edits) {
       field('Description', desc),
       resolution ? field('Resolution', resolution) : null),
     el('div', { class: 'card__foot c-details__foot' }, save, mine));
+}
+
+// detailsView shows the details to viewers, who cannot change them.
+function detailsView(c) {
+  caseState.detailsValues = null;
+  caseState.detailsEdits = null;
+  const pairs = [['Status', STATUS_LABEL[c.status] || c.status], ['Severity', SEVERITY_LABEL[c.severity] || c.severity],
+    ['Owner', c.owner || 'Unassigned'], c.description ? ['Description', c.description] : null,
+    c.resolution ? ['Resolution', c.resolution] : null].filter(Boolean);
+  return el('section', { class: 'card c-details', 'aria-labelledby': 'cd-head' },
+    el('div', { class: 'card__head' }, el('h3', { class: 'card__title', id: 'cd-head' }, 'Details')),
+    el('div', { class: 'card__body c-details__body' },
+      el('dl', { class: 'kv' }, ...pairs.flatMap(([k, v]) => [el('dt', {}, k), el('dd', {}, v)]))));
 }
 
 // ----- resolving: outcome, what happened, and the case's open findings -----
@@ -718,8 +735,8 @@ function timelineCard(c, linked) {
   return el('section', { class: 'card c-timeline', 'aria-labelledby': 'ct-head' },
     el('div', { class: 'card__head' },
       el('div', {}, el('h3', { class: 'card__title', id: 'ct-head' }, 'Timeline ', el('span', { class: 'count' }, String(entries.length)))),
-      el('div', { class: 'card__actions' }, seg)),
-    el('div', { class: 'c-compose' }, noteForm, searchForm),
+      can('analyst') ? el('div', { class: 'card__actions' }, seg) : null),
+    can('analyst') ? el('div', { class: 'c-compose' }, noteForm, searchForm) : null,
     el('ol', { class: 'timeline c-entries' }, ...items));
 }
 
@@ -736,6 +753,10 @@ function tlItem({ kind, icon: ic, time, timeTitle, text, body, remove, change })
 }
 
 function removeEntryButton(c, e, what) {
+  // Notes, events and searches are evidence: analysts remove only their
+  // own, admins anyone's (the server checks too).
+  const mine = me && String(e.author || '').toLowerCase() === String(me.username || '').toLowerCase();
+  if (!can('admin') && !(can('analyst') && mine)) return null;
   return el('button', { type: 'button', class: 'btn btn--ghost btn--icon btn--sm c-entry__remove', 'aria-label': `Remove this ${what} from the timeline`, title: 'Remove', onclick: async () => {
     if (await caseConfirm({ title: `Remove this ${what}?`, text: 'It comes off the timeline for everyone. The case history keeps a record that it was removed.', confirm: 'Remove' })) {
       if (await caseCall(c.id, '/entries/' + encodeURIComponent(e.id), undefined, 'DELETE', `Couldn’t remove the ${what}`)) toast(`The ${what} was removed.`);
@@ -860,7 +881,7 @@ function findingsCard(c, linked, missing) {
       el('button', { type: 'button', class: 'c-finding__title', title: f.title, onclick: () => openFindingFromCase(f.id) }, f.title),
       el('div', { class: 'c-finding__meta' }, sevBadge(f.urgency || f.severity), statusBadge(f.status),
         el('span', { class: 'c-finding__det mono', title: 'Detection ' + f.detection_id }, f.detection_id))),
-    el('button', { type: 'button', class: 'btn btn--ghost btn--icon btn--sm c-finding__remove', 'aria-label': 'Remove from the case: ' + f.title, title: 'Remove from the case', onclick: async () => {
+    !can('analyst') ? null : el('button', { type: 'button', class: 'btn btn--ghost btn--icon btn--sm c-finding__remove', 'aria-label': 'Remove from the case: ' + f.title, title: 'Remove from the case', onclick: async () => {
       if (await caseConfirm({ title: 'Remove this finding from the case?', text: `“${f.title}” stays in the Findings queue with its status.`, confirm: 'Remove finding' })) {
         if (await caseCall(c.id, '/findings/' + encodeURIComponent(f.id), undefined, 'DELETE', 'Couldn’t remove the finding')) toast('Finding removed from the case.');
       }
@@ -872,7 +893,7 @@ function findingsCard(c, linked, missing) {
       : el('div', { class: 'empty empty--compact' },
         el('span', { class: 'empty__icon' }, icon('shield-alert')),
         el('div', { class: 'empty__title' }, 'No findings yet'),
-        el('p', { class: 'empty__text' }, 'On the Findings page, select findings and choose Add to case.'),
+        el('p', { class: 'empty__text' }, can('analyst') ? 'On the Findings page, select findings and choose Add to case.' : 'Findings added to this case appear here.'),
         el('div', { class: 'empty__actions' }, el('a', { class: 'btn btn--secondary btn--sm', href: '#findings', 'data-page': 'findings' }, 'Open Findings'))));
 }
 
@@ -924,8 +945,8 @@ function entitiesCard(c, ectx) {
 
   return el('section', { class: 'card c-entities', 'aria-labelledby': 'ce-head' },
     el('div', { class: 'card__head' }, el('h3', { class: 'card__title', id: 'ce-head' }, 'Entities ', el('span', { class: 'count' }, String(ents.length))),
-      el('div', { class: 'card__actions' }, toggleBtn)),
-    el('div', { class: 'card__body c-entities__body' }, form,
+      can('analyst') ? el('div', { class: 'card__actions' }, toggleBtn) : null),
+    el('div', { class: 'card__body c-entities__body' }, can('analyst') ? form : null,
       list.length ? el('ul', { class: 'c-list-plain c-entity-list', role: 'list' }, ...list)
         : el('p', { class: 'c-muted' }, 'Users, hosts and IPs from findings and pinned events appear here.')));
 }

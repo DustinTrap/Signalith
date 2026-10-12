@@ -39,6 +39,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
+	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
 	"golang.org/x/term"
 )
@@ -55,6 +56,7 @@ Usage:
   signalith passwd    [-c file]           set the admin password
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
+  signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith version
 
@@ -98,6 +100,8 @@ func main() {
 		err = cmdAsk(args)
 	case "service":
 		err = cmdService(args)
+	case "archive":
+		err = cmdArchive(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -181,7 +185,18 @@ func syslogSummary(c *config.Config) string {
 			parts = append(parts, l.name+" "+l.addr)
 		}
 	}
-	return strings.Join(parts, ", ")
+	s := strings.Join(parts, ", ")
+	// public_port applies to UDP and TCP, whichever are on.
+	var fwd []string
+	for _, l := range []struct{ name, addr string }{{"UDP", c.Syslog.UDP}, {"TCP", c.Syslog.TCP}} {
+		if l.addr != "" {
+			fwd = append(fwd, l.name)
+		}
+	}
+	if c.Syslog.PublicPort > 0 && len(fwd) > 0 {
+		s += fmt.Sprintf(" (devices send %s to port %d)", strings.Join(fwd, " and "), c.Syslog.PublicPort)
+	}
+	return s
 }
 
 // printSyslogPorts prints the syslog listeners for install scripts, such
@@ -238,14 +253,37 @@ func cmdValidate(args []string) error {
 		return err
 	}
 	fmt.Printf("%d assets and %d identities loaded from %s.\n", len(lists.Assets()), len(lists.Identities()), c.LookupsDir())
-	if feeds := intelFeeds(c); len(feeds) > 0 {
-		on := 0
-		for _, f := range feeds {
-			if f.Enabled {
+	people, dir, err := openUsers(c)
+	if err != nil {
+		return err
+	}
+	n := people.Count()
+	fmt.Printf("%d local users and %d directory users in %s, plus the built-in admin %q.\n", n[users.SourceLocal], n[users.SourceDirectory], c.UsersFile(), c.Auth.AdminUser)
+	if s := dir.Settings(); s.IsEnabled() {
+		from := "the Users page"
+		if dir.FromConfig() {
+			from = "auth.ldap in this file"
+		}
+		fmt.Printf("Directory sign-in is on (%s), set up in %s. Test it on the Users page.\n", s.URL, from)
+	}
+	feeds := newFeeds(c, nil, nil)
+	if err := feeds.Load(); err != nil {
+		fmt.Println("Warning:", err)
+	}
+	if list := feeds.Status(); len(list) > 0 {
+		on, page := 0, 0
+		for _, f := range list {
+			if f.Enabled && f.Problem == "" {
 				on++
 			}
+			if f.Source == intel.SourceUI {
+				page++
+			}
+			if f.Problem != "" {
+				fmt.Printf("Warning: threat intel feed %s (added on the Threat intel page): %s\n", f.Name, f.Problem)
+			}
 		}
-		fmt.Printf("%d threat intel feeds configured, %d enabled.\n", len(feeds), on)
+		fmt.Printf("%d threat intel feeds (%d in signalith.yaml, %d added on the Threat intel page), %d enabled.\n", len(list), len(list)-page, page, on)
 	}
 	if s := syslogSummary(c); s != "" {
 		allow := "any sender"
@@ -350,6 +388,24 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 		return "", errors.New("the passwords do not match; nothing was changed")
 	}
 	return pw, nil
+}
+
+// openUsers opens the users file and the directory sign-in settings.
+func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
+	people, err := users.Open(c.UsersFile())
+	if err != nil {
+		return nil, nil, err
+	}
+	people.BuiltinAdmin = c.Auth.AdminUser
+	fromFile, err := c.LDAP()
+	if err != nil {
+		return nil, nil, err
+	}
+	dir, err := users.OpenDirectory(c.DirectoryFile(), fromFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	return people, dir, nil
 }
 
 func newStore(c *config.Config) *store.Client {
@@ -518,7 +574,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cl := newStore(c)
-	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: c.MaxEventAge(), Log: log}
+	ret := newRetention(c, cl, log)
+	maxAge := c.MaxEventAge(retentionKeepDays(ret))
+	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
 	// Closed once the index template is in place, so syslog does not
 	// create the day's first indices with the wrong field types.
 	templateReady := make(chan struct{})
@@ -528,7 +586,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
 			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
-			MaxAge: c.MaxEventAge(),
+			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return err
@@ -561,8 +619,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
-	feeds := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
-		StatusFile: filepath.Join(c.LookupsDir(), "intel_feeds.json")}
+	feeds := newFeeds(c, indicators, log)
+	if err := feeds.Load(); err != nil {
+		log.Error("threat intel feeds added on the Threat intel page cannot be used until the file is fixed", "err", err)
+	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -580,12 +640,36 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
 		}
 	}
+	people, dir, err := openUsers(c)
+	if err != nil {
+		return err
+	}
+	if _, clash := people.Get(c.Auth.AdminUser); clash {
+		log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
+	}
+	n := people.Count()
+	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
+	if os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" && c.Auth.LDAP == nil {
+		log.Warn("SIGNALITH_LDAP_BIND_PASSWORD is set but signalith.yaml has no auth.ldap, so it is not used; directory sign-in set up on the Users page keeps its own bind password")
+	}
+	if s := dir.Settings(); s.IsEnabled() {
+		log.Info("directory sign-in is on", "server", s.URL, "from_config_file", dir.FromConfig())
+		for _, w := range s.Warnings() {
+			log.Warn("directory sign-in: " + w)
+		}
+	}
 	fstore := findings.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	cstore := cases.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	sched := &detect.Scheduler{
 		Library: lib, Engine: eng, Findings: fstore, Log: log,
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
+	}
+	if saved, err := ret.Store.Get(); err != nil {
+		log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
+	} else if saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
+		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
+			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
 	srv := &api.Server{
 		Config:     c,
@@ -601,7 +685,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Feeds:      feeds,
 		Dashboards: boards,
 		Cases:      cstore,
+		Retention:  ret,
 		Assistant:  newAssistant(c),
+		Users:      people,
+		Directory:  dir,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,
@@ -615,8 +702,10 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
 			go indicators.Watch(ctx, time.Minute, log)
-			if c.Detections.Scheduler && len(feeds.List) > 0 {
-				log.Info("threat intel feeds will download on their schedules", "feeds", len(feeds.List))
+			if c.Detections.Scheduler {
+				// Feeds can be added on the page at any time, so the
+				// downloader runs even with none yet.
+				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
 				go feeds.Start(ctx)
 			}
 		}
@@ -634,7 +723,13 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			log.Info("detection scheduler is off (detections.scheduler: false)")
 		}
 	}()
-	go retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log)
+	if c.Detections.Scheduler {
+		// Like detections, retention runs on one server only.
+		go ret.Start(ctx)
+	} else {
+		log.Warn("retention does not run on this server: it runs on the server with detections.scheduler: true, " +
+			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
+	}
 
 	lim := httpserver.Limits{Max: c.Server.MaxConnections, Shared: c.Server.SharedList()}
 	hs := httpserver.New(srv.Handler(), lim, log)
@@ -658,20 +753,53 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 }
 
-// intelFeeds converts the configured feeds; the config is already
+// newRetention returns the retention manager. Policies saved on the Data
+// retention page and the run history live next to the asset and identity
+// lists, which every install can write.
+func newRetention(c *config.Config, cl *store.Client, log *slog.Logger) *retention.Manager {
+	return &retention.Manager{
+		Cluster:     retention.NewOpenSearch(cl),
+		Prefix:      c.OpenSearch.IndexPrefix,
+		Config:      c.RetentionPolicies(),
+		Store:       retention.NewStore(filepath.Join(c.LookupsDir(), "retention.yaml")),
+		Archive:     &retention.Archive{Dir: c.ArchiveDir()},
+		HistoryFile: filepath.Join(c.LookupsDir(), "retention_history.json"),
+		Interval:    c.RetentionInterval(),
+		Log:         log,
+		ReadOnly:    !c.Detections.Scheduler,
+	}
+}
+
+// retentionKeepDays is the shortest time any event category is kept, in
+// days (0: forever), as the settings stand when the server starts.
+func retentionKeepDays(ret *retention.Manager) int {
+	s, _ := ret.Settings()
+	return s.ShortestKeepDays()
+}
+
+// intelFeeds converts the feeds in signalith.yaml; the config is already
 // validated, so durations parse.
 func intelFeeds(c *config.Config) []intel.Feed {
 	var out []intel.Feed
 	for _, f := range c.Intel.Feeds {
-		iv, _ := config.ParseFeedDuration(f.Interval)
-		age, _ := config.ParseFeedDuration(f.MaxAge)
-		out = append(out, intel.Feed{
-			Name: f.Name, URL: f.URL, Format: f.Format, Type: f.Type, Column: f.Column,
-			Interval: iv, MaxAge: age, Weight: f.Weight, Description: f.Description, Tags: f.Tags,
-			Headers: f.Headers, Enabled: f.IsEnabled(),
-		})
+		out = append(out, f.Feed(intel.SourceConfig))
 	}
 	return out
+}
+
+// newFeeds returns the feed downloader: the feeds in signalith.yaml and
+// those added on the Threat intel page.
+func newFeeds(c *config.Config, indicators *intel.Store, log *slog.Logger) *intel.Feeds {
+	f := &intel.Feeds{Store: indicators, List: intelFeeds(c), Log: log,
+		File:          c.IntelFeedsFile(),
+		StatusFile:    filepath.Join(c.LookupsDir(), "intel_feeds.json"),
+		AllowLoopback: c.Intel.AllowLoopbackFeeds}
+	// Feed downloads never reach Signalith's own OpenSearch, which may
+	// accept requests without a password on the local network.
+	if p := intel.ProtectedAddr(c.OpenSearch.URL); p != "" {
+		f.Protected = []string{p}
+	}
+	return f
 }
 
 // reloadLookups picks up edits to the CSV files made outside the UI.

@@ -56,3 +56,9 @@ if ($LASTEXITCODE -ne 0) {
   }
 }
 Write-Host "Signalith is running. Open http://localhost:$($Listen.Split(':')[-1])"
+# Retention settings saved in the web UI go to $ConfigDir\lookups, and days
+# archived before deletion to $ConfigDir\archive (retention.archive_dir in
+# signalith.yaml moves them). The lookups folder inherits the Administrators
+# and SYSTEM only permissions above. The server gives the archive folder,
+# wherever it is, its own access list: SYSTEM, Administrators and the service
+# account only, not inherited from the drive.

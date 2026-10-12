@@ -112,3 +112,21 @@ func TestReadNewPasswordFromAPipe(t *testing.T) {
 		t.Error("empty input accepted")
 	}
 }
+
+func TestSyslogSummary(t *testing.T) {
+	for _, c := range []struct {
+		syslog config.Syslog
+		want   string
+	}{
+		{config.Syslog{}, ""},
+		{config.Syslog{UDP: "0.0.0.0:514", TCP: "0.0.0.0:514"}, "UDP 0.0.0.0:514, TCP 0.0.0.0:514"},
+		{config.Syslog{UDP: "0.0.0.0:5514", TCP: "0.0.0.0:5514", PublicPort: 514}, "UDP 0.0.0.0:5514, TCP 0.0.0.0:5514 (devices send UDP and TCP to port 514)"},
+		{config.Syslog{UDP: "0.0.0.0:5514", PublicPort: 514}, "UDP 0.0.0.0:5514 (devices send UDP to port 514)"},
+		{config.Syslog{TCP: "0.0.0.0:5514", TLS: "0.0.0.0:6514", PublicPort: 514}, "TCP 0.0.0.0:5514, TLS 0.0.0.0:6514 (devices send TCP to port 514)"},
+		{config.Syslog{TLS: "0.0.0.0:6514", PublicPort: 514}, "TLS 0.0.0.0:6514"},
+	} {
+		if got := syslogSummary(&config.Config{Syslog: c.syslog}); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.syslog, got, c.want)
+		}
+	}
+}

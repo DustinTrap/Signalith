@@ -13,27 +13,27 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/findings"
 )
 
-func (s *Server) routeDetections(api *http.ServeMux) {
-	api.HandleFunc("GET /api/detections", s.handleListDetections)
-	api.HandleFunc("POST /api/detections", s.handleCreateDetection)
-	api.HandleFunc("POST /api/detections/test", s.handleTestDetection)
-	api.HandleFunc("POST /api/detections/sigma", s.handleSigma)
-	api.HandleFunc("GET /api/detections/{id}", s.handleGetDetection)
-	api.HandleFunc("GET /api/detections/{id}/yaml", s.handleDetectionYAML)
-	api.HandleFunc("PUT /api/detections/{id}", s.handlePutDetection)
-	api.HandleFunc("DELETE /api/detections/{id}", s.handleDeleteDetection)
-	api.HandleFunc("POST /api/detections/{id}/run", s.handleRunDetection)
-	api.HandleFunc("GET /api/coverage", s.handleCoverage)
-	api.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"user": userOf(r), "auth": authMethod(r)})
-	})
+func (s *Server) routeDetections(api *router) {
+	api.viewer("GET /api/detections", s.handleListDetections)
+	api.viewer("GET /api/detections/{id}", s.handleGetDetection)
+	api.viewer("GET /api/detections/{id}/yaml", s.handleDetectionYAML)
+	api.viewer("GET /api/coverage", s.handleCoverage)
+	// Writing, testing, importing and running detections is admin work;
+	// a run raises findings.
+	api.admin("POST /api/detections", s.handleCreateDetection)
+	api.admin("POST /api/detections/test", s.handleTestDetection)
+	api.admin("POST /api/detections/sigma", s.handleSigma)
+	api.admin("PUT /api/detections/{id}", s.handlePutDetection)
+	api.admin("DELETE /api/detections/{id}", s.handleDeleteDetection)
+	api.admin("POST /api/detections/{id}/run", s.handleRunDetection)
 
-	api.HandleFunc("GET /api/findings", s.handleListFindings)
-	api.HandleFunc("POST /api/findings", s.handleCreateFinding)
-	api.HandleFunc("GET /api/findings/summary", s.handleFindingsSummary)
-	api.HandleFunc("POST /api/findings/bulk", s.handleBulkFindings)
-	api.HandleFunc("GET /api/findings/{id}", s.handleGetFinding)
-	api.HandleFunc("PATCH /api/findings/{id}", s.handleUpdateFinding)
+	api.viewer("GET /api/findings", s.handleListFindings)
+	api.viewer("GET /api/findings/summary", s.handleFindingsSummary)
+	api.viewer("GET /api/findings/{id}", s.handleGetFinding)
+	// Triage is analyst work.
+	api.analyst("POST /api/findings", s.handleCreateFinding)
+	api.analyst("POST /api/findings/bulk", s.handleBulkFindings)
+	api.analyst("PATCH /api/findings/{id}", s.handleUpdateFinding)
 }
 
 var errDetectionsOff = errors.New("detections are not configured on this server")

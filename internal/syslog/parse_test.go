@@ -108,6 +108,12 @@ func TestParseFormats(t *testing.T) {
 				"severity": "informational", "facility": "local4", "@timestamp": "2026-10-12T13:59:00Z"}},
 		{"Cisco ASA with host", "<164>Oct 12 2026 13:59:00 asa1 : %ASA-4-106023: Deny tcp src outside:203.0.113.9/5000 dst inside:10.0.0.5/22",
 			map[string]any{"host": "asa1", "signature_id": "ASA-4-106023", "severity": "warning"}},
+		// ASA's default has no timestamp: "logging device-id hostname" alone.
+		{"Cisco ASA without timestamp", "<166>asa1 : %ASA-6-302013: Built inbound TCP connection 1 for outside:198.51.100.7/4444 (198.51.100.7/4444) to inside:10.0.0.5/22 (10.0.0.5/22)",
+			map[string]any{"host": "asa1", "signature_id": "ASA-6-302013", "vendor_product": "Cisco ASA", "severity": "informational", "@timestamp": "2026-10-12T14:00:00Z"}},
+		{"Cisco ASA without timestamp or colon", "<166>hostname-FW %ASA-6-113012: AAA user authentication Successful : local database : user = admin",
+			map[string]any{"host": "hostname-FW", "signature_id": "ASA-6-113012", "app": "ASA"}},
+		{"word before a Cisco tag is not always a host", "<13>hello world %ASA-6-302013: x", map[string]any{"host": "192.0.2.50"}},
 		{"Cisco IOS unsynced clock", "<189>123: *Mar  1 00:01:02.345: %SYS-5-CONFIG_I: Configured from console by console",
 			map[string]any{"sequence": int64(123), "signature_id": "SYS-5-CONFIG_I", "app": "SYS", "vendor_product": "Cisco",
 				"severity": "notice", "facility": "local7", "@timestamp": "2026-10-12T14:00:00Z", "host": "192.0.2.50"}},

@@ -69,6 +69,10 @@ type Config struct {
 	CertFile, KeyFile string
 	// Allow lists the senders that may send; empty allows any sender.
 	Allow []netip.Prefix
+	// PublicPort is the port senders use for UDP and TCP when something
+	// forwards it to the one listened on (Docker publishing 514 as 5514).
+	// It is only reported, as Listener.Port; zero means the listen port.
+	PublicPort int
 	// Ready, when set, holds back writes until it is closed, so the first
 	// syslog indices are created after the index template is in place and
 	// get the right field types. Messages wait in the queue meanwhile.
@@ -144,6 +148,11 @@ type Receiver struct {
 
 	warnMu sync.Mutex
 	warned map[string]time.Time
+
+	// lastNotAllowed is the latest sender outside syslog.allow, so the
+	// health page can say whom to add.
+	rejMu          sync.Mutex
+	lastNotAllowed netip.Addr
 }
 
 type queued struct {
@@ -155,6 +164,9 @@ type queued struct {
 type Listener struct {
 	Protocol string `json:"protocol"` // udp, tcp or tls
 	Address  string `json:"address"`
+	// Port is the port senders use: Config.PublicPort for UDP and TCP
+	// when set, else the port listened on.
+	Port int `json:"port"`
 }
 
 // Sender is a system that sent syslog recently.
@@ -179,6 +191,9 @@ type Rejections struct {
 type Stats struct {
 	Enabled   bool       `json:"enabled"`
 	Listeners []Listener `json:"listeners"`
+	// Allow lists the senders accepted, as addresses or CIDRs; empty
+	// means any sender.
+	Allow []string `json:"allow"`
 	// Received counts messages accepted from allowed senders.
 	Received int64 `json:"received"`
 	// Dropped counts received messages lost because the queue was full
@@ -195,6 +210,9 @@ type Stats struct {
 	LastMessage time.Time `json:"last_message,omitzero"`
 	// Senders are the most recent senders, newest first.
 	Senders []Sender `json:"senders"`
+	// LastNotAllowed is the latest sender turned away because it is not
+	// in syslog.allow.
+	LastNotAllowed string `json:"last_not_allowed,omitempty"`
 }
 
 // New returns a receiver; Start opens its listeners.
@@ -272,7 +290,7 @@ func (r *Receiver) Start(ctx context.Context) error {
 		r.udp = pc.(*net.UDPConn)
 		// A bigger socket buffer rides out bursts while a reader is busy.
 		_ = r.udp.SetReadBuffer(4 << 20)
-		r.listeners = append(r.listeners, Listener{Protocol: "udp", Address: shownAddr(r.cfg.UDP, r.udp.LocalAddr())})
+		r.listeners = append(r.listeners, r.listener("udp", r.cfg.UDP, r.udp.LocalAddr()))
 	}
 	var protos []string
 	for _, l := range []struct{ proto, addr, setting string }{{"tcp", r.cfg.TCP, "syslog.tcp"}, {"tls", r.cfg.TLS, "syslog.tls"}} {
@@ -286,7 +304,7 @@ func (r *Receiver) Start(ctx context.Context) error {
 		}
 		r.lns = append(r.lns, ln)
 		protos = append(protos, l.proto)
-		r.listeners = append(r.listeners, Listener{Protocol: l.proto, Address: shownAddr(l.addr, ln.Addr())})
+		r.listeners = append(r.listeners, r.listener(l.proto, l.addr, ln.Addr()))
 	}
 	for i, ln := range r.lns {
 		r.readers.Add(1)
@@ -342,6 +360,19 @@ func (r *Receiver) closeListeners() {
 	for _, ln := range r.lns {
 		ln.Close()
 	}
+}
+
+// listener describes a listener that opened: the address it is on, and
+// the port senders use.
+func (r *Receiver) listener(proto, configured string, actual net.Addr) Listener {
+	l := Listener{Protocol: proto, Address: shownAddr(configured, actual)}
+	if _, port, err := net.SplitHostPort(l.Address); err == nil {
+		l.Port, _ = strconv.Atoi(port)
+	}
+	if proto != "tls" && r.cfg.PublicPort > 0 {
+		l.Port = r.cfg.PublicPort
+	}
+	return l
 }
 
 // shownAddr is the configured address with the port actually bound, so
@@ -640,6 +671,9 @@ func (r *Receiver) allowed(a netip.Addr) bool {
 // once a minute rather than per message.
 func (r *Receiver) rejectSender(a netip.Addr) {
 	r.notAllowed.Add(1)
+	r.rejMu.Lock()
+	r.lastNotAllowed = a
+	r.rejMu.Unlock()
 	r.warn("allow", "dropped syslog from a sender outside syslog.allow (logged once a minute)", "sender", a.String(), "dropped_so_far", r.notAllowed.Load())
 }
 
@@ -801,11 +835,12 @@ func (r *Receiver) warn(kind, msg string, args ...any) {
 // reports enabled false.
 func (r *Receiver) Stats() Stats {
 	if r == nil {
-		return Stats{Listeners: []Listener{}, Senders: []Sender{}}
+		return Stats{Listeners: []Listener{}, Allow: []string{}, Senders: []Sender{}}
 	}
 	s := Stats{
 		Enabled:     true,
 		Listeners:   append([]Listener{}, r.listeners...),
+		Allow:       make([]string, 0, len(r.cfg.Allow)),
 		Received:    r.received.Load(),
 		Dropped:     r.dropped.Load(),
 		WriteFailed: r.writeFailed.Load(),
@@ -819,6 +854,18 @@ func (r *Receiver) Stats() Stats {
 		Queued:  len(r.queue),
 		Senders: r.senders.list(),
 	}
+	for _, p := range r.cfg.Allow {
+		if p.IsSingleIP() {
+			s.Allow = append(s.Allow, p.Addr().String())
+		} else {
+			s.Allow = append(s.Allow, p.String())
+		}
+	}
+	r.rejMu.Lock()
+	if r.lastNotAllowed.IsValid() {
+		s.LastNotAllowed = r.lastNotAllowed.String()
+	}
+	r.rejMu.Unlock()
 	s.Rejected = s.RejectedBy.NotAllowed + s.RejectedBy.TooLarge + s.RejectedBy.BadFraming + s.RejectedBy.TooManyConnections + s.RejectedBy.TooManyFromSender
 	if ns := r.lastMessage.Load(); ns > 0 {
 		s.LastMessage = time.Unix(0, ns).UTC()

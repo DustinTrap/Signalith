@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,7 +22,10 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/agents"
 	"github.com/jrsamsanchez/signalith/internal/detect"
+	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/redact"
+	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -45,6 +47,11 @@ type Config struct {
 
 	// path is where the file was loaded from.
 	path string
+	// ldapBindPassword comes from SIGNALITH_LDAP_BIND_PASSWORD. It is kept
+	// apart from Auth.LDAP so saving the file never writes it out.
+	ldapBindPassword string
+	// sections are the top-level keys in that file.
+	sections map[string]bool
 }
 
 // Server controls the web UI and API listener.
@@ -189,18 +196,113 @@ type Search struct {
 	MaxEvents       int    `yaml:"max_events"`
 }
 
-// Retention controls how long events are kept.
+// Retention controls how long data is kept; see docs/retention.md. Most
+// installs set policies on the Data retention page instead. Anything set
+// here is shown there as "From signalith.yaml" and cannot be changed in
+// the page.
 type Retention struct {
+	// Days keeps event categories without their own policy searchable for
+	// this many days (0 keeps them forever), until a default policy is
+	// saved on the page.
 	Days int `yaml:"days"`
+	// Interval is how often policies are enforced. Default 1h.
+	Interval string `yaml:"interval,omitempty"`
+	// ArchiveDir holds archived days. A relative path is relative to the
+	// folder this config file is in. Default: an "archive" folder next to
+	// lookups.dir. SIGNALITH_ARCHIVE_DIR overrides it.
+	ArchiveDir string `yaml:"archive_dir,omitempty"`
+	// Default is the policy for event categories without their own.
+	Default *retention.Policy `yaml:"default,omitempty"`
+	// Policies sets a policy per category: a data model (authentication,
+	// endpoint, network_traffic, change), other, risk, findings or cases.
+	Policies map[string]retention.Policy `yaml:"policies,omitempty"`
+	// Guard deletes the oldest days when OpenSearch's disk gets too full.
+	Guard *retention.Guard `yaml:"guard,omitempty"`
+}
+
+// RetentionInterval returns retention.interval as a duration (1h if unset
+// or invalid; Validate reports invalid values).
+func (c *Config) RetentionInterval() time.Duration {
+	if d, err := detect.ParseDuration(c.Retention.Interval); err == nil && d > 0 {
+		return d
+	}
+	return retention.DefaultInterval
+}
+
+// ArchiveDir returns the absolute archive folder.
+func (c *Config) ArchiveDir() string {
+	if c.Retention.ArchiveDir != "" {
+		return c.resolve(c.Retention.ArchiveDir)
+	}
+	return filepath.Join(filepath.Dir(filepath.Clean(c.LookupsDir())), "archive")
+}
+
+// RetentionPolicies returns the retention settings for the retention
+// package.
+func (c *Config) RetentionPolicies() retention.Config {
+	return retention.Config{Days: c.Retention.Days, Default: c.Retention.Default,
+		Policies: c.Retention.Policies, Guard: c.Retention.Guard}
 }
 
 // Auth protects the UI and API.
 type Auth struct {
+	// AdminUser and AdminPasswordHash are the built-in admin: a break-glass
+	// account that always works, whatever happens to other users.
 	AdminUser         string `yaml:"admin_user"`
 	AdminPasswordHash string `yaml:"admin_password_hash"`
 	// SessionTimeout signs the web UI out after this long without use,
 	// unless "keep me signed in" was ticked. Default 12h.
 	SessionTimeout string `yaml:"session_timeout,omitempty"`
+	// UsersFile holds the users added on the Users page. Default
+	// users.json in lookups.dir; directory.json (directory sign-in
+	// settings from the Users page) goes in the same folder.
+	UsersFile string `yaml:"users_file,omitempty"`
+	// LDAP sets up directory sign-in here instead of on the Users page,
+	// which then shows it read-only.
+	LDAP *users.LDAPSettings `yaml:"ldap,omitempty"`
+}
+
+// UsersFile returns the absolute path of the users file.
+func (c *Config) UsersFile() string {
+	if c.Auth.UsersFile != "" {
+		return c.resolve(c.Auth.UsersFile)
+	}
+	return filepath.Join(c.LookupsDir(), "users.json")
+}
+
+// DirectoryFile returns where directory sign-in settings from the Users
+// page are kept: directory.json next to the users file.
+func (c *Config) DirectoryFile() string {
+	return filepath.Join(filepath.Dir(c.UsersFile()), "directory.json")
+}
+
+// LDAP returns the directory sign-in settings from auth.ldap, with
+// defaults filled in and the bind password from the environment if set
+// there, or nil when the file has no auth.ldap.
+func (c *Config) LDAP() (*users.LDAPSettings, error) {
+	if c.Auth.LDAP == nil {
+		return nil, nil
+	}
+	s := c.Auth.LDAP.Clone()
+	if s.Enabled == nil {
+		on := true
+		s.Enabled = &on
+	}
+	if c.ldapBindPassword != "" {
+		s.BindPassword = c.ldapBindPassword
+	}
+	if s.CACertFile != "" {
+		if strings.TrimSpace(s.CACert) != "" {
+			return nil, errors.New("auth.ldap: set ca_cert or ca_cert_file, not both")
+		}
+		b, err := os.ReadFile(c.resolve(s.CACertFile))
+		if err != nil {
+			return nil, fmt.Errorf("auth.ldap.ca_cert_file: %w", err)
+		}
+		s.CACert = string(b)
+	}
+	s.Normalize()
+	return &s, nil
 }
 
 // SessionIdle returns auth.session_timeout as a duration.
@@ -219,21 +321,23 @@ type Ingest struct {
 	// MaxEventAge is how old an event's own time (from an agent or syslog)
 	// may be and still be its event time, such as 7d. Older events, and
 	// ones more than an hour ahead, are filed under the time they arrived,
-	// with their own time kept in device_time. Empty means 7 days, or
-	// retention.days when that is shorter. Raise it to load old logs.
+	// with their own time kept in device_time. Empty means 7 days, or the
+	// shortest retention period when that is shorter. Raise it to load old
+	// logs.
 	MaxEventAge string `yaml:"max_event_age,omitempty"`
 }
 
 // MaxEventAge returns ingest.max_event_age as a duration: the setting, or
-// a week (the retention period when that is shorter, since older events
-// would land in indices about to be deleted). Each day in this window can
-// get its own daily indices, so it bounds how many a sender can create.
-func (c *Config) MaxEventAge() time.Duration {
+// a week (keepDays, the shortest retention period, when that is shorter,
+// since older events would land in indices about to be deleted). Each day
+// in this window can get its own daily indices, so it bounds how many a
+// sender can create.
+func (c *Config) MaxEventAge(keepDays int) time.Duration {
 	if d, err := detect.ParseDuration(c.Ingest.MaxEventAge); err == nil && d > 0 {
 		return d
 	}
 	week := 7 * 24 * time.Hour
-	if d := time.Duration(c.Retention.Days) * 24 * time.Hour; d > 0 && d < week {
+	if d := time.Duration(keepDays) * 24 * time.Hour; d > 0 && d < week {
 		return d
 	}
 	return week
@@ -252,6 +356,11 @@ type Syslog struct {
 	// Allow lists the sender IP addresses or CIDRs that may send syslog.
 	// Empty allows any sender.
 	Allow []string `yaml:"allow"`
+	// PublicPort is the port devices send UDP and TCP syslog to, when it
+	// is not the one Signalith listens on: Docker or a firewall forwards
+	// 514 to 5514, say. The Add data page puts it in the setup it shows.
+	// Zero means the listen port.
+	PublicPort int `yaml:"public_port,omitempty"`
 }
 
 // Enabled reports whether any syslog listener is set.
@@ -319,6 +428,9 @@ func (s *Syslog) problems(server Server) []string {
 	if s.TLS != "" && (server.TLSCert == "" || server.TLSKey == "") {
 		p = append(p, "syslog.tls needs server.tls_cert and server.tls_key; syslog over TLS uses the same certificate as the web UI")
 	}
+	if s.PublicPort < 0 || s.PublicPort > 65535 {
+		p = append(p, fmt.Sprintf("syslog.public_port %d must be 1-65535 (or 0 for the port syslog.udp and syslog.tcp listen on)", s.PublicPort))
+	}
 	for i, a := range s.Allow {
 		if _, err := parseAllow(a); err != nil {
 			p = append(p, fmt.Sprintf("syslog.allow[%d] %q must be an IP address or a CIDR such as 10.0.0.0/8", i, a))
@@ -384,141 +496,54 @@ type Assistant struct {
 	APIKey string `yaml:"api_key,omitempty"`
 }
 
-// Intel configures threat intel feeds. Nothing is downloaded unless a
-// feed is listed here.
+// Intel configures threat intel feeds. Nothing is downloaded until a
+// feed is listed here or added on the Threat intel page.
 type Intel struct {
 	Feeds []IntelFeed `yaml:"feeds"`
+	// FeedsFile keeps the feeds added on the Threat intel page. Default:
+	// intel_feeds.yaml in lookups.dir. A relative path is relative to the
+	// folder this config file is in.
+	FeedsFile string `yaml:"feeds_file,omitempty"`
+	// AllowLoopbackFeeds lets feeds download from this machine (127.0.0.1
+	// or ::1), for a feed server on the same host. Off by default.
+	AllowLoopbackFeeds bool `yaml:"allow_loopback_feeds,omitempty"`
 }
 
-// IntelFeed is one feed the server downloads on a schedule.
-type IntelFeed struct {
-	// Name identifies the feed; indicators show it as their source.
-	Name string `yaml:"name"`
-	URL  string `yaml:"url"`
-	// Format is lines (one indicator per line, # comments), csv or stix
-	// (a STIX 2.1 bundle). Default lines.
-	Format string `yaml:"format,omitempty"`
-	// Type is the indicator type (ip, cidr, domain, url, md5, sha1, sha256,
-	// hash, email) or auto to detect each value. Default auto.
-	Type string `yaml:"type,omitempty"`
-	// Column picks the CSV column, by header name or number from 1.
-	Column string `yaml:"column,omitempty"`
-	// Interval is how often to download. Default 1h, at least 5m.
-	Interval string `yaml:"interval,omitempty"`
-	// MaxAge is how long indicators stay after the feed stops updating
-	// (downloads fail). Indicators dropped from the feed are removed at the
-	// next download. Default 7d.
-	MaxAge string `yaml:"max_age,omitempty"`
-	// Weight multiplies the risk a match adds: 1 is normal, 2 doubles it.
-	Weight      float64  `yaml:"weight,omitempty"`
-	Description string   `yaml:"description,omitempty"`
-	Tags        []string `yaml:"tags,omitempty"`
-	// Headers are sent with the download, for feeds that need an API key.
-	// Values may use ${ENV_VAR} to keep keys out of this file.
-	Headers map[string]string `yaml:"headers,omitempty"`
-	// Enabled defaults to true; set false to stop using a feed without
-	// deleting its settings. Its indicators are removed.
-	Enabled *bool `yaml:"enabled,omitempty"`
-}
-
-// IsEnabled reports whether a feed is on.
-func (f IntelFeed) IsEnabled() bool { return f.Enabled == nil || *f.Enabled }
-
-// defaults fills empty optional feed settings.
-func (f *IntelFeed) defaults() {
-	if f.Format == "" {
-		f.Format = "lines"
-	}
-	if f.Type == "" {
-		f.Type = "auto"
-	}
-	if f.Interval == "" {
-		f.Interval = "1h"
-	}
-	if f.MaxAge == "" {
-		f.MaxAge = "7d"
-	}
-	if f.Weight == 0 {
-		f.Weight = 1
-	}
-}
-
-var (
-	feedNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{1,63}$`)
-	feedDurPattern  = regexp.MustCompile(`^(\d+)\s*(m|h|d|w)$`)
-	feedFormats     = []string{"lines", "csv", "stix"}
-	feedTypes       = []string{"auto", "hash", "ip", "cidr", "domain", "url", "md5", "sha1", "sha256", "email"}
-	envRef          = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
-)
+// IntelFeed is one feed the server downloads on a schedule. Feeds added on
+// the Threat intel page use the same settings and rules.
+type IntelFeed = intel.FeedSpec
 
 // ParseFeedDuration parses 30m, 12h, 7d or 2w.
-func ParseFeedDuration(s string) (time.Duration, error) {
-	m := feedDurPattern.FindStringSubmatch(strings.ToLower(strings.TrimSpace(s)))
-	if m == nil {
-		return 0, fmt.Errorf("%q is not a duration; use a number and a unit, like 30m, 1h, 7d or 2w", s)
-	}
-	n, _ := strconv.Atoi(m[1])
-	unit := map[string]time.Duration{"m": time.Minute, "h": time.Hour, "d": 24 * time.Hour, "w": 7 * 24 * time.Hour}[m[2]]
-	return time.Duration(n) * unit, nil
-}
+func ParseFeedDuration(s string) (time.Duration, error) { return intel.ParseDuration(s) }
 
 func (in *Intel) problems() []string {
 	var p []string
 	seen := map[string]bool{}
 	for i := range in.Feeds {
 		f := &in.Feeds[i]
-		f.defaults()
+		f.Defaults()
 		at := fmt.Sprintf("intel.feeds[%d]", i)
 		if f.Name != "" {
 			at = fmt.Sprintf("intel.feeds[%d] (%s)", i, f.Name)
 		}
-		switch {
-		case !feedNamePattern.MatchString(f.Name):
-			p = append(p, at+": name must be 2-64 lowercase letters, digits, -, _ or ., for example feodo-tracker")
-		case f.Name == "manual":
-			p = append(p, at+`: name "manual" is reserved for indicators added by hand`)
-		case seen[f.Name]:
+		if seen[f.Name] && f.Name != "" {
 			p = append(p, at+": name is used by another feed")
 		}
 		seen[f.Name] = true
-		if u, err := url.Parse(f.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			p = append(p, fmt.Sprintf("%s: url %q must be an http(s) address", at, f.URL))
-		}
-		if !slices.Contains(feedFormats, f.Format) {
-			p = append(p, fmt.Sprintf("%s: format %q must be one of %s", at, f.Format, strings.Join(feedFormats, ", ")))
-		}
-		if !slices.Contains(feedTypes, f.Type) {
-			p = append(p, fmt.Sprintf("%s: type %q must be one of %s", at, f.Type, strings.Join(feedTypes, ", ")))
-		}
-		if f.Format == "csv" && strings.TrimSpace(f.Column) == "" {
-			p = append(p, at+": csv feeds need a column, by header name or number from 1")
-		}
-		if f.Format != "csv" && f.Column != "" {
-			p = append(p, at+": column only applies to format: csv")
-		}
-		iv, err := ParseFeedDuration(f.Interval)
-		if err != nil {
-			p = append(p, at+": interval: "+err.Error())
-		} else if iv < 5*time.Minute {
-			p = append(p, at+": interval must be at least 5m; feeds update far less often")
-		}
-		if age, err := ParseFeedDuration(f.MaxAge); err != nil {
-			p = append(p, at+": max_age: "+err.Error())
-		} else if iv > 0 && age < iv {
-			p = append(p, at+": max_age must be at least the interval, or indicators expire between downloads")
-		}
-		if f.Weight < 0 || f.Weight > 10 {
-			p = append(p, at+": weight must be above 0 and at most 10 (1 is normal)")
-		}
-		for k, v := range f.Headers {
-			for _, m := range envRef.FindAllStringSubmatch(v, -1) {
-				if os.Getenv(m[1]) == "" {
-					p = append(p, fmt.Sprintf("%s: headers.%s uses ${%s}, which is not set in the environment", at, k, m[1]))
-				}
-			}
+		for _, pr := range f.Problems(true) {
+			p = append(p, at+": "+pr.Msg)
 		}
 	}
 	return p
+}
+
+// IntelFeedsFile returns the file that keeps the feeds added on the
+// Threat intel page.
+func (c *Config) IntelFeedsFile() string {
+	if c.Intel.FeedsFile != "" {
+		return c.resolve(c.Intel.FeedsFile)
+	}
+	return filepath.Join(c.LookupsDir(), "intel_feeds.yaml")
 }
 
 // LookupsDir returns the absolute lookups folder.
@@ -563,6 +588,11 @@ func Default() *Config {
 // Path returns the file the config was loaded from.
 func (c *Config) Path() string { return c.path }
 
+// HasSection reports whether the file the config was loaded from has the
+// top-level section, such as "syslog". Settings for one that is missing
+// are added at the end of the file; a second "syslog:" would not load.
+func (c *Config) HasSection(name string) bool { return c.sections[name] }
+
 // Load reads a config file, applies defaults and environment overrides,
 // and validates it.
 func Load(path string) (*Config, error) {
@@ -580,6 +610,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	c.path = path
+	var top map[string]any
+	if yaml.Unmarshal(data, &top) == nil {
+		c.sections = make(map[string]bool, len(top))
+		for k := range top {
+			c.sections[k] = true
+		}
+	}
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
@@ -619,6 +656,12 @@ func (c *Config) applyEnv() error {
 		}
 		c.Auth.AdminPasswordHash = h
 	}
+	if v := os.Getenv("SIGNALITH_USERS_FILE"); v != "" {
+		c.Auth.UsersFile = v
+	}
+	if v := os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD"); v != "" {
+		c.ldapBindPassword = v
+	}
 	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
 		c.Detections.Dir = v
 	}
@@ -627,6 +670,12 @@ func (c *Config) applyEnv() error {
 	}
 	if v := os.Getenv("SIGNALITH_DASHBOARDS_DIR"); v != "" {
 		c.Dashboards.Dir = v
+	}
+	if v := os.Getenv("SIGNALITH_INTEL_FEEDS_FILE"); v != "" {
+		c.Intel.FeedsFile = v
+	}
+	if v := os.Getenv("SIGNALITH_ARCHIVE_DIR"); v != "" {
+		c.Retention.ArchiveDir = v
 	}
 	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
 		c.Assistant.APIKey = v
@@ -696,7 +745,15 @@ func (c *Config) Validate() error {
 	}
 	if c.Retention.Days < 0 {
 		p = append(p, "retention.days cannot be negative (0 keeps data forever)")
+	} else if c.Retention.Days > retention.MaxKeepDays {
+		p = append(p, fmt.Sprintf("retention.days must be at most %d (0 keeps data forever)", retention.MaxKeepDays))
 	}
+	if c.Retention.Interval != "" {
+		if d, err := detect.ParseDuration(c.Retention.Interval); err != nil || d < 5*time.Minute || d > 24*time.Hour {
+			p = append(p, fmt.Sprintf("retention.interval %q must be a duration from 5m to 24h, for example 1h", c.Retention.Interval))
+		}
+	}
+	p = append(p, c.RetentionPolicies().Problems()...)
 	if c.Auth.AdminUser == "" {
 		p = append(p, "auth.admin_user is required")
 	}
@@ -708,6 +765,19 @@ func (c *Config) Validate() error {
 	if c.Auth.SessionTimeout != "" {
 		if d, err := detect.ParseDuration(c.Auth.SessionTimeout); err != nil || d < 5*time.Minute {
 			p = append(p, fmt.Sprintf("auth.session_timeout %q must be a duration of at least 5m, for example 12h or 1d", c.Auth.SessionTimeout))
+		}
+	}
+	if c.Auth.LDAP != nil {
+		if s, err := c.LDAP(); err != nil {
+			p = append(p, err.Error())
+		} else {
+			for _, pr := range s.Problems() {
+				msg := pr.Message
+				if pr.Field == "bind_password" {
+					msg = "set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD environment variable"
+				}
+				p = append(p, "auth.ldap."+pr.Field+": "+msg)
+			}
 		}
 	}
 	if c.Detections.Dir == "" {
@@ -809,18 +879,14 @@ func defaultPublicURL(s Server) string {
 	return scheme + "://" + net.JoinHostPort(host, port)
 }
 
-// HashPassword returns a bcrypt hash for the admin password.
-func HashPassword(pw string) (string, error) {
-	if len(pw) < 8 {
-		return "", errors.New("password must be at least 8 characters")
-	}
-	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
-	return string(h), err
-}
+// HashPassword returns a bcrypt hash for the admin password. Users'
+// passwords follow the same rules.
+func HashPassword(pw string) (string, error) { return users.HashPassword(pw) }
 
-// CheckPassword reports whether pw matches the admin hash.
+// CheckPassword reports whether user and pw are the built-in admin's. The
+// username ignores case, like every other username.
 func (c *Config) CheckPassword(user, pw string) bool {
-	if user != c.Auth.AdminUser {
+	if !strings.EqualFold(strings.TrimSpace(user), c.Auth.AdminUser) {
 		return false
 	}
 	return bcrypt.CompareHashAndPassword([]byte(c.Auth.AdminPasswordHash), []byte(pw)) == nil
@@ -875,7 +941,8 @@ or CIDRs such as 10.0.0.0/8; empty allows any sender.`,
 const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
-# SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY.
+# SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
+# SIGNALITH_LDAP_BIND_PASSWORD.
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
@@ -883,11 +950,17 @@ const header = `# Signalith configuration.
 #                    client may hold a tenth of them
 # server.shared_addresses  IPs or CIDRs of a proxy, load balancer or NAT that many
 #                    clients reach Signalith through; not limited as one client
+# auth.admin_user    the built-in admin, a break-glass account; add other users on the Users page
 # auth.session_timeout  sign the web UI out after this long idle (default 12h)
+# auth.users_file    where Users page accounts are kept (default users.json in lookups.dir)
+# auth.ldap          optional LDAP / Active Directory sign-in; usually set up on the Users
+#                    page instead (see docs/users.md)
 # opensearch.*       where events are stored; for https with a private CA set
 #                    ca_file (cert_file and key_file for certificate sign-in)
 # search.*           default time range and result limits
-# retention.days     days of events to keep (0 = forever)
+# retention.days     days of events to keep (0 = forever) until a default is saved on the
+#                    Data retention page; per-category policies, the disk guard and
+#                    archiving are set there too (or here: see docs/retention.md)
 # ingest.tokens      tokens agents send; see the Add data page for agent setup
 # ingest.max_event_age  events older than this (default 7d) are filed under the time
 #                    they arrived, with their own time in device_time
@@ -895,15 +968,18 @@ const header = `# Signalith configuration.
 #                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)
 # syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses server.tls_cert and tls_key
 # syslog.allow       sender IPs or CIDRs allowed to send syslog (empty = any sender)
+# syslog.public_port port devices send to, if forwarded to another (Docker: 514 -> 5514)
 # detections.dir     folder for custom detections (relative to this file)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
 # dashboards.dir     folder for custom dashboards, one YAML file each (relative to this file)
 # dashboards.stale_after  how long a host can go quiet before the posture dashboard flags it
 # assistant.*        optional AI model for "Ask in English" (provider: anthropic or openai);
 #                    off by default, and only the question and field names are sent
-# intel.feeds        threat intel feeds to download (none by default), for example:
+# intel.feeds        threat intel feeds to download (none by default). The easiest way
+#                    is the Threat intel page (Add feed), which keeps its feeds in
+#                    lookups.dir/intel_feeds.yaml (intel.feeds_file). Or list them here:
 #                      - name: feodo-tracker
 #                        url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
-#                    format: lines, csv (with column:) or stix; see docs/threat-intel.md
+#                    format: lines, csv (with column:), stix or auto; see docs/threat-intel.md
 
 `

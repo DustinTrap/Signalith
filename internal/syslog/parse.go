@@ -274,11 +274,12 @@ func parse3164(m *Message, s string, now time.Time) {
 		s = after
 	}
 	// Host name: the first word after the timestamp, unless it is already
-	// the program tag. Without a timestamp, only "host prog[pid]: ..." is
-	// clear enough to read a host name from.
+	// the program tag. Without a timestamp, only "host prog[pid]: ..." and
+	// Cisco ASA's "host %ASA-..." or "host : %ASA-..." (logging device-id
+	// without logging timestamp) are clear enough to read a host name from.
 	if m.Hostname == "" && s != "" && s[0] != '%' && !strings.HasPrefix(s, "CEF:") && !programTag.MatchString(head(s)) {
 		tok, rest := token(s)
-		if hasTime || pidTag.MatchString(head(rest)) {
+		if hasTime || pidTag.MatchString(head(rest)) || ciscoTag.MatchString(head(strings.TrimPrefix(rest, ": "))) {
 			m.Hostname = tok
 			s = strings.TrimLeft(rest, " ")
 			m.Format = "rfc3164"

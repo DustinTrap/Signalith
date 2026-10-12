@@ -11,17 +11,18 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 )
 
-func (s *Server) routeDashboards(api *http.ServeMux) {
-	api.HandleFunc("GET /api/posture", s.handlePosture)
-	api.HandleFunc("GET /api/dashboards", s.handleListDashboards)
-	api.HandleFunc("POST /api/dashboards", s.handleCreateDashboard)
-	api.HandleFunc("GET /api/dashboards/{id}", s.handleGetDashboard)
-	api.HandleFunc("GET /api/dashboards/{id}/yaml", s.handleDashboardYAML)
-	api.HandleFunc("PUT /api/dashboards/{id}", s.handlePutDashboard)
-	api.HandleFunc("DELETE /api/dashboards/{id}", s.handleDeleteDashboard)
-	api.HandleFunc("POST /api/dashboards/{id}/panels", s.handleAddPanel)
-	api.HandleFunc("POST /api/dashboards/{id}/run", s.handleRunDashboard)
-	api.HandleFunc("POST /api/panels/run", s.handleRunPanel)
+func (s *Server) routeDashboards(api *router) {
+	api.viewer("GET /api/posture", s.handlePosture)
+	api.viewer("GET /api/dashboards", s.handleListDashboards)
+	api.viewer("GET /api/dashboards/{id}", s.handleGetDashboard)
+	api.viewer("GET /api/dashboards/{id}/yaml", s.handleDashboardYAML)
+	// Running panels only reads events, like a search.
+	api.viewer("POST /api/dashboards/{id}/run", s.handleRunDashboard)
+	api.viewer("POST /api/panels/run", s.handleRunPanel)
+	api.analyst("POST /api/dashboards", s.handleCreateDashboard)
+	api.analyst("PUT /api/dashboards/{id}", s.handlePutDashboard)
+	api.analyst("DELETE /api/dashboards/{id}", s.handleDeleteDashboard)
+	api.analyst("POST /api/dashboards/{id}/panels", s.handleAddPanel)
 }
 
 var errDashboardsOff = errors.New("custom dashboards are not configured on this server; set dashboards.dir")

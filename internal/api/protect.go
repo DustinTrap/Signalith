@@ -34,7 +34,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			// API replies carry events, cases and the ingest token; keep
 			// them out of the browser's disk cache.
 			h.Set("Cache-Control", "no-store")
-			if r.URL.Path == "/api/logout" && r.Method == http.MethodPost {
+			if r.Method+" "+r.URL.Path == "POST /api/logout" {
 				// Signing out also empties the browser's cache of this
 				// site. Stored preferences such as the theme stay.
 				h.Set("Clear-Site-Data", `"cache"`)

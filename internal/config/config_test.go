@@ -221,6 +221,10 @@ func TestSyslogSettings(t *testing.T) {
 	if err != nil || c.Syslog.Enabled() {
 		t.Fatalf("absent syslog section: %v %+v", err, c.Syslog)
 	}
+	// Turning syslog on then means adding the section, not editing it.
+	if c.HasSection("syslog") || !c.HasSection("search") {
+		t.Errorf("sections: syslog %v, search %v", c.HasSection("syslog"), c.HasSection("search"))
+	}
 
 	os.WriteFile(path, []byte(`syslog:
   udp: 0.0.0.0:514
@@ -258,6 +262,16 @@ syslog:
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q:\n%v", want, err)
 		}
+	}
+
+	// Docker: listen on 5514, devices send to the 514 published for it.
+	os.WriteFile(path, []byte("syslog:\n  udp: 0.0.0.0:5514\n  tcp: 0.0.0.0:5514\n  public_port: 514\n"), 0o600)
+	if c, err := Load(path); err != nil || c.Syslog.PublicPort != 514 {
+		t.Errorf("public_port: %v %+v", err, c.Syslog)
+	}
+	os.WriteFile(path, []byte("syslog:\n  udp: 0.0.0.0:5514\n  public_port: 70000\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "syslog.public_port 70000 must be 1-65535") {
+		t.Errorf("public_port 70000: %v", err)
 	}
 
 	os.WriteFile(path, []byte("syslog:\n  udp: myhost:514\n  tcp: 0.0.0.0:514\n  tls: :514\n"), 0o600)
@@ -298,8 +312,149 @@ func TestSavedFileExplainsSyslog(t *testing.T) {
 		}
 	}
 	got, err := Load(path)
-	if err != nil || got.Syslog.UDP != "0.0.0.0:514" || got.Syslog.TCP != "0.0.0.0:514" {
+	if err != nil || got.Syslog.UDP != "0.0.0.0:514" || got.Syslog.TCP != "0.0.0.0:514" || !got.HasSection("syslog") {
 		t.Errorf("reload: %v %+v", err, got.Syslog)
+	}
+
+	// Off is written as empty settings, so the section is there to edit.
+	c.Syslog.UDP, c.Syslog.TCP = "", ""
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Load(path); err != nil || got.Syslog.Enabled() || !got.HasSection("syslog") {
+		t.Errorf("off: %v %+v, section %v", err, got.Syslog, got != nil && got.HasSection("syslog"))
+	}
+}
+
+func TestUsersAndDirectorySettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "from-the-env")
+	os.WriteFile(path, []byte("lookups:\n  dir: lists\n"), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UsersFile() != filepath.Join(dir, "lists", "users.json") || c.DirectoryFile() != filepath.Join(dir, "lists", "directory.json") {
+		t.Errorf("users file = %s, directory file = %s", c.UsersFile(), c.DirectoryFile())
+	}
+	if s, err := c.LDAP(); s != nil || err != nil {
+		t.Errorf("no auth.ldap = %v %v", s, err)
+	}
+	if !c.CheckPassword("ADMIN", "from-the-env") {
+		t.Error("the built-in admin's name should ignore case")
+	}
+	t.Setenv("SIGNALITH_USERS_FILE", filepath.Join(dir, "elsewhere", "people.json"))
+	if c, _ := Load(path); c.UsersFile() != filepath.Join(dir, "elsewhere", "people.json") {
+		t.Errorf("env users file = %s", c.UsersFile())
+	}
+
+	// auth.ldap: problems are listed with their keys.
+	os.WriteFile(path, []byte("auth:\n  ldap:\n    type: ad\n    url: http://dc1\n    bind_dn: CN=svc,DC=corp,DC=example,DC=com\n"), 0o600)
+	_, err = Load(path)
+	for _, want := range []string{"auth.ldap.url", "auth.ldap.bind_password: set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD", "auth.ldap.user_base_dn", "auth.ldap.admin_groups"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+	// A complete block: on by default, Active Directory unless type says
+	// otherwise, preset defaults filled in, the password from the
+	// environment and never written back to the file.
+	os.WriteFile(path, []byte(`auth:
+  ldap:
+    url: ldaps://dc1.corp.example.com
+    bind_dn: CN=svc,DC=corp,DC=example,DC=com
+    user_base_dn: DC=corp,DC=example,DC=com
+    admin_groups:
+      - CN=Signalith Admins,OU=Groups,DC=corp,DC=example,DC=com
+`), 0o600)
+	t.Setenv("SIGNALITH_LDAP_BIND_PASSWORD", "bind-secret")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := c.LDAP()
+	if err != nil || !s.IsEnabled() || s.Type != "ad" || s.BindPassword != "bind-secret" || s.UsernameAttribute != "sAMAccountName" || !s.Nested() {
+		t.Errorf("ldap = %+v %v", s, err)
+	}
+	if err := c.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "bind-secret") || strings.Contains(string(raw), "sAMAccountName") {
+		t.Errorf("saved file has the env password or filled defaults:\n%s", raw)
+	}
+}
+
+func TestRetentionSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signalith.yaml")
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	os.WriteFile(path, []byte(`retention:
+  days: 30
+  interval: 30m
+  default:
+    keep_days: 60
+    compact_after_days: 7
+  policies:
+    authentication:
+      keep_days: 365
+      archive: true
+    findings:
+      keep_days: 730
+  guard:
+    max_disk_percent: 80
+`), 0o600)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc := c.RetentionPolicies()
+	if rc.Days != 30 || rc.Default.KeepDays != 60 || !rc.Policies["authentication"].Archive || rc.Policies["findings"].KeepDays != 730 ||
+		rc.Guard.MaxDiskPercent != 80 || !rc.Guard.IsEnabled() || c.RetentionInterval().Minutes() != 30 {
+		t.Errorf("retention = %+v interval %v", rc, c.RetentionInterval())
+	}
+	// The archive defaults to a folder next to the lookups folder.
+	if got, want := c.ArchiveDir(), filepath.Join(dir, "archive"); got != want {
+		t.Errorf("archive dir = %s, want %s", got, want)
+	}
+	state := filepath.Join(t.TempDir(), "signalith")
+	t.Setenv("SIGNALITH_LOOKUPS_DIR", filepath.Join(state, "lookups"))
+	if c, _ := Load(path); c.ArchiveDir() != filepath.Join(state, "archive") {
+		t.Errorf("archive dir next to lookups = %s", c.ArchiveDir())
+	}
+	cold := filepath.Join(t.TempDir(), "cold")
+	t.Setenv("SIGNALITH_ARCHIVE_DIR", cold)
+	if c, _ := Load(path); c.ArchiveDir() != cold {
+		t.Errorf("SIGNALITH_ARCHIVE_DIR = %s", c.ArchiveDir())
+	}
+
+	// Defaults: retention.days, hourly, no policies.
+	d := Default()
+	if d.RetentionInterval().Hours() != 1 || d.RetentionPolicies().Days != 90 || d.RetentionPolicies().Default != nil {
+		t.Errorf("defaults = %+v", d.Retention)
+	}
+
+	os.WriteFile(path, []byte(`retention:
+  interval: 1m
+  policies:
+    authentcation: {keep_days: 30}
+    intel: {keep_days: 30}
+    endpoint: {keep_days: 7, compact_after_days: 10}
+    cases: {keep_days: 30, archive: true}
+  guard: {max_disk_percent: 97}
+`), 0o600)
+	_, err = Load(path)
+	for _, want := range []string{"retention.interval", "retention.policies.authentcation: unknown category",
+		"retention.policies.intel", "retention.policies.endpoint.compact_after_days", "retention.policies.cases",
+		"retention.guard.max_disk_percent"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q:\n%v", want, err)
+		}
+	}
+	os.WriteFile(path, []byte("retention:\n  policies:\n    endpoint: {keep: 30}\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "keep") {
+		t.Errorf("unknown policy key: %v", err)
 	}
 }
 
@@ -307,9 +462,7 @@ func TestMaxEventAge(t *testing.T) {
 	day := 24 * time.Hour
 	// Unset: a week, or the retention period when that is shorter.
 	for days, want := range map[int]time.Duration{0: 7 * day, 90: 7 * day, 7: 7 * day, 3: 3 * day, 1: day} {
-		c := Default()
-		c.Retention.Days = days
-		if got := c.MaxEventAge(); got != want {
+		if got := Default().MaxEventAge(days); got != want {
 			t.Errorf("retention %d days: %v, want %v", days, got, want)
 		}
 	}
@@ -321,8 +474,8 @@ func TestMaxEventAge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MaxEventAge() != 30*day {
-		t.Errorf("set: %v", c.MaxEventAge())
+	if c.MaxEventAge(1) != 30*day {
+		t.Errorf("set: %v", c.MaxEventAge(1))
 	}
 	for _, bad := range []string{"soon", "10m", "4000d"} {
 		os.WriteFile(path, []byte("ingest:\n  max_event_age: "+bad+"\n"), 0o600)

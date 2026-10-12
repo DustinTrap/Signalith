@@ -58,7 +58,8 @@ Desktop when you sign in".
 
 Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
 Fluent Bit, paste the generated configuration, restart it. The configuration already
-contains the server address and ingest token.
+contains the server address and ingest token. For firewalls, switches and other network
+devices, pick **Syslog** (see [Syslog](#syslog)).
 
 Agents on other machines must send to an address they can reach, such as
 `http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
@@ -96,7 +97,7 @@ refused with 408 and a message saying to send smaller batches (a lower `Flush` i
 Bit's `[SERVICE]` section), and the server log notes it.
 
 Each event keeps its own time unless that is older than `ingest.max_event_age` (a week
-by default, or `retention.days` if shorter) or more than an hour ahead. Then it is filed
+by default, or the shortest retention period if shorter) or more than an hour ahead. Then it is filed
 under the time it arrived and its own time is kept in `device_time`, so a wrong clock or
 a forged date cannot create indices for other days. Search `device_time=*` to find these
 events.
@@ -115,8 +116,14 @@ counted in the event's `dropped_fields` (search `dropped_fields>0`), their value
 Firewalls, switches, routers, appliances and servers without an agent can send syslog.
 Point them at this server's address on **UDP or TCP port 514** (or the TLS port, if
 you set `syslog.tls`). `signalith init` turns UDP and TCP 514 on; the Docker quick start
-publishes port 514 too. To forward a Linux server's logs with rsyslog, add one line to
-`/etc/rsyslog.d/90-signalith.conf` and restart rsyslog:
+publishes port 514 too.
+
+Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
+and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
+address filled in. Send the test message it shows and watch it arrive on the same page.
+When syslog is off, the page gives the steps to turn it on for this system.
+By hand, forwarding a Linux server's logs with rsyslog is one line in
+`/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
 
 ```
 *.* @@siem.example.com:514
@@ -129,7 +136,8 @@ syslog (including the usual variations, such as Cisco IOS, IOS XR, NX-OS and ASA
 land in Authentication and Change like agent data, so the built-in detections apply.
 Events have `sourcetype=syslog` (or `cef`), `host` from the message, `dvc` set to the
 sender's address, and `facility` and `severity`. The event time is the one in the message,
-unless it is older than `ingest.max_event_age` (a week by default) or more than an hour
+unless it is older than `ingest.max_event_age` (a week by default, or the shortest time any
+event category is kept when that is shorter) or more than an hour
 ahead; then it is the time Signalith received the message, and the device's own time is
 kept in `device_time`, as for agent data (see [Ingest limits](#ingest-limits)).
 
@@ -147,17 +155,30 @@ restrict the port with a firewall as well. The Windows installer limits its fire
 rules to the `syslog.allow` senders.
 
 Ports below 1024 need extra permission on Linux. The systemd unit grants it; when
-running Signalith another way, use a port such as `0.0.0.0:1514`. `/api/health` shows,
-under `syslog`, the listeners, how many messages were received, dropped, not written
-and rejected, and the most recent senders.
+running Signalith another way, use a port such as `0.0.0.0:1514`. When devices send to a
+different port than Signalith listens on, because Docker or a firewall forwards it, set
+`syslog.public_port` so Add data shows the right one (the Docker quick start listens on
+5514 and sets it to 514). The **Health** page (and `/api/health`, under `syslog`) shows the
+listeners, how many messages were received, dropped, not written and rejected, and the
+most recent senders.
 
-### Sign in
+### Sign in and users
 
 The web UI has its own sign-in page. Sessions end after `auth.session_timeout` without
 activity (12 hours by default) or when you sign out; tick **Keep me signed in** to stay
-signed in for up to 7 days. Ten wrong passwords from one address within 15 minutes lock
-that address out for 15 minutes. Scripts and API clients can keep using HTTP Basic auth
-with the same username and password.
+signed in for up to 7 days. Ten wrong passwords for one account from one address within
+15 minutes lock that account out for that address for 15 minutes (with wider limits per
+address and per account; see [docs/users.md](docs/users.md#signing-in)). Scripts and API
+clients can keep using HTTP Basic auth with the same username and password.
+
+Admins add people on the **Users** page and give each one a role: **Viewer** (look,
+search, change nothing), **Analyst** (also triage findings, work investigations, build
+dashboards) or **Admin** (also detections, feeds, lists, data collection and users).
+New users get a temporary password they replace at their first sign-in. People can
+also sign in with their **Active Directory or LDAP** account, with their role coming
+from their groups; set it up and test it on the same page. The `admin` account from
+`signalith.yaml` stays as a break-glass account that always works. See
+[docs/users.md](docs/users.md).
 
 ### Hardening built in
 
@@ -209,34 +230,47 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `opensearch.allow_insecure_http` | `false` | Allow `username`/`password` over plain http to another machine. Off, such a config is refused with an explanation |
 | `opensearch.index_prefix` | `signalith` | Indices are `<prefix>-<datamodel>-YYYY.MM.DD` |
 | `search.default_earliest` | `-24h` | Time range when a query sets none |
-| `retention.days` | `90` | Days of events to keep; `0` keeps everything |
-| `auth.admin_user`, `auth.admin_password_hash` | `admin` | Sign-in; change with `signalith passwd` (it asks twice without showing the password, or reads one line from a pipe or `SIGNALITH_NEW_PASSWORD`, and changes only this line of the file) |
+| `retention.days` | `90` | Days of events to keep (`0` keeps everything) until a default policy is saved on the Data retention page |
+| `retention.interval` | `1h` | How often retention policies are enforced |
+| `retention.archive_dir` | `archive` next to `lookups.dir` | Folder for archived days |
+| `retention.default`, `retention.policies.<category>` | none | Policies that override the page; see [Data retention](#data-retention) |
+| `retention.guard` | on, 85%, 7 days | Disk guard: `enabled`, `max_disk_percent`, `min_days` |
+| `auth.admin_user`, `auth.admin_password_hash` | `admin` | The built-in admin, a break-glass account; change its password with `signalith passwd` (it asks twice without showing the password, or reads one line from a pipe or `SIGNALITH_NEW_PASSWORD`, and changes only this line of the file) |
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
+| `auth.users_file` | `users.json` in `lookups.dir` | Where users added on the Users page are kept; directory settings go in `directory.json` next to it |
+| `auth.ldap` | none | Active Directory or LDAP sign-in, when you would rather not set it up on the Users page; see [docs/users.md](docs/users.md#setting-it-in-signalithyaml) |
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
-| `ingest.max_event_age` | `7d` (or `retention.days` if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
+| `ingest.max_event_age` | `7d` (or the shortest retention period if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
 | `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
 | `syslog.tls` | off | Address for syslog over TLS, such as `0.0.0.0:6514`; uses `server.tls_cert` and `server.tls_key` |
 | `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |
+| `syslog.public_port` | the listen port | Port devices send UDP and TCP syslog to, when it is forwarded to the listen port; shown on Add data |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
-| `intel.feeds` | none | Threat intel feeds to download; see [Threat intel](#threat-intel). Nothing is fetched unless listed |
+| `intel.feeds` | none | Threat intel feeds kept in this file (read-only on the page); most people add feeds on the **Threat intel** page instead. See [Threat intel](#threat-intel). Nothing is fetched until a feed is added |
 | `intel.feeds[].name`, `.url` | required | Feed name (shown as the indicator source) and its http(s) address |
-| `intel.feeds[].format` | `lines` | `lines` (one per line, `#` comments), `csv` (with `column:`, a header name or number) or `stix` (STIX 2.1 bundle) |
+| `intel.feeds[].kind`, `.collection` | `url` | `taxii` reads a TAXII 2.1 collection: `url` is the API root and `collection` the collection ID |
+| `intel.feeds[].format` | `lines` | `lines` (one per line, `#` comments), `csv` (with `column:`, a header name or number), `stix` (STIX 2.1 bundle) or `auto` to detect |
 | `intel.feeds[].type` | `auto` | `auto` detects each value, or `ip`, `cidr`, `domain`, `url`, `hash`, `md5`, `sha1`, `sha256`, `email` |
 | `intel.feeds[].interval`, `.max_age` | `1h`, `7d` | How often to download; how long indicators last when downloads keep failing |
 | `intel.feeds[].weight` | `1` | Multiplies the risk a match adds (0 to 10) |
-| `intel.feeds[].headers`, `.tags`, `.description`, `.enabled` | none, `true` | Request headers (values may use `${ENV_VAR}` for API keys), labels, and on/off |
+| `intel.feeds[].headers`, `.username`, `.password` | none | Request headers and HTTP basic sign-in for feeds that need a key; values may use `${ENV_VAR}` |
+| `intel.feeds[].tags`, `.description`, `.enabled` | none, `true` | Labels added to every indicator, and on/off |
+| `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys (file mode 0600) |
+| `intel.allow_loopback_feeds` | `false` | Allow feed downloads from this machine (`127.0.0.1`, `::1`), for a feed server on the same host |
 | `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
 | `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
 | `assistant.url`, `assistant.model`, `assistant.api_key` | per provider | Endpoint, model name and key; `anthropic` defaults to `claude-sonnet-5-5` |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
-`SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN` (also `SIGNALITH_OPENSEARCH_URL`,
-`SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`,
-`SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
+`SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (for
+`auth.ldap` in this file only; directory sign-in set up on the Users page keeps its own) (also
+`SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`,
+`SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
+`SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
 `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
 
 ## Detections and findings
@@ -335,13 +369,21 @@ Like the ES threat intelligence framework, Signalith matches events against
 **indicators**: IP addresses and IPv4 networks, domains, URLs, MD5/SHA-1/SHA-256
 file hashes and email addresses.
 
-- **Feeds** listed under `intel.feeds` in signalith.yaml are downloaded on their
-  interval by the server running the detection scheduler. Nothing is fetched until
-  you add one. Proxy settings come from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`
-  (OpenSearch traffic never uses them; see `opensearch.proxy`).
-  An indicator that disappears from a feed is removed at the next download; if a
-  feed keeps failing, its indicators expire after `max_age`. Disabling or removing a
-  feed removes its indicators.
+- **Feeds** are added on the **Threat intel** page with **Add feed**: pick free
+  feeds from the built-in catalog (abuse.ch, Spamhaus, Emerging Threats and more),
+  paste the address of any list, CSV or STIX file, or connect a TAXII 2.1 server
+  such as MISP or OpenCTI and pick a collection. **Test** downloads the feed and
+  shows what it holds (format, indicator types, samples) before you save, and a new
+  feed downloads at once. Feeds can also be listed under `intel.feeds` in
+  signalith.yaml; those show on the page as read-only. Nothing is fetched until you
+  add one.
+- **Downloads** run on the server with the detection scheduler, every feed on its
+  own interval. The server needs outbound HTTPS to each feed; proxy settings come
+  from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (OpenSearch traffic never uses
+  them; see `opensearch.proxy`). An indicator that disappears from
+  a feed is removed at the next download; if a feed keeps failing, its indicators
+  expire after `max_age`. Turning a feed off removes its indicators; deleting one
+  removes them, or keeps them until they age out if you choose.
 - **Manual indicators**: add one on the **Threat intel** page or upload a CSV
   (`value,type,description,weight,expires,tags`) or plain list. Every bad line is
   reported and nothing is saved until the file is clean.
@@ -352,8 +394,10 @@ file hashes and email addresses.
   `<field>_intel_source`, `_intel_type`, `_intel_weight` and `_intel_description`
   columns to any result.
 
-Copy-paste examples (free public feeds; check each provider's terms, and some ask for
-a free key, which you send with `headers`):
+Feeds added on the page are saved in `lookups/intel_feeds.yaml` (set
+`intel.feeds_file` to move it). To keep feeds in signalith.yaml instead, for example
+when it is managed by configuration tools (check each provider's terms; values may
+use `${ENV_VAR}` so keys stay out of the file):
 
 ```yaml
 intel:
@@ -362,21 +406,19 @@ intel:
       url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
       weight: 1.5
     - name: urlhaus                # malware download URLs, abuse.ch
-      url: https://urlhaus.abuse.ch/downloads/csv_recent/
-      format: csv
-      column: url
+      url: https://urlhaus.abuse.ch/downloads/text_recent/
       type: url
-    - name: malwarebazaar          # malware SHA-256 hashes, abuse.ch
-      url: https://bazaar.abuse.ch/export/txt/sha256/recent/
-      type: sha256
-    - name: et-compromised         # compromised hosts, Proofpoint Emerging Threats
-      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
-      type: ip
-      interval: 12h
+    - name: our-cti                # a collection on your own TAXII 2.1 server
+      kind: taxii
+      url: https://cti.example.com/taxii2/api1/
+      collection: 91a7b528-80eb-42ed-a74d-c6fbd5a26116
+      username: signalith
+      password: ${CTI_PASSWORD}
 ```
 
-See [docs/threat-intel.md](docs/threat-intel.md) for formats, STIX, matching details
-and the API.
+See [docs/threat-intel.md](docs/threat-intel.md) for the catalog, formats, TAXII,
+download safety rules, matching details and the API.
+
 ## Dashboards
 
 The **Dashboards** tab opens on the built-in **Security posture** dashboard, like the
@@ -419,6 +461,68 @@ panels:
 ```
 
 See [docs/dashboards.md](docs/dashboards.md) for every option and the API.
+
+## Data retention
+
+Admins set how long data is kept on the **Data retention** page. It lists every
+category with its size on disk, the days it holds and its policy:
+
+- each data model (Authentication, Endpoint, Network traffic, Change),
+- Other events,
+- Risk events,
+- Findings,
+- Investigations,
+- Threat intel, which is managed by its feeds.
+
+Each event category can have its own policy, or use the default policy:
+
+- **Keep**: how many days stay searchable (0 keeps them forever).
+- **Size cap**: the most disk the category may use. Its oldest days are deleted
+  first.
+- **Compact after**: makes old days read-only and merges them into one segment, so
+  they take less space and memory.
+- **Archive before deleting**: writes each day to a compressed, checksummed file
+  first. You can restore it later from the page or with `signalith archive restore`.
+
+Findings and investigations can be set to delete resolved and closed ones after a
+number of days. Open ones are never deleted, and neither are findings that belong to
+an investigation that is kept. Before you save, the dialog shows exactly which days
+the change deletes, archives or compacts, including days already due, and asks
+before deleting anything. Saving applies the change at once, with no restart.
+Restoring archived days shows how full the disk will be first.
+
+The **disk guard**, on by default, deletes the oldest event days when OpenSearch's
+disk passes 85% and spares the last 7 days. This keeps OpenSearch from reaching 95%,
+where it makes every index read-only and ingest stops. It deletes only when that
+helps: if other files fill the disk, it keeps your history and the page says to add
+space. A server upgraded while its OpenSearch disk is already above 85% trims old
+days at its first run. To avoid that, set `retention.guard` in signalith.yaml first.
+
+Retention runs every hour on the server with the detection scheduler; other servers
+show the page read-only. It never deletes today's data or indices that are not
+Signalith daily indices. The page keeps the last 200 actions with the reason for each.
+
+Page settings are saved in `retention.yaml` in `lookups.dir`. Anything set under
+`retention` in signalith.yaml is read-only on the page, except `retention.days`,
+which is the default only until you save a default on the page:
+
+```yaml
+retention:
+  days: 90
+  policies:
+    authentication: {keep_days: 365, compact_after_days: 14}
+    endpoint: {keep_days: 30, max_size_gb: 500, archive: true}
+    cases: {keep_days: 1095}
+  guard: {enabled: true, max_disk_percent: 85, min_days: 7}
+```
+
+See [docs/retention.md](docs/retention.md) for more:
+
+- how each rule works,
+- the archive format and restores,
+- compliance examples such as keeping 90 days searchable and a year archived,
+- running more than one server,
+- the API.
 
 ## Writing queries
 
@@ -485,7 +589,8 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/findings` | Findings model and its OpenSearch store |
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
 | `internal/risk` | Risk event store |
-| `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX) and downloads |
+| `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX, format detection), the feed catalog, TAXII 2.1, guarded downloads and feeds managed on the page |
+| `internal/retention` | Retention policies, planner, disk guard, archives and restores |
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
@@ -494,7 +599,8 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/safelog` | Length limits for log values, rotating log file |
 | `internal/redact` | Hides secrets in URLs before they are shown or logged |
 | `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |
-| `internal/api` | REST API, query explanations |
+| `internal/users` | Roles, local users, Active Directory and LDAP sign-in and its tests |
+| `internal/api` | REST API, the role of every route, query explanations |
 | `web/static` | Browser UI (plain JavaScript, no build step) |
 | `deploy/` | Docker Compose, systemd unit, Windows installer script |
 

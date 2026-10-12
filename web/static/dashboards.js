@@ -433,8 +433,9 @@
         d.builtin ? el('span', { class: 'badge' }, 'Built-in') : null,
         cur ? icon('check', 'db-check') : null);
     });
-    put($('db-menu'), ...items, el('div', { class: 'menu__sep' }),
-      el('button', { class: 'menu__item', type: 'button', onclick: () => { close(); openDashboardEditor(true); } }, icon('plus'), el('span', {}, 'New dashboard')));
+    // Viewers can open dashboards but not make them (data-min-role).
+    put($('db-menu'), ...items, el('div', { class: 'menu__sep', 'data-min-role': 'analyst' }),
+      el('button', { class: 'menu__item', type: 'button', 'data-min-role': 'analyst', onclick: () => { close(); openDashboardEditor(true); } }, icon('plus'), el('span', {}, 'New dashboard')));
   }
 
   function setHeader(id) {
@@ -835,16 +836,17 @@
       class: 'menu__item', type: 'button',
       onclick: (ev) => { ev.currentTarget.closest('details').removeAttribute('open'); onclick(); },
     }, extra), icon(ic), text);
+    const edit = { 'data-min-role': 'analyst' };
     const menu = preview ? null : el('details', { class: 'menu db-panel__menu' },
       el('summary', { class: 'btn btn--ghost btn--icon btn--sm', title: 'Panel actions', 'aria-label': 'Actions for ' + p.title }, icon('ellipsis')),
       el('div', { class: 'menu__panel' },
         item('search', 'Open in Search', () => openSearch(...panelQuery(p, body._result))),
-        item('pencil', 'Edit panel', () => openPanelEditor({ index: i, panel: p })),
-        el('div', { class: 'menu__sep' }),
-        item('arrow-up', 'Move earlier', () => movePanel(i, -1), { disabled: i === 0 }),
-        item('arrow-down', 'Move later', () => movePanel(i, 1), { disabled: i === n - 1 }),
-        el('div', { class: 'menu__sep' }),
-        item('trash-2', 'Remove panel', () => removePanel(i), { class: 'menu__item menu__item--danger' })));
+        item('pencil', 'Edit panel', () => openPanelEditor({ index: i, panel: p }), edit),
+        el('div', attrs({ class: 'menu__sep' }, edit)),
+        item('arrow-up', 'Move earlier', () => movePanel(i, -1), { ...edit, disabled: i === 0 }),
+        item('arrow-down', 'Move later', () => movePanel(i, 1), { ...edit, disabled: i === n - 1 }),
+        el('div', attrs({ class: 'menu__sep' }, edit)),
+        item('trash-2', 'Remove panel', () => removePanel(i), { ...edit, class: 'menu__item menu__item--danger' })));
     const c = card({ title: p.title || 'Preview', sub: lastRange(dash.range), actions: menu ? [menu] : [], cls: 'db-panel db-w-' + (p.width || 'half') }, body);
     body._sub = c._sub;
     body._legend = c._legend;
@@ -859,9 +861,11 @@
     body.dataset.view = dash.current;
     const d = dash.def;
     if (!d.panels.length) {
-      put(body, el('div', { class: 'card' }, emptyState('layout-dashboard', 'No panels yet',
-        'A panel is a query and a chart. Add one here, or run a search and choose Add to dashboard.',
-        smallButton('Add panel', 'plus', () => openPanelEditor({})))));
+      put(body, el('div', { class: 'card' }, can('analyst')
+        ? emptyState('layout-dashboard', 'No panels yet',
+          'A panel is a query and a chart. Add one here, or run a search and choose Add to dashboard.',
+          smallButton('Add panel', 'plus', () => openPanelEditor({})))
+        : emptyState('layout-dashboard', 'No panels yet', 'An analyst or admin can add panels to this dashboard.')));
       body._boxes = [];
       return [];
     }

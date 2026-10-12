@@ -304,7 +304,7 @@ function techRow(ids) {
 
 // ---------- findings ----------
 let currentUser = '';
-api('api/me').then((m) => { currentUser = m.user; }).catch(() => {});
+meReady.then((m) => { if (m) currentUser = m.username; });
 let findingsList = []; // the rows on screen, in display order
 const selected = new Set();
 let openFinding = null;
@@ -483,7 +483,7 @@ function renderFindingPills() {
 const FND_COLS = [['sev', 'Urgency', 'urgency'], ['title', 'Finding'], ['status', 'Status · detection'], ['owner', 'Owner'], ['age', 'Age', 'age']];
 function findingsHead(all) {
   return el('thead', {}, el('tr', {},
-    el('th', { class: 'col-check' }, all ? el('label', { class: 'check' }, all) : null),
+    el('th', { class: 'col-check', 'data-min-role': 'analyst' }, all ? el('label', { class: 'check' }, all) : null),
     ...FND_COLS.map(([col, label, key]) => {
       const th = el('th', { 'data-col': col, class: col === 'age' ? 'num' : '' });
       if (!key) { th.textContent = label; return th; }
@@ -504,7 +504,7 @@ function findingsHead(all) {
 
 function renderFindingsSkeleton() {
   const rows = Array.from({ length: 6 }, () => el('tr', {},
-    el('td', { class: 'col-check' }),
+    el('td', { class: 'col-check', 'data-min-role': 'analyst' }),
     el('td', { 'data-col': 'sev' }, dxSkel('64px')),
     el('td', { 'data-col': 'title' }, dxSkel('80%'), el('div', { class: 'dx-skel-gap' }), dxSkel('45%')),
     el('td', { 'data-col': 'status' }, dxSkel('70px'), el('div', { class: 'dx-skel-gap' }), dxSkel('120px')),
@@ -554,7 +554,7 @@ function findingRow(f) {
   const sev = sevBadge(u);
   if (u !== f.severity) sev.title = `Severity ${SEVERITY_FULL[f.severity] || f.severity}, adjusted for asset and user priority`;
   const open = el('button', { class: 'dx-rowlink', type: 'button' }, f.title);
-  const check = el('td', { class: 'col-check' }, el('label', { class: 'check' }, cb));
+  const check = el('td', { class: 'col-check', 'data-min-role': 'analyst' }, el('label', { class: 'check' }, cb));
   // The whole cell toggles the box, so a near miss does not open the finding.
   check.addEventListener('click', (ev) => { ev.stopPropagation(); if (ev.target === check) cb.click(); });
   const tr = el('tr', { 'data-id': f.id, 'aria-selected': String(openFinding === f.id) },
@@ -605,7 +605,7 @@ function renderFindingsFoot() {
   const more = fnd.total > findingsList.length
     ? el('span', {}, `Showing the newest ${findingsList.length} of ${fnd.total}. Narrow the filters to see the rest.`) : null;
   fill(foot, live, more, el('span', { class: 'spacer' }),
-    findingsList.length ? el('span', { class: 'shortcuts hide-sm', 'aria-hidden': 'true' }, el('kbd', {}, 'J'), el('kbd', {}, 'K'), el('span', {}, 'move'), el('kbd', {}, 'X'), el('span', {}, 'select')) : null);
+    findingsList.length ? el('span', { class: 'shortcuts hide-sm', 'aria-hidden': 'true' }, el('kbd', {}, 'J'), el('kbd', {}, 'K'), el('span', {}, 'move'), ...(can('analyst') ? [el('kbd', {}, 'X'), el('span', {}, 'select')] : [])) : null);
 }
 
 function updateBulk() {
@@ -957,10 +957,13 @@ function renderFindingDetail(box, data, opts = {}) {
         d && d.guidance ? el('div', { class: 'callout' }, icon('lightbulb'), el('div', {}, el('b', {}, 'How to triage. '), d.guidance)) : null,
         (f.mitre || []).length ? techRow(f.mitre) : null,
         err,
-        dxSection('Triage',
+        // Viewers see the triage state; analysts and admins change it.
+        can('analyst') ? dxSection('Triage',
           el('div', { class: 'form-grid' },
             dxField('Status', status), dxField('Owner', owner), dxField('Severity', severity, sevNote), dxField('Disposition', disposition)),
-          comment),
+          comment)
+          : dxSection('Triage', dxKv([['Status', STATUS_LABEL[f.status] || f.status], ['Owner', f.owner || 'Unassigned'],
+            ['Severity', SEVERITY_FULL[f.severity] || f.severity], ['Disposition', DISPOSITION_LABEL[f.disposition || ''] || f.disposition]])),
         ents.length ? el('section', { class: 'section' },
           el('h3', { class: 'section-title' }, 'Entities', el('span', { class: 'count' }, String(ents.length))),
           ...ents.map(([k, v]) => findingEntity(k, v, f))) : null),
@@ -976,7 +979,7 @@ function renderFindingDetail(box, data, opts = {}) {
         f.result && f.result._raw ? dxSection('Raw event', el('pre', { class: 'dx-code dx-raw' }, f.result._raw)) : null),
       dxPanel(prefix, 'activity', fnd.tab,
         activity.length ? el('ol', { class: 'timeline' }, ...activity) : el('p', { class: 'muted' }, 'No activity yet. Notes and changes appear here.'))),
-    el('div', { class: 'inspector__foot' }, save, mine, caseBtn, el('span', { class: 'spacer' }), more));
+    el('div', { class: 'inspector__foot' }, ...(can('analyst') ? [save, mine, caseBtn] : [f.case_id ? caseBtn : null]), el('span', { class: 'spacer' }), more));
 }
 
 async function undoFinding(id, prev) {
@@ -1086,8 +1089,10 @@ function detectionRow(d) {
     el('td', { 'data-col': 'sched' }, el('div', { class: 'dx-line' }, 'Every ' + d.schedule), el('span', { class: 'dx-meta' }, 'looks back ' + d.lookback)),
     el('td', { 'data-col': 'last' }, ...lastRunCell(st)),
     el('td', { 'data-col': 'n24', class: 'num', title: n24 == null ? 'Couldn’t count findings' : `${dxPlural(n24, 'finding')} in the last 24 hours` }, n24 == null ? '–' : String(n24)),
-    el('td', { 'data-col': 'on' }, el('label', { class: 'switch', title: d.enabled ? 'On: runs on schedule' : 'Off' }, sw)));
-  tr.lastChild.addEventListener('click', (ev) => { ev.stopPropagation(); if (ev.target === tr.lastChild) sw.click(); });
+    // Only admins turn detections on and off; others see On or Off.
+    can('admin') ? el('td', { 'data-col': 'on' }, el('label', { class: 'switch', title: d.enabled ? 'On: runs on schedule' : 'Off' }, sw))
+      : el('td', { 'data-col': 'on' }, el('span', { class: 'muted' }, d.enabled ? 'On' : 'Off')));
+  if (can('admin')) tr.lastChild.addEventListener('click', (ev) => { ev.stopPropagation(); if (ev.target === tr.lastChild) sw.click(); });
   tr.addEventListener('click', () => openDetection(d.id));
   return tr;
 }
@@ -1110,7 +1115,7 @@ function renderDetections() {
   if (!list.length) {
     box.replaceChildren(detections.length
       ? dxEmpty({ icon: 'filter-x', title: 'No detections match', text: 'Try another name or ATT&CK ID, or show every detection.', action: { label: 'Clear filters', run: () => { $('d-filter').value = ''; det.show = ''; renderDetections(); } } })
-      : dxEmpty({ icon: 'crosshair', title: 'No detections yet', text: 'Write one with New detection, import a Sigma rule, or use Save as detection on the Search page.' }));
+      : dxEmpty({ icon: 'crosshair', title: 'No detections yet', text: can('admin') ? 'Write one with New detection, import a Sigma rule, or use Save as detection on the Search page.' : 'Detections an admin adds appear here.' }));
   } else {
     box.replaceChildren(el('table', { class: 'table table--stack dx-detections' }, detectionsHead(), el('tbody', {}, ...list.map(detectionRow))));
   }
@@ -1272,11 +1277,12 @@ function renderDetectionInspector() {
   });
   const del = d.source === 'override' ? { icon: 'rotate-ccw', label: 'Revert to built-in', danger: true, run: () => deleteDetection(d) }
     : d.source === 'custom' ? { icon: 'trash-2', label: 'Delete detection', danger: true, run: () => deleteDetection(d) } : null;
+  const admin = can('admin');
   const more = dxMenu('More actions', [
     { icon: 'search', label: 'Open in Search', run: () => openSearch(d.query, '-' + (d.lookback || '24h')) },
     { icon: 'list-filter', label: 'View its findings', run: () => viewDetectionFindings(d.id) },
     { icon: 'download', label: 'Download YAML', href: 'api/detections/' + encodeURIComponent(d.id) + '/yaml', download: true },
-    del ? 'sep' : null, del,
+    del && admin ? 'sep' : null, admin ? del : null,
   ]);
 
   let msg = null;
@@ -1296,7 +1302,7 @@ function renderDetectionInspector() {
     el('div', { class: 'inspector__head' },
       el('h2', { class: 'inspector__title', id: 'dd-title', tabindex: '-1' }, ...detTitle(d.title)),
       el('div', { class: 'row dx-tags' }, sevBadge(d.severity),
-        el('label', { class: 'switch', for: 'dd-enabled' }, sw, d.enabled ? 'On' : 'Off'),
+        admin ? el('label', { class: 'switch', for: 'dd-enabled' }, sw, d.enabled ? 'On' : 'Off') : el('span', { class: 'badge' }, d.enabled ? 'On' : 'Off'),
         el('span', { class: 'badge' }, SOURCE_LABEL[d.source] || d.source)),
       el('div', { class: 'inspector__meta' }, ...dxDots(
         el('span', {}, 'Every ' + d.schedule), el('span', {}, 'looks back ' + d.lookback),
@@ -1323,7 +1329,7 @@ function renderDetectionInspector() {
         ['Risk', risk ? `+${risk.score} to ${(risk.objects || []).map((o) => o.field).join(', ') || 'nothing'}${risk.only ? ', no findings' : ''}` : 'None'],
         (d.tags || []).length ? ['Tags', d.tags.join(', ')] : null,
       ]))),
-    el('div', { class: 'inspector__foot' }, edit, run, test, el('span', { class: 'spacer' }), more)));
+    el('div', { class: 'inspector__foot' }, ...(admin ? [edit, run, test] : []), el('span', { class: 'spacer' }), more)));
   const link = box.querySelector('.dx-kv .link-btn');
   if (link) link.addEventListener('click', () => viewDetectionFindings(d.id));
 }
@@ -1647,7 +1653,7 @@ document.addEventListener('keydown', (ev) => {
   const k = ev.key.toLowerCase();
   if (currentPage === 'findings') {
     if (k === 'j' || k === 'k') { ev.preventDefault(); stepFinding(k === 'j' ? 1 : -1); }
-    if (k === 'x' && openFinding && findingsList.some((f) => f.id === openFinding)) {
+    if (k === 'x' && can('analyst') && openFinding && findingsList.some((f) => f.id === openFinding)) {
       ev.preventDefault();
       if (selected.has(openFinding)) selected.delete(openFinding); else selected.add(openFinding);
       const cb = $('f-list').querySelector(`tr[data-id="${CSS.escape(openFinding)}"] input[type=checkbox]`);
