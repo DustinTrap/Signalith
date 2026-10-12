@@ -67,6 +67,33 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestPublicURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "url.yaml")
+	os.WriteFile(path, []byte("server:\n  listen: 0.0.0.0:8080\n  public_url: http://localhost:8080\n"), 0o600)
+	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "long-enough-password")
+	t.Setenv("SIGNALITH_PUBLIC_URL", "http://192.168.1.20:8080")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.PublicURL != "http://192.168.1.20:8080" {
+		t.Errorf("SIGNALITH_PUBLIC_URL not applied: %s", c.Server.PublicURL)
+	}
+	// The environment value is checked like the file's, so a line break
+	// can never reach a generated agent config.
+	for _, bad := range []string{"http://192.168.1.20:8080\n[OUTPUT]", "192.168.1.20:8080", "http://192.168.1.20:8080/siem"} {
+		t.Setenv("SIGNALITH_PUBLIC_URL", bad)
+		if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "server.public_url") {
+			t.Errorf("SIGNALITH_PUBLIC_URL=%q: want a server.public_url error, got %v", bad, err)
+		}
+	}
+	t.Setenv("SIGNALITH_PUBLIC_URL", "")
+	os.WriteFile(path, []byte("server:\n  public_url: \"http://siem:8080\\n[OUTPUT]\"\n"), 0o600)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "server.public_url") {
+		t.Errorf("line break in public_url: want an error, got %v", err)
+	}
+}
+
 func TestAssistantSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ai.yaml")
 	os.WriteFile(path, []byte("assistant:\n  provider: openia\n  url: localhost:11434\n"), 0o600)
