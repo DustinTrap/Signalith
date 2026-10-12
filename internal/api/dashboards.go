@@ -84,7 +84,7 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 	}
 	p := &dashboards.Posture{
 		Engine: s.Engine, Findings: s.Findings, Detections: s.Detections,
-		SchedulerOn: s.Config.Detections.Scheduler, StaleAfter: s.Config.StaleAfter(),
+		SchedulerOn: s.conf().Detections.Scheduler, StaleAfter: s.conf().StaleAfter(),
 	}
 	if s.Scheduler != nil {
 		p.Status = s.Scheduler.Status

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
@@ -26,11 +27,22 @@ type Options struct {
 // Engine runs queries.
 type Engine struct {
 	Store store.Searcher
-	Opt   Options
+	// Opt is set before use; SetDefaults changes it afterwards.
+	Opt Options
 	// Assets backs the enrich command; nil makes enrich an error.
 	Assets *assets.Store
 	// Intel backs the intel and threatmatch commands; nil makes them errors.
 	Intel *intel.Store
+
+	optMu sync.RWMutex
+}
+
+// SetDefaults changes the default time range and the most events a
+// search fetches, for searches that start after it returns.
+func (e *Engine) SetDefaults(earliest string, maxEvents int) {
+	e.optMu.Lock()
+	defer e.optMu.Unlock()
+	e.Opt.DefaultEarliest, e.Opt.MaxEvents = earliest, maxEvents
 }
 
 // Row is one result row.
@@ -59,7 +71,9 @@ type Plan struct {
 }
 
 func (e *Engine) opts() Options {
+	e.optMu.RLock()
 	o := e.Opt
+	e.optMu.RUnlock()
 	if o.IndexPrefix == "" {
 		o.IndexPrefix = "signalith"
 	}

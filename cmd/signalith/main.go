@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,6 +50,7 @@ Usage:
   signalith serve     [-c file]           run the server
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
+  signalith settings  list|reset [-c file] [key...]   show or undo changes made on the Settings page
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith service   install|uninstall|start|stop     manage the Windows service
@@ -88,6 +90,8 @@ func main() {
 		err = cmdValidate(args)
 	case "passwd":
 		err = cmdPasswd(args)
+	case "settings":
+		err = cmdSettings(args)
 	case "query":
 		err = cmdQuery(args)
 	case "ask":
@@ -231,6 +235,14 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
+	if p := c.SettingsProblem(); p != "" {
+		fmt.Println("Warning:", p)
+	} else if keys := c.PageKeys(); len(keys) > 0 {
+		fmt.Printf("Changed on the Settings page (%s): %s.\n", c.SettingsFile(), strings.Join(keys, ", "))
+	}
+	for _, w := range c.SettingsWarnings() {
+		fmt.Println("Warning:", w+".")
+	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -370,7 +382,8 @@ func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
 // (SIGNALITH_LDAP_BIND_PASSWORD) rather than the operator's shell. The
 // placeholders are never written to the file.
 func loadForEdit(path string) (*config.Config, error) {
-	c, err := config.Load(path)
+	// Without the Settings page's changes, so they stay in their own file.
+	c, err := config.LoadFile(path)
 	if err == nil {
 		return c, nil
 	}
@@ -384,7 +397,80 @@ func loadForEdit(path string) (*config.Config, error) {
 			defer os.Unsetenv(name)
 		}
 	}
-	return config.Load(path)
+	return config.LoadFile(path)
+}
+
+// cmdSettings shows or removes the changes made on the Settings page. It
+// is the way back when a change there locks people out: reset the
+// setting here, then restart Signalith.
+func cmdSettings(args []string) error {
+	const use = "usage: signalith settings list [-c file]\n       signalith settings reset [-c file] [key...]   (no key: every change made on the page)"
+	if len(args) == 0 || (args[0] != "list" && args[0] != "reset") {
+		return errors.New(use)
+	}
+	fs := flag.NewFlagSet("settings "+args[0], flag.ExitOnError)
+	path := configFlag(fs)
+	fs.Parse(args[1:])
+	file, err := config.SettingsFileFor(*path)
+	if err != nil {
+		return err
+	}
+	page, readErr := config.ReadPageSettings(file)
+	if args[0] == "list" {
+		if readErr != nil {
+			return fmt.Errorf("%v; remove it with: signalith settings reset", readErr)
+		}
+		if page.Empty() {
+			fmt.Printf("Nothing was changed on the Settings page (%s).\n", file)
+			return nil
+		}
+		fmt.Printf("Changed on the Settings page (%s):\n", file)
+		for _, key := range page.Keys() {
+			e := page.Settings[key]
+			value := "(hidden)"
+			if e.Secret == nil {
+				var v any
+				if e.Value.Decode(&v) == nil {
+					value = fmt.Sprint(v)
+				}
+			}
+			fmt.Printf("  %-34s %-28s by %s on %s\n", key, value, e.ChangedBy, e.ChangedAt.Local().Format("2006-01-02 15:04"))
+		}
+		return nil
+	}
+	keys := fs.Args()
+	if len(keys) == 0 {
+		if err := config.WritePageSettings(file, &config.PageSettings{}); err != nil {
+			return err
+		}
+		fmt.Printf("Removed every change made on the Settings page (%s).\n", file)
+		fmt.Println("Restart Signalith to use signalith.yaml alone.")
+		return nil
+	}
+	if readErr != nil {
+		return fmt.Errorf("%v; remove every change with: signalith settings reset", readErr)
+	}
+	for _, key := range keys {
+		if _, ok := config.Lookup(key); !ok {
+			return fmt.Errorf("%s is not a setting on the Settings page; see signalith settings list", key)
+		}
+	}
+	var removed []string
+	for _, key := range keys {
+		if page.Remove(key) {
+			removed = append(removed, key)
+		}
+	}
+	if len(removed) == 0 {
+		fmt.Println("None of these were changed on the Settings page; nothing to reset.")
+		return nil
+	}
+	if err := config.WritePageSettings(file, page); err != nil {
+		return err
+	}
+	fmt.Printf("Reset %s; signalith.yaml or the default applies again.\n", strings.Join(removed, ", "))
+	fmt.Println("Restart Signalith to apply it.")
+	return nil
 }
 
 func newStore(c *config.Config) *store.Client {
@@ -535,8 +621,61 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	return newRunner(path, log).run(ctx, c)
+}
+
+// instance is every component built from one config: what a restart from
+// the Settings page stops and builds again. The web listener, sign-in
+// sessions and the user store belong to the runner and carry over.
+type instance struct {
+	cfg      *config.Config
+	srv      *api.Server
+	handler  http.Handler
+	receiver *syslog.Receiver
+	cancel   context.CancelFunc
+	jobs     sync.WaitGroup // background jobs
+	log      *slog.Logger
+}
+
+// stop ends the background jobs and the syslog receiver, and waits for
+// them, so the next instance does not run them twice.
+func (in *instance) stop() {
+	in.cancel()
+	in.jobs.Wait()
+	if in.receiver != nil {
+		// Stop receiving and write out what is queued.
+		in.receiver.Wait()
+		s := in.receiver.Stats()
+		in.log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
+	}
+}
+
+// start builds every component from c and starts the background jobs.
+// On an error, what had started is stopped again.
+func (r *runner) start(parent context.Context, c *config.Config) (*instance, error) {
+	log := r.log
+	ctx, cancel := context.WithCancel(parent)
+	in := &instance{cfg: c, cancel: cancel, log: log}
+	started := false
+	defer func() {
+		if !started {
+			in.stop()
+		}
+	}()
+	if r.failStart != nil {
+		if err := r.failStart(c); err != nil {
+			return nil, err
+		}
+	}
+	if p := c.SettingsProblem(); p != "" {
+		log.Error("settings from the Settings page are not in use", "file", c.SettingsFile(), "problem", p)
+	}
+	for _, w := range c.SettingsWarnings() {
+		log.Warn("Settings page: " + w)
+	}
+	if keys := c.PageKeys(); len(keys) > 0 {
+		log.Info("settings changed on the Settings page are in use", "settings", strings.Join(keys, ","), "file", c.SettingsFile())
+	}
 	cl := newStore(c)
 	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix}
 	// Closed once the index template is in place, so syslog does not
@@ -551,15 +690,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			MaxAge: syslogMaxAge(c.Retention.Days), PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
-			return err
+			return nil, err
 		}
-		// On the way out: stop receiving and write out what is queued.
-		defer func() {
-			cancel()
-			receiver.Wait()
-			s := receiver.Stats()
-			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
-		}()
+		in.receiver = receiver
 		var addrs []any
 		for _, l := range receiver.Stats().Listeners {
 			addrs = append(addrs, l.Protocol, l.Address)
@@ -573,11 +706,11 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	eng := newEngine(c, cl)
 	lists, err := assets.NewStore(c.LookupsDir())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	log.Info("asset and identity lists loaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()), "dir", c.LookupsDir())
 	eng.Assets = lists
-	go reloadLookups(ctx, lists, log)
+	in.jobs.Go(func() { reloadLookups(ctx, lists, log) })
 	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
@@ -587,7 +720,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, p := range problems {
 		// One bad file should not stop the SIEM; it is skipped and reported.
@@ -595,16 +728,16 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	boards, err := dashboards.NewStore(c.DashboardsDir())
 	if err != nil {
-		return fmt.Errorf("dashboards.dir: %w", err)
+		return nil, fmt.Errorf("dashboards.dir: %w", err)
 	}
 	if _, problems, err := boards.List(); err == nil {
 		for _, p := range problems {
 			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
 		}
 	}
-	people, dir, err := openUsers(c)
+	people, dir, err := r.openUsers(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, clash := people.Get(c.Auth.AdminUser); clash {
 		log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
@@ -627,6 +760,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
 	}
+	// Sessions and the failed sign-in limits carry over a restart.
+	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{
 		Config:     c,
 		Engine:     eng,
@@ -644,11 +779,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
+		Sessions:   r.sessions,
+		Limiter:    r.limiter,
+		Restarter:  r,
+		Started:    r.started,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,
 	}
-	go func() {
+	in.jobs.Go(func() {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
 		}
@@ -656,12 +795,12 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		if err := ibackend.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
-			go indicators.Watch(ctx, time.Minute, log)
+			in.jobs.Go(func() { indicators.Watch(ctx, time.Minute, log) })
 			if c.Detections.Scheduler {
 				// Feeds can be added on the page at any time, so the
 				// downloader runs even with none yet.
 				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
-				go feeds.Start(ctx)
+				in.jobs.Go(func() { feeds.Start(ctx) })
 			}
 		}
 		if err := cstore.EnsureIndex(ctx); err != nil {
@@ -677,32 +816,36 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		} else {
 			log.Info("detection scheduler is off (detections.scheduler: false)")
 		}
-	}()
-	go retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log)
+	})
+	in.jobs.Go(func() { retention.Run(ctx, cl, c.OpenSearch.IndexPrefix, c.Retention.Days, 6*time.Hour, log) })
+	in.srv, in.handler = srv, srv.Handler()
+	started = true
+	return in, nil
+}
 
-	hs := &http.Server{
-		Addr:              c.Server.Listen,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	errc := make(chan error, 1)
-	go func() {
-		log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "version", version)
-		if c.Server.TLSCert != "" {
-			errc <- hs.ListenAndServeTLS(c.Server.TLSCert, c.Server.TLSKey)
-		} else {
-			errc <- hs.ListenAndServe()
+// openUsers opens the user store once and keeps it across restarts, so
+// sign-in sessions stay valid; the directory sign-in settings are read
+// again each time.
+func (r *runner) openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
+	if r.people == nil || r.people.Path() != c.UsersFile() {
+		people, err := users.Open(c.UsersFile())
+		if err != nil {
+			return nil, nil, err
 		}
-	}()
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-		log.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return hs.Shutdown(shutdownCtx)
+		r.people = people
 	}
+	if r.people.BuiltinAdmin != c.Auth.AdminUser {
+		r.people.BuiltinAdmin = c.Auth.AdminUser
+	}
+	fromFile, err := c.LDAP()
+	if err != nil {
+		return nil, nil, err
+	}
+	dir, err := users.OpenDirectory(c.DirectoryFile(), fromFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	return r.people, dir, nil
 }
 
 // intelFeeds converts the feeds in signalith.yaml; the config is already

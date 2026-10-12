@@ -17,7 +17,7 @@ Each role can do everything the roles above it can.
 | --- | --- | --- |
 | **Viewer** | Managers, auditors, other teams | Run searches and see dashboards, findings, investigations, detections, risk and intel. Cannot change anything. |
 | **Analyst** | SOC analysts | Also triage findings, work investigations, build dashboards, use **Ask** and add or remove intel indicators by hand. |
-| **Admin** | Whoever runs Signalith | Also create and change detections, add and change threat intel feeds and upload intel, edit asset and identity lists, see the agent setup (it holds the ingest token), manage users and set up directory sign-in. |
+| **Admin** | Whoever runs Signalith | Also create and change detections, add and change threat intel feeds and upload intel, edit asset and identity lists, see the agent setup (it holds the ingest token), manage users and set up directory sign-in, and change server settings. |
 
 By area:
 
@@ -41,6 +41,7 @@ By area:
 | Threat intel: add, change, test and refresh feeds, upload files | No | No | Yes |
 | Add data (agent setup and ingest token) | No | No | Yes |
 | Users and directory sign-in | No | No | Yes |
+| Server settings (Settings page, restart) | No | No | Yes |
 | Change your own password (local users) | Yes | Yes | Yes |
 
 Dashboards have no owner: any analyst can change or delete any custom dashboard.
@@ -476,7 +477,9 @@ away to start again with only the built-in admin.
 
 Signalith logs every sign-in, sign-out and change to users or directory settings to
 its log (journald, the Windows event log, or the container's output), with
-`audit=true`, who did it and from which address. Passwords never appear.
+`audit=true`, who did it and from which address. Passwords never appear. Changes on
+the Settings page and restarts are logged the same way; see
+[settings.md](settings.md#audit-log).
 
 | Message | Fields |
 | --- | --- |
@@ -542,8 +545,11 @@ page itself.
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
 `POST /api/intel/feeds`, `PUT /api/intel/feeds/{name}`, `DELETE /api/intel/feeds/{name}`,
 `POST /api/intel/feeds/test`, `POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/catalog`,
-`POST /api/intel/taxii/collections`, `POST /api/intel/upload`, and every
-`/api/users` and `/api/auth/directory` route below.
+`POST /api/intel/taxii/collections`, `POST /api/intel/upload`, every
+`/api/users` and `/api/auth/directory` route below, and every `/api/settings` route
+(`GET` and `PUT /api/settings`, `POST /api/settings/test/opensearch`,
+`POST /api/settings/test/assistant`, `POST /api/settings/restart`,
+`GET /api/settings/export`; see [settings.md](settings.md#api)).
 
 A route added without a role is admin-only, and a test fails until it gets one. That
 includes routes registered outside the role table, straight on the server's outer

@@ -40,7 +40,7 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 func (s *Server) sessions() *auth.Sessions {
 	s.authOnce.Do(func() {
 		if s.Sessions == nil {
-			s.Sessions = auth.NewSessions(s.Config.SessionIdle())
+			s.Sessions = auth.NewSessions(s.conf().SessionIdle())
 		}
 		if s.Limiter == nil {
 			s.Limiter = auth.NewLimiter()
@@ -49,7 +49,7 @@ func (s *Server) sessions() *auth.Sessions {
 			s.Users = users.NewMemory()
 		}
 		if s.Users.BuiltinAdmin == "" {
-			s.Users.BuiltinAdmin = s.Config.Auth.AdminUser
+			s.Users.BuiltinAdmin = s.conf().Auth.AdminUser
 		}
 		if s.Directory == nil {
 			s.Directory, _ = users.OpenDirectory("", nil)
@@ -119,7 +119,7 @@ func clientIP(r *http.Request) string {
 }
 
 func (s *Server) secureCookie(r *http.Request) bool {
-	return r.TLS != nil || strings.HasPrefix(s.Config.Server.PublicURL, "https://") ||
+	return r.TLS != nil || strings.HasPrefix(s.conf().Server.PublicURL, "https://") ||
 		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 

@@ -247,7 +247,7 @@ var errNoSchedule = errors.New("this server does not download feeds (its detecti
 // downloads reports whether this server downloads feeds on their
 // schedules (the one with the detection scheduler).
 func (s *Server) downloads() bool {
-	return s.Config != nil && s.Config.Detections.Scheduler
+	return s.conf() != nil && s.conf().Detections.Scheduler
 }
 
 func (s *Server) feedsOK(w http.ResponseWriter) bool {

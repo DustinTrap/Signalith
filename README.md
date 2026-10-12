@@ -154,6 +154,21 @@ Everything lives in one YAML file (`/etc/signalith/signalith.yaml` or
 `signalith validate` checks it and lists every problem with the setting to fix.
 Unknown keys are rejected, so typos do not silently do nothing.
 
+### Settings page
+
+Admins can change most of these settings on the **Settings** page instead: the public
+and web addresses, the certificate, the OpenSearch connection, search limits, syslog,
+the detection scheduler and the AI assistant. Each one shows where its value comes
+from; an environment variable wins over the page, which wins over `signalith.yaml`.
+Some apply at once; for the rest, the page restarts Signalith inside the same process,
+after checking that the new web address can be listened on and that OpenSearch
+answers, so a typo cannot lock you out, and people stay signed in. Changes are kept in
+`settings.yaml` in the lookups folder (`SIGNALITH_SETTINGS_FILE` moves it), never in
+`signalith.yaml`. Passwords and keys are never shown, and are only sent to the address
+they were entered for. If a change goes wrong, `signalith settings list` shows what
+was changed on the page and `signalith settings reset [setting...]` undoes it; then
+restart the service. See [docs/settings.md](docs/settings.md).
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
@@ -196,10 +211,12 @@ Unknown keys are rejected, so typos do not silently do nothing.
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (for
 `auth.ldap` in this file only; directory sign-in set up on the Users page keeps its own) (also
-`SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`,
+`SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_USERNAME`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`,
 `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
 `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
-`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
+`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). A setting set by an
+environment variable is shown locked on the Settings page. `SIGNALITH_SETTINGS_FILE`
+sets where the Settings page keeps its changes (default `settings.yaml` in `lookups.dir`).
 
 ## Detections and findings
 
@@ -458,7 +475,7 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
-| `internal/config` | YAML config, validation, password hashing |
+| `internal/config` | YAML config, validation, password hashing, the Settings page's registry and settings file |
 | `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |
 | `internal/users` | Roles, local users, Active Directory and LDAP sign-in and its tests |
 | `internal/api` | REST API, the role of every route, query explanations |
