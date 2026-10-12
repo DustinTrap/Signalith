@@ -3,6 +3,7 @@ package intel
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -129,6 +130,24 @@ func serverSaid(contentType string, body []byte) string {
 	s := strings.TrimSpace(string(body))
 	if s == "" || !utf8.ValidString(s) || looksHTML([]byte(s)) {
 		return ""
+	}
+	// A JSON error, such as a TAXII server's {"title": ..., "description": ...},
+	// reads better as its message than as raw JSON.
+	if strings.HasPrefix(s, "{") {
+		var obj map[string]any
+		if json.Unmarshal([]byte(s), &obj) != nil {
+			return ""
+		}
+		s = ""
+		for _, k := range []string{"description", "message", "error_description", "detail", "error", "title"} {
+			if v, ok := obj[k].(string); ok && strings.TrimSpace(v) != "" {
+				s = strings.TrimSpace(v)
+				break
+			}
+		}
+		if s == "" {
+			return ""
+		}
 	}
 	s, _, _ = strings.Cut(s, "\n")
 	s = strings.TrimSpace(s)

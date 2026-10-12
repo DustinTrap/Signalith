@@ -168,6 +168,7 @@ func TestDescribeErrors(t *testing.T) {
 	}{
 		{&HTTPError{Code: 403, Status: "403 Forbidden"}, plainFeed, "The server answered 403 Forbidden. This feed may need an API key."},
 		{&HTTPError{Code: 401, Status: "401 Unauthorized", Said: "invalid key sup3r-secret"}, keyed, "Check that the API key"},
+		{&HTTPError{Code: 401, Status: "401 Unauthorized", Said: "Unauthorized"}, Feed{Kind: KindTAXII}, "This server needs you to sign in: enter a user name and password, or an API key."},
 		{&HTTPError{Code: 404, Status: "404 Not Found"}, plainFeed, "Check the URL."},
 		{&HTTPError{Code: 404, Status: "404 Not Found"}, Feed{Kind: KindTAXII}, "collection ID"},
 		{&HTTPError{Code: 429, Status: "429 Too Many Requests"}, plainFeed, "longer interval"},
@@ -179,6 +180,9 @@ func TestDescribeErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := describe(c.err, c.fd, time.Minute)
+		if strings.Contains(got, "It said: \"Unauthorized\"") {
+			t.Errorf("describe(%v) repeats the status: %q", c.err, got)
+		}
 		if !strings.Contains(got, c.want) {
 			t.Errorf("describe(%v) = %q, want %q", c.err, got, c.want)
 		}
@@ -193,6 +197,21 @@ func TestDescribeErrors(t *testing.T) {
 	} {
 		if got := RedactURL(in); got != want {
 			t.Errorf("RedactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestServerSaid(t *testing.T) {
+	for _, c := range []struct{ ct, body, want string }{
+		{"text/plain", "missing or wrong API key\nmore", "missing or wrong API key"},
+		{"application/taxii+json;version=2.1", `{"title":"Unauthorized","description":"The API key is not valid for this API root."}`, "The API key is not valid for this API root."},
+		{"application/json", `{"title":"Collection not found","http_status":"404"}`, "Collection not found"},
+		{"application/json", `{"http_status":"500"}`, ""},
+		{"application/json", `{not json`, ""},
+		{"text/html", "<html><body>Denied</body></html>", ""},
+	} {
+		if got := serverSaid(c.ct, []byte(c.body)); got != c.want {
+			t.Errorf("serverSaid(%q, %q) = %q, want %q", c.ct, c.body, got, c.want)
 		}
 	}
 }

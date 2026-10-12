@@ -45,16 +45,23 @@ func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	feeds := []intel.FeedView{}
-	if s.Feeds != nil {
-		feeds = s.Feeds.Status()
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"summary":   s.Intel.Summary(),
-		"feeds":     feeds,
 		"loaded":    s.Intel.Loaded(),
 		"downloads": s.Config != nil && s.Config.Detections.Scheduler,
 		"types":     intel.Types,
-	})
+		// manage says whether feeds can be added and changed on the page.
+		"manage": s.Feeds != nil,
+	}
+	if s.Feeds != nil {
+		feeds = s.Feeds.Status()
+		// A broken feeds file blocks changes on the page until it is fixed.
+		if err := s.Feeds.Load(); err != nil {
+			out["file_error"] = err.Error()
+		}
+	}
+	out["feeds"] = feeds
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleIntelRefresh(w http.ResponseWriter, r *http.Request) {

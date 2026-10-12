@@ -284,9 +284,12 @@ func describeStatus(he *HTTPError, fd Feed) string {
 	msg := "The server answered " + he.Status + "."
 	switch {
 	case he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden:
-		if creds {
+		switch {
+		case creds:
 			msg += " Check that the API key or password is right and allowed to read this feed."
-		} else {
+		case fd.Kind == KindTAXII:
+			msg += " This server needs you to sign in: enter a user name and password, or an API key."
+		default:
 			msg += " This feed may need an API key."
 		}
 	case he.Code == http.StatusNotFound:
@@ -302,7 +305,8 @@ func describeStatus(he *HTTPError, fd Feed) string {
 	case he.Code >= 500:
 		msg += " The feed's server has a problem; try again later."
 	}
-	if he.Said != "" {
+	// Skip a message that only repeats the status, such as "Unauthorized".
+	if said := strings.TrimRight(he.Said, "."); said != "" && !strings.EqualFold(said, http.StatusText(he.Code)) && !strings.EqualFold(said, he.Status) {
 		msg += fmt.Sprintf(" It said: %q", he.Said)
 	}
 	return msg

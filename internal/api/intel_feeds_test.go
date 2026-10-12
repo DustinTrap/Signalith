@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -146,7 +148,7 @@ func TestIntelFeedsAPI(t *testing.T) {
 		t.Fatalf("refresh = %d %v", code, out)
 	}
 	code, out = send("GET", "/api/intel", "")
-	if code != 200 || len(out["feeds"].([]any)) != 2 {
+	if code != 200 || len(out["feeds"].([]any)) != 2 || out["manage"] != true || out["file_error"] != nil {
 		t.Errorf("overview = %d %v", code, out)
 	}
 
@@ -215,6 +217,31 @@ func TestIntelFeedsAPI(t *testing.T) {
 	code, _ = call(t, ts, "DELETE", "/api/intel/feeds/spamhaus-drop", "", "Origin", "https://evil.example")
 	if code != 403 {
 		t.Errorf("cross-site delete = %d", code)
+	}
+}
+
+// A feeds file that cannot be read is reported on the page, which then
+// cannot change feeds, so the file is never overwritten.
+func TestIntelFeedsBrokenFile(t *testing.T) {
+	store := intel.NewStore(intel.NewMemory())
+	if err := store.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "intel_feeds.yaml")
+	if err := os.WriteFile(file, []byte("feeds: [this is: not valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Intel = store
+		s.Feeds = &intel.Feeds{Store: store, Log: s.Log, File: file}
+	})
+	code, raw := call(t, ts, "GET", "/api/intel", "")
+	out := asMap(t, raw)
+	if code != 200 || !strings.Contains(fmt.Sprint(out["file_error"]), "intel_feeds.yaml") {
+		t.Errorf("overview = %d %v", code, out)
+	}
+	if code, _ := call(t, ts, "POST", "/api/intel/feeds", `{"name":"x-feed","url":"https://feeds.example/x"}`); code != 503 {
+		t.Errorf("add with a broken file = %d", code)
 	}
 }
 

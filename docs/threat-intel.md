@@ -203,8 +203,10 @@ indicators, keeps the previous indicators and is retried within 15 minutes; if i
 keeps failing, indicators expire `max_age` after the last good download. Expired
 indicators stop matching at once and are deleted hourly.
 
-The Threat intel page shows each feed's last download, count, changes, skipped and
-reserved values, notes and last error, with **Refresh now**.
+The Threat intel page lists each feed with its status, indicator count and last
+download. Open a row for its settings, the last download's changes, skipped and
+reserved values, notes and last error. The row's menu has **Refresh now** and, for
+feeds added on the page, **Edit**, **Turn off** and **Delete**.
 
 ### Turning off and deleting feeds
 

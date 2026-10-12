@@ -597,8 +597,8 @@
       </div>
       <div class="page-head__actions">
         <button id="ti-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
-        <button id="ti-add-open" class="btn btn--secondary" type="button" aria-label="Add indicators"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span class="hide-sm">Add indicators</span></button>
-        <button id="ti-hunt" class="btn btn--primary" type="button" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg>Find matching events</button>
+        <button id="ti-hunt" class="btn btn--secondary" type="button" aria-label="Find matching events" title="Search the last 24 hours for events that match any indicator"><svg class="icon" aria-hidden="true"><use href="#i-scan-search"/></svg><span class="hide-sm">Find matching events</span></button>
+        <button id="ti-feed-add" class="btn btn--primary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add feed</button>
       </div>
     </div>
 
@@ -611,7 +611,6 @@
             <h3 class="card__title">Feeds</h3>
             <p class="card__sub" id="ti-feeds-sub"></p>
           </div>
-          <div class="card__actions"><button id="ti-examples-open" class="btn btn--ghost btn--sm hidden" type="button"><svg class="icon" aria-hidden="true"><use href="#i-file-code"/></svg>Example settings</button></div>
         </div>
         <div id="ti-feeds" class="ti-feeds__body"></div>
       </div>
@@ -624,6 +623,8 @@
         <div class="toolbar" role="search">
           <div class="input-wrap"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="ti-q" class="input" type="search" placeholder="Find a value, description or tag" aria-label="Find indicators" autocomplete="off" spellcheck="false"></div>
           <select id="ti-source" class="select" aria-label="Source"><option value="">Any source</option></select>
+          <span class="spacer hide-sm"></span>
+          <button id="ti-add-open" class="btn btn--secondary" type="button"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add indicators</button>
         </div>
         <div class="split">
           <div class="card">
@@ -639,6 +640,10 @@
         </div>
       </div>
     </div>
+
+    <!-- Add feed and Edit feed; intel.js fills it -->
+    <dialog id="ti-feed-dialog" class="modal ti-feed-dialog" aria-labelledby="ti-feed-title"></dialog>
+    <dialog id="ti-feed-delete" class="modal" aria-labelledby="ti-feed-delete-title" aria-describedby="ti-feed-delete-desc"></dialog>
 
     <dialog id="ti-add-dialog" class="modal" aria-labelledby="ti-add-title">
       <div class="modal__head">
@@ -715,49 +720,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
           <button class="btn btn--ghost" type="button" data-close>Cancel</button>
           <button class="btn btn--primary" type="button" id="ti-upload">Upload and add</button>
         </div>
-      </div>
-    </dialog>
-
-    <dialog id="ti-examples" class="modal ti-examples" aria-labelledby="ti-examples-title" aria-describedby="ti-examples-desc">
-      <div class="modal__head">
-        <div>
-          <h3 class="modal__title" id="ti-examples-title">Example feed settings</h3>
-          <p class="modal__desc" id="ti-examples-desc">Paste into signalith.yaml, run <code>signalith validate</code> and restart. Check each provider's terms of use.</p>
-        </div>
-        <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
-      </div>
-      <div class="modal__body">
-        <pre class="code-block" id="ti-example-yaml">intel:
-  feeds:
-    # Botnet command-and-control servers (abuse.ch Feodo Tracker)
-    - name: feodo-tracker
-      url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
-      tags: [botnet, c2]
-      weight: 1.5
-    # Malware download URLs from the last 30 days (abuse.ch URLhaus)
-    - name: urlhaus
-      url: https://urlhaus.abuse.ch/downloads/csv_recent/
-      format: csv
-      column: url
-      type: url
-    # Malware file hashes (abuse.ch MalwareBazaar, last 48 hours)
-    - name: malwarebazaar
-      url: https://bazaar.abuse.ch/export/txt/sha256/recent/
-      type: sha256
-    # Compromised hosts (Proofpoint Emerging Threats)
-    - name: et-compromised
-      url: https://rules.emergingthreats.net/blockrules/compromised-ips.txt
-      type: ip
-      interval: 12h
-    # A STIX 2.1 bundle from your own platform, with an API key
-    - name: our-misp
-      url: https://misp.example.com/feeds/signalith.json
-      format: stix
-      headers: {Authorization: "${MISP_API_KEY}"}</pre>
-      </div>
-      <div class="modal__foot">
-        <button class="btn btn--ghost" type="button" id="ti-example-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy</button>
-        <button class="btn btn--secondary" type="button" data-close>Close</button>
       </div>
     </dialog>
 

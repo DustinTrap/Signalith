@@ -60,8 +60,10 @@ async function api(path, body, method) {
   }
   if (!resp.ok) {
     const err = new Error(data.error || resp.statusText);
+    err.status = resp.status;
     err.pos = data.pos;
     err.problems = data.problems;
+    err.fields = data.fields; // setting name -> problem, to mark form fields
     throw err;
   }
   return data;
