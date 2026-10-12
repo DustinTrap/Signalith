@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,13 +31,9 @@ func SetAdminPasswordHash(path, hash string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	// Written in place, so the file keeps its owner, permissions and (on
+	// The new file keeps the old one's owner, permissions and (on
 	// Windows) access list.
-	return os.WriteFile(path, out, st.Mode().Perm())
+	return securefile.WriteFile(path, out)
 }
 
 // setScalar returns the YAML document data with the value at keys set to
@@ -109,13 +107,7 @@ func replaceInLine(data []byte, node *yaml.Node, value string) ([]byte, bool) {
 		return nil, false
 	}
 	line := lines[node.Line-1]
-	// Column counts characters; the part before the value is the key and
-	// indentation, so find its byte offset by walking runes.
-	start := 0
-	for col := 1; col < node.Column && start < len(line); col++ {
-		_, size := utf8.DecodeRune(line[start:])
-		start += size
-	}
+	start := byteOffset(line, node.Column)
 	rest := line[start:]
 	var end int
 	switch {
@@ -137,12 +129,46 @@ func replaceInLine(data []byte, node *yaml.Node, value string) ([]byte, bool) {
 		out.Write(lines[i])
 	}
 	out.Write(line[:start])
-	out.WriteString(strconv.Quote(value))
+	if node.Style&(yaml.DoubleQuotedStyle|yaml.SingleQuotedStyle) == 0 && plainScalar(value) {
+		// A value that was not quoted stays so when it can.
+		out.WriteString(value)
+	} else {
+		out.WriteString(strconv.Quote(value))
+	}
 	out.Write(rest[end:])
 	for i := node.Line; i < len(lines); i++ {
 		out.Write(lines[i])
 	}
 	return out.Bytes(), true
+}
+
+// safePlain matches text that can be written without quotes: no spaces,
+// quotes, # or other characters YAML treats specially.
+var safePlain = regexp.MustCompile(`^[A-Za-z0-9_$][A-Za-z0-9_.:$/+=-]*$`)
+
+// plainScalar reports whether v reads back as the same string when
+// written without quotes (so not true, 123 or null).
+func plainScalar(v string) bool {
+	if !safePlain.MatchString(v) || strings.HasSuffix(v, ":") {
+		return false
+	}
+	var back map[string]any
+	if yaml.Unmarshal([]byte("v: "+v), &back) != nil {
+		return false
+	}
+	s, ok := back["v"].(string)
+	return ok && s == v
+}
+
+// byteOffset returns where a YAML column (counted in characters from 1)
+// starts in line.
+func byteOffset(line []byte, column int) int {
+	start := 0
+	for col := 1; col < column && start < len(line); col++ {
+		_, size := utf8.DecodeRune(line[start:])
+		start += size
+	}
+	return start
 }
 
 // valueAt returns the text value at keys in a YAML document, or "" when

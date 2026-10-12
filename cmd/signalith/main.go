@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
 	"github.com/jrsamsanchez/signalith/internal/search"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/users"
@@ -57,6 +59,7 @@ Usage:
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
+  signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith version
 
@@ -102,6 +105,8 @@ func main() {
 		err = cmdService(args)
 	case "archive":
 		err = cmdArchive(args)
+	case "secrets":
+		err = cmdSecrets(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -165,13 +170,20 @@ func cmdInit(args []string) error {
 		return err
 	}
 	fmt.Printf("Wrote %s\n\n", *path)
-	fmt.Printf("  Web UI:    %s\n", c.Server.PublicURL)
-	fmt.Printf("  User:      %s\n", c.Auth.AdminUser)
+	fmt.Printf("  Web UI:      %s\n", c.Server.PublicURL)
+	fmt.Printf("  User:        %s\n", c.Auth.AdminUser)
 	if generated {
-		fmt.Printf("  Password:  %s   (shown once; change it with: signalith passwd)\n", pw)
+		fmt.Printf("  Password:    %s   (shown once; change it with: signalith passwd)\n", pw)
 	}
 	if s := syslogSummary(c); s != "" {
-		fmt.Printf("  Syslog:    %s\n", s)
+		fmt.Printf("  Syslog:      %s\n", s)
+	}
+	// Save encrypted the ingest token, so there is a master key now.
+	if src, err := c.Keyring().Source(); err == nil {
+		fmt.Printf("  Master key:  %s\n", src)
+		if src.Created {
+			fmt.Println("               It encrypts the passwords and keys Signalith stores. Back it up; see docs/encryption.md.")
+		}
 	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
@@ -222,7 +234,7 @@ func cmdValidate(args []string) error {
 	path := configFlag(fs)
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
 	fs.Parse(args)
-	c, err := config.Load(*path)
+	c, err := loadConfig(*path, newLogger(os.Stderr))
 	if err != nil {
 		return err
 	}
@@ -231,6 +243,9 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
+	if src, err := c.Keyring().Source(); err == nil {
+		fmt.Printf("Master key for stored passwords and keys: %s, key id %s.\n", src, src.KeyID)
+	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -265,6 +280,9 @@ func cmdValidate(args []string) error {
 			from = "auth.ldap in this file"
 		}
 		fmt.Printf("Directory sign-in is on (%s), set up in %s. Test it on the Users page.\n", s.URL, from)
+	}
+	if p := dir.Problem(); p != "" {
+		fmt.Println("Warning:", p)
 	}
 	feeds := newFeeds(c, nil, nil)
 	if err := feeds.Load(); err != nil {
@@ -355,6 +373,15 @@ func cmdPasswd(args []string) error {
 // readNewPassword asks for the new password twice without showing it.
 // When input is not a terminal (a script piping it in), it reads one line.
 func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
+	return readSecret(in, prompt, "New admin password: ", false)
+}
+
+// readSecret asks for a password or key with label, twice, without
+// showing it. When input is not a terminal (a script piping it in), it
+// reads one line. When orEmpty is set, pressing Enter at the first
+// question returns "" (so the caller can make a value); otherwise nothing
+// entered is an error.
+func readSecret(in *os.File, prompt io.Writer, label string, orEmpty bool) (string, error) {
 	fd := int(in.Fd())
 	if !term.IsTerminal(fd) {
 		line, err := bufio.NewReader(in).ReadString('\n')
@@ -363,7 +390,7 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 			if err != nil && !errors.Is(err, io.EOF) {
 				return "", err
 			}
-			return "", errors.New("no password entered")
+			return "", errors.New("nothing entered; nothing was changed")
 		}
 		return line, nil
 	}
@@ -373,21 +400,24 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 		fmt.Fprintln(prompt)
 		return string(b), err
 	}
-	pw, err := read("New admin password: ")
+	v, err := read(label)
 	if err != nil {
 		return "", err
 	}
-	if pw == "" {
-		return "", errors.New("no password entered")
+	if v == "" {
+		if orEmpty {
+			return "", nil
+		}
+		return "", errors.New("nothing entered; nothing was changed")
 	}
 	again, err := read("Type it again: ")
 	if err != nil {
 		return "", err
 	}
-	if again != pw {
-		return "", errors.New("the passwords do not match; nothing was changed")
+	if again != v {
+		return "", errors.New("the two entries do not match; nothing was changed")
 	}
-	return pw, nil
+	return v, nil
 }
 
 // openUsers opens the users file and the directory sign-in settings.
@@ -413,7 +443,7 @@ func newStore(c *config.Config) *store.Client {
 	return store.New(store.Config{
 		URL:           c.OpenSearch.URL,
 		Username:      c.OpenSearch.Username,
-		Password:      c.OpenSearch.Password,
+		Password:      secrets.New("opensearch.password", c.OpenSearch.Password),
 		CAFile:        ca,
 		CertFile:      cert,
 		KeyFile:       key,
@@ -563,14 +593,55 @@ func newLogger(w io.Writer) *slog.Logger {
 	return slog.New(safelog.New(slog.NewTextHandler(w, nil)))
 }
 
-func serve(ctx context.Context, path string, log *slog.Logger) error {
+// loadConfig loads the config file and makes its master key the one the
+// files the server writes are encrypted with; a new master key made later
+// is logged.
+func loadConfig(path string, log *slog.Logger) (*config.Config, error) {
 	c, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	useKeys(c, log)
+	return c, nil
+}
+
+// logMasterKey says where the master key comes from.
+func logMasterKey(c *config.Config, log *slog.Logger) {
+	keys := c.Keyring()
+	src, err := keys.Source()
+	switch {
+	case errors.Is(err, secrets.ErrNoKey):
+		log.Info("no master key yet; one is made the first time a password or key is stored", "file", keys.DefaultPath())
+		return
+	case err != nil:
+		log.Error("the master key cannot be read, so stored passwords and keys cannot be decrypted or saved", "err", err)
+		return
+	}
+	log.Info("master key for stored passwords and keys", "key", src.String(), "key_id", src.KeyID)
+	if src.OldPath != "" {
+		log.Info("the previous master key is still kept after a rotation; remove it once nothing needs it: signalith secrets rotate-master -prune", "file", src.OldPath)
+	}
+	for _, p := range keys.Unused() {
+		log.Warn("another master key file is not used; values encrypted with it cannot be read", "file", p)
+	}
+}
+
+func serve(ctx context.Context, path string, log *slog.Logger) error {
+	hardenProcess(log)
+	// A crash prints only the goroutine that failed, not every one with
+	// the values on its stack. This is Go's default; it cannot lower a
+	// GOTRACEBACK set in the environment, and on Linux hardenProcess
+	// keeps even GOTRACEBACK=crash from writing a core file.
+	debug.SetTraceback("single")
+	c, err := loadConfig(path, log)
 	if err != nil {
 		return err
 	}
 	for _, w := range c.Warnings() {
 		log.Warn(w)
 	}
+	logMasterKey(c, log)
+	encryptStores(c, log)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cl := newStore(c)

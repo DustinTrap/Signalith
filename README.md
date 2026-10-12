@@ -43,7 +43,9 @@ Desktop when you sign in".
    sudo cp deploy/systemd/signalith.service /etc/systemd/system/
    sudo systemctl enable --now signalith
    ```
-   `init` prints the admin password once.
+   `init` prints the admin password once, and where it put the master key that
+   encrypts the passwords and keys Signalith stores (`/etc/signalith/keys/master.key`).
+   Back that file up, apart from the config; see [Encryption](#encryption).
 
 ### Windows
 
@@ -53,6 +55,12 @@ Desktop when you sign in".
    .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
    ```
    This writes `C:\ProgramData\Signalith\signalith.yaml`, installs the **Signalith** service and starts it.
+   The service runs as its own account, `NT SERVICE\Signalith`, and only SYSTEM, Administrators and
+   that account can read `C:\ProgramData\Signalith`. To upgrade, put the new `signalith.exe` next to
+   the script and run it again: it stops the service, replaces the program, encrypts passwords an
+   older version kept as plain text, moves the service off LocalSystem and starts it again. An
+   archive folder outside `C:\ProgramData\Signalith` (`retention.archive_dir`) is given to the new
+   account too.
 
 ### Send data
 
@@ -204,8 +212,14 @@ from their groups; set it up and test it on the same page. The `admin` account f
 - **Logs**: values in log lines are cut to a sensible length, and the Windows service log
   (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
   quick start caps container logs the same way; under systemd, journald limits the log.
-- **Secrets**: passwords and keys in configured URLs are hidden (`***`) everywhere a URL is
-  shown or logged, and agents get a generic error rather than OpenSearch details.
+- **Secrets**: every password and key Signalith stores in a file is encrypted with a master
+  key (`signalith secrets`; see [Encryption](#encryption)). Passwords and keys in configured URLs
+  are hidden (`***`) everywhere a URL is shown or logged, and agents get a generic error rather
+  than OpenSearch details.
+- **Memory**: on Linux the server turns off core dumps and keeps other programs from reading its
+  memory; the systemd unit also turns off swap for it, hides other processes and limits it to the
+  files and system calls it needs. On Windows the service runs as its own account rather than
+  LocalSystem.
 
 ## Configuration
 
@@ -258,7 +272,7 @@ Unknown keys are rejected, so typos do not silently do nothing.
 | `intel.feeds[].weight` | `1` | Multiplies the risk a match adds (0 to 10) |
 | `intel.feeds[].headers`, `.username`, `.password` | none | Request headers and HTTP basic sign-in for feeds that need a key; values may use `${ENV_VAR}` |
 | `intel.feeds[].tags`, `.description`, `.enabled` | none, `true` | Labels added to every indicator, and on/off |
-| `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys (file mode 0600) |
+| `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys encrypted (file mode 0600) |
 | `intel.allow_loopback_feeds` | `false` | Allow feed downloads from this machine (`127.0.0.1`, `::1`), for a feed server on the same host |
 | `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
@@ -271,7 +285,37 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`,
 `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
 `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
-`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off).
+`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). `SIGNALITH_STATE_DIR` is the folder for
+files Signalith makes for itself, such as its master key (default: the folder holding the lookups
+folder; the systemd unit and the Docker image set `/var/lib/signalith`), and
+`SIGNALITH_MASTER_KEY_FILE` or `SIGNALITH_MASTER_KEY` supply the master key (see [Encryption](#encryption)).
+
+## Encryption
+
+Passwords and API keys are encrypted wherever Signalith stores them: in `signalith.yaml`
+(`opensearch.password`, `assistant.api_key`, `auth.ldap.bind_password`, `ingest.tokens`, feed
+passwords and headers), in `directory.json` (the directory service account password) and in
+`intel_feeds.yaml` (keys of feeds added on the page). They look like `enc:v1:9096cd23:...`. A
+plain value pasted into `signalith.yaml` still works, and `signalith validate` and the **Health**
+page say to encrypt it. The master key is made by `signalith init` (or the first time a
+password is stored): `/etc/signalith/keys/master.key` on Linux,
+`C:\ProgramData\Signalith\keys\master.key.dpapi` on Windows (also protected with DPAPI for that
+computer), `/var/lib/signalith/keys/master.key` in the Docker volume. Losing it loses only the
+stored passwords and keys, which can be entered again, never events.
+
+```sh
+sudo signalith secrets status                       # where the key is; how each value is stored
+sudo signalith secrets encrypt                      # encrypt plain values, keeping comments and layout
+sudo signalith secrets set opensearch.password      # asks twice without showing it, or reads a pipe
+sudo signalith secrets set ingest.tokens            # adds a token; press Enter to have one made
+sudo signalith secrets rotate-master                # new master key; everything encrypted again
+sudo signalith secrets rotate-master -prune         # remove the previous key once nothing needs it
+```
+
+[docs/encryption.md](docs/encryption.md) covers backing up and changing the key, keeping it in a
+systemd credential or a Docker secret, disk encryption (BitLocker, LUKS, Docker Desktop, cloud
+disks), what protects passwords in memory, and confidential VMs. HTTPS is in
+[docs/https.md](docs/https.md).
 
 ## Detections and findings
 
@@ -594,7 +638,9 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
-| `internal/config` | YAML config, validation, password hashing |
+| `internal/config` | YAML config, validation, password hashing, encrypted values in `signalith.yaml` |
+| `internal/secrets` | Master key, encryption of stored passwords and keys, key rotation |
+| `internal/securefile` | Whole-or-nothing writes of files with secrets, private permissions on Linux and Windows |
 | `internal/httpserver` | Web server timeouts and connection limits |
 | `internal/safelog` | Length limits for log values, rotating log file |
 | `internal/redact` | Hides secrets in URLs before they are shown or logged |

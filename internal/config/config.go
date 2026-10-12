@@ -25,6 +25,8 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -52,6 +54,13 @@ type Config struct {
 	ldapBindPassword string
 	// sections are the top-level keys in that file.
 	sections map[string]bool
+	// file is the config as that file has it: no settings from the
+	// environment, and passwords and keys as written. Save writes it.
+	file *Config
+	// plain lists the passwords and keys stored as plain text in the file.
+	plain []string
+	// keys holds the master key; see Keyring.
+	keys *secrets.Keyring
 }
 
 // Server controls the web UI and API listener.
@@ -594,8 +603,25 @@ func (c *Config) Path() string { return c.path }
 func (c *Config) HasSection(name string) bool { return c.sections[name] }
 
 // Load reads a config file, applies defaults and environment overrides,
-// and validates it.
+// decrypts the passwords and keys stored encrypted, and validates it.
 func Load(path string) (*Config, error) {
+	c, err := LoadUnchecked(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.openSecrets(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return c, nil
+}
+
+// LoadUnchecked reads a config file with defaults and environment
+// overrides, but neither decrypts nor checks it: for commands that look
+// at, or repair, a file that may not load.
+func LoadUnchecked(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -603,11 +629,9 @@ func Load(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	c := Default()
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	dec.KnownFields(true)
-	if err := dec.Decode(c); err != nil && err.Error() != "EOF" {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	c, err := decodeFile(path, data)
+	if err != nil {
+		return nil, err
 	}
 	c.path = path
 	var top map[string]any
@@ -617,10 +641,23 @@ func Load(path string) (*Config, error) {
 			c.sections[k] = true
 		}
 	}
+	// Keep the file's own view, before the environment changes anything.
+	if c.file, err = decodeFile(path, data); err != nil {
+		return nil, err
+	}
+	c.plain = plainLabels(c.file.secretRefs())
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
-	if err := c.Validate(); err != nil {
+	return c, nil
+}
+
+// decodeFile decodes signalith.yaml over the defaults.
+func decodeFile(path string, data []byte) (*Config, error) {
+	c := Default()
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(c); err != nil && err.Error() != "EOF" {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
@@ -849,7 +886,7 @@ func (c *Config) Warnings() []string {
 	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
-	return w
+	return append(w, c.secretWarnings()...)
 }
 
 // OpenSearchTLSFiles returns opensearch.ca_file, cert_file and key_file,
@@ -901,11 +938,34 @@ func RandomToken(nBytes int) string {
 	return hex.EncodeToString(b)
 }
 
-// Save writes the config with a header comment explaining each section.
+// Save writes the config with a header comment explaining each section,
+// with its passwords and keys encrypted. A config from Load is written as
+// its file had it: settings from environment variables are never written
+// out, and neither are changes made after loading (use SetSecret or
+// SetAdminPasswordHash to change one setting in a file).
 func (c *Config) Save(path string) error {
+	src := c
+	if c.file != nil {
+		src = c.file
+	}
+	if c.path == "" {
+		// The master key goes with the file: a keyring made before the
+		// config had a file is made again for its folder.
+		c.path, c.keys = path, nil
+	}
 	var doc yaml.Node
-	if err := doc.Encode(c); err != nil {
+	if err := doc.Encode(src); err != nil {
 		return err
+	}
+	for _, n := range secretNodes(&doc) {
+		if !isPlain(n.node.Value, n.envRefs) {
+			continue
+		}
+		sealed, err := c.Keyring().Seal(n.field, n.node.Value)
+		if err != nil {
+			return err
+		}
+		n.node.Value, n.node.Style = sealed, 0
 	}
 	root := &doc
 	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
@@ -920,13 +980,7 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
-		}
-	}
-	content := header + string(out)
-	return os.WriteFile(path, []byte(content), 0o600)
+	return securefile.WriteFile(path, []byte(header+string(out)))
 }
 
 // sectionComments are written just above a section of the saved file.
@@ -942,7 +996,9 @@ const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
-# SIGNALITH_LDAP_BIND_PASSWORD.
+# SIGNALITH_LDAP_BIND_PASSWORD. Passwords and keys below are encrypted
+# (enc:v1:...) with Signalith's master key; a plain value pasted in works
+# too, and "signalith secrets encrypt" encrypts it (see docs/encryption.md).
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)

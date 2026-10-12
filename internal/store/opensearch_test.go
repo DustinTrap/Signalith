@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 func green(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"status":"green"}`) }
@@ -47,7 +50,7 @@ func TestProxyEnvironmentIsIgnored(t *testing.T) {
 		t.Fatalf("transport proxy set from the environment: %v", err)
 	}
 	// 192.0.2.1 is a documentation address nobody answers on.
-	c := New(Config{URL: "http://192.0.2.1:9200", Username: "signalith", Password: "OS-SECRET", Timeout: 300 * time.Millisecond})
+	c := New(Config{URL: "http://192.0.2.1:9200", Username: "signalith", Password: secrets.New("opensearch.password", "OS-SECRET"), Timeout: 300 * time.Millisecond})
 	if _, err := c.Health(context.Background()); err == nil || proxied.Load() != 0 {
 		t.Fatalf("health went through the proxy: err=%v proxied=%d", err, proxied.Load())
 	}
@@ -144,7 +147,7 @@ func TestRedirectsAreNotFollowed(t *testing.T) {
 		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
 	}))
 	defer ts.Close()
-	_, err := New(Config{URL: ts.URL, Username: "signalith", Password: "OS-SECRET"}).Health(context.Background())
+	_, err := New(Config{URL: ts.URL, Username: "signalith", Password: secrets.New("opensearch.password", "OS-SECRET")}).Health(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "redirect") || leaked.Load() != nil {
 		t.Fatalf("err=%v, other host got %v", err, leaked.Load())
 	}
@@ -225,5 +228,19 @@ func TestUnusedProxyEnvironmentIsExplained(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://p:1")
 	if h := New(Config{URL: "http://os.corp:9200"}).proxyHint; !strings.Contains(h, "HTTP_PROXY is set") {
 		t.Errorf("plain http with HTTP_PROXY: %q", h)
+	}
+}
+
+// TestConfigHidesPassword checks that printing or logging a Config never
+// shows the OpenSearch password, including one taken from the URL.
+func TestConfigHidesPassword(t *testing.T) {
+	c := New(Config{URL: "https://admin:URL-SECRET@os.example.com:9200", Timeout: time.Second})
+	for _, s := range []string{fmt.Sprintf("%v", c.cfg), fmt.Sprintf("%+v", c.cfg), fmt.Sprintf("%#v", c.cfg)} {
+		if strings.Contains(s, "URL-SECRET") || !strings.Contains(s, "[redacted]") {
+			t.Errorf("printed config: %s", s)
+		}
+	}
+	if c.cfg.Password.Reveal() != "URL-SECRET" || c.cfg.Username != "admin" {
+		t.Errorf("credentials from the URL: %q", c.cfg.Username)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/users/ldaptest"
 )
 
@@ -342,7 +343,7 @@ func TestSettingsChecksAndSaving(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(path)
-	if !strings.Contains(string(raw), `"bind_password": "secret-bind"`) {
+	if strings.Contains(string(raw), "secret-bind") || !strings.Contains(string(raw), `"bind_password": "enc:v1:`) {
 		t.Errorf("file = %s", raw)
 	}
 	again, err := OpenDirectory(path, nil)
@@ -353,5 +354,75 @@ func TestSettingsChecksAndSaving(t *testing.T) {
 	fromFile, _ := OpenDirectory(path, &off)
 	if err := fromFile.Save(off); !errors.Is(err, ErrReadOnly) {
 		t.Errorf("save over config: %v", err)
+	}
+}
+
+// TestDirectoryBindPasswordEncrypted checks that directory.json keeps the
+// service account password encrypted, still reads a plain one, rewrites a
+// plain one encrypted through ResealDirectoryFile, and reports one that
+// cannot be decrypted instead of failing.
+func TestDirectoryBindPasswordEncrypted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "directory.json")
+	plain := `{
+  "version": 1,
+  "settings": {"enabled": true, "type": "ad", "url": "ldaps://dc1.example.com", "bind_dn": "CN=svc,DC=example,DC=com",
+    "user_base_dn": "DC=example,DC=com", "admin_groups": ["CN=Admins,DC=example,DC=com"]},
+  "bind_password": "plain-bind-pw"
+}
+`
+	if err := os.WriteFile(path, []byte(plain), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := OpenDirectory(path, nil)
+	if err != nil || d.Settings().BindPassword != "plain-bind-pw" || d.Problem() != "" {
+		t.Fatalf("plain file: %v %q", err, d.Problem())
+	}
+
+	// Migration encrypts it, and only it.
+	seal := func(s secrets.Stored) (string, error) { return secrets.Seal(s.Field, s.Value) }
+	out, n, err := ResealDirectoryFile([]byte(plain), seal)
+	if err != nil || n != 1 || strings.Contains(string(out), "plain-bind-pw") || !strings.Contains(string(out), `"bind_password": "enc:v1:`) {
+		t.Fatalf("reseal: n=%d err=%v\n%s", n, err, out)
+	}
+	if again, n, _ := ResealDirectoryFile(out, seal); n != 0 || string(again) != string(out) {
+		t.Error("resealing an encrypted file should change nothing")
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err = OpenDirectory(path, nil)
+	if err != nil || d.Settings().BindPassword != "plain-bind-pw" || !d.Enabled() {
+		t.Fatalf("encrypted file: %v %+v", err, d.Settings())
+	}
+
+	// With another master key the password is left out and Problem says
+	// why; the server still starts.
+	other := secrets.NewKeyring(t.TempDir())
+	if _, err := other.Seal("x", "make a key"); err != nil {
+		t.Fatal(err)
+	}
+	prev := secrets.Default()
+	secrets.SetDefault(other)
+	defer secrets.SetDefault(prev)
+	d, err = OpenDirectory(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Settings().BindPassword != "" || !strings.Contains(d.Problem(), "service account password is entered again") ||
+		!strings.Contains(d.Problem(), "directory.bind_password is encrypted with master key") {
+		t.Errorf("wrong key: password %q, problem %q", d.Settings().BindPassword, d.Problem())
+	}
+	// Entering it again clears the problem.
+	set := d.Settings()
+	set.BindPassword = "new-bind-pw"
+	if err := d.Save(set); err != nil {
+		t.Fatal(err)
+	}
+	if d.Problem() != "" {
+		t.Errorf("problem after saving: %q", d.Problem())
+	}
+	if d, _ = OpenDirectory(path, nil); d.Settings().BindPassword != "new-bind-pw" {
+		t.Errorf("reloaded %q", d.Settings().BindPassword)
 	}
 }

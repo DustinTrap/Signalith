@@ -639,6 +639,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if len(s.Config.Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
 	}
+	if p := s.dir().Problem(); p != "" {
+		warnings = append(warnings, p)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
