@@ -53,10 +53,12 @@ type Finding struct {
 	Earliest string                     `json:"earliest,omitempty"` // drilldown window, absolute
 	Latest   string                     `json:"latest,omitempty"`
 	GroupKey string                     `json:"group_key,omitempty"` // throttle key
-	Created  time.Time                  `json:"created"`
-	Updated  time.Time                  `json:"updated"`
-	Comments []Comment                  `json:"comments,omitempty"`
-	History  []Change                   `json:"history,omitempty"`
+	// CaseID is the investigation this finding belongs to, if any.
+	CaseID   string    `json:"case_id,omitempty"`
+	Created  time.Time `json:"created"`
+	Updated  time.Time `json:"updated"`
+	Comments []Comment `json:"comments,omitempty"`
+	History  []Change  `json:"history,omitempty"`
 }
 
 // Comment is an analyst note.

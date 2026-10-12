@@ -13,6 +13,7 @@
     <button class="tab active" data-page="search">Search</button>
     <button class="tab" data-page="dashboards">Dashboards</button>
     <button class="tab" data-page="findings">Findings <span id="open-count" class="count-badge hidden"></span></button>
+    <button class="tab" data-page="cases">Investigations <span id="case-count" class="count-badge hidden"></span></button>
     <button class="tab" data-page="risk">Risk</button>
     <button class="tab" data-page="detections">Detections</button>
     <button class="tab" data-page="coverage">ATT&amp;CK coverage</button>
@@ -61,6 +62,7 @@
             <button id="explain">Explain</button>
             <button id="save-detection" title="Run this query on a schedule and raise findings">Save as detection</button>
             <button id="add-to-dashboard" title="Show this query as a panel on a dashboard">Add to dashboard</button>
+            <button id="search-to-case" title="Save this search and a snapshot of its results to an investigation">Add to case</button>
           </div>
         </div>
         <div id="query-error" class="error hidden"></div>
@@ -204,11 +206,40 @@
       <input id="f-bulk-owner" type="text" placeholder="Assign to">
       <input id="f-bulk-comment" type="text" placeholder="Comment (optional)">
       <button id="f-bulk-apply" class="primary">Apply</button>
+      <button id="f-bulk-case" title="Group the selected findings into an investigation">Add to case</button>
     </div>
     <div class="split">
       <div id="f-list" class="results"></div>
       <aside id="f-detail" class="detail hidden"></aside>
     </div>
+  </section>
+
+  <!-- Investigations -->
+  <section id="page-cases" class="page">
+    <div id="c-list-view">
+      <div class="page-head">
+        <h2>Investigations</h2>
+        <button id="c-new" class="primary">New case</button>
+      </div>
+      <div class="toolbar">
+        <select id="c-status" title="Status">
+          <option value="new,in_progress,pending" selected>Open</option>
+          <option value="new">New</option>
+          <option value="in_progress">In progress</option>
+          <option value="pending">Pending</option>
+          <option value="resolved,closed">Resolved or closed</option>
+          <option value="">Any status</option>
+        </select>
+        <select id="c-owner" title="Owner">
+          <option value="">Anyone's</option>
+          <option value="me">Mine</option>
+        </select>
+        <input id="c-text" type="search" placeholder="Search title, case ID, user, host, IP">
+        <button id="c-refresh">Refresh</button>
+      </div>
+      <div id="c-list" class="results"></div>
+    </div>
+    <div id="c-view" class="hidden"></div>
   </section>
 
   <!-- Risk -->
@@ -477,10 +508,13 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     </ul>
   </section>
 </main>
+<dialog id="case-picker" class="case-picker"></dialog>
+<div id="toast" class="toast hidden" role="status"></div>
 <script src="app.js"></script>
 <script src="detections.js"></script>
 <script src="risk.js"></script>
 <script src="intel.js"></script>
 <script src="dashboards.js"></script>
+<script src="cases.js"></script>
 </body>
 </html>

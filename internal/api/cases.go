@@ -1,0 +1,529 @@
+package api
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/findings"
+	"github.com/jrsamsanchez/signalith/internal/query"
+)
+
+func (s *Server) routeCases(api *http.ServeMux) {
+	api.HandleFunc("GET /api/cases", s.handleListCases)
+	api.HandleFunc("POST /api/cases", s.handleCreateCase)
+	api.HandleFunc("GET /api/cases/summary", s.handleCasesSummary)
+	api.HandleFunc("GET /api/cases/{id}", s.handleGetCase)
+	api.HandleFunc("PATCH /api/cases/{id}", s.handleUpdateCase)
+	api.HandleFunc("POST /api/cases/{id}/findings", s.handleAddCaseFindings)
+	api.HandleFunc("DELETE /api/cases/{id}/findings/{fid}", s.handleRemoveCaseFinding)
+	api.HandleFunc("POST /api/cases/{id}/entries", s.handleAddCaseEntry)
+	api.HandleFunc("DELETE /api/cases/{id}/entries/{entry}", s.handleRemoveCaseEntry)
+	api.HandleFunc("POST /api/cases/{id}/entities", s.handleAddCaseEntity)
+}
+
+var errCasesOff = errors.New("investigation cases are not configured on this server")
+
+func (s *Server) casesReady(w http.ResponseWriter) bool {
+	if s.Cases == nil {
+		writeError(w, http.StatusServiceUnavailable, errCasesOff)
+		return false
+	}
+	return true
+}
+
+func writeCaseError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, cases.ErrNotFound), errors.Is(err, cases.ErrEntryNotFound), errors.Is(err, findings.ErrNotFound):
+		writeError(w, http.StatusNotFound, err)
+	default:
+		writeError(w, http.StatusBadGateway, err)
+	}
+}
+
+// modifyCase loads a case, lets change edit it and saves it if change
+// reports a modification. Changes are serialized so two analysts editing
+// the same case do not overwrite each other's additions.
+func (s *Server) modifyCase(ctx context.Context, id string, change func(c *cases.Case) (bool, error)) (*cases.Case, error) {
+	s.caseMu.Lock()
+	defer s.caseMu.Unlock()
+	c, err := s.Cases.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	changed, err := change(c)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		if err := s.Cases.Save(ctx, c); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+// badRequest marks an error as the client's fault.
+type badRequest struct{ error }
+
+func (s *Server) writeModifyError(w http.ResponseWriter, err error) {
+	var br badRequest
+	if errors.As(err, &br) {
+		writeError(w, http.StatusBadRequest, br.error)
+		return
+	}
+	writeCaseError(w, err)
+}
+
+func (s *Server) handleListCases(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	v := r.URL.Query()
+	flt := cases.Filter{Status: splitList(v.Get("status")), Owner: v.Get("owner"), Text: v.Get("q"), FindingID: v.Get("finding")}
+	if l := v.Get("limit"); l != "" {
+		n, err := strconv.Atoi(l)
+		if err != nil || n < 1 || n > 1000 {
+			writeError(w, http.StatusBadRequest, errors.New("limit must be 1-1000"))
+			return
+		}
+		flt.Limit = n
+	}
+	list, total, err := s.Cases.Search(r.Context(), flt)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if list == nil {
+		list = []*cases.Case{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cases": list, "total": total})
+}
+
+func (s *Server) handleCasesSummary(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	_, open, err := s.Cases.Search(r.Context(), cases.Filter{Status: cases.OpenStatuses, Limit: 1})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	resp := map[string]any{"open": open}
+	if u := userOf(r); u != "" {
+		_, mine, err := s.Cases.Search(r.Context(), cases.Filter{Status: cases.OpenStatuses, Owner: u, Limit: 1})
+		if err == nil {
+			resp["mine"] = mine
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleCreateCase(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	var req struct {
+		Title       string   `json:"title"`
+		Description string   `json:"description"`
+		Severity    string   `json:"severity"`
+		Owner       string   `json:"owner"`
+		Findings    []string `json:"findings"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Severity == "" {
+		req.Severity = "medium"
+	}
+	title, desc, sev, owner := strings.TrimSpace(req.Title), req.Description, req.Severity, req.Owner
+	if title == "" && len(req.Findings) > 0 && s.Findings != nil {
+		// Name the case after its first finding when no title is given.
+		if f, err := s.Findings.Get(r.Context(), req.Findings[0]); err == nil {
+			title = f.Title
+		}
+	}
+	if title == "" {
+		writeError(w, http.StatusBadRequest, errors.New("title is required"))
+		return
+	}
+	if err := (cases.Update{Title: &title, Description: &desc, Severity: &sev, Owner: &owner}).Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.Findings) > cases.MaxFindings {
+		writeError(w, http.StatusBadRequest, errors.New("too many findings"))
+		return
+	}
+	now := time.Now().UTC()
+	user := userOf(r)
+	c := &cases.Case{
+		ID: cases.NewID(now), Title: title, Description: strings.TrimSpace(desc), Severity: sev,
+		Status: findings.StatusNew, Owner: strings.TrimSpace(owner), CreatedBy: user, Created: now, Updated: now,
+		History: []findings.Change{{Author: user, Field: "created", To: "case", Time: now}},
+	}
+	if c.Owner != "" {
+		c.Status = findings.StatusInProgress
+	}
+	s.caseMu.Lock()
+	err := s.Cases.Create(r.Context(), c)
+	s.caseMu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	failed := map[string]string{}
+	if len(req.Findings) > 0 {
+		c, failed, err = s.addCaseFindings(r.Context(), c.ID, req.Findings, user)
+		if err != nil {
+			writeCaseError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"case": c, "failed": failed})
+}
+
+func (s *Server) handleGetCase(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	c, err := s.Cases.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeCaseError(w, err)
+		return
+	}
+	linked := []*findings.Finding{}
+	var missing []string
+	if s.Findings != nil {
+		for _, id := range c.Findings {
+			f, err := s.Findings.Get(r.Context(), id)
+			if err != nil {
+				missing = append(missing, id)
+				continue
+			}
+			f.History, f.Comments, f.Result = nil, nil, nil
+			linked = append(linked, f)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"case": c, "findings": linked, "missing_findings": missing})
+}
+
+func (s *Server) handleUpdateCase(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	var req struct {
+		cases.Update
+		// CloseFindings also sets each open linked finding to the case's
+		// new resolved or closed status, with Disposition if given.
+		CloseFindings bool   `json:"close_findings"`
+		Disposition   string `json:"disposition"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := req.Update.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Disposition != "" {
+		if err := (findings.Update{Disposition: &req.Disposition}).Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	user := userOf(r)
+	c, err := s.modifyCase(r.Context(), r.PathValue("id"), func(c *cases.Case) (bool, error) {
+		status := c.Status
+		if req.Status != nil {
+			status = *req.Status
+		}
+		if req.CloseFindings && findings.IsOpen(status) {
+			return false, badRequest{errors.New("set the case to resolved or closed to close its findings")}
+		}
+		return c.Apply(req.Update, user, time.Now().UTC()), nil
+	})
+	if err != nil {
+		s.writeModifyError(w, err)
+		return
+	}
+	resp := map[string]any{"case": c}
+	if req.CloseFindings && s.Findings != nil {
+		closed, failed := 0, map[string]string{}
+		for _, id := range c.Findings {
+			f, err := s.Findings.Get(r.Context(), id)
+			if err != nil {
+				failed[id] = err.Error()
+				continue
+			}
+			if !findings.IsOpen(f.Status) {
+				continue
+			}
+			st := c.Status
+			u := findings.Update{Status: &st, Comment: "Closed with case " + c.ID}
+			if req.Disposition != "" {
+				u.Disposition = &req.Disposition
+			}
+			if _, err := s.updateFinding(r.Context(), id, u, user); err != nil {
+				failed[id] = err.Error()
+				continue
+			}
+			closed++
+		}
+		resp["findings_closed"], resp["failed"] = closed, failed
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// addCaseFindings links findings to a case. A finding already in another
+// case moves to this one, since a finding belongs to one investigation.
+func (s *Server) addCaseFindings(ctx context.Context, caseID string, ids []string, user string) (*cases.Case, map[string]string, error) {
+	failed := map[string]string{}
+	if s.Findings == nil {
+		return nil, nil, errDetectionsOff
+	}
+	c, err := s.modifyCase(ctx, caseID, func(c *cases.Case) (bool, error) {
+		changed := false
+		for _, id := range ids {
+			now := time.Now().UTC()
+			f, err := s.Findings.Get(ctx, id)
+			if err != nil {
+				failed[id] = err.Error()
+				continue
+			}
+			if f.CaseID != "" && f.CaseID != c.ID {
+				if old, err := s.Cases.Get(ctx, f.CaseID); err == nil && old.RemoveFinding(f.ID, user, now) {
+					old.History[len(old.History)-1].To = "moved to " + c.ID
+					if err := s.Cases.Save(ctx, old); err != nil {
+						failed[id] = err.Error()
+						continue
+					}
+				}
+			}
+			added, err := c.AddFinding(f, user, now)
+			if err != nil {
+				failed[id] = err.Error()
+				continue
+			}
+			changed = changed || added
+			if f.CaseID != c.ID {
+				f.History = append(f.History, findings.Change{Author: user, Field: "case", From: f.CaseID, To: c.ID, Time: now})
+				f.CaseID = c.ID
+				if f.Status == findings.StatusNew {
+					f.History = append(f.History, findings.Change{Author: user, Field: "status", From: f.Status, To: findings.StatusInProgress, Time: now})
+					f.Status = findings.StatusInProgress
+				}
+				f.Updated = now
+				if err := s.Findings.Save(ctx, f); err != nil {
+					failed[id] = err.Error()
+				}
+			}
+		}
+		return changed, nil
+	})
+	return c, failed, err
+}
+
+func (s *Server) handleAddCaseFindings(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(req.IDs) == 0 || len(req.IDs) > cases.MaxFindings {
+		writeError(w, http.StatusBadRequest, errors.New("ids must list 1-500 findings"))
+		return
+	}
+	c, failed, err := s.addCaseFindings(r.Context(), r.PathValue("id"), req.IDs, userOf(r))
+	if err != nil {
+		writeCaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"case": c, "failed": failed})
+}
+
+func (s *Server) handleRemoveCaseFinding(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	fid, user := r.PathValue("fid"), userOf(r)
+	c, err := s.modifyCase(r.Context(), r.PathValue("id"), func(c *cases.Case) (bool, error) {
+		if !c.RemoveFinding(fid, user, time.Now().UTC()) {
+			return false, findings.ErrNotFound
+		}
+		return true, nil
+	})
+	if err != nil {
+		writeCaseError(w, err)
+		return
+	}
+	if s.Findings != nil {
+		if f, err := s.Findings.Get(r.Context(), fid); err == nil && f.CaseID == c.ID {
+			now := time.Now().UTC()
+			f.History = append(f.History, findings.Change{Author: user, Field: "case", From: c.ID, To: "", Time: now})
+			f.CaseID, f.Updated = "", now
+			_ = s.Findings.Save(r.Context(), f)
+		}
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+// handleAddCaseEntry adds a note, a search or an event to the timeline.
+// A search is run here and a snapshot of its first rows is kept, so the
+// case shows what the analyst saw even after the events age out.
+func (s *Server) handleAddCaseEntry(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	var req struct {
+		Kind     string         `json:"kind"`
+		Text     string         `json:"text"`
+		Query    string         `json:"query"`
+		Earliest string         `json:"earliest"`
+		Latest   string         `json:"latest"`
+		Event    map[string]any `json:"event"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	text := strings.TrimSpace(req.Text)
+	if len(text) > cases.MaxTextLen {
+		writeError(w, http.StatusBadRequest, errors.New("text is too long"))
+		return
+	}
+	e := cases.Entry{Kind: req.Kind, Text: text}
+	switch req.Kind {
+	case cases.KindNote:
+		if text == "" {
+			writeError(w, http.StatusBadRequest, errors.New("a note needs text"))
+			return
+		}
+	case cases.KindSearch:
+		qs := strings.TrimSpace(req.Query)
+		if qs == "" {
+			writeError(w, http.StatusBadRequest, errors.New("query is required"))
+			return
+		}
+		q, err := query.Parse(qs)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if q.Earliest == "" {
+			q.Earliest = req.Earliest
+		}
+		if q.Latest == "" {
+			q.Latest = req.Latest
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		res, err := s.Engine.Execute(ctx, q)
+		cancel()
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		e.Query, e.Earliest, e.Latest = qs, req.Earliest, req.Latest
+		e.Result, e.Columns, e.Matched = res.Kind, res.Columns, res.Matched
+		e.Truncated = res.Truncated || len(res.Rows) > cases.MaxRows
+		for _, row := range res.Rows[:min(len(res.Rows), cases.MaxRows)] {
+			e.Rows = append(e.Rows, map[string]any(row))
+		}
+		if e.Rows == nil {
+			e.Rows = []map[string]any{}
+		}
+	case cases.KindEvent:
+		if len(req.Event) == 0 {
+			writeError(w, http.StatusBadRequest, errors.New("event is required"))
+			return
+		}
+		ev, err := cases.TrimEvent(req.Event)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		e.Event = ev
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("kind must be note, search or event"))
+		return
+	}
+	user := userOf(r)
+	var added *cases.Entry
+	c, err := s.modifyCase(r.Context(), r.PathValue("id"), func(c *cases.Case) (bool, error) {
+		ent, err := c.AddEntry(e, user, time.Now().UTC())
+		if err != nil {
+			return false, badRequest{err}
+		}
+		added = ent
+		if e.Kind == cases.KindEvent {
+			c.AddEntities(e.Event)
+		}
+		return true, nil
+	})
+	if err != nil {
+		s.writeModifyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"case": c, "entry": added})
+}
+
+func (s *Server) handleRemoveCaseEntry(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	id, user := r.PathValue("entry"), userOf(r)
+	c, err := s.modifyCase(r.Context(), r.PathValue("id"), func(c *cases.Case) (bool, error) {
+		i := slices.IndexFunc(c.Entries, func(e cases.Entry) bool { return e.ID == id })
+		if i >= 0 && c.Entries[i].Kind == cases.KindFinding {
+			return false, badRequest{errors.New("remove the finding from the case instead")}
+		}
+		return true, c.RemoveEntry(id, user, time.Now().UTC())
+	})
+	if err != nil {
+		s.writeModifyError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) handleAddCaseEntity(w http.ResponseWriter, r *http.Request) {
+	if !s.casesReady(w) {
+		return
+	}
+	var e cases.Entity
+	if err := readJSON(r, &e); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(e.Field) == "" || strings.TrimSpace(e.Value) == "" || len(e.Field)+len(e.Value) > 1000 {
+		writeError(w, http.StatusBadRequest, errors.New("field and value are required"))
+		return
+	}
+	user := userOf(r)
+	c, err := s.modifyCase(r.Context(), r.PathValue("id"), func(c *cases.Case) (bool, error) {
+		if !c.AddEntity(e) {
+			return false, nil
+		}
+		now := time.Now().UTC()
+		c.History = append(c.History, findings.Change{Author: user, Field: "entity", To: e.Field + "=" + e.Value, Time: now})
+		c.Updated = now
+		return true, nil
+	})
+	if err != nil {
+		writeCaseError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}

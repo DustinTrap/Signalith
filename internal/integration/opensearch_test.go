@@ -5,9 +5,12 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -59,6 +64,7 @@ func setup(t *testing.T) (*store.Client, *search.Engine, string) {
 		_ = cl.Do(ctx, http.MethodDelete, "/_index_template/"+prefix, nil, nil)
 		_ = cl.DeleteIndex(ctx, prefix+"_findings")
 		_ = cl.DeleteIndex(ctx, prefix+"_intel")
+		_ = cl.DeleteIndex(ctx, prefix+"_cases")
 	})
 	eng := &search.Engine{Store: cl, Opt: search.Options{IndexPrefix: prefix, DefaultEarliest: "-24h"}}
 	return cl, eng, prefix
@@ -733,5 +739,108 @@ func TestDashboardsEndToEnd(t *testing.T) {
 	}
 	if out[3].Error == "" || out[3].Result != nil {
 		t.Errorf("bad panel = %+v", out[3])
+	}
+}
+
+// TestCasesEndToEnd groups real findings into a case, saves a search and an
+// event to it, and closes it with its findings, all through the API.
+func TestCasesEndToEnd(t *testing.T) {
+	cl, eng, prefix := setup(t)
+	load(t, cl, prefix)
+	ctx := context.Background()
+	fs := findings.NewOpenSearch(cl, prefix)
+	cs := cases.NewOpenSearch(cl, prefix)
+	for _, ensure := range []func(context.Context) error{fs.EnsureIndex, cs.EnsureIndex, cs.EnsureIndex} {
+		if err := ensure(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lib, _, err := detect.NewLibrary("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs}
+	var ids []string
+	for _, id := range []string{"auth-brute-force", "auth-shadow-file-access"} {
+		d, _ := lib.Get(id)
+		d.Lookback = "1h"
+		res, err := sched.Run(ctx, d)
+		if err != nil || len(res.Findings) != 1 {
+			t.Fatalf("%s: %v %+v", id, err, res)
+		}
+		ids = append(ids, res.Findings[0].ID)
+	}
+
+	cfg := config.Default()
+	h, _ := config.HashPassword("case-test-pass")
+	cfg.Auth.AdminPasswordHash = h
+	srv := httptest.NewServer((&api.Server{Config: cfg, Engine: eng, Findings: fs, Cases: cs, Detections: lib, Scheduler: sched,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler())
+	defer srv.Close()
+	call := func(method, path string, body any, want int) map[string]any {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(method, srv.URL+path, bytes.NewReader(b))
+		req.SetBasicAuth("admin", "case-test-pass")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		if resp.StatusCode != want {
+			t.Fatalf("%s %s = %d %v", method, path, resp.StatusCode, out)
+		}
+		return out
+	}
+
+	out := call("POST", "/api/cases", map[string]any{"findings": ids}, 201)
+	c := out["case"].(map[string]any)
+	id := c["id"].(string)
+	if c["title"] != "Brute force against web1 from 203.0.113.9" || len(c["findings"].([]any)) != 2 {
+		t.Fatalf("case = %v", c)
+	}
+	f, err := fs.Get(ctx, ids[0])
+	if err != nil || f.CaseID != id || f.Status != findings.StatusInProgress {
+		t.Fatalf("finding after linking = %v %+v", err, f)
+	}
+
+	out = call("POST", "/api/cases/"+id+"/entries", map[string]any{"kind": "search", "query": "src=203.0.113.9 | stats count by host", "earliest": "-1h"}, 201)
+	e := out["entry"].(map[string]any)
+	if e["result_kind"] != "table" || len(e["rows"].([]any)) != 2 {
+		t.Errorf("search snapshot = %v", e)
+	}
+	ev := run(t, eng, "user=alice earliest=-1h").Rows[0]
+	call("POST", "/api/cases/"+id+"/entries", map[string]any{"kind": "event", "event": ev, "text": "alice read /etc/shadow"}, 201)
+	call("POST", "/api/cases/"+id+"/entries", map[string]any{"kind": "note", "text": "Source blocked at the firewall"}, 201)
+
+	// Searching by an entity finds the case, and the list leaves out the timeline.
+	out = call("GET", "/api/cases?q=203.0.113.9&status=new,in_progress", nil, 200)
+	list := out["cases"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["entries"] != nil {
+		t.Errorf("list = %v", out)
+	}
+	out = call("GET", "/api/cases?finding="+ids[1], nil, 200)
+	if out["total"] != float64(1) {
+		t.Errorf("by finding = %v", out)
+	}
+
+	out = call("PATCH", "/api/cases/"+id, map[string]any{"status": "closed", "resolution": "Contained", "close_findings": true, "disposition": "true_positive"}, 200)
+	if out["findings_closed"] != float64(2) {
+		t.Errorf("close = %v", out)
+	}
+	for _, fid := range ids {
+		if f, _ := fs.Get(ctx, fid); f.Status != findings.StatusClosed || f.Disposition != "true_positive" {
+			t.Errorf("%s = %s %s", fid, f.Status, f.Disposition)
+		}
+	}
+	out = call("GET", "/api/cases/"+id, nil, 200)
+	got := out["case"].(map[string]any)
+	if len(got["entries"].([]any)) != 5 || got["status"] != "closed" || len(out["findings"].([]any)) != 2 {
+		t.Errorf("case = %v", out)
+	}
+	if out = call("GET", "/api/cases/summary", nil, 200); out["open"] != float64(0) {
+		t.Errorf("summary = %v", out)
 	}
 }

@@ -366,7 +366,7 @@ function renderResult(res) {
     el('tbody', {}, ...rows.map((r) => el('tr', {}, ...cols.map((c) => {
       const v = r[c];
       const cls = c === '_raw' ? 'raw' : (typeof v === 'number' ? 'num' : '');
-      return el('td', { class: cls, onclick: (ev) => showCellMenu(ev, c, v, res.kind) }, c === '_time' ? fmtTime(v) : fmtValue(v));
+      return el('td', { class: cls, onclick: (ev) => showCellMenu(ev, c, v, res.kind, r) }, c === '_time' ? fmtTime(v) : fmtValue(v));
     })))));
   $('results').replaceChildren(table);
 }
@@ -383,9 +383,16 @@ function sortBy(col) {
 }
 
 // ---------- cell actions ----------
-function showCellMenu(ev, col, value, kind) {
+function showCellMenu(ev, col, value, kind, row) {
   hideCellMenu();
-  if (value === null || value === undefined || col === '_raw' || col === 'count' || col === 'percent') return;
+  const pin = kind === 'events' && row && typeof pinEventToCase === 'function'
+    ? el('button', { onclick: () => { hideCellMenu(); pinEventToCase(row); } }, 'Pin this event to a case') : null;
+  if (value === null || value === undefined || col === 'count' || col === 'percent' || (col === '_raw' && !pin)) return;
+  if (col === '_raw') {
+    $('cell-menu').replaceChildren(pin);
+    placeCellMenu(ev);
+    return;
+  }
   const menu = $('cell-menu');
   const field = col === '_time' ? null : col;
   const items = [];
@@ -404,7 +411,12 @@ function showCellMenu(ev, col, value, kind) {
     } }, `Chart ${field} over time`));
   }
   items.push(el('button', { onclick: () => { hideCellMenu(); navigator.clipboard.writeText(fmtValue(value)); } }, 'Copy value'));
+  if (pin) items.push(pin);
   menu.replaceChildren(...items);
+  placeCellMenu(ev);
+}
+function placeCellMenu(ev) {
+  const menu = $('cell-menu');
   menu.style.left = ev.pageX + 'px';
   menu.style.top = ev.pageY + 'px';
   menu.classList.remove('hidden');

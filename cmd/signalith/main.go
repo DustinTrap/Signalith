@@ -20,6 +20,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
+	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -439,6 +440,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		}
 	}
 	fstore := findings.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
+	cstore := cases.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	sched := &detect.Scheduler{
 		Library: lib, Engine: eng, Findings: fstore, Log: log,
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
@@ -456,6 +458,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Intel:      indicators,
 		Feeds:      feeds,
 		Dashboards: boards,
+		Cases:      cstore,
 		Assistant:  newAssistant(c),
 		UI:         web.FS(),
 		Log:        log,
@@ -473,6 +476,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 				log.Info("threat intel feeds will download on their schedules", "feeds", len(feeds.List))
 				go feeds.Start(ctx)
 			}
+		}
+		if err := cstore.EnsureIndex(ctx); err != nil {
+			log.Error("could not create the cases index; investigations will not work", "index", cstore.Index, "err", err)
 		}
 		if err := fstore.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the findings index; detections will not run", "index", fstore.Index, "err", err)

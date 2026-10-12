@@ -7,13 +7,14 @@ query language that reads like SPL, plain-English questions that become queries,
 visual query builder, CIM-style data models, scheduled detections with a findings
 queue for triage, Sigma rule import, a MITRE ATT&CK coverage map, risk-based
 alerting with asset and identity context, threat intel feeds matched against your
-events, and a security posture dashboard plus dashboards you build from queries.
-Investigation cases and response actions come in a later phase.
+events, a security posture dashboard plus dashboards you build from queries, and
+investigation cases that collect findings, notes, searches and evidence in one place.
+Response actions and playbooks come next.
 
 The server is a single Go binary with the web UI embedded. It runs as a Windows
 service or a systemd unit.
 
-> Status: Phase 3 (ES depth) is complete; Phase 4 is next. See the [roadmap](#roadmap).
+> Status: Phase 3 (ES depth) is complete; Phase 4 has started with investigation cases. See the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -131,6 +132,25 @@ changes and more, plus two risk incident rules); 19 are on by default.
 
 Detections are YAML files, so they can live in Git. See
 [docs/detections.md](docs/detections.md) for the format.
+
+## Investigations
+
+A **case** groups the findings that belong to one incident with the work done on it,
+like an investigation in Splunk ES. Open the **Investigations** tab to see open cases.
+
+- Start a case with **New case**, or select findings on the Findings page and choose
+  **Add to case**. A finding belongs to one case; adding it to another moves it. The
+  case takes the highest urgency of its findings and collects their users, hosts and
+  IPs as **entities**, each a click away from a search.
+- The **timeline** holds notes, searches and events. **Add a search** (or **Add to
+  case** on the Search page) runs the query and keeps a snapshot of its first 50 rows,
+  so the case still shows what you saw after the events age out. In search results,
+  click a cell and choose **Pin this event to a case** to keep the full event.
+- Set status, severity and owner as you work. When you resolve or close a case, write
+  a resolution and optionally close all of its open findings with one disposition.
+
+Cases are stored in OpenSearch in the `<prefix>_cases` index, and every change is
+recorded with who made it.
 
 ## Risk and context
 

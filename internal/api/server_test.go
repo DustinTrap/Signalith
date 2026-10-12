@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -80,6 +81,7 @@ func newTestServerWith(t *testing.T, change func(*Server)) (*httptest.Server, *f
 		Findings:   fs,
 		Assets:     lists,
 		Dashboards: boards,
+		Cases:      cases.NewMemory(),
 		Log:        logger,
 		Version:    "test",
 	}
