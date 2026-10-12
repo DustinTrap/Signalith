@@ -183,6 +183,7 @@
       <div class="nav__label">Configure</div>
       <a class="nav__item" href="#assets" data-page="assets"><svg class="icon" aria-hidden="true"><use href="#i-fingerprint"/></svg><span>Assets &amp; identities</span></a>
       <a class="nav__item" href="#data" data-page="data" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
       <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
     </div>
@@ -923,6 +924,209 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     <div id="u-panel-directory" class="u-panel" role="tabpanel" aria-labelledby="u-tab-directory" hidden></div>
   </section>
 
+  <!-- Data retention -->
+  <section id="page-retention" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Data retention</h2>
+        <p class="page-head__desc">How long each kind of data stays searchable, and what happens to it on the way out.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="rt-refresh" class="btn btn--ghost btn--icon" type="button" aria-label="Refresh" title="Refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg></button>
+        <button id="rt-run" class="btn btn--secondary" type="button" title="Apply every policy now instead of at the next scheduled run" disabled><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>Run now</button>
+      </div>
+    </div>
+
+    <div id="rt-summary" class="card rt-summary" aria-busy="true"></div>
+    <div id="rt-alerts" class="rt-alerts"></div>
+
+    <div id="rt-main">
+    <div class="tabs rt-tabs" role="tablist" aria-label="Data retention">
+      <button class="tab" type="button" role="tab" id="rt-tab-policies" data-tab="policies" aria-controls="rt-panel-policies" aria-selected="true">Policies</button>
+      <button class="tab" type="button" role="tab" id="rt-tab-archive" data-tab="archive" aria-controls="rt-panel-archive" aria-selected="false" tabindex="-1">Archive <span class="count hidden" id="rt-archive-count"></span></button>
+      <button class="tab" type="button" role="tab" id="rt-tab-activity" data-tab="activity" aria-controls="rt-panel-activity" aria-selected="false" tabindex="-1">Activity <span class="count rt-count--bad hidden" id="rt-activity-count"></span></button>
+    </div>
+
+    <div id="rt-panel-policies" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-policies">
+      <div class="card">
+        <div id="rt-table" class="table-wrap"></div>
+        <div id="rt-foot" class="table-foot hidden"></div>
+      </div>
+      <div id="rt-defaults" class="card rt-defaults" aria-label="Defaults"></div>
+    </div>
+
+    <div id="rt-panel-archive" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-archive" hidden>
+      <div class="toolbar">
+        <select id="rt-arch-cat" class="select" aria-label="Category"><option value="">All categories</option></select>
+        <span class="spacer"></span>
+        <button id="rt-restore-open" class="btn btn--primary" type="button" disabled><svg class="icon" aria-hidden="true"><use href="#i-rotate-ccw"/></svg><span id="rt-restore-label">Restore</span></button>
+      </div>
+      <div id="rt-arch-msg"></div>
+      <div class="card">
+        <div id="rt-arch" class="table-wrap"></div>
+        <div id="rt-arch-foot" class="table-foot hidden"></div>
+      </div>
+    </div>
+
+    <div id="rt-panel-activity" class="rt-panel" role="tabpanel" aria-labelledby="rt-tab-activity" hidden>
+      <div id="rt-lastrun" class="card"></div>
+      <div class="card">
+        <div class="card__head"><div><h3 class="card__title">Recent actions</h3><p class="card__sub">What retention compacted, archived, deleted or restored, newest first.</p></div></div>
+        <div id="rt-actions" class="table-wrap"></div>
+      </div>
+    </div>
+    </div>
+
+    <dialog id="rt-edit" class="modal rt-dialog" aria-labelledby="rt-edit-title" aria-describedby="rt-edit-desc">
+      <form id="rt-edit-form" novalidate autocomplete="off">
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="rt-edit-title">Policy</h3>
+            <p class="modal__desc" id="rt-edit-desc"></p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="rt-edit-msg"></div>
+          <div id="rt-mode" class="seg rt-mode" role="radiogroup" aria-label="Which policy">
+            <button type="button" role="radio" data-mode="default" aria-checked="true">Use the default</button>
+            <button type="button" role="radio" data-mode="own" aria-checked="false" tabindex="-1">Own policy</button>
+          </div>
+          <div id="rt-mode-note" class="callout rt-mode-note"></div>
+          <div class="rt-settings" id="rt-settings">
+            <div class="rt-set" id="rt-f-keep">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-keep" id="rt-keep-label">Keep searchable for</label>
+                <p class="rt-set__hint" id="rt-keep-hint"></p>
+              </div>
+              <div class="rt-set__ctl">
+                <div class="rt-unit"><input id="rt-keep" class="input" type="number" inputmode="numeric" min="1" max="36500" step="1" placeholder="–" aria-describedby="rt-keep-hint"><span aria-hidden="true">days</span></div>
+                <label class="check"><input type="checkbox" id="rt-forever"><span id="rt-forever-label">Forever</span></label>
+              </div>
+            </div>
+            <div class="rt-set rt-events-only" id="rt-f-cap">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-cap">Size cap</label>
+                <p class="rt-set__hint" id="rt-cap-hint"></p>
+              </div>
+              <div class="rt-set__ctl">
+                <div class="rt-unit"><input id="rt-cap" class="input" type="number" inputmode="decimal" min="0" step="any" placeholder="None" aria-describedby="rt-cap-hint"><span aria-hidden="true">GB</span></div>
+              </div>
+            </div>
+            <div class="rt-set rt-events-only" id="rt-f-compact">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-compact">Compact after</label>
+                <p class="rt-set__hint" id="rt-compact-hint">Older days become read-only and smaller. Keep it above how long agents can be offline.</p>
+              </div>
+              <div class="rt-set__ctl">
+                <div class="rt-unit"><input id="rt-compact" class="input" type="number" inputmode="numeric" min="0" step="1" placeholder="Never" aria-describedby="rt-compact-hint"><span aria-hidden="true">days</span></div>
+              </div>
+            </div>
+            <div class="rt-set rt-events-only" id="rt-f-archive">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-archive">Archive before deleting</label>
+                <p class="rt-set__hint" id="rt-archive-hint"></p>
+              </div>
+              <div class="rt-set__ctl">
+                <span class="switch"><input type="checkbox" id="rt-archive" role="switch" aria-describedby="rt-archive-hint"></span>
+              </div>
+            </div>
+          </div>
+          <div id="rt-preview" class="rt-preview" aria-live="polite"></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="rt-edit-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rt-guard" class="modal rt-dialog" aria-labelledby="rt-guard-title" aria-describedby="rt-guard-desc">
+      <form id="rt-guard-form" novalidate autocomplete="off">
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="rt-guard-title">Disk guard</h3>
+            <p class="modal__desc" id="rt-guard-desc">Deletes the oldest event days before OpenSearch&rsquo;s disk fills up. At 95% OpenSearch makes every index read-only, and new events stop.</p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="rt-guard-msg"></div>
+          <div class="rt-settings">
+            <div class="rt-set" id="rt-f-gon">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-guard-on">Disk guard on</label>
+                <p class="rt-set__hint">Checks the fullest OpenSearch data disk every 5 minutes.</p>
+              </div>
+              <div class="rt-set__ctl"><span class="switch"><input type="checkbox" id="rt-guard-on" role="switch"></span></div>
+            </div>
+            <div class="rt-set" id="rt-f-pct">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-pct">Max disk use</label>
+                <p class="rt-set__hint" id="rt-pct-hint">From 50% to 94%. Above it, the oldest days go first.</p>
+              </div>
+              <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-pct" class="input" type="number" inputmode="numeric" min="50" max="94" step="1" aria-describedby="rt-pct-hint"><span aria-hidden="true">%</span></div></div>
+            </div>
+            <div class="rt-set" id="rt-f-min">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-min">Min days</label>
+                <p class="rt-set__hint" id="rt-min-hint">The guard never deletes today or these last days.</p>
+              </div>
+              <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-min" class="input" type="number" inputmode="numeric" min="1" max="36500" step="1" aria-describedby="rt-min-hint"><span aria-hidden="true">days</span></div></div>
+            </div>
+          </div>
+          <div id="rt-guard-disk" class="rt-guard-disk"></div>
+          <div id="rt-guard-preview" class="rt-preview" aria-live="polite"></div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="rt-guard-save">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rt-confirm" class="modal" aria-labelledby="rt-confirm-title" aria-describedby="rt-confirm-desc">
+      <div class="modal__head">
+        <div>
+          <h3 class="modal__title" id="rt-confirm-title">Delete data now?</h3>
+          <div class="modal__desc" id="rt-confirm-desc"></div>
+        </div>
+      </div>
+      <div class="modal__foot">
+        <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+        <button class="btn btn--danger" type="button" id="rt-confirm-ok">Delete and save</button>
+      </div>
+    </dialog>
+
+    <dialog id="rt-restore" class="modal" aria-labelledby="rt-restore-title" aria-describedby="rt-restore-desc">
+      <form id="rt-restore-form" novalidate autocomplete="off">
+        <div class="modal__head">
+          <div>
+            <h3 class="modal__title" id="rt-restore-title">Restore</h3>
+            <p class="modal__desc" id="rt-restore-desc"></p>
+          </div>
+          <button class="btn btn--ghost btn--icon btn--sm modal__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="modal__body">
+          <div id="rt-restore-msg"></div>
+          <div class="rt-settings">
+            <div class="rt-set" id="rt-f-rkeep">
+              <div class="rt-set__text">
+                <label class="rt-set__label" for="rt-rkeep">Keep searchable for</label>
+                <p class="rt-set__hint" id="rt-rkeep-hint"></p>
+              </div>
+              <div class="rt-set__ctl"><div class="rt-unit"><input id="rt-rkeep" class="input" type="number" inputmode="numeric" min="1" max="365" step="1" value="14" aria-describedby="rt-rkeep-hint"><span aria-hidden="true">days</span></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="modal__foot">
+          <button class="btn btn--ghost" type="button" data-close>Cancel</button>
+          <button class="btn btn--primary" type="submit" id="rt-restore-ok">Restore</button>
+        </div>
+      </form>
+    </dialog>
+  </section>
+
   <!-- Health -->
   <section id="page-health" class="page">
     <div id="health" class="health-page"></div>
@@ -986,5 +1190,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="dashboards.js"></script>
 <script src="cases.js"></script>
 <script src="users.js"></script>
+<script src="retention.js"></script>
 </body>
 </html>

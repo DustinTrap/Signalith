@@ -11,8 +11,11 @@ Signalith keeps events in daily OpenSearch indices, one per data category and da
 Findings and investigations have their own policy. A **disk guard** keeps
 OpenSearch from filling its disk.
 
-Set everything on the **Data retention** page (admins only). Changes apply at once:
-saving starts a retention run, with no restart. The same settings can be written in
+Set everything on the **Data retention** page under Configure (admins only): select a
+category to change its policy, or edit the default policy and the disk guard under
+**Defaults**. The dialog shows what saving would delete, archive or compact before you
+save, and asks again before anything is deleted. Changes apply at once: saving starts
+a retention run, with no restart. The same settings can be written in
 `signalith.yaml` instead (see [Settings in signalith.yaml](#settings-in-signalithyaml)).
 
 ## Categories
@@ -214,7 +217,7 @@ detection scheduler. It also runs when settings are saved, when **Run now** is
 pressed, and when the disk guard trips. The first scheduled run is 2 minutes after
 the server starts.
 
-Each run plans first and then acts. The **Preview** on the page uses the same
+Each run plans first and then acts. The preview in the page's dialogs uses the same
 planner, so what it shows is what the next run does. Deletions run oldest day first,
 then compactions.
 
@@ -224,7 +227,7 @@ the prefix is listed as unmanaged and left alone. Today's and future-dated days 
 never deleted, and today and yesterday are never compacted. Only one run or restore
 happens at a time.
 
-The page keeps the last 50 actions (what was deleted, archived or compacted, why,
+The page keeps the last 200 actions (what was deleted, archived or compacted, why,
 how much space it freed, and who made the change behind it), plus the last run's
 totals and errors. Every action is also logged by the server.
 

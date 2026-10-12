@@ -63,6 +63,9 @@ type Manager struct {
 	lastShort time.Time
 }
 
+// maxRestores is how many restores the archive view remembers.
+const maxRestores = 50
+
 func (m *Manager) init() {
 	m.initOnce.Do(func() {
 		m.hist = loadHistory(m.HistoryFile)
@@ -964,7 +967,7 @@ func (m *Manager) Restore(ids []string, keepDays int, by string) ([]RestoreStatu
 		sts = append(sts, st)
 		m.restores = append(m.restores, st)
 	}
-	if n := len(m.restores) - MaxActions; n > 0 {
+	if n := len(m.restores) - maxRestores; n > 0 {
 		m.restores = slices.Delete(m.restores, 0, n)
 	}
 	out := make([]RestoreStatus, len(sts))

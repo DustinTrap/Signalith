@@ -7,8 +7,9 @@ import (
 	"time"
 )
 
-// MaxActions is how many recent actions the history keeps.
-const MaxActions = 50
+// MaxActions is how many recent actions the history keeps: a few weeks of
+// daily runs, since one run can touch dozens of days.
+const MaxActions = 200
 
 // Run triggers.
 const (
