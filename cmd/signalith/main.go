@@ -42,6 +42,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
 	"github.com/jrsamsanchez/signalith/internal/notify"
+	"github.com/jrsamsanchez/signalith/internal/playbooks"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/respond"
@@ -71,7 +72,7 @@ Usage:
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
   signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
-  signalith initial-password [-c file]    print the first admin password the Docker quick start made
+  signalith initial-password [-c file]    print the first admin password the Docker quick start or a package made
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
@@ -108,6 +109,7 @@ func defaultConfigPath() string {
 }
 
 func main() {
+	runService()
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, usage, defaultConfigPath())
 		os.Exit(2)
@@ -178,6 +180,7 @@ func cmdInit(args []string) error {
 	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
 	syslogTLS := fs.String("syslog-tls", "0.0.0.0:6514", "address to receive syslog on over TLS (empty: off)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
+	savePassword := fs.Bool("save-password", false, "keep a generated admin password in "+initialPasswordFile+" next to the config file, for signalith initial-password, instead of printing it (for installers)")
 	fs.Parse(args)
 
 	if _, err := os.Stat(*path); err == nil && !*force {
@@ -218,12 +221,24 @@ func cmdInit(args []string) error {
 	if err := c.Save(*path); err != nil {
 		return err
 	}
+	// An installer shows no output to whoever runs it, so the generated
+	// password is kept where only administrators can read it until
+	// signalith initial-password shows it.
+	saved := generated && *savePassword
+	if saved {
+		if err := securefile.Replace(filepath.Join(filepath.Dir(*path), initialPasswordFile), []byte(pw+"\n")); err != nil {
+			return fmt.Errorf("cannot keep the admin password: %w", err)
+		}
+	}
 	fmt.Printf("Wrote %s\n\n", *path)
 	fmt.Printf("  Web UI:      %s\n", c.Server.PublicURL)
 	fmt.Printf("  HTTPS:       the server makes its own certificate when it starts; browsers warn\n")
 	fmt.Printf("               until you trust it (see docs/https.md)\n")
 	fmt.Printf("  User:        %s\n", c.Auth.AdminUser)
-	if generated {
+	switch {
+	case saved:
+		fmt.Printf("  Password:    show it with: signalith initial-password   (change it with: signalith passwd)\n")
+	case generated:
 		fmt.Printf("  Password:    %s   (shown once; change it with: signalith passwd)\n", pw)
 	}
 	if s := syslogSummary(c); s != "" {
@@ -447,6 +462,17 @@ func cmdValidate(args []string) error {
 			}
 		}
 		fmt.Printf("%d notification channels and %d rules (%d on), set on the Notifications page.\n", len(s.Channels), len(s.Rules), on)
+	}
+	if list, err := (&playbooks.Manager{File: c.PlaybooksFile()}).List(); err != nil {
+		fmt.Println("Warning:", err)
+	} else if len(list) > 0 {
+		on := 0
+		for _, p := range list {
+			if p.Enabled {
+				on++
+			}
+		}
+		fmt.Printf("%d playbooks (%d on), set on the Playbooks page.\n", len(list), on)
 	}
 	if s := syslogSummary(c); s != "" {
 		allow := "any sender"
@@ -1123,6 +1149,13 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		responder.Protected = []string{p}
 	}
 	ensureScriptsDir(c.ResponseScriptsDir(), log)
+	// Playbooks: set on the Playbooks page, run by the server that runs
+	// the background jobs; each run is claimed in <prefix>_playbook_runs.
+	pbooks := &playbooks.Manager{File: c.PlaybooksFile()}
+	if err := pbooks.Load(); err != nil {
+		log.Error("playbooks do not start until the playbooks file is fixed", "err", err)
+	}
+	pruns := playbooks.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
 	// Agent tokens: one per agent or group, kept in the runtime index so
@@ -1156,6 +1189,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Dashboards: boards,
 		Cases:      cstore,
 		Respond:    responder,
+		Playbooks:  &api.Playbooks{Manager: pbooks, Runs: pruns},
 		Retention:  ret,
 		Sample:     sampleLoader,
 		Endpoints:  estore,
@@ -1174,12 +1208,17 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Version:    version,
 	}
 	srv.KnownBrowsers = r.browsers
+	pbRunner := &playbooks.Runner{
+		Playbooks: pbooks, Findings: fstore, Runs: pruns, Desk: srv.PlaybookDesk(), Respond: responder,
+		Notify: notes, Sender: senders, Server: sampleServer, Log: log,
+		PublicURL: func() string { return c.Server.PublicURL },
+	}
 	// Every server makes the indices it uses when they are missing; the
 	// indicesReady channel is closed once it has tried, and the flags say
 	// which ones are there. Changes to existing indices and the background
 	// jobs are for the one server that runs those.
 	indicesReady := make(chan struct{})
-	var intelOK, casesOK, findingsOK, notifyOK bool
+	var intelOK, casesOK, findingsOK, notifyOK, playbooksOK bool
 	in.jobs.Go(func() {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
@@ -1211,6 +1250,11 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		}
 		if err := astore.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the response actions index; response actions will not run", "index", astore.Index, "err", err)
+		}
+		if err := pruns.EnsureIndex(ctx); err != nil {
+			log.Error("could not create the playbook runs index; playbooks will not run", "index", pruns.Index, "err", err)
+		} else {
+			playbooksOK = true
 		}
 		close(indicesReady)
 	})
@@ -1259,6 +1303,15 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			log.Info("notifications will be sent for new findings that match a rule", "file", c.NotifyFile())
 			dispatcher.Run(ctx)
 		}},
+		{Name: "playbooks", Run: func(ctx context.Context) {
+			if !ready(ctx) || !playbooksOK || !findingsOK {
+				return
+			}
+			// Playbooks can be added on the page at any time, so the
+			// runner runs even with none yet.
+			log.Info("playbooks will run for new findings that match them", "file", c.PlaybooksFile())
+			pbRunner.Run(ctx)
+		}},
 		// Retention keeps running while OpenSearch refuses writes (its
 		// disk is full): its disk guard is what frees space.
 		{Name: "retention", Emergency: true, Run: func(ctx context.Context) {
@@ -1271,7 +1324,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		in.jobsList = watchJobs(in.jobsList, c, hook)
 	}
 	if !c.Detections.Scheduler {
-		log.Warn("detections.scheduler is off, so this server never runs detections, threat intel downloads, notifications or retention; " +
+		log.Warn("detections.scheduler is off, so this server never runs detections, threat intel downloads, notifications, playbooks or retention; " +
 			"another server that shares its OpenSearch does. The Data retention and feed settings are read-only here")
 	}
 	if r.node != nil {
@@ -1280,7 +1333,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		// The scheduler, the feeds and the notifications ask before each
 		// run, download or message, so a server that lost the job lease
 		// stops at once, even before its jobs' context ends.
-		sched.Allowed, feeds.Allowed, dispatcher.Allowed = r.node.RunsJobs, r.node.RunsJobs, r.node.RunsJobs
+		sched.Allowed, feeds.Allowed, dispatcher.Allowed, pbRunner.Allowed = r.node.RunsJobs, r.node.RunsJobs, r.node.RunsJobs, r.node.RunsJobs
 		srv.Cluster = r.node
 		in.node = r.node
 	}
@@ -1302,7 +1355,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		r.node.Use(cl, c.OpenSearch.IndexPrefix, cluster.Settings{
 			Eligible: c.Detections.Scheduler, NodeURL: nodeURL(c), Listen: c.Server.Listen,
 			Syslog:       cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
-			Fingerprints: func() cluster.Fingerprints { return filesFingerprints(c, ret, feeds, notes) },
+			Fingerprints: func() cluster.Fingerprints { return filesFingerprints(c, ret, feeds, notes, pbooks) },
 		})
 		// A server with detections.scheduler off never runs the jobs. It
 		// may still hold the lease from before a restart in place, which
@@ -1359,11 +1412,12 @@ func upgradeIndices(ctx context.Context, log *slog.Logger, allowed func() bool, 
 
 // filesFingerprints hashes this server's own files that the background
 // jobs use: retention policies, feeds, custom detections, notification
-// channels and rules and, while a policy archives, the archives. A server
-// whose files differ from those of the server that runs the jobs does not
-// take them over by itself.
-func filesFingerprints(c *config.Config, ret *retention.Manager, feeds *intel.Feeds, notes *notify.Manager) cluster.Fingerprints {
-	fp := cluster.Fingerprints{Feeds: feeds.Fingerprint(), Detections: detectionsFingerprint(c.DetectionsDir()), Notify: notes.Fingerprint()}
+// channels and rules, playbooks and, while a policy archives, the
+// archives. A server whose files differ from those of the server that
+// runs the jobs does not take them over by itself.
+func filesFingerprints(c *config.Config, ret *retention.Manager, feeds *intel.Feeds, notes *notify.Manager, pbooks *playbooks.Manager) cluster.Fingerprints {
+	fp := cluster.Fingerprints{Feeds: feeds.Fingerprint(), Detections: detectionsFingerprint(c.DetectionsDir()), Notify: notes.Fingerprint(),
+		Playbooks: pbooks.Fingerprint()}
 	fp.Retention, fp.Archives = ret.Fingerprint()
 	return fp
 }
@@ -1378,9 +1432,15 @@ func detectionsFingerprint(dir string) string {
 	if err != nil {
 		return cluster.Hash([]byte(err.Error()))
 	}
+	// The on and off choices for built-in and pack rules count too.
+	states, err := filepath.Glob(filepath.Join(dir, detect.StateDir, "*.yaml"))
+	if err != nil {
+		return cluster.Hash([]byte(err.Error()))
+	}
 	sort.Strings(files)
+	sort.Strings(states)
 	var parts [][]byte
-	for _, f := range files {
+	for _, f := range append(files, states...) {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			b = []byte("unreadable: " + err.Error())
@@ -1390,7 +1450,11 @@ func detectionsFingerprint(dir string) string {
 		// them.
 		b = bytes.TrimPrefix(b, []byte("\ufeff"))
 		b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
-		parts = append(parts, []byte(filepath.Base(f)), b)
+		name := filepath.Base(f)
+		if filepath.Base(filepath.Dir(f)) == detect.StateDir {
+			name = detect.StateDir + "/" + name
+		}
+		parts = append(parts, []byte(name), b)
 	}
 	return cluster.Hash(parts...)
 }

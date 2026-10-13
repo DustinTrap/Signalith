@@ -63,6 +63,11 @@ var knownFields = func() map[string]string {
 
 		// Windows and Linux parsers.
 		"src_host": kw, "logon_type_name": kw, "member": kw,
+		// Sysmon process fields that Sigma rules match on.
+		"original_file_name": kw, "process_description": kw, "process_product": kw,
+		"process_company": kw, "process_file_version": kw, "process_integrity_level": kw,
+		"process_current_directory": kw, "process_guid": kw, "parent_process_guid": kw,
+		"parent_process_id": long, "parent_user": kw, "logon_id": kw,
 		// An sshd line whose client address cannot be told from text the
 		// client sent (see ambiguousSSH).
 		"src_ambiguous": kw,
@@ -83,6 +88,11 @@ var knownFields = func() map[string]string {
 
 		// osquery (internal/endpoint).
 		"endpoint_id": kw, "file_old_path": kw, "user_id": kw, "inventory_type": kw,
+
+		// Wazuh alerts (wazuh.go).
+		"benchmark": kw, "wazuh_rule_level": long, "wazuh_rule_groups": kw, "wazuh_agent_id": kw,
+		"wazuh_agent_name": kw, "wazuh_agent_ip": kw, "wazuh_manager": kw, "wazuh_decoder": kw,
+		"wazuh_location": kw, "wazuh_win_event_id": kw,
 
 		// Risk events.
 		"group_key": kw, "risk_score": double, "risk_base_score": double,

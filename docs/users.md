@@ -39,6 +39,8 @@ By area:
 | Threat intel: view and look up | Yes | Yes | Yes |
 | Threat intel: add or remove indicators by hand | No | Yes | Yes |
 | Threat intel: add, change, test and refresh feeds, upload files | No | No | Yes |
+| Playbooks: see runs, approve or reject steps that wait | No | Yes | Yes |
+| Playbooks: create, edit, delete, turn on and off | No | No | Yes |
 | Add data (agent setup, agent tokens) | No | No | Yes |
 | Agent tokens: list names and use (API only) | No | Yes | Yes |
 | Users and directory sign-in | No | No | Yes |
@@ -611,7 +613,7 @@ page itself.
 `POST /api/build`, `POST /api/parse`, `GET /api/datamodels`, `GET /api/fields`,
 `GET /api/fields/values`, `GET /api/language`, `GET /api/ask`,
 `GET /api/detections`, `GET /api/detections/{id}`, `GET /api/detections/{id}/yaml`,
-`GET /api/coverage`, `GET /api/findings`, `GET /api/findings/summary`,
+`GET /api/coverage`, `GET /api/detections/packs`, `GET /api/findings`, `GET /api/findings/summary`,
 `GET /api/findings/{id}`, `GET /api/cases`, `GET /api/cases/summary`,
 `GET /api/cases/{id}`, `GET /api/lookups/context`, `GET /api/lookups/{kind}`,
 `GET /api/risk`, `GET /api/risk/object`, `GET /api/intel`, `GET /api/intel/feeds`,
@@ -628,15 +630,17 @@ page itself.
 `POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`, `GET /api/endpoints`,
 `GET /api/endpoints/{id}`, `GET /api/endpoints/settings`, `GET /api/endpoints/checks`,
 `GET /api/respond/actions`, `GET /api/respond/runs`, `POST /api/respond/run` (running
-[response actions](response-actions.md)), `GET /api/agent-tokens` (the names, status
-and use of the [agent tokens](agent-tokens.md), never a secret).
+[response actions](response-actions.md)), `GET /api/playbooks/runs`,
+`POST /api/playbooks/runs/{id}/approve`, `POST /api/playbooks/runs/{id}/reject`
+(the Approvals page; see [playbooks.md](playbooks.md)), `GET /api/agent-tokens` (the names,
+status and use of the [agent tokens](agent-tokens.md), never a secret).
 
 **Admin:** `GET /api/agents/config`, `POST /api/agent-tokens`,
 `PATCH /api/agent-tokens/{id}`, `POST /api/agent-tokens/{id}/revoke`,
 `POST /api/agent-tokens/legacy/{id}/refuse`, `POST /api/agent-tokens/legacy/{id}/accept`
 (see [agent-tokens.md](agent-tokens.md#commands)), `POST /api/tls/names`, `GET /api/security`,
 `POST /api/security/ca`, `POST /api/detections`,
-`POST /api/detections/test`, `POST /api/detections/sigma`,
+`POST /api/detections/test`, `POST /api/detections/sigma`, `POST /api/detections/enable`,
 `PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
 `POST /api/intel/feeds`, `PUT /api/intel/feeds/{name}`, `DELETE /api/intel/feeds/{name}`,
@@ -644,6 +648,7 @@ and use of the [agent tokens](agent-tokens.md), never a secret).
 `POST /api/intel/taxii/collections`, `POST /api/intel/upload`,
 `GET /api/respond/config`, `PUT /api/respond/config`, `POST /api/respond/test`
 (setting up [response actions](response-actions.md)),
+`GET /api/playbooks`, `PUT /api/playbooks` (the Playbooks page; see [playbooks.md](playbooks.md)),
 `GET /api/sample`, `POST /api/sample/load`, `POST /api/sample/remove`
 (the one-click [sample data](sample-data.md)), `PUT /api/endpoints/settings`,
 `DELETE /api/endpoints/{id}`, `GET /api/endpoints/blocked`, `DELETE /api/endpoints/blocked/{host}`,
