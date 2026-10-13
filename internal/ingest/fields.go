@@ -73,6 +73,11 @@ var knownFields = func() map[string]string {
 		// OpenTelemetry log records (OTLP).
 		"service": kw, "trace_id": kw, "span_id": kw, "otel_scope": kw,
 
+		// Wazuh alerts (wazuh.go).
+		"benchmark": kw, "wazuh_rule_level": long, "wazuh_rule_groups": kw, "wazuh_agent_id": kw,
+		"wazuh_agent_name": kw, "wazuh_agent_ip": kw, "wazuh_manager": kw, "wazuh_decoder": kw,
+		"wazuh_location": kw, "wazuh_win_event_id": kw,
+
 		// Risk events.
 		"group_key": kw, "risk_score": double, "risk_base_score": double,
 	}

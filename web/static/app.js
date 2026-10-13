@@ -368,7 +368,7 @@ const JUMP_WORDS = {
   dashboards: 'home overview posture charts', findings: 'alerts incidents queue triage', cases: 'cases investigations',
   risk: 'risk scores', search: 'query events logs hunt', intel: 'threat intel ioc indicators feeds',
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
-  data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco sample demo test data try example', retention: 'retention rotation archive restore delete storage disk guard policies',
+  data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco wazuh ossec alerts sample demo test data try example', retention: 'retention rotation archive restore delete storage disk guard policies',
   health: 'status opensearch ingest', help: 'help syntax language commands',
   servers: 'cluster nodes servers background jobs leader failover standby readyz',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
@@ -2079,6 +2079,13 @@ document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('c
 $('linux-source').addEventListener('change', loadAgentConfig);
 $('otel-host').addEventListener('change', loadAgentConfig);
 $('sysmon').addEventListener('change', loadAgentConfig);
+$('wazuh-syslog').addEventListener('click', (e) => {
+  e.preventDefault();
+  const radio = document.querySelector('input[name=os][value=syslog]');
+  radio.checked = true;
+  radio.focus();
+  loadDataSource();
+});
 agentServerEl.addEventListener('input', () => {
   clearTimeout(agentServerTimer);
   agentServerTimer = setTimeout(agentServerChanged, 400);
@@ -2125,17 +2132,24 @@ async function agentSetupLoad() {
   // An OpenTelemetry Collector on Linux or Windows reads the same sources
   // as Fluent Bit there, so it shares their options.
   const otel = os === 'otel';
+  // Wazuh: Fluent Bit on the Linux machine that runs the Wazuh manager.
+  const wazuh = os === 'wazuh';
   const host = otel ? $('otel-host').value : os;
   $('otel-opts').classList.toggle('hidden', !otel);
   $('linux-opts').classList.toggle('hidden', host !== 'linux');
   $('windows-opts').classList.toggle('hidden', host !== 'windows');
+  $('wazuh-note').classList.toggle('hidden', !wazuh);
   $('agent-title').textContent = otel ? 'Set up the OpenTelemetry Collector on ' + (host === 'windows' ? 'Windows' : 'Linux')
+    : wazuh ? 'Set up Fluent Bit on the Wazuh manager'
     : 'Set up Fluent Bit on ' + (os === 'windows' ? 'Windows' : 'Linux');
+  $('agent-sub').textContent = wazuh ? 'Do this once, on the Wazuh manager. Your Wazuh agents keep reporting to it as before.'
+    : 'Do this on each host you want to collect from.';
   const steps = $('agent-steps');
   const seq = ++agentSetupSeq;
   steps.setAttribute('aria-busy', 'true');
   if (!agentSetupConfig) agentSetupSkeleton();
-  const q = new URLSearchParams({ os, source: $('linux-source').value, sysmon: $('sysmon').checked });
+  const q = wazuh ? new URLSearchParams({ os: 'linux', source: 'wazuh' })
+    : new URLSearchParams({ os, source: $('linux-source').value, sysmon: $('sysmon').checked });
   if (otel) q.set('collector', host);
   const server = agentServerValue();
   agentServerSent = server;

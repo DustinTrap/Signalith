@@ -49,6 +49,7 @@ func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Durat
 		app = m.Cisco.Facility
 	}
 	extra := 0
+	wazuh := false
 	var ev ingest.Event
 	t := m.Time
 	if m.CEF != nil {
@@ -66,6 +67,17 @@ func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Durat
 			model = "Network_Traffic"
 		}
 		ev = ingest.Event{Model: model, Fields: f}
+	} else if w, ok := ingest.ParseWazuhText(m.Text); ok {
+		// A Wazuh manager's syslog output (format json): the alert names
+		// the host it is about, and has its own time and severity.
+		wazuh = true
+		ev = w
+		if !w.Time.IsZero() && (plausible(w.Time, received, maxAge) || !plausible(t, received, maxAge)) {
+			t = w.Time
+		}
+		if agent, _ := w.Fields["host"].(string); agent != "" {
+			host = truncate(agent, maxHostLen)
+		}
 	} else {
 		if host == "" {
 			host = senderIP
@@ -81,7 +93,7 @@ func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Durat
 	if m.Priority >= 0 {
 		f["facility"] = facilityNames[m.Priority/8]
 	}
-	if m.CEF == nil {
+	if m.CEF == nil && !wazuh {
 		switch {
 		case m.Priority >= 0:
 			f["severity"] = severityNames[m.Priority%8]
@@ -116,7 +128,9 @@ func (m *Message) Event(sender netip.Addr, received time.Time, maxAge time.Durat
 			}
 		}
 	}
-	f["message"] = m.Raw
+	if !wazuh {
+		f["message"] = m.Raw // a Wazuh alert keeps its own JSON
+	}
 	ev.Time = received.UTC()
 	if plausible(t, received, maxAge) {
 		ev.Time = t.UTC()

@@ -30,6 +30,7 @@ var fuzzSeeds = []string{
 	"CEF:0|V|P|1|1|N|3|rt=Oct 12 13:00:00.123 +02:00 end=1",
 	`<134>Oct 12 13:59:00 fw1 CEF:0|Ven\|dor|P|1|sig|N|5|rt=1791813540000 src=10.0.0.1 dst=10.0.0.2 msg=a\=b c\\d\n request=http://x/?a=b`,
 	"CEF:0|V|P|1|1|N|Very-High|spt=abc in=5 out=x act=Deny proto=6",
+	`<132>Oct 12 13:59:00 wazuh-manager ossec: {"timestamp":"2026-10-12T13:58:59.000+0000","rule":{"level":10,"id":"5763","groups":["authentication_failures"]},"agent":{"id":"001","name":"web-01"},"data":{"srcip":"192.0.2.4"}}`,
 	"hello world\x00\r\n",
 	"\xff\xfe\x00<13>",
 }

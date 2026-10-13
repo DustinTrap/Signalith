@@ -194,7 +194,9 @@ The configuration already contains the server address and ingest token, and send
 HTTPS, checking the server's certificate with that CA. For firewalls, switches and other network
 devices, pick **Syslog** (see [Syslog](#syslog)). Hosts that run an OpenTelemetry Collector, and
 apps with an OpenTelemetry SDK, can send logs over OTLP instead: pick **OpenTelemetry** (see
-[docs/opentelemetry.md](docs/opentelemetry.md)).
+[docs/opentelemetry.md](docs/opentelemetry.md)). If you run Wazuh, pick **Wazuh** to send
+the alerts your Wazuh manager raises, through Fluent Bit on the manager or its own syslog
+output (see [docs/wazuh.md](docs/wazuh.md)).
 
 Agents on other machines must send to an address they can reach, such as
 `https://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
@@ -213,6 +215,7 @@ Supported sources in Phase 1:
 | Linux useradd, userdel, usermod, gpasswd | Change |
 | Syslog from any device (see below), including CEF | Authentication, Change, Network_Traffic or Other |
 | OpenTelemetry Collector or SDK logs over OTLP/HTTP ([docs/opentelemetry.md](docs/opentelemetry.md)) | the same models for Windows, Linux and syslog records; Other for app logs |
+| Wazuh alerts from a Wazuh manager ([docs/wazuh.md](docs/wazuh.md)) | Authentication, Filesystem, Registry, Configuration_Check, Endpoint, Change or Alerts |
 | Anything else | Other (searchable by text and fields) |
 
 #### Ingest limits
