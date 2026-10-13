@@ -3,6 +3,8 @@ package intel
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -150,7 +152,7 @@ func TestParseSTIX(t *testing.T) {
 func TestParseUpload(t *testing.T) {
 	now := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
 	good := "value,type,description,weight,expires,tags\n203.0.113.9,,Scanner,2,30d,scanner|ssh\nevil.example,domain,,,2027-01-01,\n# a comment\n\n"
-	inds, err := ParseUpload([]byte(good), now)
+	inds, err := ParseUpload(strings.NewReader(good), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,19 +161,75 @@ func TestParseUpload(t *testing.T) {
 		t.Errorf("upload = %+v", inds)
 	}
 	// A plain list needs no header.
-	inds, err = ParseUpload([]byte("203.0.113.9\nbad.example,phishing site\n"), now)
+	inds, err = ParseUpload(strings.NewReader("203.0.113.9\nbad.example,phishing site\n"), now)
 	if err != nil || len(inds) != 2 || inds[1].Description != "phishing site" {
 		t.Errorf("plain = %+v %v", inds, err)
 	}
 	bad := "value,type,weight,expires\n203.0.113.9,,abc,\nnot a value,,,\n203.0.113.10,domain,,\n203.0.113.11,,,2020-01-01\n"
-	_, err = ParseUpload([]byte(bad), now)
+	_, err = ParseUpload(strings.NewReader(bad), now)
 	var pe *ParseError
 	if !errors.As(err, &pe) || len(pe.Lines) != 4 || pe.Lines[0].Line != 2 || pe.Lines[3].Line != 5 ||
 		!strings.Contains(pe.Lines[0].Msg, "weight") || !strings.Contains(pe.Lines[3].Msg, "in the past") {
 		t.Fatalf("errors = %v", err)
 	}
-	if _, err := ParseUpload([]byte("value,colour\n1.2.3.4,red\n"), now); err == nil || !strings.Contains(err.Error(), "unknown column") {
+	if _, err := ParseUpload(strings.NewReader("value,colour\n1.2.3.4,red\n"), now); err == nil || !strings.Contains(err.Error(), "unknown column") {
 		t.Errorf("unknown column: %v", err)
+	}
+	// A byte order mark is skipped.
+	if inds, err := ParseUpload(strings.NewReader("\ufeffvalue\n203.0.113.9\n"), now); err != nil || len(inds) != 1 {
+		t.Errorf("bom = %+v %v", inds, err)
+	}
+}
+
+// ipLines yields n distinct IPv4 addresses, one per line, without holding
+// them all in memory.
+type ipLines struct {
+	n, i int
+	buf  []byte
+}
+
+func (g *ipLines) Read(p []byte) (int, error) {
+	for len(g.buf) < len(p) && g.i < g.n {
+		g.buf = fmt.Appendf(g.buf, "11.%d.%d.%d\n", g.i>>16&255, g.i>>8&255, g.i&255)
+		g.i++
+	}
+	if len(g.buf) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, g.buf)
+	g.buf = g.buf[n:]
+	return n, nil
+}
+
+func TestParseUploadCap(t *testing.T) {
+	defer func(n int) { maxUploadIndicators = n }(maxUploadIndicators)
+	maxUploadIndicators = 1000
+	now := time.Now()
+	// Exactly the cap is fine; one more refuses the whole upload as soon
+	// as it is seen, without reading the rest of a 2.1 million line file.
+	if inds, err := ParseUpload(&ipLines{n: 1000}, now); err != nil || len(inds) != 1000 {
+		t.Fatalf("at the cap = %d %v", len(inds), err)
+	}
+	g := &ipLines{n: 2_100_000}
+	inds, err := ParseUpload(g, now)
+	if err == nil || inds != nil || !strings.Contains(err.Error(), "more than 1000 indicators") {
+		t.Fatalf("over the cap = %d %v", len(inds), err)
+	}
+	if g.i > 100_000 {
+		t.Errorf("read %d lines before refusing", g.i)
+	}
+	// Each line counts, so repeating one value cannot slip past the cap.
+	if _, err := ParseUpload(strings.NewReader(strings.Repeat("203.0.113.9\n", 1001)), now); err == nil {
+		t.Error("1001 lines accepted")
+	}
+}
+
+// A read error, such as a body over its limit, is returned as it is.
+func TestParseUploadReadError(t *testing.T) {
+	r := http.MaxBytesReader(httptest.NewRecorder(), io.NopCloser(&ipLines{n: 100_000}), 1000)
+	var tooBig *http.MaxBytesError
+	if _, err := ParseUpload(r, time.Now()); !errors.As(err, &tooBig) {
+		t.Errorf("err = %v", err)
 	}
 }
 

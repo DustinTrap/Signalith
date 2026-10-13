@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -77,7 +78,7 @@ func TestSlowDetectionTimesOut(t *testing.T) {
 
 	st := s.Status()
 	slow := st["aaa-slow"]
-	if !slow.TimedOut || !strings.Contains(slow.LastError, "timed out after 300ms") || slow.Running {
+	if !slow.TimedOut || slow.Timeouts != 1 || !strings.Contains(slow.LastError, "timed out after 300ms") || slow.Running {
 		t.Errorf("slow detection state %+v", slow)
 	}
 	ran := 0
@@ -122,8 +123,158 @@ func TestSlowDetectionTimesOut(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
 	_, err := s.Run(ctx, d)
-	if !errors.Is(err, context.Canceled) || s.Status()["aaa-slow"].TimedOut {
+	if !errors.Is(err, context.Canceled) || s.Status()["aaa-slow"].TimedOut || s.Status()["aaa-slow"].Timeouts != 1 {
 		t.Errorf("cancelled run: %v, %+v", err, s.Status()["aaa-slow"])
+	}
+}
+
+// fakeClock is a clock tests move by hand; the scheduler's workers read
+// it at once.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Add(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// clockRunner answers at once, but queries mentioning "slow" move the
+// clock on by four and a half minutes, as a slow search would take. It
+// records the windows the queries mentioning "fast" searched.
+type clockRunner struct {
+	clock   *fakeClock
+	mu      sync.Mutex
+	windows [][2]time.Time
+}
+
+func (r *clockRunner) Execute(_ context.Context, q *query.Query) (*search.Result, error) {
+	key := q.String()
+	switch {
+	case strings.Contains(key, "slow"):
+		r.clock.Add(4*time.Minute + 30*time.Second)
+	case strings.Contains(key, "fast"):
+		from, err1 := time.Parse(time.RFC3339, q.Earliest)
+		to, err2 := time.Parse(time.RFC3339, q.Latest)
+		if err1 != nil || err2 != nil {
+			return nil, errors.Join(err1, err2)
+		}
+		r.mu.Lock()
+		r.windows = append(r.windows, [2]time.Time{from, to})
+		r.mu.Unlock()
+	}
+	return &search.Result{Kind: "table"}, nil
+}
+
+// TestStarvedDetectionLeavesNoGaps reproduces dos-5's remainder: with
+// slow detections holding the only worker, a detection due every minute
+// that looks back one minute ran every nine minutes or so and searched
+// only the last minute each time, so most events were never searched, and
+// nothing said so. Now each run searches on from where the last one
+// stopped, and the lateness shows in its run state.
+func TestStarvedDetectionLeavesNoGaps(t *testing.T) {
+	lib := libraryWithSlowRule(t)
+	for _, d := range []*Detection{
+		{ID: "aaa-slow2", Title: "Slow 2", Query: "user=slow2", Enabled: true, Schedule: "5m", Lookback: "1h"},
+		{ID: "zzz-fast", Title: "Fast", Query: "user=fast", Enabled: true, Schedule: "1m", Lookback: "1m"},
+	} {
+		if err := lib.Put(d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	clock := &fakeClock{t: start}
+	run := &clockRunner{clock: clock}
+	s := &Scheduler{Library: lib, Engine: run, Findings: findings.NewMemory(), Workers: 1, Now: clock.Now, Log: slog.New(slog.DiscardHandler)}
+	end := start.Add(time.Hour)
+	behind := false
+	for clock.Now().Before(end) {
+		s.RunDue(context.Background())
+		fast, _ := lib.Get("zzz-fast")
+		behind = behind || Behind(fast, s.Status()["zzz-fast"], clock.Now())
+		clock.Add(15 * time.Second) // the scheduler's tick
+	}
+
+	w := run.windows
+	if len(w) < 2 || len(w) > 20 {
+		t.Fatalf("the fast detection ran %d times; the test means it to be starved", len(w))
+	}
+	// Which rule takes the worker first varies, so the first run may start
+	// late; with no earlier run it still searches just its lookback.
+	if want := w[0][1].Add(-time.Minute); !w[0][0].Equal(want) {
+		t.Errorf("first window starts %v, want its lookback, %v", w[0][0], want)
+	}
+	for i := 1; i < len(w); i++ {
+		if w[i][0].After(w[i-1][1]) {
+			t.Errorf("events between %v and %v were never searched", w[i-1][1], w[i][0])
+		}
+		if !w[i][1].After(w[i-1][1]) {
+			t.Errorf("window %d %v does not move on from %v", i, w[i], w[i-1][1])
+		}
+	}
+	if last := w[len(w)-1][1]; last.Before(end.Add(-10 * time.Minute)) {
+		t.Errorf("last window ends %v, long before %v", last, end)
+	}
+	st := s.Status()["zzz-fast"]
+	if st.LateRuns == 0 || st.Lag <= time.Minute.Milliseconds() || st.LastLate.IsZero() || st.Unsearched != 0 || !behind {
+		t.Errorf("lateness not reported: %+v, behind %v", st, behind)
+	}
+	if !st.SearchedTo.Equal(w[len(w)-1][1]) {
+		t.Errorf("searched to %v, want %v", st.SearchedTo, w[len(w)-1][1])
+	}
+
+	// Further behind than the catch-up limit (an hour, for a one-minute
+	// lookback), a run searches back to the limit and counts the gap.
+	fast, _ := lib.Get("zzz-fast")
+	clock.Add(3 * time.Hour)
+	if _, err := s.Run(context.Background(), fast); err != nil {
+		t.Fatal(err)
+	}
+	last := run.windows[len(run.windows)-1]
+	if want := clock.Now().Add(-time.Hour); !last[0].Equal(want) {
+		t.Errorf("catch-up window starts %v, want %v", last[0], want)
+	}
+	if got, want := s.Status()["zzz-fast"].Unsearched, last[0].Sub(st.SearchedTo).Milliseconds(); got != want || got <= 0 {
+		t.Errorf("unsearched %dms, want %dms", got, want)
+	}
+
+	// On time again, a run searches its lookback, as it always did.
+	clock.Add(time.Minute)
+	if _, err := s.Run(context.Background(), fast); err != nil {
+		t.Fatal(err)
+	}
+	last = run.windows[len(run.windows)-1]
+	if want := clock.Now().Add(-time.Minute); !last[0].Equal(want) {
+		t.Errorf("on-time window starts %v, want %v", last[0], want)
+	}
+
+	// Turned off, it forgets where it stopped, so it does not catch up on
+	// the time it was off.
+	fast.Enabled = false
+	if err := lib.Put(fast); err != nil {
+		t.Fatal(err)
+	}
+	s.RunDue(context.Background())
+	if st := s.Status()["zzz-fast"]; !st.SearchedTo.IsZero() {
+		t.Errorf("a detection turned off keeps its checkpoint: %v", st.SearchedTo)
+	}
+}
+
+func TestCatchUp(t *testing.T) {
+	for lb, want := range map[time.Duration]time.Duration{
+		time.Minute: time.Hour, 15 * time.Minute: 150 * time.Minute, 6 * time.Hour: 24 * time.Hour, 7 * 24 * time.Hour: 7 * 24 * time.Hour,
+	} {
+		if got := CatchUp(lb); got != want {
+			t.Errorf("lookback %v: catch-up %v, want %v", lb, got, want)
+		}
 	}
 }
 

@@ -1104,6 +1104,19 @@ function lastRunCell(st) {
   return [el('div', { class: 'dx-line', title: fmtTime(st.last_run) }, ago(st.last_run)), second];
 }
 
+// lagText says how far the detection fell behind since the server
+// started: runs that waited longer than its schedule for a free worker,
+// runs stopped at their timeout, and time no run searched because it fell
+// further behind than its catch-up limit. '' when none.
+function lagText(st) {
+  const mins = (ms) => Math.max(1, Math.round(ms / 60e3));
+  const parts = [];
+  if (st.late_runs) parts.push(`${dxPlural(st.late_runs, 'late run')}, last ${ago(st.last_late)}`);
+  if (st.timeouts) parts.push(dxPlural(st.timeouts, 'timeout'));
+  if (st.unsearched_ms) parts.push(`${mins(st.unsearched_ms)} min not searched`);
+  return parts.join(' · ');
+}
+
 function detectionRow(d) {
   const st = d.state || {};
   const sw = el('input', { type: 'checkbox', role: 'switch', 'aria-label': 'On: ' + plainTitle(d.title) });
@@ -1354,6 +1367,7 @@ function renderDetectionInspector() {
       dxSection('Last run', dxKv([
         ['When', st.last_run ? el('span', { title: fmtTime(st.last_run) }, ago(st.last_run) + (st.last_duration_ms ? ` · took ${st.last_duration_ms} ms` : '')) : runsOn ? `Not here: it runs on ${runsOn}` : runsOn === '' ? 'Not here' : 'Not run yet'],
         st.last_run ? ['Results', `${dxPlural(st.last_results, 'result')}, ${dxPlural(st.last_findings, 'new finding')}`] : null,
+        lagText(st) ? ['Behind schedule', lagText(st)] : null,
         n24 != null ? ['Last 24 hours', n24 ? el('button', { class: 'link-btn', type: 'button' }, dxPlural(n24, 'finding')) : 'No findings'] : null,
         schedulerOn && d.enabled ? null : ['Schedule', schedulerOn || runsOn != null && !d.enabled ? 'Off, so it does not run'
           : runsOn ? `Runs on ${runsOn}` : runsOn === '' ? 'No server runs detections right now' : 'Scheduler off; runs only with Run now'],
