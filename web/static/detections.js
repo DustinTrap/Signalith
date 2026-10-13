@@ -955,6 +955,7 @@ function renderFindingDetail(box, data, opts = {}) {
     dxTabs(prefix, tabs, fnd.tab, setTab),
     el('div', { class: 'inspector__body' },
       dxPanel(prefix, 'overview', fnd.tab,
+        typeof pbFindingBanner === 'function' ? pbFindingBanner(f.id) : null,
         f.description ? el('p', { class: 'dx-lede' }, f.description) : null,
         d && d.guidance ? el('div', { class: 'callout' }, icon('lightbulb'), el('div', {}, el('b', {}, 'How to triage. '), d.guidance)) : null,
         (f.mitre || []).length ? techRow(f.mitre) : null,
