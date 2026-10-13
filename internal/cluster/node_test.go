@@ -765,3 +765,20 @@ func TestRuntimeIndexTemplate(t *testing.T) {
 		t.Errorf("made again with %s", fos.IndexBody("s_runtime"))
 	}
 }
+
+// The banner every signed-in user sees while OpenSearch's disk is full
+// never says space is being freed: whether the holder's disk guard is on,
+// and has days it may delete, is known only there. The admins' text says
+// what the guard does unless it was turned off.
+func TestFullDiskBannerClaimsNothing(t *testing.T) {
+	text, banner := fullDiskWarning(JobsStatus{Holder: "n_a", HolderName: "siem-a"})
+	if strings.Contains(banner, "deleting") || strings.Contains(banner, "free") || !strings.Contains(banner, "refuses new events") {
+		t.Errorf("banner %q", banner)
+	}
+	if !strings.Contains(text, "siem-a keeps only the retention disk guard running: unless it was turned off") {
+		t.Errorf("text %q", text)
+	}
+	if _, banner := fullDiskWarning(JobsStatus{}); !strings.Contains(banner, "No server is deleting old days") {
+		t.Errorf("no holder: %q", banner)
+	}
+}

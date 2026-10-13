@@ -286,7 +286,9 @@ func installService(m *mgr.Mgr, path string) error {
 	// identity (node.id) and lock there, next to its master key and HTTPS
 	// certificate.
 	if c, err := config.LoadUnchecked(abs); err == nil {
-		_ = os.MkdirAll(c.StateDir(), 0o750)
+		if err := prepareStateDir(c.StateDir(), filepath.Dir(abs)); err != nil {
+			fmt.Printf("Warning: could not prepare the state folder %s: %v\n", c.StateDir(), err)
+		}
 	}
 	access := serviceAccess(abs)
 	for _, dir := range access.write {
@@ -354,4 +356,28 @@ func grantAccess(path, sid string, rights windows.ACCESS_MASK, inherit bool) err
 		return err
 	}
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil)
+}
+
+// prepareStateDir makes the state folder, or the fallback folder in
+// ProgramData that Signalith uses as one, private: only SYSTEM,
+// Administrators, the service and this account may use it, as
+// install.ps1 does for the config folder, and nothing is passed down
+// from ProgramData, where every user may read. The config folder, which
+// install.ps1 protects, and any other folder that already exists (one
+// chosen with SIGNALITH_STATE_DIR) are left as they are.
+func prepareStateDir(dir, configDir string) error {
+	if strings.EqualFold(filepath.Clean(dir), filepath.Clean(configDir)) {
+		return nil
+	}
+	_, err := os.Stat(dir)
+	own := errors.Is(err, os.ErrNotExist)
+	for _, f := range config.StateDirFallbacks() {
+		if strings.EqualFold(filepath.Clean(f), filepath.Clean(dir)) {
+			own = true
+		}
+	}
+	if !own {
+		return nil
+	}
+	return securefile.MkdirPrivate(dir)
 }

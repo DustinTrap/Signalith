@@ -585,12 +585,13 @@ function renderHealthCard(h) {
 
 // ---------- app shell: the servers' red problems ----------
 // No server running detections, OpenSearch's disk full: everyone sees
-// them on every page but Servers, which says the same at more length.
-// Admins get a link there; it says why and what to do.
+// them on every page but Servers, which says the same at more length, and
+// Health, which lists them among its own alerts. Admins get a link there;
+// it says why and what to do.
 const clusterBanner = { list: [], key: '' };
 function renderClusterBanner() {
   const box = $('cluster-banner');
-  const list = currentPage === 'servers' ? [] : clusterBanner.list;
+  const list = currentPage === 'servers' || currentPage === 'health' ? [] : clusterBanner.list;
   const key = list.join('\n') + '|' + can('admin');
   if (key === clusterBanner.key) return;
   clusterBanner.key = key;

@@ -1003,9 +1003,11 @@ setInterval(() => {
 let detections = [];
 let schedulerOn = true;
 // runsOn names the server that runs the detections when this one does
-// not; '' when none does; null when this server runs them or its
-// scheduler is off.
+// not; '' when none does; null when this server runs them, or when it is
+// on its own (no other servers share its OpenSearch) with its scheduler
+// off. schedulerHere is this server's own scheduler setting.
 let runsOn = null;
+let schedulerHere = true;
 const det = { show: '', open: null, closed: false, list: [], counts24: null, loaded: false, seq: 0, msg: null, test: null, running: null };
 // d-show is a group of pills; other pages set it like a select ($('d-show').value = '').
 Object.defineProperty($('d-show'), 'value', { configurable: true, get: () => det.show, set: (v) => { det.show = v || ''; } });
@@ -1032,7 +1034,8 @@ async function loadDetections() {
     if (seq !== det.seq) return;
     detections = res.detections;
     schedulerOn = res.scheduler;
-    runsOn = typeof res.runs_on === 'string' && res.scheduler_here ? res.runs_on : null;
+    runsOn = typeof res.runs_on === 'string' ? res.runs_on : null;
+    schedulerHere = res.scheduler_here !== false;
     det.counts24 = null;
     if (f24) {
       det.counts24 = {};
@@ -1072,20 +1075,21 @@ function detectionsHead() {
 // scheduler is off, another server runs them, or none does right now.
 function schedulerNote() {
   const note = $('d-scheduler-note');
-  let tone = 'info', ic = 'info', title = 'The scheduler is off on this server.', text = 'Detections only run when you choose Run now.';
+  const offHere = schedulerHere ? '' : 'This server’s scheduler is off. ';
+  let tone = 'info', ic = 'info', title = 'The scheduler is off on this server.', text = ['Detections only run when you choose Run now.'];
   if (runsOn) {
     title = `Detections run on ${runsOn}.`;
-    text = 'Their run times and errors are shown there. Run now runs one here.';
+    text = [offHere + 'Their run times and errors are shown there. Run now runs one here.'];
   } else if (runsOn === '') {
     tone = 'danger'; ic = 'circle-alert';
     title = 'No server runs detections right now.';
-    text = can('admin') ? 'The Servers page says why.' : 'An admin needs to look.';
+    text = can('admin') ? [offHere + 'The ', el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page'), ' says why.']
+      : [offHere + 'An admin needs to look.'];
   }
   note.dataset.tone = tone;
   note.querySelector('use').setAttribute('href', '#i-' + ic);
   $('d-scheduler-title').textContent = title;
-  $('d-scheduler-text').replaceChildren(...(runsOn === '' && can('admin')
-    ? ['The ', el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page'), ' says why.'] : [text]));
+  $('d-scheduler-text').replaceChildren(...text);
   note.classList.toggle('hidden', schedulerOn);
 }
 

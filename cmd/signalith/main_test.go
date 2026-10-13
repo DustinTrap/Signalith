@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -154,6 +155,61 @@ func TestPasswdUsesTheServiceEnvironment(t *testing.T) {
 			t.Errorf("%s: the new password does not work, or the service's still does", name)
 		}
 		t.Setenv(name, "")
+	}
+}
+
+// Commands that only read (validate, secrets status and the others) never
+// write in a fallback state folder, so one run as root cannot leave a note
+// the server's own account cannot read. signalith passwd, which keeps the
+// password there, notes the folder as this install's first, and finds it
+// where the service does: a unit's StateDirectory= is its
+// $STATE_DIRECTORY, which a shell does not have.
+func TestFallbackStateDirIsNotedOnlyWhenWritten(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd's StateDirectory is Linux only")
+	}
+	for _, k := range []string{"SIGNALITH_STATE_DIR", "SIGNALITH_LOOKUPS_DIR", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_ADMIN_PASSWORD_FILE", "STATE_DIRECTORY"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	// The usual state folder cannot be made: a file is where its folder
+	// would be.
+	path := filepath.Join(dir, "signalith.yaml")
+	os.WriteFile(filepath.Join(dir, "data"), []byte("not a folder"), 0o600)
+	h, _ := config.HashPassword("password in the file")
+	os.WriteFile(path, []byte("auth:\n  admin_password_hash: "+h+"\nlookups:\n  dir: data/lookups\n"), 0o600)
+	fallback := filepath.Join(dir, "service-state")
+	first := filepath.Join(dir, "admin-password")
+	os.WriteFile(first, []byte("first password\n"), 0o600)
+	saved := readServiceSettings
+	t.Cleanup(func() { readServiceSettings = saved })
+	readServiceSettings = func() *serviceSettings {
+		return &serviceSettings{where: "the test unit", args: []string{"serve", "-c", path},
+			env: map[string]string{"STATE_DIRECTORY": fallback, "SIGNALITH_ADMIN_PASSWORD_FILE": first}}
+	}
+	useServiceEnv(path, io.Discard)
+	if got := os.Getenv("STATE_DIRECTORY"); got != fallback {
+		t.Fatalf("STATE_DIRECTORY = %q", got)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := config.StateDirFor(path); got != fallback {
+		t.Fatalf("state folder %q, want %q", got, fallback)
+	}
+	if _, err := os.Stat(fallback); !os.IsNotExist(err) {
+		t.Fatalf("reading the config made the fallback folder: %v", err)
+	}
+	t.Setenv("SIGNALITH_NEW_PASSWORD", "new admin password")
+	if out, err := capture(t, func() error { return cmdPasswd([]string{"-c", path}) }); err != nil {
+		t.Fatalf("passwd: %v\n%s", err, out)
+	}
+	note, err := os.ReadFile(filepath.Join(fallback, "used_instead_of"))
+	if err != nil || !strings.Contains(string(note), filepath.Join(dir, "data")+"\n") {
+		t.Errorf("note: %v %q", err, note)
+	}
+	if fi, err := os.Stat(filepath.Join(fallback, "admin-password-hash")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("password hash: %v", err)
 	}
 }
 

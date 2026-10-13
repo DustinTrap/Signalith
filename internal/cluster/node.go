@@ -271,10 +271,14 @@ func (n *Node) Use(c *store.Client, prefix string, s Settings) {
 }
 
 // Pause gives the background jobs up, and keeps this server from taking
-// them again until the next Use: its components could not start.
+// them again until the next Use: its components could not start. Until
+// then its heartbeat says it is down, and lists no syslog listeners,
+// since nothing listens on them; its web address still answers, with a
+// page that says it is down.
 func (n *Node) Pause(why string) {
 	n.mu.Lock()
 	n.paused = why
+	n.settings.Syslog = Syslog{}
 	n.mu.Unlock()
 	n.releaseAsync(why)
 	n.poke()
@@ -417,8 +421,11 @@ func (n *Node) tick(ctx context.Context) time.Duration {
 	if due {
 		state := StateReady
 		n.mu.Lock()
-		if n.stopping {
+		switch {
+		case n.stopping:
 			state = StateStopping
+		case n.paused != "":
+			state = StateDown
 		}
 		n.mu.Unlock()
 		if conflict == "" {
@@ -670,6 +677,9 @@ func (n *Node) heartbeatDoc(state string) Heartbeat {
 		hb.ClockOffsetMS = &ms
 	}
 	hb.Problems = append(hb.Problems, n.local.Warnings...)
+	if n.paused != "" {
+		hb.Problems = append(hb.Problems, n.paused+". Its log says why.")
+	}
 	return hb
 }
 
@@ -1151,6 +1161,8 @@ const (
 	NotReadyOpenSearch = "opensearch"
 	NotReadyIdentity   = "identity"
 	NotReadyStopping   = "stopping"
+	// NotReadyDown is a server whose parts could not start (see Pause).
+	NotReadyDown = "down"
 )
 
 // Ready reports whether this server should get traffic from a load
@@ -1167,6 +1179,8 @@ func (n *Node) readyLocked() (bool, string) {
 		return false, NotReadyStopping
 	case n.conflict != "":
 		return false, NotReadyIdentity
+	case n.paused != "":
+		return false, NotReadyDown
 	case !n.hb.checked && n.lastErr != "":
 		return false, NotReadyOpenSearch
 	case !n.hb.checked:
@@ -1258,7 +1272,8 @@ func (n *Node) Status() Status {
 	// This server, as it is now rather than as last written.
 	self.State = StateReady
 	if !ready {
-		self.State = map[string]string{NotReadyStopping: StateStopping, NotReadyIdentity: StateConflict, NotReadyOpenSearch: StateUnreachable}[reason]
+		self.State = map[string]string{NotReadyStopping: StateStopping, NotReadyIdentity: StateConflict, NotReadyOpenSearch: StateUnreachable,
+			NotReadyDown: StateDown}[reason]
 		if self.State == "" {
 			self.State = StateStarting
 		}
@@ -1465,7 +1480,9 @@ func (n *Node) localWarningsLocked(st Status) []Warning {
 }
 
 // fullDiskWarning says that OpenSearch refuses writes, what Signalith does
-// about it, and what an admin can do; and briefly, for every page.
+// about it, and what an admin can do; and briefly, for every page. Only
+// the holder knows whether its disk guard is on, or has days left it may
+// delete, so the short form claims nothing about freeing space.
 func fullDiskWarning(jobs JobsStatus) (text, banner string) {
 	head := "OpenSearch's disk is full, so it refuses new events. "
 	if jobs.Holder == "" {
@@ -1474,7 +1491,7 @@ func fullDiskWarning(jobs JobsStatus) (text, banner string) {
 	}
 	return head + fmt.Sprintf("%s keeps only the retention disk guard running: unless it was turned off on the Data retention page, it deletes the oldest days until there is room. "+
 			"New events are stored again by themselves after that; agents keep theirs until then. To make room sooner, give OpenSearch more disk.", jobs.HolderName),
-		head + "Signalith is deleting the oldest days to free space."
+		strings.TrimSpace(head)
 }
 
 // Banners returns the red problems for a banner on every page, briefly.

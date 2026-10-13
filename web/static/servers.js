@@ -19,6 +19,7 @@
     offline: ['down', 'Not answering'],
     conflict: ['down', 'Identity in use'],
     unreachable: ['down', 'Can’t reach OpenSearch'],
+    down: ['down', 'Couldn’t start'],
   };
   const gone = (s) => s.state === 'offline' || s.state === 'stopped';
   const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
@@ -161,6 +162,8 @@
       sub = el('div', { class: 'sv-sub' }, 'Leaves this list 7 days after it stopped');
     } else if (s.state === 'offline' && seenAgo != null) {
       sub = el('div', { class: 'sv-sub', title: s.offline_since ? new Date(s.offline_since).toLocaleString() : '' }, ageSpan('seen', seenAgo));
+    } else if (s.state === 'down') {
+      sub = el('div', { class: 'sv-sub' }, 'Receives nothing and tries again every 30 seconds');
     } else if ((s.state === 'ready' || s.state === 'unreachable') && s.uptime_seconds != null) {
       sub = el('div', { class: 'sv-sub', title: s.started_at ? 'Started ' + new Date(s.started_at).toLocaleString() : '' }, ageSpan('up', s.uptime_seconds));
     }
@@ -237,7 +240,7 @@
   function diskAlert(lease) {
     const who = lease.holder_name;
     return alertBox('danger', 'OpenSearch’s disk is full, so it refuses new events.',
-      (who ? `${who} keeps only the disk guard running, which deletes the oldest days to make room. ` : '') +
+      (who ? `${who} keeps only the disk guard running: unless it was turned off on the Data retention page, it deletes the oldest days to make room. ` : '') +
       'New events are stored again by themselves once there is room. To make room sooner, give OpenSearch more disk.');
   }
 
@@ -253,6 +256,8 @@
     else parts.push('No server runs the jobs right now');
     const down = servers.filter((s) => s.state === 'offline').length;
     if (down) parts.push(`${down} not answering`);
+    const failed = servers.filter((s) => s.state === 'down').length;
+    if (failed) parts.push(`${failed} couldn’t start`);
     const live = servers.filter((s) => !gone(s));
     const versions = [...new Set(live.filter((s) => s.version).map((s) => s.version))];
     if (live.length > 1 && versions.length === 1) parts.push('all on ' + versions[0]);

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/ospki"
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -213,18 +214,13 @@ func printInitialPassword(out io.Writer, path string) error {
 }
 
 // writeAdminHash keeps the built-in admin's new password hash in the
-// state folder (config.AdminHashFile), where the server reads it.
+// state folder (config.AdminHashFile), where the server reads it. It is
+// private: mode 0600, or on Windows an access list of its own (SYSTEM,
+// Administrators and the service), whatever the folder passes down. Run
+// as root, a new file is given the folder's owner, so the server's own
+// account can still read it, and a link there is replaced, not followed.
 func writeAdminHash(path, hash string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := writeFile(path, []byte(hash+"\n"), 0o600); err != nil {
-		return err
-	}
-	// Written by root for a server that runs as another user: the server
-	// must still be able to read it.
-	return chownLike(path, dir)
+	return securefile.Replace(path, []byte(hash+"\n"))
 }
 
 // cmdOpenSearchCerts writes certificates and security settings for an

@@ -96,3 +96,62 @@ func TestSettingsFileOwnerIgnoresALink(t *testing.T) {
 		t.Errorf("new file owned by %d:%d, want the folder's owner", st.Uid, st.Gid)
 	}
 }
+
+// A note root writes in a fallback state folder belongs to the folder's
+// owner, so the server's own account can read it and add to it.
+func TestStateDirNoteKeepsTheFolderOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to give files away")
+	}
+	def, fallback := t.TempDir(), t.TempDir()
+	if err := os.Chown(fallback, 4242, 4343); err != nil {
+		t.Skip("cannot change owners here:", err)
+	}
+	badFolders(t, def)
+	if dir, _ := pickStateDir(def, []string{fallback}); dir != fallback {
+		t.Fatalf("got %q", dir)
+	}
+	if err := RecordStateDir(fallback); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(fallback, insteadOfFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := fi.Sys().(*syscall.Stat_t)
+	if st.Uid != 4242 || st.Gid != 4343 || fi.Mode().Perm() != 0o644 {
+		t.Errorf("note owned by %d:%d, mode %v", st.Uid, st.Gid, fi.Mode().Perm())
+	}
+}
+
+// The note is readable by every account whatever the umask (the systemd
+// unit's is 0077), and a link put in its place is not followed.
+func TestStateDirNoteModeAndLinks(t *testing.T) {
+	old := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(old) })
+	def, fallback := t.TempDir(), t.TempDir()
+	badFolders(t, def)
+	if dir, _ := pickStateDir(def, []string{fallback}); dir != fallback {
+		t.Fatalf("got %q", dir)
+	}
+	if err := RecordStateDir(fallback); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(fallback, insteadOfFile)); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Errorf("note: %v %v", fi.Mode(), err)
+	}
+	other := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(other, insteadOfFile)); err != nil {
+		t.Fatal(err)
+	}
+	if err := noteInsteadOf(other, def); err == nil {
+		t.Error("a link was followed")
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep\n" {
+		t.Errorf("the linked file changed: %q", b)
+	}
+}

@@ -2,17 +2,22 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
+	"github.com/jrsamsanchez/signalith/internal/config"
 )
 
 // eventually waits up to 20 seconds for ok.
@@ -96,6 +101,104 @@ func TestSchedulerOffNeverRunsTheJobs(t *testing.T) {
 		!strings.Contains(s["not_eligible"].(string), "detections.scheduler is off") {
 		t.Errorf("this server %v", s)
 	}
+}
+
+// Turning detections.scheduler off on the Settings page and restarting in
+// place, while this server holds the job lease, starts no job with the new
+// settings, even before the lease is given up in the background.
+func TestSchedulerTurnedOffStartsNoJob(t *testing.T) {
+	var mu sync.Mutex
+	var started []string
+	jobStarting = func(name string, c *config.Config) {
+		mu.Lock()
+		defer mu.Unlock()
+		started = append(started, fmt.Sprintf("%s scheduler=%v", name, c.Detections.Scheduler))
+	}
+	t.Cleanup(func() { jobStarting = nil })
+	rs := startRunnerWith(t, runOptions{scheduler: true, server: plainHTTP})
+	node := rs.r.node
+	eventually(t, "this server runs the jobs", node.RunsJobs)
+	eventually(t, "the jobs start", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(started) > 0
+	})
+	for range 3 {
+		rs.save(`{"detections.scheduler":false}`)
+		if _, res := rs.restart(); !res.OK {
+			t.Fatalf("restart %+v\n%s", res, rs.logs.String())
+		}
+		eventually(t, "the jobs are given up", func() bool { return !node.RunsJobs() })
+		rs.save(`{"detections.scheduler":true}`)
+		if _, res := rs.restart(); !res.OK {
+			t.Fatalf("restart %+v\n%s", res, rs.logs.String())
+		}
+		eventually(t, "this server runs the jobs again", node.RunsJobs)
+	}
+	rs.stop()
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range started {
+		if strings.HasSuffix(s, "scheduler=false") {
+			t.Errorf("a job started with detections.scheduler off: %v", started)
+			break
+		}
+	}
+}
+
+// A server whose restart starts neither the new settings nor the previous
+// ones tells the other servers so: its heartbeat says down, lists no
+// syslog listeners (nothing listens on them) and names the problem, and it
+// gives the jobs up. Once it starts again, it is ready and runs them.
+func TestDownServerSaysSoInItsHeartbeat(t *testing.T) {
+	var broken atomic.Bool
+	downRetry = 200 * time.Millisecond
+	t.Cleanup(func() { downRetry = 30 * time.Second })
+	udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	syslogAddr := udp.LocalAddr().String()
+	udp.Close()
+	rs := startRunnerWith(t, runOptions{scheduler: true, server: plainHTTP, page: map[string]any{"syslog.udp": syslogAddr},
+		fail: func(*config.Config) error {
+			if broken.Load() {
+				return errors.New("broken on purpose")
+			}
+			return nil
+		}})
+	node := rs.r.node
+	heartbeat := func() map[string]any { return rs.os.Source("signalith_runtime", "node:"+node.ID()) }
+	listed := func(hb map[string]any) string {
+		sl, _ := hb["syslog"].(map[string]any)
+		s, _ := sl["udp"].(string)
+		return s
+	}
+	eventually(t, "this server runs the jobs", node.RunsJobs)
+	eventually(t, "the heartbeat lists the syslog listener", func() bool { return listed(heartbeat()) == syslogAddr })
+	broken.Store(true)
+	if _, res := rs.restart(); res.OK {
+		t.Fatalf("restart worked: %+v", res)
+	}
+	eventually(t, "the heartbeat says down", func() bool {
+		hb := heartbeat()
+		return hb["state"] == cluster.StateDown && listed(hb) == ""
+	})
+	eventually(t, "the jobs are given up", func() bool { return !node.RunsJobs() })
+	if ok, why := node.Ready(); ok || why != cluster.NotReadyDown {
+		t.Errorf("Ready: %v %q", ok, why)
+	}
+	if hb := heartbeat(); hb["listen"] != rs.addr || !strings.Contains(fmt.Sprint(hb["problems"]), "could not start") || hb["leader_eligible"] != false {
+		t.Errorf("heartbeat while down: %v", hb)
+	}
+	// It starts again with the settings that work (the page's syslog.udp
+	// was set aside as the likely cause).
+	broken.Store(false)
+	eventually(t, "the heartbeat says ready again", func() bool {
+		hb := heartbeat()
+		return hb["state"] == cluster.StateReady && !strings.Contains(fmt.Sprint(hb["problems"]), "could not start")
+	})
+	eventually(t, "this server runs the jobs again", node.RunsJobs)
 }
 
 // /livez and /readyz answer without signing in, and say nothing more than

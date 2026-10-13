@@ -37,6 +37,9 @@ var serviceVars = map[string]bool{
 	"SIGNALITH_USERS_FILE": true, "SIGNALITH_INTEL_FEEDS_FILE": true, "SIGNALITH_SETTINGS_FILE": true,
 	"SIGNALITH_MASTER_KEY_FILE": true, "SIGNALITH_MASTER_KEY": true,
 	"SIGNALITH_NODE_NAME": true, "SIGNALITH_NODE_URL": true,
+	// systemd sets it from the unit's StateDirectory= (see
+	// parseSystemctlShow): the state folder falls back to it.
+	"STATE_DIRECTORY": true,
 }
 
 // serviceSettings is what the service is given.
@@ -152,11 +155,16 @@ func (s *serviceSettings) serves(path string) bool {
 
 // parseSystemctlShow reads "systemctl show" output: the service's command
 // line, its Environment= settings, the files EnvironmentFile= names (read
-// with readFile, later ones winning, as systemd does), and a master key
-// passed as a credential.
+// with readFile, later ones winning, as systemd does), a master key
+// passed as a credential, and its StateDirectory=, which systemd gives the
+// service as $STATE_DIRECTORY (the first one, under /var/lib), where its
+// state folder may fall back to (config.Config.StateDir). A command run by
+// hand gets the same, so it looks for the state folder where the service
+// does.
 func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *serviceSettings {
 	s := &serviceSettings{where: "systemctl show signalith", env: map[string]string{}}
 	var files []string
+	var stateDir string
 	sc := bufio.NewScanner(bytes.NewReader(show))
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -184,6 +192,14 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			if f, _, _ := strings.Cut(value, " ("); unitPathIsAbs(f) {
 				files = append(files, f)
 			}
+		case "StateDirectory":
+			// signalith, or several separated by spaces; a newer systemd
+			// may add :link to an entry.
+			if f := strings.Fields(value); len(f) > 0 {
+				if d, _, _ := strings.Cut(f[0], ":"); d != "" && !path.IsAbs(d) && !strings.Contains(d, "..") {
+					stateDir = path.Join("/var/lib", d)
+				}
+			}
 		case "LoadCredential":
 			if id, file, ok := strings.Cut(value, ":"); ok && id == "master.key" && unitPathIsAbs(file) {
 				s.cred = file
@@ -202,6 +218,10 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			s.env[k] = v
 		}
 		clear(data)
+	}
+	// systemd sets STATE_DIRECTORY itself, over any Environment= line.
+	if stateDir != "" {
+		s.env["STATE_DIRECTORY"] = stateDir
 	}
 	return s
 }

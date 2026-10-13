@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -27,7 +28,8 @@ import (
 func TestMain(m *testing.M) {
 	readServiceSettings = func() *serviceSettings { return nil }
 	for _, k := range []string{"SIGNALITH_STATE_DIR", "SIGNALITH_MASTER_KEY", "SIGNALITH_MASTER_KEY_FILE", "CREDENTIALS_DIRECTORY",
-		"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_ASSISTANT_API_KEY", "SIGNALITH_INGEST_TOKEN", "SIGNALITH_LDAP_BIND_PASSWORD", "SIGNALITH_LOOKUPS_DIR"} {
+		"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_ASSISTANT_API_KEY", "SIGNALITH_INGEST_TOKEN", "SIGNALITH_LDAP_BIND_PASSWORD", "SIGNALITH_LOOKUPS_DIR",
+		"STATE_DIRECTORY"} {
 		os.Unsetenv(k)
 	}
 	os.Exit(m.Run())
@@ -486,6 +488,22 @@ EnvironmentFiles=/nonexistent/other.env (ignore_errors=yes)
 	if s := parseSystemctlShow([]byte("ExecStart=\nEnvironment=\n"), os.ReadFile); s.envFor("/etc/signalith/signalith.yaml") != nil {
 		t.Errorf("no service: %+v", s)
 	}
+	// A unit with StateDirectory= gets $STATE_DIRECTORY from systemd, not
+	// from an Environment= line; a command run by hand gets the same, so
+	// it finds a state folder that fell back there.
+	for line, want := range map[string]string{
+		"StateDirectory=signalith-test\n":                      "/var/lib/signalith-test",
+		"StateDirectory=sig/nested other\n":                    "/var/lib/sig/nested",
+		"StateDirectory=signalith:old-name\n":                  "/var/lib/signalith",
+		"StateDirectory=\n":                                    "",
+		"StateDirectory=../etc\n":                              "",
+		"StateDirectory=sig\nEnvironment=STATE_DIRECTORY=/x\n": "/var/lib/sig",
+	} {
+		got := parseSystemctlShow(append(slices.Clone(show), line...), os.ReadFile).envFor("/etc/signalith/signalith.yaml")
+		if got["STATE_DIRECTORY"] != want {
+			t.Errorf("%q: STATE_DIRECTORY = %q, want %q", line, got["STATE_DIRECTORY"], want)
+		}
+	}
 	// The Windows service's settings, as read from the registry.
 	win := &serviceSettings{args: []string{"-c", `C:\ProgramData\Signalith\signalith.yaml`},
 		env: map[string]string{"SIGNALITH_MASTER_KEY_FILE": `C:\ProgramData\Signalith\keys\master.key`, "SIGNALITH_ADMIN_PASSWORD": "x"}}
@@ -532,6 +550,27 @@ func TestServiceVarsCoverTheServersFolders(t *testing.T) {
 		if serviceVars[n] {
 			t.Errorf("%s, a file holding a secret, is taken from the service", n)
 		}
+	}
+	// So is every variable the state folder's fallbacks are read from
+	// (systemd's STATE_DIRECTORY), except Windows' ProgramData, which is
+	// the same for the service and every account.
+	getenv := regexp.MustCompile(`Getenv\("([A-Za-z_]+)"\)`)
+	statefs, _ := filepath.Glob(filepath.Join("..", "..", "internal", "config", "statefs_*.go"))
+	found := 0
+	for _, p := range statefs {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range getenv.FindAllStringSubmatch(string(b), -1) {
+			found++
+			if m[1] != "ProgramData" && !serviceVars[m[1]] {
+				t.Errorf("%s, where the state folder may fall back to, is not taken from the service", m[1])
+			}
+		}
+	}
+	if found < 2 {
+		t.Errorf("found %d variables in %v", found, statefs)
 	}
 }
 

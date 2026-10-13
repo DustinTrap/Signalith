@@ -478,9 +478,13 @@ func cmdPasswd(args []string) error {
 	// Docker quick start, whose signalith.yaml is read-only), the new one
 	// is kept in the state folder and replaces it. So is every later one,
 	// and one for a service given the password in its environment.
-	hashFile := config.AdminHashFileIn(config.StateDirFor(*path))
+	stateDir := config.StateDirFor(*path)
+	hashFile := config.AdminHashFileIn(stateDir)
 	_, statErr := os.Stat(hashFile)
 	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || svcPassword != "" || statErr == nil {
+		if err := config.RecordStateDir(stateDir); err != nil {
+			return err
+		}
 		if err := writeAdminHash(hashFile, h); err != nil {
 			return err
 		}
@@ -1102,6 +1106,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		}},
 	}
 	in.retention = ret
+	if hook := jobStarting; hook != nil {
+		in.jobsList = watchJobs(in.jobsList, c, hook)
+	}
 	if !c.Detections.Scheduler {
 		log.Warn("detections.scheduler is off, so this server never runs detections, threat intel downloads or retention; " +
 			"another server that shares its OpenSearch does. The Data retention and feed settings are read-only here")
@@ -1129,10 +1136,36 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			Syslog:       cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
 			Fingerprints: func() cluster.Fingerprints { return filesFingerprints(c, ret, feeds) },
 		})
-		r.node.SetJobs(in.jobsList)
+		// A server with detections.scheduler off never runs the jobs. It
+		// may still hold the lease from before a restart in place, which
+		// Use gives up in the background: until then it must not start
+		// them with settings that say it never runs them.
+		if c.Detections.Scheduler {
+			r.node.SetJobs(in.jobsList)
+		} else {
+			r.node.SetJobs(nil)
+		}
 	}
 	started = true
 	return in, nil
+}
+
+// jobStarting, set by tests, hears of each background job as it starts,
+// with the settings it starts with.
+var jobStarting func(name string, c *config.Config)
+
+// watchJobs tells hook when each job starts.
+func watchJobs(jobs []cluster.Job, c *config.Config, hook func(string, *config.Config)) []cluster.Job {
+	out := make([]cluster.Job, len(jobs))
+	for i, j := range jobs {
+		run := j.Run
+		j.Run = func(ctx context.Context) {
+			hook(j.Name, c)
+			run(ctx)
+		}
+		out[i] = j
+	}
+	return out
 }
 
 // indexUpgrade is an index whose fields the job holder brings up to date.
@@ -1243,8 +1276,16 @@ func deployment() string {
 func openNode(c *config.Config, log *slog.Logger) (*cluster.Node, *slog.Logger, error) {
 	inContainer := cluster.InContainer()
 	dir, why := c.StateDirChoice()
+	// A fallback folder is noted as this install's before anything is
+	// kept in it.
+	if err := config.RecordStateDir(dir); err != nil {
+		return nil, nil, err
+	}
 	local, err := cluster.OpenLocal(dir, cluster.LocalOptions{Name: c.Cluster.NodeName, InContainer: inContainer})
 	if err != nil {
+		if why != "" {
+			log.Warn(why)
+		}
 		return nil, nil, err
 	}
 	log = log.With("node", local.Identity.Name)

@@ -512,8 +512,9 @@ while it runs), next to its master key (`keys`) and its HTTPS certificate (`tls`
 The folder must be on a local disk that the service's user can write. When the folder
 that holds `lookups.dir` is on a network share or cannot be written, and holds none
 of those files yet, Signalith uses `/var/lib/signalith` (Linux) or
-`C:\ProgramData\Signalith` (Windows) instead, says so in its log, and keeps using it
-from then on (commands such as `signalith secrets` find it too). A folder that
+`C:\ProgramData\Signalith` (Windows) instead, unless another Signalith install already
+keeps its files there, says so in its log, and keeps using it from then on (commands
+such as `signalith secrets` find it too). A folder that
 already holds a master key, a certificate or `admin-password-hash` is always kept, so
 an upgrade never leaves them behind; if it is on a network share, the log says so,
 and you can move its files to a local folder and set `SIGNALITH_STATE_DIR` to it.

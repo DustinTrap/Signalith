@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -90,6 +91,54 @@ func TestEveryRouteHasARole(t *testing.T) {
 	} {
 		if classified[pattern] != want {
 			t.Errorf("%s = %s, want %s", pattern, classified[pattern], want)
+		}
+	}
+}
+
+// The role table in docs/users.md lists every route under its role,
+// itself or as "every `/api/<prefix>` route".
+func TestUsersDocListsEveryRoute(t *testing.T) {
+	_, s := newRoleServer(t)
+	b, err := os.ReadFile(filepath.Join("..", "..", "docs", "users.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(b)
+	start := strings.Index(doc, "### Roles of every route")
+	end := strings.Index(doc, "A route added without a role")
+	if start < 0 || end < start {
+		t.Fatal("docs/users.md has no role table")
+	}
+	paras := map[string]string{}
+	for _, p := range strings.Split(doc[start:end], "\n\n") {
+		for _, head := range []string{"**Every role**", "**Viewer:**", "**Analyst:**", "**Admin:**"} {
+			if strings.HasPrefix(p, head) {
+				paras[head] = strings.Join(strings.Fields(p), " ")
+			}
+		}
+	}
+	if len(paras) != 4 {
+		t.Fatalf("role paragraphs %v", paras)
+	}
+	prefix := regexp.MustCompile("`(/api/[a-z/]+)`")
+	for _, r := range s.routes {
+		head := map[users.Role]string{users.Viewer: "**Viewer:**", users.Analyst: "**Analyst:**", users.Admin: "**Admin:**"}[r.Role]
+		if r.Anytime {
+			head = "**Every role**"
+		}
+		p := paras[head]
+		if strings.Contains(p, "`"+r.Pattern+"`") {
+			continue
+		}
+		_, path, _ := strings.Cut(r.Pattern, " ")
+		covered := false
+		for _, m := range prefix.FindAllStringSubmatch(p, -1) {
+			if path == m[1] || strings.HasPrefix(path, m[1]+"/") {
+				covered = true
+			}
+		}
+		if !covered {
+			t.Errorf("docs/users.md does not list %s under %s", r.Pattern, head)
 		}
 	}
 }

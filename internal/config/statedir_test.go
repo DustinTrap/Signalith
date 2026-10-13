@@ -41,19 +41,53 @@ func TestStateDirIsNextToLookups(t *testing.T) {
 }
 
 // When the folder that holds lookups.dir cannot be used and holds none of
-// Signalith's files, a local fallback is used, says why, and stays the
-// state folder after the usual one can be used again, also for commands
-// run by hand (as another user, for whom it may be writable).
+// Signalith's files, a local fallback is used and says why. Choosing it
+// writes nothing (validate and other commands only read); the server
+// records it, and then it stays the state folder after the usual one can
+// be used again, also for commands run by hand (as another user, for whom
+// it may be writable).
 func TestStateDirFallback(t *testing.T) {
-	def, other, fallback := t.TempDir(), t.TempDir(), t.TempDir()
+	def, other := t.TempDir(), t.TempDir()
+	fallback := filepath.Join(t.TempDir(), "state")
 	badFolders(t, def, other)
 	dir, why := pickStateDir(def, []string{other, fallback})
 	if dir != fallback || !strings.Contains(why, "cannot write in") || !strings.Contains(why, "SIGNALITH_STATE_DIR") {
 		t.Fatalf("fallback: %q %q", dir, why)
 	}
+	if _, err := os.Stat(fallback); !os.IsNotExist(err) {
+		t.Fatalf("choosing made the fallback folder: %v", err)
+	}
 	// Kept for the life of the process.
 	if again, _ := pickStateDir(def, []string{other, fallback}); again != fallback {
 		t.Errorf("second answer %q", again)
+	}
+	// The server records it before using it: the folder is made private
+	// and the note can be read by every account.
+	if err := RecordStateDir(fallback); err != nil {
+		t.Fatal(err)
+	}
+	note := filepath.Join(fallback, insteadOfFile)
+	fi, err := os.Stat(note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if fi.Mode().Perm() != 0o644 {
+			t.Errorf("note mode %v", fi.Mode().Perm())
+		}
+		if st, _ := os.Stat(fallback); st.Mode().Perm() != 0o700 {
+			t.Errorf("folder mode %v", st.Mode().Perm())
+		}
+	}
+	// Recording again, or another folder, changes nothing.
+	if err := RecordStateDir(fallback); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordStateDir(def); err != nil {
+		t.Fatal(err)
+	}
+	if got := notedFolders(fallback); len(got) != 1 || !samePath(got[0], def) {
+		t.Errorf("noted %v", got)
 	}
 	// A later start, or a command run as root, for whom def is fine.
 	badFolders(t)
@@ -61,9 +95,74 @@ func TestStateDirFallback(t *testing.T) {
 	if dir != fallback || !strings.Contains(why, "used instead of "+def) {
 		t.Errorf("after def works again: %q %q", dir, why)
 	}
-	// Another config's folder is not taken for this one's.
-	if dir, _ := pickStateDir(t.TempDir(), []string{fallback}); dir == fallback {
-		t.Error("a fallback used for another folder was taken")
+}
+
+// A fallback folder that is already another install's state folder is
+// never taken, so a second install whose usual folder cannot be used does
+// not take over the first one's identity, certificate and keys. A folder
+// that holds only a master key may be taken (signalith init makes the
+// key of a config in /etc in /var/lib/signalith).
+func TestStateDirFallbackOfAnotherInstall(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	fallback := t.TempDir()
+	badFolders(t, first, second)
+	if dir, _ := pickStateDir(first, []string{fallback}); dir != fallback {
+		t.Fatalf("first install: %q", dir)
+	}
+	if err := RecordStateDir(fallback); err != nil {
+		t.Fatal(err)
+	}
+	dir, why := pickStateDir(second, []string{fallback})
+	if dir != second || !strings.Contains(why, fallback+" already holds another Signalith install's files") || !strings.Contains(why, "SIGNALITH_STATE_DIR") {
+		t.Errorf("second install: %q %q", dir, why)
+	}
+	// The first one still gets it.
+	forgetStateDirs()
+	if dir, _ := pickStateDir(first, []string{fallback}); dir != fallback {
+		t.Errorf("first install again: %q", dir)
+	}
+	// A folder some install uses without a note, as the systemd unit's
+	// /var/lib/signalith (set with SIGNALITH_STATE_DIR) is.
+	for _, f := range []string{"node.id", "tls", "admin-password-hash", "keys"} {
+		t.Run(f, func(t *testing.T) {
+			def, used, next := t.TempDir(), t.TempDir(), t.TempDir()
+			badFolders(t, def)
+			if err := os.WriteFile(filepath.Join(used, f), []byte("x\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dir, _ := pickStateDir(def, []string{used, next})
+			if want := next; f == "keys" {
+				want = used
+				if dir != want {
+					t.Errorf("a folder with only a master key: %q", dir)
+				}
+			} else if dir != want {
+				t.Errorf("got %q, want the next fallback %q", dir, want)
+			}
+		})
+	}
+}
+
+// Files that appear in the usual folder after a fallback was recorded,
+// such as a master key made by a command run by hand without the
+// service's settings, do not move the server back: it keeps its identity
+// and certificate, and the reason names the files it does not use.
+func TestStateDirNoteBeforeStrayFiles(t *testing.T) {
+	def, fallback := t.TempDir(), t.TempDir()
+	badFolders(t, def)
+	if dir, _ := pickStateDir(def, []string{fallback}); dir != fallback {
+		t.Fatalf("got %q", dir)
+	}
+	if err := RecordStateDir(fallback); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(def, "keys"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	forgetStateDirs()
+	dir, why := pickStateDir(def, []string{fallback})
+	if dir != fallback || !strings.Contains(why, def+" also holds keys, which Signalith does not use") {
+		t.Errorf("got %q %q", dir, why)
 	}
 }
 
@@ -90,12 +189,12 @@ func TestStateDirKeepsExistingFiles(t *testing.T) {
 	}
 }
 
-// With nowhere better, the usual folder is kept, and using it says what
-// is wrong.
+// With nowhere better, the usual folder is kept, and the reason says
+// what is wrong.
 func TestStateDirNoFallback(t *testing.T) {
 	def, fallback := t.TempDir(), t.TempDir()
 	badFolders(t, def, fallback)
-	if dir, why := pickStateDir(def, []string{fallback}); dir != def || why != "" {
+	if dir, why := pickStateDir(def, []string{fallback}); dir != def || !strings.Contains(why, "cannot write in "+def) || strings.Contains(why, "another") {
 		t.Errorf("got %q %q", dir, why)
 	}
 }

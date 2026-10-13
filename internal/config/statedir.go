@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 )
 
 // The state folder holds what Signalith makes for itself and keeps on one
@@ -47,19 +49,28 @@ func (c *Config) StateDir() string {
 }
 
 // StateDirChoice returns the state folder and, when it is not the usual
-// one, why, for the log:
+// one or the usual one cannot be used, why, for the log:
 //
 //  1. SIGNALITH_STATE_DIR when it is set.
-//  2. Else the folder that holds lookups.dir when it already holds
+//  2. Else a fallback folder used before instead of the folder that holds
+//     lookups.dir (its used_instead_of file names that folder). Files
+//     that appear in the usual folder later, such as a master key made by
+//     a command run without the service's settings, do not move it back:
+//     the reason says they are not used.
+//  3. Else the folder that holds lookups.dir when it already holds
 //     Signalith's own files (HoldsState), so an upgrade never leaves a
 //     master key or a certificate behind.
-//  3. Else a fallback folder used before instead of that one.
 //  4. Else that folder, when it is on a local disk this user can write.
 //  5. Else the first fallback that is (systemd's $STATE_DIRECTORY, then
-//     /var/lib/signalith on Linux; %ProgramData%\Signalith on Windows),
-//     which notes that it is used instead.
-//  6. Else the folder that holds lookups.dir anyway; using it then says
-//     what is wrong.
+//     /var/lib/signalith on Linux; %ProgramData%\Signalith on Windows)
+//     and is not another install's state folder (see takenByOther).
+//  6. Else the folder that holds lookups.dir anyway; the reason, and
+//     using it, then say what is wrong.
+//
+// Choosing writes nothing, so commands that only read (validate, secrets
+// status and the others) change nothing. The server, and a command about
+// to write in the folder, call RecordStateDir first, which notes a
+// fallback as used instead of the usual folder.
 //
 // The answer is kept for the life of the process, so a restart in place
 // or a folder that becomes writable later never moves it.
@@ -73,7 +84,9 @@ func (c *Config) StateDirChoice() (dir, why string) {
 // StateDirFallbacks are the folders a state folder falls back to here.
 func StateDirFallbacks() []string { return fallbackStateDirs() }
 
-type stateChoice struct{ dir, why string }
+// stateChoice is a chosen state folder. insteadOf is the usual folder
+// when dir is a fallback that does not yet say it is used instead of it.
+type stateChoice struct{ dir, why, insteadOf string }
 
 var (
 	stateMu    sync.Mutex
@@ -103,10 +116,30 @@ func pickStateDir(def string, fallbacks []string) (string, string) {
 	return ch.dir, ch.why
 }
 
-func chooseStateDir(def, abs string, fallbacks []string) stateChoice {
-	if HoldsState(abs) {
-		return stateChoice{dir: def}
+// RecordStateDir is called by a process about to write in the state
+// folder dir: the server when it starts, and signalith passwd. When dir
+// is a fallback this process chose, it makes the folder if needed (with
+// an access list of its own on Windows, not ProgramData's) and notes in
+// it which folder it is used instead of, so every later start and every
+// command finds the same folder, and no other install takes it. For any
+// other folder it does nothing.
+func RecordStateDir(dir string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	for key, ch := range stateCache {
+		if ch.insteadOf == "" || !samePath(ch.dir, dir) {
+			continue
+		}
+		if err := noteInsteadOf(ch.dir, ch.insteadOf); err != nil {
+			return fmt.Errorf("could not note in %s that Signalith keeps its own files there: %w. Set SIGNALITH_STATE_DIR to a folder on a local disk that this user can write", ch.dir, err)
+		}
+		ch.insteadOf = ""
+		stateCache[key] = ch
 	}
+	return nil
+}
+
+func chooseStateDir(def, abs string, fallbacks []string) stateChoice {
 	var others []string
 	for _, d := range fallbacks {
 		if d != "" && !samePath(d, abs) {
@@ -114,26 +147,79 @@ func chooseStateDir(def, abs string, fallbacks []string) stateChoice {
 		}
 	}
 	for _, d := range others {
-		if usedInsteadOf(d, abs) {
-			return stateChoice{d, fmt.Sprintf("Signalith keeps its own files (master key, HTTPS certificate and this server's identity) in %s, "+
-				"used instead of %s since that folder could not be used; set SIGNALITH_STATE_DIR to choose the folder", d, abs)}
+		if !usedInsteadOf(d, abs) {
+			continue
 		}
+		why := fmt.Sprintf("Signalith keeps its own files (master key, HTTPS certificate and this server's identity) in %s, "+
+			"used instead of %s since that folder could not be used; set SIGNALITH_STATE_DIR to choose the folder", d, abs)
+		if stray := stateFilesIn(abs); len(stray) > 0 {
+			it, was := "it", "it was"
+			if len(stray) > 1 {
+				it, was = "them", "they were"
+			}
+			why += fmt.Sprintf(". %s also holds %s, which Signalith does not use: %s probably made later by a command run without the service's settings. "+
+				"Move %s away once you are sure nothing in %s is needed", abs, strings.Join(stray, " and "), was, it, it)
+		}
+		return stateChoice{dir: d, why: why}
+	}
+	if HoldsState(abs) {
+		return stateChoice{dir: def}
 	}
 	problem := stateDirProblem(abs)
 	if problem == "" {
 		return stateChoice{dir: def}
 	}
+	var taken []string
 	for _, d := range others {
 		if stateDirProblem(d) != "" {
 			continue
 		}
-		if err := noteInsteadOf(d, abs); err != nil {
+		if takenByOther(d) {
+			taken = append(taken, d)
 			continue
 		}
-		return stateChoice{d, fmt.Sprintf("Signalith keeps its own files (master key, HTTPS certificate and this server's identity) in %s, "+
+		return stateChoice{dir: d, insteadOf: abs, why: fmt.Sprintf("Signalith keeps its own files (master key, HTTPS certificate and this server's identity) in %s, "+
 			"because %s; set SIGNALITH_STATE_DIR to choose the folder", d, problem)}
 	}
-	return stateChoice{dir: def}
+	why := fmt.Sprintf("Signalith cannot keep its own files (master key, HTTPS certificate and this server's identity) in %s, because %s", abs, problem)
+	if len(taken) > 0 {
+		why += fmt.Sprintf(", and %s already %s another Signalith install's files", strings.Join(taken, " and "), plural(len(taken), "holds", "hold"))
+	}
+	return stateChoice{dir: def, why: why + ". Set SIGNALITH_STATE_DIR to a folder on a local disk that this user can write"}
+}
+
+// takenByOther reports whether the fallback folder dir is another
+// install's state folder: it holds a server identity, an HTTPS
+// certificate or an admin password, or it is noted as used instead of
+// another folder. (A fallback that is this install's own is found
+// before, by its note.) A folder that holds only a master key may still
+// be taken: on Linux, signalith init makes the key of a config in /etc in
+// /var/lib/signalith before the service first starts (see Keyring).
+func takenByOther(dir string) bool {
+	for _, f := range stateFilesIn(dir) {
+		if f != "keys" {
+			return true
+		}
+	}
+	return len(notedFolders(dir)) > 0
+}
+
+// stateFilesIn lists the files and folders of stateFiles that dir holds.
+func stateFilesIn(dir string) []string {
+	var out []string
+	for _, f := range stateFiles {
+		if _, err := os.Lstat(filepath.Join(dir, f)); err == nil {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // stateDirProblem is StateDirProblem; tests replace it.
@@ -178,17 +264,29 @@ func nearestExisting(dir string) string {
 // NearestExisting is nearestExisting, for the cluster package.
 func NearestExisting(dir string) string { return nearestExisting(dir) }
 
+// notedFolders lists the folders the fallback folder dir is noted as used
+// instead of, in its used_instead_of file.
+func notedFolders(dir string) []string {
+	f, err := os.Open(filepath.Join(dir, insteadOfFile))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // usedInsteadOf reports whether the fallback folder dir was used instead
 // of the folder def before.
 func usedInsteadOf(dir, def string) bool {
-	f, err := os.Open(filepath.Join(dir, insteadOfFile))
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") && samePath(line, def) {
+	for _, d := range notedFolders(dir) {
+		if samePath(d, def) {
 			return true
 		}
 	}
@@ -196,22 +294,43 @@ func usedInsteadOf(dir, def string) bool {
 }
 
 // noteInsteadOf records in the fallback folder dir that it is used
-// instead of def.
+// instead of def. A folder that does not exist yet is made private (mode
+// 0700, or on Windows an access list of its own for SYSTEM,
+// Administrators and the service, not the one ProgramData passes down,
+// which lets every user read). The note holds only folder names, so
+// every account may read it; made by root, it is given to the folder's
+// owner, so the server's own account can add to it.
 func noteInsteadOf(dir, def string) error {
 	if usedInsteadOf(dir, def) {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		if err := securefile.MkdirPrivate(dir); err != nil {
+			return err
+		}
 	}
 	path := filepath.Join(dir, insteadOfFile)
-	_, err := os.Stat(path)
-	f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
+	fi, err := os.Lstat(path)
+	isNew := errors.Is(err, os.ErrNotExist)
+	if err == nil && !fi.Mode().IsRegular() {
+		// Run as root, a link here made by the server's own account must
+		// not be followed to some other file.
+		return fmt.Errorf("%s is not a plain file; move it away", path)
+	}
+	f, ferr := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|noFollow, 0o644)
 	if ferr != nil {
 		return ferr
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if isNew {
 		_, ferr = f.WriteString("# Signalith keeps its own files here instead of in these folders, which could not be used.\n")
+		if ferr == nil {
+			// Readable by every account whatever the umask (the systemd
+			// unit's is 0077).
+			ferr = f.Chmod(0o644)
+		}
+		if ferr == nil {
+			ferr = giveToFolderOwner(f, dir)
+		}
 	}
 	if ferr == nil {
 		_, ferr = f.WriteString(def + "\n")

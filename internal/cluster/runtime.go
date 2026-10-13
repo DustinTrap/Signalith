@@ -81,6 +81,11 @@ const (
 	// StateConflict is a server that found another process using its
 	// identity: it runs no jobs until that is fixed.
 	StateConflict = "conflict"
+	// StateDown is a server whose parts could not start (a restart in
+	// place failed with the new settings and the previous ones): it
+	// answers only with a page that says so, receives no syslog and runs
+	// no jobs, and tries again.
+	StateDown = "down"
 	// StateOffline is never written: it is a heartbeat that stopped
 	// changing.
 	StateOffline = "offline"

@@ -23,7 +23,7 @@ few seconds.
 | Column | What it shows |
 | --- | --- |
 | Server | The server's name (`cluster.node_name`), **This server** on the one you are signed in to, and its address (`server.node_url`) |
-| Status | **Running**, **Starting**, **Stopping**, **Stopped** (shut down on purpose), **Not answering** (no sign of life for 30 seconds), **Can't reach OpenSearch** (this server, while it cannot) or **Identity in use** (see [Identity](#identity)). Below it: how long it has been up, or when it was last seen, counted by the server that answered the page, so neither the other server's clock nor yours matters. A clock more than 2 seconds off is shown here too |
+| Status | **Running**, **Starting**, **Stopping**, **Stopped** (shut down on purpose), **Not answering** (no sign of life for 30 seconds), **Can't reach OpenSearch** (this server, while it cannot), **Couldn't start** (a restart after a settings change failed with the new settings and the old ones: it receives nothing, runs no jobs and tries again every 30 seconds; its log says why) or **Identity in use** (see [Identity](#identity)). Below it: how long it has been up, or when it was last seen, counted by the server that answered the page, so neither the other server's clock nor yours matters. A clock more than 2 seconds off is shown here too |
 | Background jobs | **Runs jobs** on the server that runs them. **Standby** on a server that would take them over, or why it would not. **Doesn't run them** on a server that may not, with the reason |
 | Version | The Signalith version it runs |
 
@@ -128,12 +128,12 @@ runs no jobs, and tells load balancers to send it nothing.
 
 To give a server a new identity, stop it, delete `node.id` from its state folder
 and start it again. In Docker the state folder is the data volume, and the image
-has no shell, so:
+has no shell, so, from the folder you cloned Signalith into:
 
 ```
-docker compose stop signalith
+docker compose -f deploy/docker/docker-compose.yml stop signalith
 docker run --rm -v docker_signalith-data:/d busybox rm /d/node.id
-docker compose up -d
+docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
 `docker volume ls` shows the volume's name (here `docker_signalith-data`).
@@ -147,16 +147,31 @@ server and every command (`signalith secrets`, `signalith initial-password`,
 
 1. `SIGNALITH_STATE_DIR` when it is set. The systemd unit and the Docker image set
    it to `/var/lib/signalith`.
-2. Otherwise the folder that holds `lookups.dir`, when it already holds any of those
+2. Otherwise a local folder Signalith used before instead of the folder that holds
+   `lookups.dir` (it notes this in a `used_instead_of` file there). If files turn
+   up in the usual folder later, for example from a command run without the
+   service's settings, the server stays where it is, and `signalith validate` and
+   the log name the files it does not use.
+3. Otherwise the folder that holds `lookups.dir`, when it already holds any of those
    files. An upgrade therefore keeps using the folder it used before, wherever that
    is, and leaves nothing behind.
-3. Otherwise a local folder Signalith used instead of that one before (it notes this
-   in a `used_instead_of` file there).
 4. Otherwise the folder that holds `lookups.dir`, when it is on a local disk and the
    service's user can write in it.
-5. Otherwise a local folder: `/var/lib/signalith` on Linux (or the systemd
-   `StateDirectory`), `C:\ProgramData\Signalith` on Windows. The log says why, and
-   Signalith keeps using that folder from then on.
+5. Otherwise a local folder: the systemd `StateDirectory`, then `/var/lib/signalith`
+   on Linux, `C:\ProgramData\Signalith` on Windows. A folder that already holds
+   another install's identity, certificate or admin password, or that another
+   install noted as its own, is skipped, so two installs never share one. The log
+   says why, and Signalith keeps using that folder from then on. Signalith makes the
+   folder private when it creates it (on Windows only SYSTEM, Administrators, the
+   Signalith service and the account that made it can open it).
+6. Otherwise the folder that holds `lookups.dir` anyway. The server then does not
+   start, and says what is wrong: set `SIGNALITH_STATE_DIR` to a local folder.
+
+Only the server, and `signalith passwd` when it keeps the password there, write the
+`used_instead_of` note. Commands that only look (`signalith validate`,
+`signalith secrets status` and the others) change nothing. Commands run by hand read
+the service's settings (`systemctl show signalith`, including its `StateDirectory`)
+so they find the same folder.
 
 The folder should be on a local disk, never on a network share, since the identity's
 lock cannot be trusted there. A folder on a network share that already holds a master
