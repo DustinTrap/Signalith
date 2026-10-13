@@ -262,3 +262,178 @@ func TestSearchesWaitForATurn(t *testing.T) {
 		t.Errorf("after the others finished: %v", err)
 	}
 }
+
+// TestLongGlobPartsMatchLikeTheRegexp checks the one-pass matcher for ?
+// parts longer than one 64-bit word, on strings built from the pattern so
+// that many of them match.
+func TestLongGlobPartsMatchLikeTheRegexp(t *testing.T) {
+	rnd := rand.New(rand.NewSource(2))
+	letters := []rune("abé?")
+	matched := 0
+	for range 3000 {
+		var p []rune
+		for range 1 + rnd.Intn(200) {
+			if rnd.Intn(60) == 0 {
+				p = append(p, '*')
+			} else {
+				p = append(p, letters[rnd.Intn(len(letters))])
+			}
+		}
+		pattern := string(p)
+		// A string the pattern matches, then perhaps one character changed.
+		var b strings.Builder
+		for _, r := range p {
+			switch r {
+			case '*':
+				for range rnd.Intn(5) {
+					b.WriteRune(letters[rnd.Intn(3)])
+				}
+			case '?':
+				b.WriteRune(letters[rnd.Intn(3)])
+			default:
+				b.WriteRune(r)
+			}
+		}
+		s := []rune(b.String())
+		if len(s) > 0 && rnd.Intn(2) == 0 {
+			s[rnd.Intn(len(s))] = letters[rnd.Intn(3)]
+		}
+		var re strings.Builder
+		re.WriteString(`(?s)^`)
+		for _, r := range pattern {
+			switch r {
+			case '*':
+				re.WriteString(".*")
+			case '?':
+				re.WriteString(".")
+			default:
+				re.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		re.WriteString("$")
+		want := regexp.MustCompile(re.String()).MatchString(string(s))
+		if got := compileGlob(pattern, false).match(string(s)); got != want {
+			t.Fatalf("pattern %q on %q: %v, want %v", pattern, string(s), got, want)
+		}
+		if want {
+			matched++
+		}
+	}
+	if matched < 300 {
+		t.Errorf("only %d of the strings matched; the test is too weak", matched)
+	}
+}
+
+// TestWildcardHeavyWhereIsBounded reproduces the dos-6 re-audit finding:
+// hundreds of long ? patterns in a where IN list made each row take
+// seconds, and the search ran for about ten minutes after its two-minute
+// timeout. Now the patterns of where commands are capped together, ?
+// parts match in one pass, and a timed-out search stops within a row.
+func TestWildcardHeavyWhereIsBounded(t *testing.T) {
+	long := strings.Repeat("ab", 1000)
+	fs := funcStore(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return hits(600, func(int) string { return long }), nil
+	})
+	e := &Engine{Store: fs}
+	pat := func(i int) string { return fmt.Sprintf("*%szq%04d*", strings.Repeat("?", 990), i) }
+
+	// The re-audit's query is refused before it reaches OpenSearch.
+	var vals []string
+	for i := range 300 {
+		vals = append(vals, fmt.Sprintf("%q", pat(i)))
+	}
+	_, err := e.Run(context.Background(), `* | table user | where user IN (`+strings.Join(vals, ", ")+`)`)
+	var qe *QueryError
+	if !errors.As(err, &qe) || !strings.Contains(err.Error(), "4096 characters") {
+		t.Fatalf("300 long patterns: %v", err)
+	}
+	// So is an IN list over maxInValues, wildcards or not.
+	vals = vals[:0]
+	for i := range maxInValues + 1 {
+		vals = append(vals, fmt.Sprint(i))
+	}
+	if _, err := e.Run(context.Background(), `* | where user IN (`+strings.Join(vals, ",")+`)`); !errors.As(err, &qe) || !strings.Contains(err.Error(), "IN list") {
+		t.Errorf("long IN list: %v", err)
+	}
+
+	// The most the cap allows (four 1,000-character patterns) runs over
+	// 600 rows of 2,000 characters quickly.
+	vals = vals[:0]
+	for i := range 4 {
+		vals = append(vals, fmt.Sprintf("%q", pat(i)))
+	}
+	src := `* | table user | where user IN (` + strings.Join(vals, ", ") + `)`
+	start := time.Now()
+	if _, err := e.Run(context.Background(), src); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Errorf("the largest allowed where took %v", d)
+	}
+
+	// A search that times out stops promptly, mid-command.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	fs = funcStore(func(context.Context, string, map[string]any) (map[string]any, error) {
+		return hits(20000, func(int) string { return long }), nil
+	})
+	start = time.Now()
+	_, err = (&Engine{Store: fs, Opt: Options{MaxEvents: 20000}}).Run(ctx, src)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("timed-out search: %v", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("a search that timed out after 20ms ran for %v", d)
+	}
+}
+
+// TestOneUserHoldsHalfTheSlots: one user's searches take at most half of
+// MaxSearches, so a viewer sending many slow searches leaves room for
+// everyone else.
+func TestOneUserHoldsHalfTheSlots(t *testing.T) {
+	release := make(chan struct{})
+	var running atomic.Int32
+	fs := funcStore(func(ctx context.Context, _ string, body map[string]any) (map[string]any, error) {
+		if fmt.Sprint(body["query"]) != "map[match_all:map[]]" {
+			running.Add(1)
+			defer running.Add(-1)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return hits(1, func(int) string { return "x" }), nil
+	})
+	e := &Engine{Store: fs, Opt: Options{MaxSearches: 4, QueueWait: 100 * time.Millisecond}}
+	mallory := ForUser(context.Background(), "mallory")
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := e.Run(mallory, `user=slow`); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	for running.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := e.Run(mallory, `user=third`); !errors.Is(err, ErrUserBusy) {
+		t.Errorf("mallory's third search: %v", err)
+	}
+	// Others still get a turn, and the refused search freed nothing it
+	// did not hold.
+	if _, err := e.Run(ForUser(context.Background(), "alice"), `*`); err != nil {
+		t.Errorf("alice: %v", err)
+	}
+	if _, err := e.Run(context.Background(), `*`); err != nil {
+		t.Errorf("no user: %v", err)
+	}
+	close(release)
+	wg.Wait()
+	if _, err := e.Run(mallory, `*`); err != nil {
+		t.Errorf("mallory after hers finished: %v", err)
+	}
+}

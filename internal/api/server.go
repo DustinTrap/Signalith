@@ -260,7 +260,8 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // writeSearchError answers a failed search: 400 for a query that cannot
 // run as written, 503 (retry shortly) when too many searches are running,
-// and 502 when OpenSearch failed.
+// 429 when the user's own searches hold their share of the slots, and 502
+// when OpenSearch failed.
 func writeSearchError(w http.ResponseWriter, err error) {
 	var qe *search.QueryError
 	switch {
@@ -269,6 +270,9 @@ func writeSearchError(w http.ResponseWriter, err error) {
 	case errors.Is(err, search.ErrBusy):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, search.ErrUserBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, err)
 	default:
 		writeError(w, http.StatusBadGateway, err)
 	}
