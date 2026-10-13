@@ -908,7 +908,7 @@ syslog devices ─UDP/TCP/TLS▶ query compiler,
 | `internal/search` | Compiles queries to OpenSearch DSL and runs remaining commands in memory |
 | `internal/ingest` | Fluent Bit and OTLP record parsing for Windows and Linux, index template |
 | `internal/syslog` | Syslog receiver (UDP, TCP, TLS), RFC 5424, RFC 3164 and CEF parsing |
-| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Risk, Other |
+| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Filesystem, Registry, Network_Resolution, Image_Load, Script, Inventory, Configuration_Check, Alerts, Risk, Other |
 | `internal/agents` | Fluent Bit and OpenTelemetry Collector configuration generator |
 | `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
 | `internal/findings` | Findings model and its OpenSearch store |
