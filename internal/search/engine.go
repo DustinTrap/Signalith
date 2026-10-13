@@ -48,6 +48,7 @@ type Engine struct {
 	optMu   sync.RWMutex
 	slotsMu sync.Mutex
 	slots   chan struct{}
+	perUser map[string]chan struct{}
 }
 
 // SetDefaults changes the default time range and the most events a
@@ -78,35 +79,85 @@ func Background(ctx context.Context) context.Context {
 	return context.WithValue(ctx, backgroundKey{}, true)
 }
 
-// acquire waits for one of MaxSearches slots and returns the function
-// that frees it.
+type userKey struct{}
+
+// ForUser marks ctx as a signed-in user's work. One user's searches hold
+// at most half of the MaxSearches slots at once, so one user (or one
+// stolen sign-in) cannot keep everyone else waiting.
+func ForUser(ctx context.Context, user string) context.Context {
+	return context.WithValue(ctx, userKey{}, user)
+}
+
+// ErrUserBusy is returned when a user's own searches already hold their
+// share of the slots and none finished within QueueWait.
+var ErrUserBusy = errors.New("You already have several searches running; wait for one to finish, then try again")
+
+// perUserSearches is how many of MaxSearches slots one user's searches
+// may hold at once.
+func perUserSearches(total int) int {
+	return max(1, total/2)
+}
+
+// acquire waits for one of MaxSearches slots, and for one of the user's
+// own share of them when ctx names a user (see ForUser), and returns the
+// function that frees them.
 func (e *Engine) acquire(ctx context.Context) (func(), error) {
 	if bg, _ := ctx.Value(backgroundKey{}).(bool); bg {
 		return func() {}, nil
 	}
 	o := e.opts()
+	user, _ := ctx.Value(userKey{}).(string)
 	e.slotsMu.Lock()
 	if e.slots == nil {
 		e.slots = make(chan struct{}, o.MaxSearches)
 	}
 	slots := e.slots
-	e.slotsMu.Unlock()
-	release := func() { <-slots }
-	select {
-	case slots <- struct{}{}:
-		return release, nil
-	default:
+	var mine chan struct{}
+	if user != "" {
+		if e.perUser == nil {
+			e.perUser = map[string]chan struct{}{}
+		}
+		if mine = e.perUser[user]; mine == nil {
+			mine = make(chan struct{}, perUserSearches(cap(slots)))
+			e.perUser[user] = mine
+		}
 	}
+	e.slotsMu.Unlock()
+
 	t := time.NewTimer(o.QueueWait)
 	defer t.Stop()
-	select {
-	case slots <- struct{}{}:
-		return release, nil
-	case <-t.C:
-		return nil, ErrBusy
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	take := func(c chan struct{}, busy error) error {
+		select {
+		case c <- struct{}{}:
+			return nil
+		default:
+		}
+		select {
+		case c <- struct{}{}:
+			return nil
+		case <-t.C:
+			return busy
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	if mine != nil {
+		if err := take(mine, ErrUserBusy); err != nil {
+			return nil, err
+		}
+	}
+	if err := take(slots, ErrBusy); err != nil {
+		if mine != nil {
+			<-mine
+		}
+		return nil, err
+	}
+	return func() {
+		<-slots
+		if mine != nil {
+			<-mine
+		}
+	}, nil
 }
 
 // Row is one result row.

@@ -204,20 +204,14 @@ func (s *Server) handleIntelUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.intelOK(w) {
 		return
 	}
-	allowSlowUpload(w)
-	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	inds, err := intel.ParseUpload(data, time.Now())
+	inds, err := intel.ParseUpload(uploadBody(w, r), time.Now())
 	var pe *intel.ParseError
 	if errors.As(err, &pe) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "the file has problems; nothing was saved", "lines": pe.Lines})
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		uploadFailed(w, err)
 		return
 	}
 	if len(inds) == 0 {

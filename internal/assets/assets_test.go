@@ -85,6 +85,21 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
+func TestRowCap(t *testing.T) {
+	defer func(n int) { maxRows = n }(maxRows)
+	maxRows = 100
+	if as, err := ParseAssets([]byte("host\n" + strings.Repeat("web1\n", 100))); err != nil || len(as) != 100 {
+		t.Fatalf("at the cap = %d %v", len(as), err)
+	}
+	if _, err := ParseAssets([]byte("host\n" + strings.Repeat("web1\n", 101))); err == nil || !strings.Contains(err.Error(), "more than 100 rows") {
+		t.Errorf("assets over the cap: %v", err)
+	}
+	s, _ := NewStore("")
+	if _, err := s.SetIdentities([]byte("identity\n" + strings.Repeat("bob\n", 101))); err == nil || !strings.Contains(err.Error(), "more than 100 rows") {
+		t.Errorf("identities over the cap: %v", err)
+	}
+}
+
 func TestFilesAndReload(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewStore(dir)
