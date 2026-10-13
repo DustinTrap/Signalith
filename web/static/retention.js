@@ -17,7 +17,7 @@ const rtState = {
 
 // ---------- formatting ----------
 const RT_ICON = {
-  authentication: 'key-round', endpoint: 'monitor', network_traffic: 'network', change: 'square-pen',
+  authentication: 'key-round', endpoint: 'monitor', network_traffic: 'network', change: 'square-pen', malware: 'bug',
   other: 'box', risk: 'gauge', findings: 'shield-alert', cases: 'briefcase', intel: 'radar',
 };
 const RT_FIELD_NAME = { keep_days: 'Keep', max_size_gb: 'Size cap', compact_after_days: 'Compact after', max_disk_percent: 'Max disk use', min_days: 'Min days' };

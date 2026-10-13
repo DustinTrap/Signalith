@@ -515,7 +515,7 @@ func TestOverview(t *testing.T) {
 		cats[c.ID] = c
 	}
 	// No "other" events yet, so that row is left out.
-	if !slices.Equal(ids, []string{"authentication", "endpoint", "network_traffic", "change", "risk", Findings, Cases, Intel}) {
+	if !slices.Equal(ids, []string{"authentication", "endpoint", "network_traffic", "change", "malware", "risk", Findings, Cases, Intel}) {
 		t.Errorf("categories = %v", ids)
 	}
 	ep := cats["endpoint"]
@@ -553,7 +553,7 @@ func TestOverview(t *testing.T) {
 	// are missing.
 	f.mem.Fail["indices"] = errors.New("connection refused")
 	ov = f.m.Overview(context.Background())
-	if !strings.Contains(ov.Error, "connection refused") || len(ov.Categories) != 8 || ov.Guard.Status.State != GuardUnknown {
+	if !strings.Contains(ov.Error, "connection refused") || len(ov.Categories) != 9 || ov.Guard.Status.State != GuardUnknown {
 		t.Errorf("down: %+v", ov)
 	}
 }

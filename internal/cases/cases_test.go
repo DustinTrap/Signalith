@@ -178,3 +178,12 @@ func TestCreateNeverReplacesACase(t *testing.T) {
 		t.Errorf("conflict: %v", err)
 	}
 }
+
+func TestFileHashIsAnEntity(t *testing.T) {
+	c := &Case{}
+	h := strings.Repeat("ab", 32)
+	c.AddEntities(map[string]any{"file_sha256": h, "file_path": `C:\x.exe`, "dest": "ws-fin-07"})
+	if got := c.EntityValues(); strings.Join(got, ",") != h+",ws-fin-07" {
+		t.Errorf("entities = %v", got)
+	}
+}

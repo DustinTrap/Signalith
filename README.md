@@ -207,8 +207,13 @@ Supported sources in Phase 1:
 | Sysmon: event 1 process create, event 3 network connection | Endpoint, Network_Traffic |
 | Linux sshd, sudo, su (auth.log, secure, or journald) | Authentication |
 | Linux useradd, userdel, usermod, gpasswd | Change |
-| Syslog from any device (see below), including CEF | Authentication, Change, Network_Traffic or Other |
+| Syslog from any device (see below), including CEF and LEEF | Authentication, Change, Network_Traffic or Other |
+| Microsoft Defender Antivirus (Windows agent, collected automatically) | Malware |
+| ClamAV (Linux agent: /var/log/clamav or the journal) | Malware |
+| Antivirus consoles via syslog (CEF, LEEF, Symantec, Trellix ePO): Trend Micro, Sophos, ESET, CrowdStrike, SentinelOne, Kaspersky, Bitdefender and others | Malware |
 | Anything else | Other (searchable by text and fields) |
+
+Antivirus: see [docs/antivirus.md](docs/antivirus.md).
 
 #### Ingest limits
 
@@ -903,7 +908,7 @@ syslog devices ─UDP/TCP/TLS▶ query compiler,
 | `internal/search` | Compiles queries to OpenSearch DSL and runs remaining commands in memory |
 | `internal/ingest` | Fluent Bit record parsing for Windows and Linux, index template |
 | `internal/syslog` | Syslog receiver (UDP, TCP, TLS), RFC 5424, RFC 3164 and CEF parsing |
-| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Risk, Other |
+| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Malware, Risk, Other |
 | `internal/agents` | Fluent Bit configuration generator |
 | `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
 | `internal/findings` | Findings model and its OpenSearch store |
