@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/redact"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 // Searcher runs a search request body against an index pattern.
@@ -35,7 +36,8 @@ type Config struct {
 	// shown in errors.
 	URL      string
 	Username string
-	Password string
+	// Password shows as [redacted] when a Config is printed or logged.
+	Password secrets.Secret
 	// CAFile is a PEM file of certificate authorities to trust, in
 	// addition to the system's, for an OpenSearch with a private CA.
 	CAFile string
@@ -85,7 +87,7 @@ func New(cfg Config) *Client {
 	if stripped, user, pw, ok := redact.Strip(cfg.URL); ok {
 		cfg.URL = stripped
 		if cfg.Username == "" {
-			cfg.Username, cfg.Password = user, pw
+			cfg.Username, cfg.Password = user, secrets.New("opensearch.password", pw)
 		}
 	}
 	base := strings.TrimRight(cfg.URL, "/")
@@ -321,7 +323,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, out any)
 		req.Header.Set("Content-Type", contentType)
 	}
 	if c.cfg.Username != "" {
-		req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
+		req.SetBasicAuth(c.cfg.Username, c.cfg.Password.Reveal())
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

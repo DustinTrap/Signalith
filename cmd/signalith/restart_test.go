@@ -494,9 +494,20 @@ func TestSettingsCommand(t *testing.T) {
 	page := &config.PageSettings{}
 	at := time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC)
 	page.Set("search.max_events", 1234, "alice", at)
-	page.SetSecret("opensearch.password", "never-printed", strings.TrimSuffix(fos.URL, "/"), "alice", at)
+	// The page's secrets are saved encrypted, with the config's master key.
+	c0, err := config.LoadUnchecked(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	useTestKeyring(t, c0.Keyring())
+	if err := page.SetSecret("opensearch.password", "never-printed", strings.TrimSuffix(fos.URL, "/"), "alice", at); err != nil {
+		t.Fatal(err)
+	}
 	if err := config.WritePageSettings(file, page); err != nil {
 		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(file); strings.Contains(string(data), "never-printed") || !strings.Contains(string(data), "secret: enc:v1:") {
+		t.Fatalf("settings file:\n%s", data)
 	}
 
 	out, err := capture(t, func() error { return cmdSettings([]string{"list", "-c", path}) })

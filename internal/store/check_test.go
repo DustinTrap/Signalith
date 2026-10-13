@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 func opensearchHandler(user, password string) http.Handler {
@@ -66,9 +68,9 @@ func TestCheck(t *testing.T) {
 		problem string
 		message string
 	}{
-		{"connected", Config{URL: plain.URL, Username: "signalith", Password: "right"}, true, "", `Connected to OpenSearch 2.15.0, cluster "prod". Health: yellow.`},
+		{"connected", Config{URL: plain.URL, Username: "signalith", Password: secrets.New("opensearch.password", "right")}, true, "", `Connected to OpenSearch 2.15.0, cluster "prod". Health: yellow.`},
 		{"no password", Config{URL: plain.URL}, false, "auth", "asks for a username and password"},
-		{"wrong password", Config{URL: plain.URL, Username: "signalith", Password: "wrong"}, false, "auth", "refused the username and password"},
+		{"wrong password", Config{URL: plain.URL, Username: "signalith", Password: secrets.New("opensearch.password", "wrong")}, false, "auth", "refused the username and password"},
 		{"not opensearch", Config{URL: other.URL}, false, "not_opensearch", "it is not OpenSearch"},
 		{"endless answer", Config{URL: huge.URL}, false, "not_opensearch", "far more than OpenSearch would"},
 		{"endless health", Config{URL: hugeHealth.URL}, false, "not_opensearch", "far more than OpenSearch would"},

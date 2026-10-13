@@ -26,6 +26,8 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
@@ -54,6 +56,28 @@ type Config struct {
 	ldapBindPassword string
 	// sections are the top-level keys in that file.
 	sections map[string]bool
+	// file is the config as that file has it: no settings from the
+	// environment, and passwords and keys as written. Save writes it.
+	file *Config
+	// plain lists the passwords and keys stored as plain text in the file,
+	// and addressWarnings those written into addresses that cannot be
+	// encrypted there.
+	plain, addressWarnings []string
+	// unreadable lists the encrypted ones that cannot be decrypted, with
+	// what to do; locked has their fields, and feedLocked their labels by
+	// feed. See openSecrets.
+	unreadable []string
+	locked     map[string]bool
+	feedLocked map[string][]string
+	// pageUnreadable lists the passwords and keys saved on the Settings
+	// page that cannot be decrypted, with what to do, and pageLocked their
+	// settings, with what the page says about each. See applyPage. A copy
+	// of a Config shares them: they are replaced, never changed in place
+	// (see copyPageProblem).
+	pageUnreadable []pageProblem
+	pageLocked     map[string]string
+	// keys holds the master key; see Keyring.
+	keys *secrets.Keyring
 	// layers records where each setting's value came from.
 	layers *layers
 	// publicURLDerived is true when server.public_url was empty and
@@ -628,9 +652,12 @@ func (c *Config) Path() string { return c.path }
 func (c *Config) HasSection(name string) bool { return c.sections[name] }
 
 // Load reads a config file, applies the settings changed on the Settings
-// page, defaults and environment overrides, and validates the result.
-// Settings from the page that cannot be used never stop Signalith: it
-// starts with signalith.yaml alone, and SettingsProblem says why.
+// page, defaults and environment overrides, decrypts the passwords and keys
+// stored encrypted, and validates the result. Settings from the page that
+// cannot be used never stop Signalith: it starts with signalith.yaml
+// alone, and SettingsProblem says why. A password or key that cannot be
+// decrypted is left out and reported by Warnings rather than failing (see
+// Unreadable and PageUnreadable).
 func Load(path string) (*Config, error) {
 	return loadWith(path, nil)
 }
@@ -721,6 +748,14 @@ func LoadFile(path string) (*Config, error) {
 	return c, nil
 }
 
+// LoadUnchecked reads a config file with defaults and environment
+// overrides, but neither decrypts nor checks it, and leaves out the
+// settings changed on the Settings page: for commands that look at, or
+// repair, a file that may not load.
+func LoadUnchecked(path string) (*Config, error) {
+	return readAndEnv(path)
+}
+
 // Saved is the configuration as saved, whether or not it is valid:
 // signalith.yaml, the settings changed on the Settings page, and the
 // environment. The Settings page shows it.
@@ -793,6 +828,9 @@ func build(path string, page *PageSettings) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Both use the same master key.
+	base.keys = c.Keyring()
+	base.openSecrets()
 	// Validating fills in worked-out values, such as the public address.
 	_ = base.Validate()
 	c.layers.base = base
@@ -801,10 +839,15 @@ func build(path string, page *PageSettings) (*Config, error) {
 			return nil, &PageFileError{Path: c.layers.pageFile, Err: err}
 		}
 	}
+	// The passwords and keys in signalith.yaml are decrypted once the
+	// page's settings are in: one the page replaces is not needed, as one
+	// an environment variable replaces is not.
+	c.openSecrets()
 	return c, nil
 }
 
-// readAndEnv reads signalith.yaml with defaults and the environment.
+// readAndEnv reads signalith.yaml with defaults and the environment,
+// without decrypting it.
 func readAndEnv(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -813,11 +856,9 @@ func readAndEnv(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	c := Default()
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	dec.KnownFields(true)
-	if err := dec.Decode(c); err != nil && err.Error() != "EOF" {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	c, err := decodeFile(path, data)
+	if err != nil {
+		return nil, err
 	}
 	c.path = path
 	c.layers = &layers{file: map[string]bool{}, env: map[string]string{}, page: map[string]*PageEntry{}, refused: map[string]*PageEntry{}}
@@ -829,11 +870,29 @@ func readAndEnv(path string) (*Config, error) {
 		}
 		fileKeys(top, "", c.layers.file)
 	}
+	// Keep the file's own view, before the environment changes anything.
+	if c.file, err = decodeFile(path, data); err != nil {
+		return nil, err
+	}
+	c.plain = plainLabels(c.file.secretRefs())
+	inURL, warnings := addressPlain(c.file.addressSecrets())
+	c.plain, c.addressWarnings = append(c.plain, inURL...), warnings
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
 	c.layers.pageFileEnv = strings.TrimSpace(os.Getenv("SIGNALITH_SETTINGS_FILE")) != ""
 	c.layers.pageFile = c.SettingsFile()
+	return c, nil
+}
+
+// decodeFile decodes signalith.yaml over the defaults.
+func decodeFile(path string, data []byte) (*Config, error) {
+	c := Default()
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(c); err != nil && err.Error() != "EOF" {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	return c, nil
 }
 
@@ -1040,6 +1099,11 @@ func (c *Config) Validate() error {
 			for _, pr := range s.Problems() {
 				msg := pr.Message
 				if pr.Field == "bind_password" {
+					if c.locked["auth.ldap.bind_password"] {
+						// Reported by Warnings; directory sign-in fails
+						// without trying an empty password.
+						continue
+					}
 					msg = "set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD environment variable"
 				}
 				p = append(p, "auth.ldap."+pr.Field+": "+msg)
@@ -1063,7 +1127,8 @@ func (c *Config) Validate() error {
 	switch c.Assistant.Provider {
 	case "":
 	case "anthropic":
-		if c.Assistant.APIKey == "" {
+		// A key that cannot be decrypted is reported by Warnings instead.
+		if c.Assistant.APIKey == "" && !c.locked["assistant.api_key"] && c.pageLocked["assistant.api_key"] == "" {
 			p = append(p, "assistant.api_key is required for anthropic; set it or SIGNALITH_ASSISTANT_API_KEY")
 		}
 	case "openai":
@@ -1115,7 +1180,7 @@ func (c *Config) Warnings() []string {
 	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
-	return w
+	return append(w, c.secretWarnings()...)
 }
 
 // OpenSearchConnection returns the settings Signalith connects to
@@ -1123,7 +1188,7 @@ func (c *Config) Warnings() []string {
 func (c *Config) OpenSearchConnection() store.Config {
 	ca, cert, key := c.OpenSearchTLSFiles()
 	return store.Config{
-		URL: c.OpenSearch.URL, Username: c.OpenSearch.Username, Password: c.OpenSearch.Password,
+		URL: c.OpenSearch.URL, Username: c.OpenSearch.Username, Password: secrets.New("opensearch.password", c.OpenSearch.Password),
 		CAFile: ca, CertFile: cert, KeyFile: key,
 		TLSSkipVerify: c.OpenSearch.TLSSkipVerify, Proxy: c.OpenSearch.Proxy,
 	}
@@ -1186,16 +1251,39 @@ func RandomToken(nBytes int) string {
 	return hex.EncodeToString(b)
 }
 
-// Save writes the config with a header comment explaining each section.
-// A config with settings from the Settings page is refused, so they stay
-// in their own file; load it with LoadFile to change signalith.yaml.
+// Save writes the config with a header comment explaining each section,
+// with its passwords and keys encrypted. A config from Load is written as
+// its file had it: settings from environment variables are never written
+// out, and neither are changes made after loading (use SetSecret or
+// SetAdminPasswordHash to change one setting in a file). A config with
+// settings from the Settings page is refused, so they stay in their own
+// file; load it with LoadFile to change signalith.yaml.
 func (c *Config) Save(path string) error {
 	if len(c.PageKeys()) > 0 {
 		return errors.New("this configuration includes settings from the Settings page; load signalith.yaml with LoadFile to save it")
 	}
+	src := c
+	if c.file != nil {
+		src = c.file
+	}
+	if c.path == "" {
+		// The master key goes with the file: a keyring made before the
+		// config had a file is made again for its folder.
+		c.path, c.keys = path, nil
+	}
 	var doc yaml.Node
-	if err := doc.Encode(c); err != nil {
+	if err := doc.Encode(src); err != nil {
 		return err
+	}
+	for _, n := range secretNodes(&doc) {
+		if !isPlain(n.node.Value, n.envRefs) {
+			continue
+		}
+		sealed, err := c.Keyring().Seal(n.field, n.node.Value)
+		if err != nil {
+			return err
+		}
+		n.node.Value, n.node.Style = sealed, 0
 	}
 	root := &doc
 	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
@@ -1210,13 +1298,7 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
-		}
-	}
-	content := header + string(out)
-	return os.WriteFile(path, []byte(content), 0o600)
+	return securefile.WriteFile(path, []byte(header+string(out)))
 }
 
 // sectionComments are written just above a section of the saved file.
@@ -1232,7 +1314,9 @@ const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
-# SIGNALITH_LDAP_BIND_PASSWORD.
+# SIGNALITH_LDAP_BIND_PASSWORD. Passwords and keys below are encrypted
+# (enc:v1:...) with Signalith's master key; a plain value pasted in works
+# too, and "signalith secrets encrypt" encrypts it (see docs/encryption.md).
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)

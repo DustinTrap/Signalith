@@ -131,7 +131,9 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		default:
 			touched[key] = true
 			delete(typed, key)
-			page.SetSecret(key, "", "", e.By, e.At)
+			if err := page.SetSecret(key, "", "", e.By, e.At); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, key := range e.Reset {
@@ -167,7 +169,11 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		}
 		for _, key := range sortedKeys(typed) {
 			s, _ := Lookup(key)
-			page.SetSecret(key, typed[key], s.SentTo(c), e.By, e.At)
+			// Encrypted with the master key; a key is made if there is
+			// none yet.
+			if err := page.SetSecret(key, typed[key], s.SentTo(c), e.By, e.At); err != nil {
+				return nil, err
+			}
 		}
 	}
 	after, err := build(path, page)

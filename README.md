@@ -39,11 +39,31 @@ Desktop when you sign in".
    sudo install -m 0755 signalith-linux-amd64 /usr/local/bin/signalith
    sudo useradd --system --no-create-home signalith
    sudo signalith init -c /etc/signalith/signalith.yaml -opensearch http://127.0.0.1:9200
-   sudo chown -R signalith /etc/signalith
+   sudo chown -R signalith /etc/signalith /var/lib/signalith
    sudo cp deploy/systemd/signalith.service /etc/systemd/system/
    sudo systemctl enable --now signalith
    ```
-   `init` prints the admin password once.
+   `init` prints the admin password once, and where it put the master key that
+   encrypts the passwords and keys Signalith stores (`/var/lib/signalith/keys/master.key`).
+   Back that file up, apart from the config; see [Encryption](#encryption).
+
+To upgrade, stop the service, replace the program and the unit, encrypt passwords an older
+version kept as plain text in `signalith.yaml`, and start it again:
+
+```sh
+sudo systemctl stop signalith
+sudo install -m 0755 signalith-linux-amd64 /usr/local/bin/signalith
+sudo cp deploy/systemd/signalith.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo signalith secrets encrypt
+sudo systemctl start signalith
+sudo signalith secrets status
+```
+
+The server encrypts the passwords and keys in its own files when it starts. Its master key is
+`/var/lib/signalith/keys/master.key`; `secrets status` shows where it is. Older versions cannot
+read encrypted values: before going back to one, run `sudo signalith secrets decrypt` (see
+[docs/encryption.md](docs/encryption.md#going-back-to-an-older-version)).
 
 ### Windows
 
@@ -53,6 +73,17 @@ Desktop when you sign in".
    .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
    ```
    This writes `C:\ProgramData\Signalith\signalith.yaml`, installs the **Signalith** service and starts it.
+   The service runs as its own account, `NT SERVICE\Signalith`, and only SYSTEM, Administrators and
+   that account can read `C:\ProgramData\Signalith`. To upgrade, put the new `signalith.exe` next to
+   the script and run it again: it stops the service, replaces the program, encrypts passwords an
+   older version kept as plain text, moves the service off LocalSystem and starts it again. An
+   archive folder outside `C:\ProgramData\Signalith` (`retention.archive_dir`) is given to the new
+   account too, and certificate and key files named in `signalith.yaml` or on the **Settings** page
+   (`server.tls_cert`, `opensearch.ca_file` and the like) can be read by it; the script says which.
+   After naming one outside `C:\ProgramData\Signalith` on the page later, run `signalith service install`
+   again, as Administrator, so the service may read it. Before going back
+   to an older version, run `signalith secrets decrypt` (see
+   [docs/encryption.md](docs/encryption.md#going-back-to-an-older-version)).
 
 ### Send data
 
@@ -207,8 +238,16 @@ from their groups; set it up and test it on the same page. The `admin` account f
 - **Logs**: values in log lines are cut to a sensible length, and the Windows service log
   (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
   quick start caps container logs the same way; under systemd, journald limits the log.
-- **Secrets**: passwords and keys in configured URLs are hidden (`***`) everywhere a URL is
-  shown or logged, and agents get a generic error rather than OpenSearch details.
+- **Secrets**: every password and key Signalith stores in a file is encrypted with a master
+  key (`signalith secrets`; see [Encryption](#encryption)). A password written into
+  `opensearch.url` is moved out of the address and encrypted by `signalith secrets encrypt`; one
+  in `opensearch.proxy` or a key in a feed's address cannot be, and is reported. Passwords and
+  keys in configured URLs are hidden (`***`) everywhere a URL is shown or logged, and agents get a
+  generic error rather than OpenSearch details.
+- **Memory**: on Linux the server turns off core dumps and keeps other programs from reading its
+  memory; the systemd unit also turns off swap for it, hides other processes and limits it to the
+  files and system calls it needs. On Windows the service runs as its own account rather than
+  LocalSystem.
 
 ## Configuration
 
@@ -229,12 +268,13 @@ answers, and people stay signed in. A move of the web address goes back by itsel
 when nobody reaches the new one within 2 minutes, which makes a lockout unlikely,
 though a firewall or proxy in between can still cause one. Changes are kept in
 `settings.yaml` in the lookups folder (`SIGNALITH_SETTINGS_FILE` moves it), never in
-`signalith.yaml`. Passwords and keys are never shown, and are only sent to the address
-they were entered for. If a change goes wrong, `signalith settings list` shows what
-was changed on the page and `signalith settings reset [setting...]` undoes it; then
-restart the service. The Linux service keeps the file in `/var/lib/signalith/lookups`:
-give it with `-file /var/lib/signalith/lookups/settings.yaml`. See
-[docs/settings.md](docs/settings.md).
+`signalith.yaml`. Passwords and keys saved there are encrypted with the master key (see
+[Encryption](#encryption)), are never shown, and are only sent to the address they
+were entered for. If a change goes wrong, `signalith settings list` shows what was
+changed on the page and `signalith settings reset [setting...]` undoes it; then
+restart the service. The Linux service keeps the file in `/var/lib/signalith/lookups`,
+which these commands read from its unit; where they cannot, give it with
+`-file /var/lib/signalith/lookups/settings.yaml`. See [docs/settings.md](docs/settings.md).
 
 Behind a reverse proxy that serves HTTPS, have it send `X-Forwarded-Proto: https`, so
 the sign-in cookie is marked for HTTPS only.
@@ -246,7 +286,7 @@ the sign-in cookie is marked for HTTPS only.
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
 | `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
 | `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
-| `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
+| `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown; `signalith secrets encrypt` moves it there in the file, encrypted |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials. Sent only over https, or plain http to this machine, unless `allow_insecure_http` is on |
 | `opensearch.ca_file` | none | PEM file with the CA that signed OpenSearch's certificate (for a private CA); system CAs are trusted too. Relative to the config file |
 | `opensearch.cert_file`, `opensearch.key_file` | none | Client certificate and key for certificate sign-in to OpenSearch; reloaded when they change |
@@ -283,7 +323,7 @@ the sign-in cookie is marked for HTTPS only.
 | `intel.feeds[].weight` | `1` | Multiplies the risk a match adds (0 to 10) |
 | `intel.feeds[].headers`, `.username`, `.password` | none | Request headers and HTTP basic sign-in for feeds that need a key; values may use `${ENV_VAR}` |
 | `intel.feeds[].tags`, `.description`, `.enabled` | none, `true` | Labels added to every indicator, and on/off |
-| `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys (file mode 0600) |
+| `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys encrypted (file mode 0600) |
 | `intel.allow_loopback_feeds` | `false` | Allow feed downloads from this machine (`127.0.0.1`, `::1`), for a feed server on the same host |
 | `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
@@ -299,6 +339,45 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). A setting set by an
 environment variable is shown locked on the Settings page. `SIGNALITH_SETTINGS_FILE`
 sets where the Settings page keeps its changes (default `settings.yaml` in `lookups.dir`).
+`SIGNALITH_STATE_DIR` is the folder for files Signalith makes for itself, such as its master key
+(default: the folder holding the lookups folder; the systemd unit and the Docker image set
+`/var/lib/signalith`), and `SIGNALITH_MASTER_KEY_FILE` or `SIGNALITH_MASTER_KEY` supply the master
+key (see [Encryption](#encryption)).
+
+## Encryption
+
+Passwords and API keys are encrypted wherever Signalith stores them: in `signalith.yaml`
+(`opensearch.password`, `assistant.api_key`, `auth.ldap.bind_password`, `ingest.tokens`, feed
+passwords and headers), in `settings.yaml` (the OpenSearch password and the AI model's API key
+saved on the **Settings** page), in `directory.json` (the directory service account password) and
+in `intel_feeds.yaml` (keys of feeds added on the page). They look like `enc:v1:9096cd23:...`. A
+plain value pasted into `signalith.yaml` still works, and `signalith validate` and the **Health**
+page say to encrypt it; the server encrypts plain values in the files it writes itself
+(`settings.yaml`, `directory.json`, `intel_feeds.yaml`) when it starts. The master key is made by
+`signalith init` (or the first time a password is stored): `/var/lib/signalith/keys/master.key`
+on Linux, `C:\ProgramData\Signalith\keys\master.key.dpapi` on Windows (also protected with DPAPI
+for that computer), `/var/lib/signalith/keys/master.key` in the Docker volume. Back it up, apart
+from the config. Losing it loses only the stored passwords and keys, never events: the server
+keeps running, and the **Health** page lists what to enter again (for the Settings page, the
+field itself says so).
+
+```sh
+sudo signalith secrets status                       # where the key is; how each value is stored
+sudo signalith secrets encrypt                      # encrypt plain values, keeping comments and layout
+sudo signalith secrets set opensearch.password      # asks twice without showing it, or reads a pipe
+sudo signalith secrets set ingest.tokens            # adds a token; press Enter to have one made
+sudo signalith secrets rotate-master                # new master key; everything encrypted again
+sudo signalith secrets rotate-master -prune         # remove the previous key once nothing needs it
+sudo signalith secrets decrypt                      # plain text again, before going back to an older version
+```
+
+When the key is lost, `encrypt` and `set` stop rather than make a new one; add `-new-key` to the
+first of them.
+
+[docs/encryption.md](docs/encryption.md) covers backing up and changing the key, keeping it in a
+systemd credential or a Docker secret, the commands in Docker, going back to an older version,
+disk encryption (BitLocker, LUKS, Docker Desktop, cloud
+disks), what protects passwords in memory, and confidential VMs.
 
 ## Detections and findings
 
@@ -621,7 +700,9 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
-| `internal/config` | YAML config, validation, password hashing, the Settings page's registry and settings file |
+| `internal/config` | YAML config, validation, password hashing, encrypted values in `signalith.yaml`, the Settings page's registry and settings file |
+| `internal/secrets` | Master key, encryption of stored passwords and keys, key rotation |
+| `internal/securefile` | Whole-or-nothing writes of files with secrets, private permissions on Linux and Windows |
 | `internal/httpserver` | Web server timeouts and connection limits |
 | `internal/safelog` | Length limits for log values, rotating log file |
 | `internal/redact` | Hides secrets in URLs before they are shown or logged |

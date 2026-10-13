@@ -392,6 +392,10 @@ func (s *Server) settingsView() (map[string]any, error) {
 			if f.Set != nil && *f.Set {
 				f.SentTo = set.SentTo(saved.Config)
 			}
+			// A secret saved here that cannot be decrypted is not used.
+			if msg := saved.PageSecretProblem(set.Key); msg != "" && f.Warning == "" {
+				f.Warning = msg
+			}
 			if f.Source.Kind == config.FromEnv {
 				f.Locked, f.LockedReason = true, config.LockedReason(f.Source.Env)
 			}

@@ -3,8 +3,7 @@
 package retention
 
 import (
-	"fmt"
-
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -23,24 +22,8 @@ func diskSpace(dir string) (free, total int64, err error) {
 }
 
 // restrictDir gives a folder an access list of its own, not inherited
-// from the drive or its parent: full control for SYSTEM, Administrators
-// and the account the server runs as, and nobody else. Files created in
-// it inherit the list. Unix file modes do not do this on Windows.
-func restrictDir(dir string) error {
-	tok := windows.GetCurrentProcessToken()
-	user, err := tok.GetTokenUser()
-	if err != nil {
-		return err
-	}
-	sddl := fmt.Sprintf("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)", user.User.Sid.String())
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		return err
-	}
-	dacl, _, err := sd.DACL()
-	if err != nil {
-		return err
-	}
-	return windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
-}
+// from the drive or its parent: full control for SYSTEM, Administrators,
+// the Signalith service account (NT SERVICE\Signalith) and the account
+// the server runs as, and nobody else. Files created in it inherit the
+// list. Unix file modes do not do this on Windows.
+func restrictDir(dir string) error { return securefile.MkdirPrivate(dir) }

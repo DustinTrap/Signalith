@@ -12,6 +12,7 @@ COPY --from=build /out/signalith /usr/local/bin/signalith
 # Writable folders for custom detections, lookups, dashboards and archived
 # days, owned by the nonroot user.
 COPY --from=build --chown=65532:65532 /out/data /var/lib/signalith
+ENV SIGNALITH_STATE_DIR=/var/lib/signalith
 ENV SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections \
     SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups \
     SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards \
