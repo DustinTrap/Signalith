@@ -234,3 +234,26 @@ func TestEndUser(t *testing.T) {
 		t.Error("ben's session ended")
 	}
 }
+
+// TestPeekDoesNotKeepSessionAlive: a page's own refreshes (Peek) see the
+// session but do not count as use, so a tab that only polls signs out at
+// the idle timeout.
+func TestPeekDoesNotKeepSessionAlive(t *testing.T) {
+	c := &clock{time.Date(2026, 10, 13, 8, 0, 0, 0, time.UTC)}
+	s := NewSessions(5 * time.Minute)
+	s.Now = c.now
+	tok := s.Create("admin", false)
+	for i := 0; i < 9; i++ { // every 30 seconds for 4.5 minutes
+		c.t = c.t.Add(30 * time.Second)
+		if _, ok := s.Peek(tok); !ok {
+			t.Fatalf("session ended after %v of polling", time.Duration(i+1)*30*time.Second)
+		}
+	}
+	c.t = c.t.Add(30 * time.Second)
+	if _, ok := s.Peek(tok); ok {
+		t.Fatal("a session that only polled outlived the idle timeout")
+	}
+	if _, ok := s.Lookup(tok); ok {
+		t.Fatal("expired session still usable")
+	}
+}

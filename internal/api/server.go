@@ -216,7 +216,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeSettings(api)
 	s.routeCluster(api)
 	if s.UI != nil {
-		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
+		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(staticFiles(s.UI, true)))
 	}
 	s.routes = api.routes
 	s.routeLogin(mux)
@@ -346,7 +346,18 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(res.Errors) > 0 {
-		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "first", res.Errors[0].Reason)
+		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "temporary", res.Temporary, "first", res.Errors[0].Reason)
+	}
+	if res.Temporary > 0 {
+		// OpenSearch may take these later (its disk is full, or it is too
+		// busy): 503 makes Fluent Bit send the batch again instead of
+		// dropping it. Events already stored count as duplicates then.
+		w.Header().Set("Retry-After", "30")
+		writeJSON(w, http.StatusServiceUnavailable, struct {
+			Error string `json:"error"`
+			*ingest.Result
+		}{"some events could not be stored right now; send them again later", res})
+		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }

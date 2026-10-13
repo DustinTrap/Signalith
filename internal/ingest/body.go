@@ -3,6 +3,9 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,8 +58,11 @@ func badBody(format string, args ...any) *BodyError {
 // single object. The whole body is checked against the limits above first,
 // so a refused request (a *BodyError) writes nothing. Records are then
 // decoded and written in batches; if OpenSearch fails part way, the
-// batches already written stay, and a sender that retries the request
-// (Fluent Bit does on the 503 this leads to) may store them twice.
+// batches already written stay. Each record's document ID comes from the
+// tag, the whole body and the record's place in it, so when the sender
+// sends the same request again (Fluent Bit does on the 503 this leads
+// to), records already stored count as duplicates instead of being
+// stored twice.
 func (p *Pipeline) IngestBody(ctx context.Context, tag string, body []byte) (*Result, error) {
 	n, err := checkBody(body)
 	if err != nil {
@@ -73,12 +79,17 @@ func (p *Pipeline) IngestBody(ctx context.Context, tag string, body []byte) (*Re
 		return nil, err
 	}
 	batch := make([]Event, 0, min(n, batchEvents))
+	ids := make([]string, 0, cap(batch))
+	seed := bodySeed(tag, body)
 	size, done := 0, 0
 	flush := func() error {
-		res, err := p.write(ctx, batch)
+		for i := range batch {
+			ids = append(ids, recordID(seed, done+i))
+		}
+		res, err := p.write(ctx, batch, ids)
 		done += len(batch)
 		clear(batch)
-		batch, size = batch[:0], 0
+		batch, ids, size = batch[:0], ids[:0], 0
 		if err != nil {
 			p.stats.Failed.Add(int64(n - done))
 			return err
@@ -112,6 +123,26 @@ func (p *Pipeline) IngestBody(ctx context.Context, tag string, body []byte) (*Re
 		}
 	}
 	return total, nil
+}
+
+// bodySeed identifies a request by its tag and body.
+func bodySeed(tag string, body []byte) [sha256.Size]byte {
+	h := sha256.New()
+	h.Write([]byte(tag))
+	h.Write([]byte{0})
+	h.Write(body)
+	return [sha256.Size]byte(h.Sum(nil))
+}
+
+// recordID is the document ID of the record at pos in the request seed
+// identifies: the same in every send of that request, and different for
+// identical records within it.
+func recordID(seed [sha256.Size]byte, pos int) string {
+	var b [sha256.Size + 8]byte
+	copy(b[:], seed[:])
+	binary.BigEndian.PutUint64(b[sha256.Size:], uint64(pos))
+	sum := sha256.Sum256(b[:])
+	return base64.RawURLEncoding.EncodeToString(sum[:18])
 }
 
 // checkBody reads a body without keeping what it decodes and returns how

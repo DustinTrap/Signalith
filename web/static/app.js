@@ -130,9 +130,21 @@ const toSignIn = (change) => {
   signingIn = true;
   location.assign('login?' + (change ? 'change=1&' : '') + 'next=' + encodeURIComponent(location.pathname + location.search + location.hash));
 };
+// A request made with no one using the page in the last few seconds,
+// such as a refresh on a timer, is marked as background so the server does
+// not count it as activity: an unattended tab still signs out after the
+// idle timeout (Settings > Sign out after).
+let lastInput = Date.now();
+for (const ev of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'input', 'scroll']) {
+  addEventListener(ev, () => { lastInput = Date.now(); }, { capture: true, passive: true });
+}
+const backgroundAfter = 10000;
 async function api(path, body, method) {
-  const opts = body === undefined ? { method: method || 'GET' } : {
-    method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (document.hidden || Date.now() - lastInput > backgroundAfter) headers['X-Signalith-Background'] = '1';
+  const opts = body === undefined ? { method: method || 'GET', headers } : {
+    method: method || 'POST', headers, body: JSON.stringify(body),
   };
   const resp = await fetch(path.replace(/^\//, ''), opts);
   const data = await resp.json().catch(() => ({}));
