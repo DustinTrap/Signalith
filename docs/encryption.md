@@ -473,6 +473,11 @@ server by encrypting its disks:
 - **OpenSearch snapshots and archives** you copy elsewhere need the same protection
   at their destination.
 
+The Security page (**Configure > Security**) and `signalith security` show whether the
+disk under Signalith's files, its archives and OpenSearch's data is encrypted, as far
+as the server can tell, and how to check by hand where it can't (see
+[Disk encryption](security.md#disk-encryption) in docs/security.md).
+
 ## In use
 
 While it runs, the server holds decrypted passwords and keys in memory. Signalith
@@ -502,6 +507,12 @@ processor encrypts the VM's memory: Azure confidential VMs (DCasv5, ECasv5 and
 DCesv5 series), Google Cloud Confidential VMs (N2D with AMD SEV, C3 with Intel TDX),
 or AWS EC2 instances with AMD SEV-SNP (M6a, C6a, R6a). Nothing in Signalith needs to
 change.
+
+The Security page and `signalith security` check that crash dumps are off, whether
+swap could hold Signalith's memory, and whether the service runs with its
+protections. They also say when they find a confidential VM. See
+[Memory](security.md#memory) and [Service protections](security.md#service-protections)
+in docs/security.md.
 
 ## Environment variables
 

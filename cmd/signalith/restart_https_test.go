@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/api"
+	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/config"
 )
 
@@ -365,4 +366,59 @@ func TestUnconfirmedHTTPSMoveSetsAsideItsFiles(t *testing.T) {
 func port(addr string) string {
 	_, p, _ := net.SplitHostPort(addr)
 	return p
+}
+
+// The Security page and a restart in place: switching certificate
+// authority needs no restart, and a restart keeps the one switched to,
+// the last report and the heartbeat's summary.
+func TestSecurityAcrossARestartInPlace(t *testing.T) {
+	rs := startRunnerWith(t, runOptions{server: "  tls:\n    mode: auto\n"})
+	oldCA := rs.ownCA()
+	if code, out, err := rs.call("", "GET", "/api/security", ""); err != nil || code != 200 || out["checks"] == nil {
+		t.Fatalf("report: %d %v %v", code, out, err)
+	}
+	if code, out, _ := rs.call("", "POST", "/api/security/ca", `{"action":"prepare","scope":"strict"}`); code != 200 {
+		t.Fatalf("prepare: %d %v", code, out)
+	}
+	nextPEM, err := os.ReadFile(filepath.Join(rs.dir, "tls", "next", "ca.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A browser that trusts both, as one given the new one beforehand.
+	rs.useHTTPS(append(slices.Clone(oldCA), nextPEM...))
+	if code, out, _ := rs.call("", "POST", "/api/security/ca", `{"action":"switch"}`); code != 200 {
+		t.Fatalf("switch: %d %v", code, out)
+	}
+	newFP := pemFingerprint(t, nextPEM)
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(nextPEM)
+	if _, err := peerCert(t, rs.addr).Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+		t.Errorf("the new certificate authority is not in use at once: %v", err)
+	}
+	// A restart in place, with a name the strict one doesn't cover.
+	rs.save(`{"server.tls.names":["siem-alias.lan"]}`)
+	if _, res := rs.restart(); !res.OK {
+		t.Fatalf("restart: %+v\n%s", res, rs.logs.String())
+	}
+	if got := pemFingerprint(t, rs.ownCA()); got != newFP {
+		t.Error("the restart went back to the old certificate authority")
+	}
+	if _, err := peerCert(t, rs.addr).Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+		t.Errorf("after the restart: %v", err)
+	}
+	code, out, _ := rs.call("", "GET", "/api/security", "")
+	ca, _ := out["ca"].(map[string]any)
+	if code != 200 || ca == nil || ca["previous"] == nil || ca["current"].(map[string]any)["scope"] != "strict" {
+		t.Fatalf("report after the restart: %d %v", code, out["ca"])
+	}
+	// The heartbeat sums up the last report.
+	var sec *cluster.SecuritySummary
+	for _, s := range rs.r.node.Status().Servers {
+		if s.Self && s.Detail != nil {
+			sec = s.Detail.Security
+		}
+	}
+	if sec == nil || sec.CheckedAt == nil || sec.CAScope != "strict" {
+		t.Errorf("heartbeat: %+v", sec)
+	}
 }

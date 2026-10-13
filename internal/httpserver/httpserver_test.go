@@ -481,3 +481,34 @@ func testCertificate(t *testing.T) tls.Certificate {
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
+
+func TestParseRefusal(t *testing.T) {
+	for line, want := range map[string]string{
+		"http: TLS handshake error from 203.0.113.9:51234: remote error: tls: unknown certificate authority\n": "203.0.113.9:51234",
+		"http: TLS handshake error from [2001:db8::1]:443: remote error: tls: bad certificate":                 "[2001:db8::1]:443",
+		"http: TLS handshake error from 10.0.0.5:1: remote error: tls: certificate unknown":                    "10.0.0.5:1",
+		"http: TLS handshake error from 10.0.0.5:1: EOF":                                                       "",
+		"http: TLS handshake error from 10.0.0.6:2: local error: tls: bad record MAC":                          "10.0.0.6:2",
+		"http: TLS handshake error from 10.0.0.5:1: remote error: tls: protocol version not supported":         "",
+		"http: panic serving 10.0.0.5:1: x":                                                                    "",
+	} {
+		got, ok := ParseRefusal(line)
+		if got != want || ok != (want != "") {
+			t.Errorf("%q: %q %v", line, got, ok)
+		}
+	}
+}
+
+func TestOnRefusalSeesEveryRefusal(t *testing.T) {
+	var buf bytes.Buffer
+	hs := New(http.NotFoundHandler(), Limits{}, slog.New(slog.NewTextHandler(&buf, nil)))
+	var got []string
+	OnRefusal(hs, func(addr string) { got = append(got, addr) })
+	for i := range errorLogBurst + 5 {
+		hs.ErrorLog.Printf("http: TLS handshake error from 203.0.113.9:%d: remote error: tls: unknown certificate authority", i)
+	}
+	// Throttling the log does not throttle what is recorded.
+	if len(got) != errorLogBurst+5 || got[0] != "203.0.113.9:0" {
+		t.Errorf("%d refusals: %v", len(got), got)
+	}
+}

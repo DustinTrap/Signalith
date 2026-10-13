@@ -70,6 +70,7 @@ Usage:
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith sample-data load|remove|status [-c file] [-size ...]  load or remove a week of sample data to try
   signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
+  signalith security  [-c file] [-json]   print the security report (exit 2 when something is at risk)
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
   signalith bootstrap-docker -opensearch-dir DIR -signalith-dir DIR   prepare the Docker quick start (its setup service runs this)
@@ -77,10 +78,10 @@ Usage:
 
 The config file defaults to %s
 (override with -c or the SIGNALITH_CONFIG environment variable).
-On Linux, validate, settings and secrets use the folders, files and master
-key the signalith service is given in its unit, when it runs with the same
-config file. If the unit cannot be read, give settings and validate the
-Settings page's file with -file (the service keeps it in
+On Linux, validate, settings, secrets and security use the folders, files
+and master key the signalith service is given in its unit, when it runs
+with the same config file. If the unit cannot be read, give settings and
+validate the Settings page's file with -file (the service keeps it in
 /var/lib/signalith/lookups/settings.yaml).
 `
 
@@ -134,6 +135,8 @@ func main() {
 		err = cmdSampleData(args)
 	case "secrets":
 		err = cmdSecrets(args)
+	case "security":
+		err = cmdSecurity(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -927,6 +930,10 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		}
 		if certs != nil {
 			sc.GetCertificate = certs.GetCertificate
+			sc.OnRefusal = func(addr string) { certs.NoteRefusal(addr, "syslog") }
+			// The names senders use, for the Security page's strict
+			// certificate authority.
+			sc.OnTLSName = certs.NoteName
 		}
 		receiver = syslog.New(sc, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
@@ -1068,6 +1075,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Sessions:   r.sessions,
 		Limiter:    r.limiter,
 		Restarter:  r,
+		Security:   r.security,
 		Started:    r.started,
 		UI:         web.FS(),
 		Log:        log,
@@ -1164,6 +1172,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		in.node = r.node
 	}
 	in.srv, in.handler = srv, srv.Handler()
+	// The security checks: 30 seconds after the process started, a moment
+	// after a restart in place, then hourly.
+	in.jobs.Go(func() { srv.RunSecurityChecks(ctx, api.SecurityDelay(r.started)) })
 	in.plain = in.handler
 	if c.Server.HTTPS() {
 		in.plain = srv.PlainHandler(in.handler)
@@ -1378,6 +1389,10 @@ func certOptions(c *config.Config) (o tlsauto.Options, ok bool) {
 		return o, true
 	}
 	o.Dir = c.TLSDir()
+	// Only for a certificate authority made on first start; certKey leaves
+	// it out, since it never changes the one in use (the Security page
+	// does that).
+	o.Scope = c.Server.CAScope()
 	if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
 		o.Names = append(o.Names, u.Hostname())
 	}

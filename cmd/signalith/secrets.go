@@ -18,10 +18,8 @@ import (
 	"syscall"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
-	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
-	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
 const secretsUsage = `Usage:
@@ -185,16 +183,14 @@ type secretFile struct {
 	replace bool
 }
 
-// secretFiles lists the files with passwords or keys: signalith.yaml,
-// which only these commands and "signalith init" write, then the files
-// the server keeps, the Settings page's settings.yaml among them.
+// secretFiles lists the files with passwords or keys (see
+// config.Config.SecretFiles, which the Security page also goes by).
 func secretFiles(c *config.Config) []secretFile {
-	return []secretFile{
-		{path: c.Path(), reseal: config.ResealFile},
-		{path: c.DirectoryFile(), reseal: users.ResealDirectoryFile, server: true},
-		{path: c.IntelFeedsFile(), reseal: intel.ResealFeedsFile, server: true},
-		{path: c.SettingsFile(), reseal: config.ResealSettingsFile, server: true, replace: true},
+	var out []secretFile
+	for _, f := range c.SecretFiles() {
+		out = append(out, secretFile{path: f.Path, reseal: f.Reseal, server: f.Server, replace: f.Replace})
 	}
+	return out
 }
 
 // writeFile replaces the file f with data, as the server writes it.
@@ -207,12 +203,7 @@ func (f secretFile) writeFile(data []byte) error {
 
 // listSecrets returns the values stored in a file's text.
 func listSecrets(f secretFile, data []byte) ([]secrets.Stored, error) {
-	var out []secrets.Stored
-	_, _, err := f.reseal(data, func(s secrets.Stored) (string, error) {
-		out = append(out, s)
-		return s.Value, nil
-	})
-	return out, err
+	return config.ListSecrets(f.reseal, data)
 }
 
 // whyUnreadable says briefly why a value cannot be decrypted.

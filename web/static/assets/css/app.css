@@ -2459,6 +2459,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .agent-ca__pem:focus-visible { outline-offset: -2px; }
 #page-data .agent-ca__fp { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 8px 12px 10px; font-size: var(--fs-sm); line-height: 18px; color: var(--text-3); box-shadow: inset 0 1px 0 var(--line-subtle); }
 #page-data .agent-ca__fp code { min-width: 0; font-size: var(--fs-sm); color: var(--text-2); overflow-wrap: anywhere; }
+/* while switching certificate authority: one sentence naming both fingerprints */
+#page-data .agent-ca__both { display: block; }
 #page-data .agent-s { color: var(--code-cmd); font-weight: 500; }
 #page-data .agent-k { color: var(--text-2); }
 #page-data .agent-c { color: var(--text-3); }
@@ -2576,6 +2578,9 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
    counters, then the components with a pulse each. */
 #page-health .health-page { display: grid; gap: var(--sp-4); }
 #page-health .hp-alerts { display: grid; gap: var(--sp-2); }
+/* admins: a quiet link to every security check, under the warnings */
+#page-health .hp-more { font-size: var(--fs-sm); }
+#page-health .hp-more a { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; }
 #page-health .hp-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 #page-health .kpi__value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* no value yet: a quiet dash, as on Dashboards; the foot says why */
@@ -3391,3 +3396,204 @@ body:has(#page-settings.active .st-savebar:not([hidden])) #toast { bottom: 88px;
   #page-settings .st-kv dd + dt { margin-top: 8px; }
 }
 /* ==== end page:settings ==== */
+
+/* ==== page:security (styles for this page only) ==== */
+/* A summary card with the first things to fix, then one card per group
+   of checks. Colour means a state and appears only in icons, the summary
+   tile, the step marks and the menu count: cards have no coloured edges,
+   and good rows are quieter than problems. A row is icon | title | line
+   where its card is wide, and icon | title over line where it is narrow.
+   How to fix folds away under each problem; nothing opens by itself.
+   The dialog lives at the end of <body>, so its rules are scoped by
+   .sc-dialog. */
+#page-security .sc-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--sp-4); }
+
+/* one colour per state, from the tokens (light and dark come with them) */
+#page-security [data-state="risk"] { --sc: var(--danger); --sc-soft: var(--danger-soft); }
+#page-security [data-state="attention"] { --sc: var(--warning); --sc-soft: var(--warning-soft); }
+#page-security [data-state="unknown"] { --sc: var(--text-3); --sc-soft: var(--hover); }
+#page-security [data-state="good"] { --sc: var(--success); --sc-soft: var(--success-soft); }
+
+/* Export: a menu under its button */
+/* the actions stay on the right when the head wraps, so the menu opens on screen */
+#page-security .page-head__actions { margin-left: auto; }
+#page-security .sc-export .menu__panel { min-width: 220px; }
+/* a panel brought into view stops below the sticky top bar */
+#page-security .sc-ca { scroll-margin-top: calc(var(--topbar-h) + 16px); }
+#page-security .sc-export > summary { gap: 6px; }
+#page-security .sc-export__chev { color: var(--text-3); margin-left: -2px; }
+#page-security .sc-export[open] > summary { box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-xs); }
+
+/* the summary card */
+#page-security .sc-summary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; padding: 20px; }
+#page-security .sc-summary__main { display: flex; align-items: center; gap: 14px; min-width: 0; }
+#page-security .sc-tile { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: var(--r-lg); color: var(--sc); background: var(--sc-soft); }
+#page-security .sc-tile .icon { width: 20px; height: 20px; }
+#page-security .sc-tile--skel { background: var(--hover); }
+#page-security .sc-head { flex: 1; min-width: 0; display: grid; gap: 3px; }
+#page-security .sc-headline { font-size: var(--fs-lg); font-weight: 600; letter-spacing: var(--track-tight); }
+#page-security .sc-sub { font-size: var(--fs-sm); color: var(--text-3); line-height: 1.45; }
+#page-security .sc-fixfirst { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding-top: 16px; box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-security .sc-fixfirst__list { margin: 0 -8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+#page-security .sc-ff {
+  display: grid; grid-template-columns: 20px 200px minmax(0, 1fr) 16px; align-items: center; column-gap: 12px;
+  width: 100%; min-height: 40px; padding: 8px; border: 0; border-radius: var(--r-md); background: none; color: var(--text); text-align: left;
+  transition: background var(--t-fast);
+}
+#page-security .sc-ff:hover { background: var(--hover); }
+#page-security .sc-ff__icon { display: grid; place-items: center; color: var(--sc); }
+#page-security .sc-ff__title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#page-security .sc-ff__line { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#page-security .sc-ff__chev { color: var(--text-3); transition: transform var(--t-fast) var(--ease), color var(--t-fast); }
+#page-security .sc-ff:hover .sc-ff__chev { color: var(--text-2); transform: translateX(2px); }
+
+/* the other servers: one quiet line */
+#page-security .sc-others { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 20px; margin-top: -4px; padding: 0 4px; font-size: var(--fs-sm); color: var(--text-3); }
+#page-security .sc-others__label { font-weight: 500; color: var(--text-2); }
+#page-security .sc-others__item a, #page-security .sc-others__name { font-weight: 500; }
+#page-security .sc-others__name { color: var(--text-2); }
+
+/* group cards (and the certificate authority panel, which shares the head) */
+#page-security .sc-group, #page-security .sc-ca { container: sc-card / inline-size; }
+#page-security .sc-group__head { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; padding: 16px 20px 14px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+#page-security .sc-group__icon { width: 32px; height: 32px; display: grid; place-items: center; border-radius: var(--r-md); color: var(--text-2); background: var(--hover); }
+#page-security .sc-group__heading { min-width: 0; display: grid; gap: 2px; }
+#page-security .sc-group__title { font-size: var(--fs-md); font-weight: 600; letter-spacing: var(--track-tight); width: max-content; max-width: 100%; }
+#page-security .sc-group__title:focus { outline: none; }
+#page-security .sc-group__title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#page-security .sc-group__desc { font-size: var(--fs-sm); color: var(--text-3); line-height: 1.45; }
+#page-security .sc-tally { font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; text-align: right; }
+
+/* rows */
+#page-security .sc-rows { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+#page-security .sc-row { display: grid; grid-template-columns: 20px minmax(0, 1fr); column-gap: 12px; padding: 14px 20px; }
+#page-security .sc-row + .sc-row { box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-security .sc-row__icon { grid-column: 1; grid-row: 1; height: 20px; display: grid; place-items: center; color: var(--sc); }
+#page-security .sc-row__title { grid-column: 2; grid-row: 1; min-width: 0; font-size: var(--fs-base); font-weight: 500; line-height: 20px; letter-spacing: 0; color: var(--text); overflow-wrap: anywhere; }
+#page-security .sc-row__title:focus { outline: none; }
+#page-security .sc-row__title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#page-security .sc-row__body { grid-column: 2; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-top: 2px; }
+#page-security .sc-row__line { color: var(--text-2); line-height: 20px; overflow-wrap: anywhere; }
+#page-security .sc-row[data-state="good"] .sc-row__line { color: var(--text-3); }
+#page-security .sc-row__details { margin: 0; display: grid; gap: 2px; font-size: var(--fs-sm); line-height: 1.45; color: var(--text-3); overflow-wrap: anywhere; }
+@container sc-card (min-width: 720px) {
+  #page-security .sc-row { grid-template-columns: 20px 200px minmax(0, 1fr); column-gap: 14px; }
+  #page-security .sc-row__body { grid-column: 3; grid-row: 1; margin-top: 0; }
+}
+@container sc-card (max-width: 520px) {
+  #page-security .sc-group__head { grid-template-columns: 32px minmax(0, 1fr); align-items: start; }
+  #page-security .sc-group__icon { grid-row: span 2; }
+  #page-security .sc-tally { grid-column: 2; text-align: left; white-space: normal; }
+}
+
+/* how to fix: closed until asked for */
+#page-security .sc-fix { min-width: 0; }
+#page-security :is(.sc-fix, .sc-other) > summary {
+  display: inline-flex; align-items: center; gap: 4px; width: max-content; max-width: 100%; min-height: 24px;
+  list-style: none; cursor: pointer; font-size: var(--fs-sm); font-weight: 500; border-radius: var(--r-xs);
+}
+#page-security :is(.sc-fix, .sc-other) > summary::-webkit-details-marker { display: none; }
+#page-security .sc-fix > summary { color: var(--accent); }
+#page-security .sc-fix > summary:hover { text-decoration: underline; text-underline-offset: 2px; }
+#page-security .sc-chev { transition: transform var(--t) var(--ease); }
+#page-security details[open] > summary > .sc-chev { transform: rotate(90deg); }
+#page-security .sc-fix__body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 8px; padding: 14px 16px; border-radius: var(--r-md); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
+#page-security .sc-steps-text { color: var(--text); line-height: 1.5; overflow-wrap: anywhere; }
+#page-security .sc-steplist { margin: 0; padding-left: 20px; display: grid; gap: 6px; color: var(--text); line-height: 1.5; overflow-wrap: anywhere; }
+#page-security .sc-steplist li { padding-left: 2px; }
+#page-security .sc-steplist li::marker { color: var(--text-3); font-variant-numeric: tabular-nums; }
+#page-security .sc-scope { display: grid; gap: 10px; max-width: 76ch; color: var(--text-2); line-height: 1.55; }
+#page-security .sc-scope b { font-weight: 600; color: var(--text); }
+#page-security .sc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+#page-security .sc-locked { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-3); }
+#page-security .sc-locked code { font-size: var(--fs-xs); color: var(--text-2); }
+:is(#page-security, .sc-dialog) .sc-doc { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-sm); font-weight: 500; }
+
+/* commands: each box scrolls sideways by itself, never the page */
+#page-security .sc-cmds { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
+#page-security .sc-cmd { min-width: 0; overflow: hidden; border-radius: var(--r-md); background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+#page-security .sc-cmd__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 4px 2px 12px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+#page-security .sc-cmd__label { font-size: var(--fs-xs); font-weight: 600; letter-spacing: var(--track-caps); text-transform: uppercase; color: var(--text-3); }
+#page-security .sc-cmd__pre { margin: 0; padding: 10px 12px; overflow-x: auto; font: 400 var(--fs-sm)/20px var(--font-mono); color: var(--text); white-space: pre; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+#page-security .sc-cmd__pre:focus-visible { outline-offset: -2px; }
+#page-security .is-copied, #page-security .is-copied .icon { color: var(--success); }
+#page-security .sc-other > summary { color: var(--text-3); }
+#page-security .sc-other > summary:hover { color: var(--text-2); }
+#page-security .sc-other__body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 8px; }
+
+/* Always on and Not checked here: the shared disclosure component */
+#page-security .sc-more > summary .chev { margin-left: auto; }
+#page-security .sc-always + .sc-notchecked { margin-top: calc(-1 * var(--sp-2)); }
+#page-security .sc-more__lead { margin-bottom: 10px; font-size: var(--fs-sm); color: var(--text-3); }
+#page-security .sc-list { margin: 0; display: grid; gap: 8px; }
+#page-security .sc-list li { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 10px; color: var(--text-2); line-height: 1.5; }
+#page-security .sc-list li .icon { margin-top: 3px; color: var(--text-3); }
+#page-security .sc-list--plain li { grid-template-columns: minmax(0, 1fr); position: relative; padding-left: 16px; }
+#page-security .sc-list--plain li::before { content: ""; position: absolute; left: 4px; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--text-3); }
+#page-security .sc-more__link { margin-top: 12px; }
+#page-security .sc-foot { padding: 0 4px; font-size: var(--fs-sm); color: var(--text-3); }
+
+/* the certificate authority panel: four steps down a line */
+#page-security .sc-steps { margin: 0; padding: 16px 20px 18px; display: grid; grid-template-columns: minmax(0, 1fr); }
+#page-security .sc-step { position: relative; display: grid; grid-template-columns: 24px minmax(0, 1fr); column-gap: 14px; padding-bottom: 20px; }
+#page-security .sc-step:last-child { padding-bottom: 0; }
+#page-security .sc-step::before { content: ""; position: absolute; left: 11.5px; top: 30px; bottom: 6px; width: 1px; background: var(--line); }
+#page-security .sc-step:last-child::before { display: none; }
+#page-security .sc-step__mark {
+  width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%;
+  font-size: var(--fs-xs); font-weight: 600; font-variant-numeric: tabular-nums;
+  color: var(--text-3); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line);
+}
+#page-security .sc-step[data-step="done"] .sc-step__mark { color: var(--success); background: var(--success-soft); box-shadow: none; }
+#page-security .sc-step[data-step="current"] .sc-step__mark { color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+#page-security .sc-step__body { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding-top: 2px; color: var(--text-2); line-height: 1.5; overflow-wrap: anywhere; }
+#page-security .sc-step__title { font-size: var(--fs-base); font-weight: 600; line-height: 20px; letter-spacing: 0; color: var(--text); }
+#page-security .sc-step[data-step="todo"] .sc-step__title { font-weight: 500; color: var(--text-2); }
+#page-security .sc-step code { font-size: var(--fs-sm); color: var(--text); }
+#page-security .sc-step .link-btn { font-size: var(--fs-sm); }
+#page-security .sc-muted { font-size: var(--fs-sm); color: var(--text-3); }
+#page-security .sc-share { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 14px 16px; border-radius: var(--r-md); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
+#page-security .sc-share__part { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+#page-security .sc-share__part + .sc-share__part { padding-top: 14px; box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-security .sc-share__title { font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+#page-security .sc-refused { margin: 0; display: grid; gap: 4px; font-size: var(--fs-sm); }
+
+/* loading and error */
+#page-security .sc-skel { height: 10px; margin: 5px 0; }
+#page-security .sc-skel--title { width: 70%; }
+#page-security .sc-skel--20 { width: 20%; }
+#page-security .sc-skel--40 { width: 40%; height: 14px; }
+#page-security .sc-skel--45 { width: 45%; }
+#page-security .sc-skel--55 { width: 55%; }
+#page-security .sc-skel--60 { width: 60%; }
+#page-security .sc-skel--65 { width: 65%; }
+#page-security .sc-skel--70 { width: 70%; }
+#page-security .sc-error { display: grid; gap: 10px; justify-items: start; min-width: 0; overflow-wrap: anywhere; }
+
+/* the dialog: make a certificate authority, switch, switch back, remove */
+.sc-dialog .modal__close { margin: -4px -8px 0 auto; flex: none; }
+.sc-dialog .sc-dialog__text { color: var(--text-2); line-height: 1.5; }
+.sc-dialog .sc-cover { display: grid; gap: 8px; }
+.sc-dialog .sc-names { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sc-dialog .sc-names code { display: inline-block; padding: 2px 8px; border-radius: var(--r-sm); background: var(--chip-bg); box-shadow: inset 0 0 0 1px var(--line-subtle); font-size: var(--fs-sm); color: var(--text); overflow-wrap: anywhere; }
+.sc-dialog .sc-names__more { font-size: var(--fs-sm); color: var(--text-3); }
+.sc-dialog .sc-callout__body { min-width: 0; display: grid; gap: 8px; justify-items: start; }
+.sc-dialog .alert p { color: var(--text-2); }
+
+@media (max-width: 720px) {
+  /* page-head actions become icon buttons; their labels stay as aria-label */
+  #page-security .page-head__actions .btn { width: var(--h); padding: 0; }
+  #page-security .sc-summary { padding: 16px; gap: 14px; }
+  #page-security .sc-summary__main { align-items: flex-start; gap: 12px; }
+  #page-security .sc-tile { width: 32px; height: 32px; border-radius: var(--r-md); }
+  #page-security .sc-tile .icon { width: 18px; height: 18px; }
+  /* Fix first rows take two lines: icon and title, then the line */
+  #page-security .sc-ff { grid-template-columns: 20px minmax(0, 1fr) 16px; row-gap: 2px; align-items: start; }
+  #page-security .sc-ff__icon, #page-security .sc-ff__chev { height: 20px; }
+  #page-security .sc-ff__title { grid-column: 2; line-height: 20px; }
+  #page-security .sc-ff__line { grid-column: 2; grid-row: 2; font-size: var(--fs-sm); }
+  #page-security .sc-ff__chev { grid-column: 3; grid-row: 1 / span 2; align-self: center; }
+  #page-security .sc-group__head, #page-security .sc-row, #page-security .sc-steps { padding-left: 16px; padding-right: 16px; }
+  #page-security .sc-fix__body, #page-security .sc-share { padding: 12px; }
+}
+/* ==== end page:security ==== */

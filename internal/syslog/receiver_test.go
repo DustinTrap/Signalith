@@ -267,6 +267,49 @@ func TestTLSWithCertificateManager(t *testing.T) {
 	waitFor(t, "the second event", func() bool { return bulk.count() == 2 })
 }
 
+// The name a TLS sender asked for is heard once per connection, and only
+// after it sends syslog: a bare handshake doesn't count.
+func TestTLSNameAfterFirstMessage(t *testing.T) {
+	m, err := tlsauto.New(tlsauto.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureName("syslog.corp.lan"); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var names []string
+	bulk := &capture{}
+	r, _, _ := start(t, Config{TLS: "127.0.0.1:0", GetCertificate: m.GetCertificate, OnTLSName: func(n string) {
+		mu.Lock()
+		names = append(names, n)
+		mu.Unlock()
+	}}, bulk)
+	heard := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string{}, names...)
+	}
+	c, err := tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{InsecureSkipVerify: true, ServerName: "stranger.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(m.CAPEM())
+	c, err = tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{RootCAs: pool, ServerName: "syslog.corp.lan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := "<86>1 2026-10-12T13:00:00Z web1 sshd 900 - - Accepted password for bob from 192.0.2.4 port 22 ssh2"
+	fmt.Fprintf(c, "%d %s%d %s", len(msg), msg, len(msg), msg)
+	waitFor(t, "the events", func() bool { return bulk.count() == 2 })
+	c.Close()
+	if got := heard(); len(got) != 1 || got[0] != "syslog.corp.lan" {
+		t.Errorf("%v", got)
+	}
+}
+
 func TestTLSNeedsCertificate(t *testing.T) {
 	r := New(Config{TLS: "127.0.0.1:0", CertFile: "/nonexistent/cert.pem", KeyFile: "/nonexistent/key.pem"}, &ingest.Pipeline{Store: &capture{}}, nil)
 	err := r.Start(context.Background())
@@ -885,6 +928,57 @@ func TestIPv6SendersCountedByNetwork(t *testing.T) {
 		b.limit(e, netip.MustParseAddr(from), now, DefaultMaxAge)
 		if kept := len(e.Fields); kept != map[bool]int{true: 1, false: 0}[i < 2] {
 			t.Errorf("name %d from %s kept: %v", i, from, e.Fields)
+		}
+	}
+}
+
+// A sender that doesn't trust the certificate is heard of, by address.
+func TestTLSRefusalIsNoted(t *testing.T) {
+	certFile, keyFile := writeCert(t)
+	refused := make(chan string, 4)
+	r, _, _ := start(t, Config{TLS: "127.0.0.1:0", CertFile: certFile, KeyFile: keyFile,
+		OnRefusal: func(addr string) { refused <- addr }}, &capture{})
+	// No CA given: the client refuses the certificate.
+	if c, err := tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{ServerName: "127.0.0.1"}); err == nil {
+		c.Close()
+		t.Fatal("the certificate was trusted")
+	}
+	select {
+	case a := <-refused:
+		if !strings.HasPrefix(a, "127.0.0.1") {
+			t.Errorf("address %q", a)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refusal was not noted")
+	}
+	// Plain text is no refusal.
+	plain, err := net.Dial("tcp", addr(t, r, "tls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprint(plain, "<13>Oct 12 13:00:00 h app: not encrypted\n")
+	plain.SetReadDeadline(time.Now().Add(5 * time.Second))
+	io.Copy(io.Discard, plain)
+	plain.Close()
+	select {
+	case a := <-refused:
+		t.Errorf("plain text noted as a refusal from %s", a)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestRefusedCertificate(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"remote error: tls: unknown certificate authority": true,
+		"remote error: tls: bad certificate":               true,
+		// An OpenSSL client's alert over TLS 1.3, sent before it encrypts.
+		"local error: tls: bad record MAC":                     true,
+		"remote error: tls: protocol version not supported":    false,
+		"tls: first record does not look like a TLS handshake": false,
+		"read tcp 127.0.0.1:6514->127.0.0.1:5000: i/o timeout": false,
+	} {
+		if got := refusedCertificate(errors.New(msg)); got != want {
+			t.Errorf("%q: %v", msg, got)
 		}
 	}
 }

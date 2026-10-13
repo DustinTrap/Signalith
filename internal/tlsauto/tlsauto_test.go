@@ -389,7 +389,9 @@ func TestCANameConstraints(t *testing.T) {
 	}
 	pool := caPool(t, m)
 	for name, ok := range map[string]bool{
-		"siem.example.com": true, "api.siem.example.com": true, "ws-test": true, "siem.corp.local": true, "nas.home.arpa": true,
+		"siem.example.com": true, "ws-test": true, "siem.corp.local": true, "nas.home.arpa": true,
+		// Not the names under this server's own public ones.
+		"api.siem.example.com": false, "x.ws-test": false,
 		"192.168.1.20": true, "10.9.8.7": true, "100.101.102.103": true, "fd00::5": true, "198.51.100.7": true, "127.0.0.1": true,
 		"www.bank.example": false, "example.com": false, "login.microsoftonline.com": false, "8.8.8.8": false, "198.51.100.8": false, "2001:db8::1": false,
 	} {

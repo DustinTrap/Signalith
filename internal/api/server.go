@@ -122,6 +122,9 @@ type Server struct {
 	// says which one runs the background jobs. nil means this server runs
 	// them when detections.scheduler is on, and lists no servers.
 	Cluster Cluster
+	// Security runs the Security page's checks and keeps the last
+	// report; it carries over a restart in place. nil makes one.
+	Security *SecurityChecker
 
 	authOnce     sync.Once
 	creds        credCache  // recently checked Basic credentials
@@ -142,7 +145,10 @@ type Server struct {
 
 	// legacyProxies are reverse proxies believed only because the config
 	// predates HTTPS by default (see viaTrustedProxy).
-	legacyProxies legacyProxySeen
+	legacyProxies addrSeen
+	secOnce       sync.Once
+	sec           *SecurityChecker
+	caMu          sync.Mutex // one change of certificate authority at a time
 }
 
 // liveModel is the assistant after a change on the Settings page; nil
@@ -194,6 +200,10 @@ func (s *Server) Handler() http.Handler {
 	// Adds the address agents or syslog devices send to to the HTTPS
 	// certificate.
 	api.admin("POST /api/tls/names", s.handleTLSName)
+	// The security checks name files, accounts and addresses on the
+	// server, and the certificate authority is the server's to change.
+	api.admin("GET /api/security", s.handleSecurity)
+	api.admin("POST /api/security/ca", s.handleSecurityCA)
 	s.routeDetections(api)
 	s.routeRisk(api)
 	s.routeAsk(api)
@@ -286,6 +296,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if !s.validToken(r) && !s.retiredTokenAccepted(w, r) {
 		return
 	}
+	// Only agents that hold a token count: anyone can send a request.
+	s.noteName(r)
+	s.notePlainAgent(r)
 	var res *ingest.Result
 	if plaintextIngest(r) {
 		// Noted once the batch is in, with the host names in its events:
@@ -749,7 +762,9 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		Sysmon:      v.Get("sysmon") == "true",
 	}
 	if certs != nil {
-		opts.CA = string(certs.CAPEM())
+		// While a new certificate authority is prepared, agents get both,
+		// so they keep sending after the switch.
+		opts.CA = string(certs.AgentCAPEM())
 		opts.CAUnknown = opts.CA == "" && !certs.PublicCA()
 	}
 	a, err := agents.Generate(opts)
@@ -757,10 +772,14 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	out := agentConfig{Agent: a, AddName: addName}
 	if a.CA != "" {
 		a.CAFingerprint = certs.Fingerprint()
+		if next := certs.Next(); next != nil {
+			out.NextCAFingerprint = next.Fingerprint
+		}
 	}
-	writeJSON(w, http.StatusOK, agentConfig{Agent: a, AddName: addName})
+	writeJSON(w, http.StatusOK, out)
 }
 
 // agentConfig is the answer to GET api/agents/config. AddName is the
@@ -768,6 +787,9 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 type agentConfig struct {
 	*agents.Agent
 	AddName string `json:"add_name,omitempty"`
+	// NextCAFingerprint is the new certificate authority's, while
+	// Signalith is switching: the CA file holds both.
+	NextCAFingerprint string `json:"next_ca_fingerprint,omitempty"`
 }
 
 // agentToken is the ingest token new agents get: the first that is not
@@ -836,6 +858,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	out["config_has_syslog"] = s.Config.HasSection("syslog")
 	out["runtime"] = s.runtimeInfo()
 	out["tls"] = s.tlsInfo()
+	if sec := s.securityHealth(); sec != nil {
+		out["security"] = sec
+	}
 	osURL := redact.URL(s.conf().OpenSearch.URL)
 	if err != nil {
 		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
@@ -886,6 +911,16 @@ func (s *Server) tlsInfo() map[string]any {
 	if s.TLS.CAPEM() != nil {
 		t["ca_sha256"] = s.TLS.Fingerprint()
 		t["own_ca"] = s.TLS.LocalCA()
+	}
+	if ca := s.TLS.CAInfo(); ca != nil {
+		t["ca_scope"] = ca.Scope
+		// When it was made, for the Settings page's "In use now".
+		t["ca_made"] = ca.NotBefore
+	}
+	if next := s.TLS.Next(); next != nil {
+		// Signalith is switching certificate authority: agents and browsers
+		// get both until then.
+		t["next_ca_sha256"] = next.Fingerprint
 	}
 	return t
 }

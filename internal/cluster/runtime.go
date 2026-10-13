@@ -165,9 +165,25 @@ type Heartbeat struct {
 	// CannotTakeOver says why this server, though it may run the jobs,
 	// would not take them over by itself now.
 	CannotTakeOver string `json:"cannot_take_over,omitempty"`
+	// Security sums up this server's last security check, for the
+	// Security page of the others. A server too old to check itself has
+	// none.
+	Security *SecuritySummary `json:"security,omitempty"`
 	// Features lists what this server's version can do that an older one
 	// cannot, where another server must know it (see FeatureSampleData).
 	Features []string `json:"features,omitempty"`
+}
+
+// SecuritySummary is a server's last security check, as its heartbeat
+// carries it. CheckedAt is nil until the first check has run.
+type SecuritySummary struct {
+	CheckedAt *time.Time `json:"checked_at"`
+	Risk      int        `json:"risk"`
+	Attention int        `json:"attention"`
+	Unknown   int        `json:"unknown"`
+	// CAScope is the scope of the certificate authority in use (standard,
+	// strict or unconstrained), "" without one of Signalith's own.
+	CAScope string `json:"ca_scope,omitempty"`
 }
 
 // Syslog is where a server listens for syslog.

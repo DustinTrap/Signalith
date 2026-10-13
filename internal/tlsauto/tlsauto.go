@@ -70,6 +70,10 @@ type Options struct {
 	// cover besides this machine's own: the public_url host and
 	// server.tls.names.
 	Names []string
+	// Scope is how far a certificate authority made on first start
+	// reaches (server.tls.ca_scope): ScopeStandard (or "") or
+	// ScopeStrict. It never changes the one in use; see Prepare.
+	Scope string
 	// Log gets renewals and problems; nil discards them.
 	Log *slog.Logger
 	// Now is the clock; nil uses time.Now.
@@ -93,6 +97,13 @@ type Manager struct {
 	stamp    string
 	publicCA bool
 	failed   string // the files' stamp that last failed to load
+
+	// switchedAt is when Switch last moved to a new certificate
+	// authority while the previous one is kept (zero otherwise), and
+	// refusals the computers that refused the new certificate since.
+	switchedAt time.Time
+	seen       recorder // refusals since the switch, by address
+	names      recorder // host names people and agents used, by name
 }
 
 // localNames lists this machine's names and addresses for the auto
@@ -120,9 +131,15 @@ func New(o Options) (*Manager, error) {
 	}
 	// The names first: a new CA is made for them.
 	m.added = m.readNames()
+	// A switch of certificate authority that a crash cut short is
+	// finished or undone before anything is read.
+	if err := m.recoverSwitch(); err != nil {
+		return nil, err
+	}
 	if err := m.loadCA(); err != nil {
 		return nil, err
 	}
+	m.switchedAt = readStamp(m.path(previousDir, stampSwitched))
 	if err := m.loadOrIssue(); err != nil {
 		return nil, err
 	}
@@ -143,7 +160,10 @@ func (m *Manager) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// GetCertificate is for tls.Config.GetCertificate.
+// GetCertificate is for tls.Config.GetCertificate. The name a client
+// asks for in the handshake is not noted here: anyone who can reach the
+// port could send any name. The API and the syslog receiver note it once
+// the client has proved it may send (see NoteName).
 func (m *Manager) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return m.cert.Load(), nil
 }
@@ -270,7 +290,12 @@ func (m *Manager) canCover(host string) (string, error) {
 	}
 	m.mu.Lock()
 	allowed := m.allowed(name)
+	strict := m.ca != nil && classify(m.ca) == ScopeStrict
 	m.mu.Unlock()
+	if !allowed && strict {
+		return "", fmt.Errorf("Signalith's certificate authority is strict, so it can only vouch for the names it was made with. "+
+			"Add %s under Extra certificate names and make a new certificate authority on the Security page, or switch to standard", name)
+	}
 	if !allowed {
 		return "", fmt.Errorf("Signalith's certificate can't include %s: its own certificate authority only signs this server's names and private network addresses, "+
 			"so trusting it can't expose other websites. Use this computer's IP address or a name the certificate covers (%s), "+
@@ -365,8 +390,8 @@ func (m *Manager) Check() error {
 		return nil
 	}
 	if m.now().After(m.ca.NotAfter.Add(-RenewBefore)) {
-		m.log().Warn("Signalith's own certificate authority is about to expire; delete the tls folder and restart to make a new one, "+
-			"then give agents the new CA from the Add data page", "ca_file", filepath.Join(m.opts.Dir, CAFile), "expires", m.ca.NotAfter)
+		m.log().Warn("Signalith's own certificate authority is about to expire; make a new one on the Security page, "+
+			"give it to browsers and agents, then switch to it", "ca_file", filepath.Join(m.opts.Dir, CAFile), "expires", m.ca.NotAfter)
 	}
 	if err := m.issue(); err != nil {
 		return fmt.Errorf("could not renew: %w", err)
@@ -377,7 +402,9 @@ func (m *Manager) Check() error {
 
 // ---- auto mode ----
 
-func (m *Manager) path(name string) string { return filepath.Join(m.opts.Dir, name) }
+func (m *Manager) path(name ...string) string {
+	return filepath.Join(append([]string{m.opts.Dir}, name...)...)
+}
 
 // loadCA reads the CA, or makes one on first start.
 func (m *Manager) loadCA() error {
@@ -408,10 +435,10 @@ func (m *Manager) loadCA() error {
 }
 
 // makeCA makes the CA. Its name constraints let it sign only the names
-// and addresses this server has now (wantNames) and ones that only mean
-// something on a private network (see constraints): computers trust it
-// for every site, so this keeps a stolen ca.key from vouching for anyone
-// else's.
+// and addresses this server has now (candidateNames) and, unless
+// Options.Scope is strict, ones that only mean something on a private
+// network (see constraints): computers trust it for every site, so this
+// keeps a stolen ca.key from vouching for anyone else's.
 func (m *Manager) makeCA() error {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -422,7 +449,7 @@ func (m *Manager) makeCA() error {
 		host = "signalith"
 	}
 	now := m.now()
-	dns, ips := constraints(m.wantNames())
+	dns, excluded, ips := constraints(m.candidateNames(), normScope(m.opts.Scope) == ScopeStrict)
 	tmpl := &x509.Certificate{
 		SerialNumber:                serial(),
 		Subject:                     pkix.Name{CommonName: "Signalith Local CA (" + host + ")", Organization: []string{"Signalith"}},
@@ -434,6 +461,7 @@ func (m *Manager) makeCA() error {
 		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         dns,
+		ExcludedDNSDomains:          excluded,
 		PermittedIPRanges:           ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
@@ -472,22 +500,32 @@ func writeCAKey(path string, key crypto.Signer) error {
 // the CA may sign. The others are kept in m.outside, for Outside.
 func (m *Manager) wantNames() []string {
 	var out, outside []string
+	for _, n := range m.candidateNames() {
+		if m.allowed(n) {
+			out = append(out, n)
+		} else {
+			outside = append(outside, n)
+		}
+	}
+	m.outside = outside
+	return out
+}
+
+// candidateNames lists every name the auto certificate should cover,
+// whether or not the CA in use may sign it: the Options names first (the
+// public_url host when there is one, which is also the certificate's
+// common name), then this machine's, then the ones EnsureName added.
+func (m *Manager) candidateNames() []string {
+	var out []string
 	seen := map[string]bool{}
-	// The first name (the public_url host when there is one) is also the
-	// certificate's common name.
 	for _, list := range [][]string{m.opts.Names, localNames(), m.added} {
 		for _, n := range list {
 			if n, ok := normalizeName(n); ok && !seen[n] {
 				seen[n] = true
-				if m.allowed(n) {
-					out = append(out, n)
-				} else {
-					outside = append(outside, n)
-				}
+				out = append(out, n)
 			}
 		}
 	}
-	m.outside = outside
 	return out
 }
 
@@ -518,9 +556,56 @@ var (
 )
 
 // constraints returns the name constraints for a new CA: privateDomains
-// and privateRanges, plus each of names outside them. A DNS name there
-// also allows the names under it.
-func constraints(names []string) (dns []string, ips []*net.IPNet) {
+// and privateRanges, plus each of names outside them; or, when strict,
+// exactly names, each address on its own. A permitted DNS name would
+// also allow the names under it, so those are excluded (see
+// excludedSubtrees) for each one that isn't a private network name.
+func constraints(names []string, strict bool) (dns, excluded []string, ips []*net.IPNet) {
+	if strict {
+		dns, ips = strictConstraints(names)
+		return dns, excludedSubtrees(dns, true), ips
+	}
+	dns, ips = standardConstraints(names)
+	return dns, excludedSubtrees(dns, false), ips
+}
+
+// excludedSubtrees keeps each permitted DNS name from allowing the names
+// under it: a CA for siem.example.com would otherwise also vouch for
+// www.siem.example.com, and one for a machine named "dev" for every .dev
+// website. ".name" excludes only the names under name, not name itself.
+// Private network names (in standard) keep theirs, and so does a name
+// with another permitted name under it, which excluding would exclude
+// too.
+func excludedSubtrees(dns []string, strict bool) []string {
+	var out []string
+	for _, d := range dns {
+		switch {
+		case d == "invalid":
+		case !strict && domainAllowed(privateDomains, d):
+		case slices.ContainsFunc(dns, func(o string) bool { return strings.HasSuffix(o, "."+d) }):
+		default:
+			out = append(out, "."+d)
+		}
+	}
+	return out
+}
+
+// PrivateName reports whether name only means something on a private
+// network: a name under one of the private network suffixes, or a
+// private, shared, loopback or link-local address. Any standard
+// certificate authority may vouch for such a name.
+func PrivateName(name string) bool {
+	if a, err := netip.ParseAddr(name); err == nil {
+		a = a.Unmap()
+		return slices.ContainsFunc(privateRanges, func(p netip.Prefix) bool { return p.Contains(a) })
+	}
+	n, ok := normalizeName(name)
+	return ok && domainAllowed(privateDomains, n)
+}
+
+// standardConstraints are the constraints of a standard CA: the private
+// network names and ranges, and each of names outside them.
+func standardConstraints(names []string) (dns []string, ips []*net.IPNet) {
 	dns = slices.Clone(privateDomains)
 	ranges := slices.Clone(privateRanges)
 	for _, n := range names {
@@ -528,7 +613,9 @@ func constraints(names []string) (dns []string, ips []*net.IPNet) {
 			if !slices.ContainsFunc(ranges, func(p netip.Prefix) bool { return p.Contains(a) }) {
 				ranges = append(ranges, netip.PrefixFrom(a, a.BitLen()))
 			}
-		} else if !domainAllowed(dns, n) {
+		} else if !domainAllowed(privateDomains, n) && !slices.Contains(dns, n) {
+			// Each name on its own, even one under another: the names
+			// under a name are excluded (see excludedSubtrees).
 			dns = append(dns, n)
 		}
 	}
@@ -538,19 +625,61 @@ func constraints(names []string) (dns []string, ips []*net.IPNet) {
 	return dns, ips
 }
 
+// strictConstraints are the constraints of a strict CA: the DNS names
+// in names, and each address in them as a /32 or /128. Neither list is
+// ever empty, which would allow anything: an empty one gets a name or
+// address that is no one's.
+func strictConstraints(names []string) (dns []string, ips []*net.IPNet) {
+	for _, n := range names {
+		if a, err := netip.ParseAddr(n); err == nil {
+			a = a.Unmap()
+			ip := &net.IPNet{IP: a.AsSlice(), Mask: net.CIDRMask(a.BitLen(), a.BitLen())}
+			if !slices.ContainsFunc(ips, func(o *net.IPNet) bool { return o.String() == ip.String() }) {
+				ips = append(ips, ip)
+			}
+		} else if !slices.Contains(dns, n) {
+			dns = append(dns, n)
+		}
+	}
+	if len(dns) == 0 {
+		dns = []string{"invalid"}
+	}
+	if len(ips) == 0 {
+		ips = []*net.IPNet{{IP: net.IPv4bcast.To4(), Mask: net.CIDRMask(32, 32)}}
+	}
+	return dns, ips
+}
+
 // allowed reports whether the CA's name constraints let it sign name. A
 // CA without them (made by an earlier version) may sign anything.
-func (m *Manager) allowed(name string) bool {
-	if m.ca == nil {
+func (m *Manager) allowed(name string) bool { return caAllows(m.ca, name) }
+
+// caAllows reports whether ca's name constraints let it sign name.
+func caAllows(ca *x509.Certificate, name string) bool {
+	if ca == nil {
 		return true
 	}
 	if a, err := netip.ParseAddr(name); err == nil {
-		if len(m.ca.PermittedIPRanges) == 0 {
+		if len(ca.PermittedIPRanges) == 0 {
 			return true
 		}
-		return slices.ContainsFunc(m.ca.PermittedIPRanges, func(r *net.IPNet) bool { return r.Contains(a.AsSlice()) })
+		return slices.ContainsFunc(ca.PermittedIPRanges, func(r *net.IPNet) bool { return r.Contains(a.AsSlice()) })
 	}
-	return len(m.ca.PermittedDNSDomains) == 0 || domainAllowed(m.ca.PermittedDNSDomains, name)
+	if slices.ContainsFunc(ca.ExcludedDNSDomains, func(d string) bool { return domainExcluded(d, name) }) {
+		return false
+	}
+	return len(ca.PermittedDNSDomains) == 0 || domainAllowed(ca.PermittedDNSDomains, name)
+}
+
+// domainExcluded reports whether an excluded DNS constraint covers name:
+// ".example.com" only the names under example.com, "example.com" that
+// name too.
+func domainExcluded(constraint, name string) bool {
+	c := strings.ToLower(constraint)
+	if strings.HasPrefix(c, ".") {
+		return strings.HasSuffix(name, c)
+	}
+	return name == c || strings.HasSuffix(name, "."+c)
 }
 
 // domainAllowed reports whether name is one of domains or under one, the
@@ -602,9 +731,20 @@ func (m *Manager) usable(leaf *x509.Certificate) bool {
 // issue makes a new server certificate from the CA for wantNames and
 // starts serving it. The caller holds m.mu.
 func (m *Manager) issue() error {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	c, err := m.issueLeaf()
 	if err != nil {
 		return err
+	}
+	m.cert.Store(c)
+	return nil
+}
+
+// issueLeaf makes a new server certificate from the CA for wantNames and
+// writes it, without serving it yet. The caller holds m.mu.
+func (m *Manager) issueLeaf() (*tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
 	}
 	names := m.wantNames()
 	tmpl := &x509.Certificate{
@@ -627,17 +767,16 @@ func (m *Manager) issue() error {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, m.ca, key.Public(), m.caKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	leaf, _ := x509.ParseCertificate(der)
 	if err := writeKey(m.path(keyFile), key); err != nil {
-		return err
+		return nil, err
 	}
 	if err := writeFile(m.path(certFile), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
-		return err
+		return nil, err
 	}
-	m.cert.Store(&tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf})
-	return nil
+	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
 }
 
 // readNames reads the names EnsureName added, one per line.

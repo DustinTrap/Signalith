@@ -203,6 +203,15 @@ var Registry = []Setting{
 		Help: "Host names or IP addresses that people and agents also use to reach Signalith, for the automatic certificate: a DNS alias, or the address a NAT or Docker publishes. " +
 			"This computer's own names and addresses and the public address are always in it.",
 		Placeholder: "siem.corp.local", EmptyMeans: "none besides those", check: checkCertNames, problem: certNamesProblem},
+	{Key: "server.tls.ca_scope", Scope: ScopeServer, Section: "https", Label: "Certificate authority reaches", Type: TypeChoice,
+		Help: "Only with Automatic HTTPS. Signalith's own certificate authority never vouches for public websites. " +
+			"Standard also lets it vouch for private network names and addresses, so a new address for this server works right away. " +
+			"Strict limits it to this server's names and addresses as they are now; a new one later means a new certificate authority " +
+			"that browsers and agents must trust again. A change takes effect when you switch on the Security page.",
+		Choices:    []Choice{{CAScopeStandard, "This server and private network names (standard)"}, {CAScopeStrict, "Only this server's own names and addresses (strict)"}},
+		EmptyMeans: CAScopeStandard,
+		Confirm:    "Nothing changes for browsers or agents yet. The Security page makes the new certificate authority and helps you switch to it.",
+		problem:    caScopeProblem},
 	{Key: "server.tls_cert", Scope: ScopeServer, File: true, Section: "https", Label: "Certificate file", Type: TypeText, Restart: true,
 		Help:        "Only with your own certificate files: full path of the PEM certificate, followed by any intermediate certificates. Signalith loads it again when the file changes.",
 		Placeholder: "/etc/signalith/tls/cert.pem", problem: tlsFileProblem("server.tls_cert")},
@@ -483,6 +492,8 @@ func (c *Config) Value(key string) any {
 			return "allow"
 		}
 		return "deny"
+	case "server.tls.ca_scope":
+		return c.Server.CAScope()
 	}
 	if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.String {
 		out := make([]string, v.Len())
@@ -522,7 +533,7 @@ func (c *Config) CopyValue(key string, from *Config) error {
 	if !ok {
 		return fmt.Errorf("unknown setting %s", key)
 	}
-	if key == "server.tls.mode" || key == "server.tls.plaintext_ingest" {
+	if key == "server.tls.mode" || key == "server.tls.plaintext_ingest" || key == "server.tls.ca_scope" {
 		// The value in effect, which an empty one in the file is not.
 		return c.SetValue(key, from.Value(key))
 	}
@@ -791,6 +802,18 @@ func checkCertNames(v any) error {
 }
 
 func certNamesProblem(c *Config) string { return badCertNames(c.Server.TLSNames()) }
+
+// caScopeProblem asks for one of the two choices.
+func caScopeProblem(c *Config) string {
+	if c.Server.TLS == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Server.TLS.CAScope)) {
+	case "", CAScopeStandard, CAScopeStrict:
+		return ""
+	}
+	return "Choose standard or strict."
+}
 
 // modelProblem asks for a model where the provider needs one named.
 func modelProblem(c *Config) string {

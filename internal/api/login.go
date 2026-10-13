@@ -219,6 +219,11 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		// download (Signalith's own, or a private CA's).
 		page = bytes.Replace(page, []byte(`id="ca-help" hidden`), []byte(`id="ca-help"`), 1)
 	}
+	if s.TLS.Next() != nil {
+		// Signalith is switching certificate authority: the line that
+		// offers the new one, hidden otherwise.
+		page = bytes.Replace(page, []byte(`id="ca-next" hidden`), []byte(`id="ca-next"`), 1)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(page)
@@ -228,8 +233,27 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 // certificate comes from, for browsers and agents to trust. It is a
 // public certificate, so it needs no sign-in; check its fingerprint
 // against the one in the server log before trusting it.
+//
+// While Signalith is switching certificate authority, which=next serves
+// the new one, and which=both the one in use and the new one together.
 func (s *Server) handleCAPEM(w http.ResponseWriter, r *http.Request) {
-	ca := s.TLS.CAPEM()
+	ca, file := s.TLS.CAPEM(), "signalith-ca.crt"
+	switch which := r.URL.Query().Get("which"); which {
+	case "", "current":
+	case "next", "both":
+		if s.TLS.Next() == nil {
+			writeError(w, http.StatusNotFound, errors.New("Signalith isn't switching certificate authority, so there is no new one to download."))
+			return
+		}
+		if which == "next" {
+			ca, file = s.TLS.NextPEM(), "signalith-ca-new.crt"
+		} else {
+			ca, file = s.TLS.AgentCAPEM(), "signalith-ca.pem"
+		}
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("which must be next or both"))
+		return
+	}
 	if ca == nil {
 		msg := "Signalith does not serve HTTPS itself (server.tls.mode is off), so there is no certificate to download."
 		switch {
@@ -242,7 +266,7 @@ func (s *Server) handleCAPEM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-x509-ca-cert")
-	w.Header().Set("Content-Disposition", `attachment; filename="signalith-ca.crt"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+file+`"`)
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(ca)
 }

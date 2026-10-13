@@ -309,12 +309,21 @@ func TestLoginPageOffersTheCA(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return string(b)
 	}
+	const both = `<p id="ca-help" hidden><a href="api/tls/ca.pem">Download</a></p><p id="ca-next" hidden><a href="api/tls/ca.pem?which=next">New</a></p>`
+	certs := newCertManager(t)
 	ts, _ := newTestServerWith(t, func(s *Server) {
-		s.UI = fstest.MapFS{"login.html": {Data: []byte(`<p id="ca-help" hidden><a href="api/tls/ca.pem">Download</a></p>`)}}
-		s.TLS = newCertManager(t)
+		s.UI = fstest.MapFS{"login.html": {Data: []byte(both)}}
+		s.TLS = certs
 	})
-	if p := page(ts); !strings.Contains(p, `id="ca-help">`) {
+	if p := page(ts); !strings.Contains(p, `id="ca-help">`) || !strings.Contains(p, `id="ca-next" hidden`) {
 		t.Errorf("with a CA: %s", p)
+	}
+	// While a new certificate authority waits, the page offers it too.
+	if err := certs.Prepare("standard"); err != nil {
+		t.Fatal(err)
+	}
+	if p := page(ts); !strings.Contains(p, `id="ca-next">`) {
+		t.Errorf("with a new CA ready: %s", p)
 	}
 	ts, _ = newTestServerWith(t, func(s *Server) {
 		s.UI = fstest.MapFS{"login.html": {Data: []byte(`<p id="ca-help" hidden><a href="api/tls/ca.pem">Download</a></p>`)}}

@@ -66,3 +66,21 @@ func serviceStartedAfter(t time.Time) (bool, error) {
 	ago := time.Duration(now.Nano()) - time.Duration(started)*time.Microsecond
 	return time.Now().Add(-ago).After(t), nil
 }
+
+// serviceProcess is the running signalith service's process id, or ""
+// when it isn't running. Tests replace it.
+var serviceProcess = func() string {
+	out, err := systemctlShow("MainPID")
+	if err != nil {
+		return ""
+	}
+	_, v, _ := strings.Cut(strings.TrimSpace(string(out)), "=")
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return v
+	}
+	return ""
+}
+
+// needAdmin is what to do when a file needs more rights than this
+// account has.
+const needAdmin = "Run it with sudo."

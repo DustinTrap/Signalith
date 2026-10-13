@@ -66,6 +66,12 @@ over TLS private (see [HTTPS](https.md)):
   files, or Off, only behind a reverse proxy that serves HTTPS.
 - **Extra certificate names**: other names or addresses people and agents use, for the
   automatic certificate.
+- **Certificate authority reaches**: standard (this server and private network names,
+  the default) or strict (only this server's own names and addresses), for a
+  certificate authority Signalith makes. Saving it changes nothing for browsers or
+  agents. It is used when you make a new certificate authority on the Security page,
+  which then helps you switch to it (see
+  [How far the certificate authority reaches](https.md#how-far-the-certificate-authority-reaches)).
 - **Certificate file** and **Key file**: used only with your own certificate files. The
   page checks that they load before saving.
 - **Agents on plain HTTP**: whether agents set up for `http://` may still send while you

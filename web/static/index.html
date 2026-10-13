@@ -46,6 +46,7 @@
 <symbol id="i-circle-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></symbol>
 <symbol id="i-circle-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m16 9-5.5 5.5L8 12"/></symbol>
 <symbol id="i-circle-dot" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="12" r="10"/></symbol>
+<symbol id="i-circle-help" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></symbol>
 <symbol id="i-circle-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></symbol>
 <symbol id="i-clipboard-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></symbol>
 <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
@@ -186,6 +187,7 @@
       <a class="nav__item" href="#data" data-page="data" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
       <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
       <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
+      <a class="nav__item" href="#security" data-page="security" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-shield-check"/></svg><span>Security</span><span id="security-count" class="nav__count hidden" data-critical></span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
       <a class="nav__item" href="#servers" data-page="servers" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
       <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
@@ -1165,6 +1167,28 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     </div>
   </section>
 
+  <!-- Security (admins) -->
+  <section id="page-security" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Security</h2>
+        <p class="page-head__desc">Whether Signalith is set up safely, and what to fix first.</p>
+      </div>
+      <div class="page-head__actions">
+        <button id="sc-recheck" class="btn btn--secondary" type="button" aria-label="Re-check" title="Run the checks again now"><svg class="icon" aria-hidden="true"><use href="#i-refresh-cw"/></svg><span class="hide-sm">Re-check</span></button>
+        <details class="menu sc-export" id="sc-export">
+          <summary class="btn btn--secondary" aria-label="Export" title="Export the report as text"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg><span class="hide-sm">Export</span><svg class="icon icon--sm hide-sm sc-export__chev" aria-hidden="true"><use href="#i-chevron-down"/></svg></summary>
+          <div class="menu__panel" role="menu">
+            <button class="menu__item" type="button" role="menuitem" id="sc-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>Copy report as text</button>
+            <a class="menu__item" role="menuitem" id="sc-download" href="api/security?format=text&amp;download=1" download><svg class="icon" aria-hidden="true"><use href="#i-file-text"/></svg>Download as text</a>
+          </div>
+        </details>
+      </div>
+    </div>
+    <div id="sc-root" class="sc-page" aria-busy="true"></div>
+    <p id="sc-status" class="sr-only" role="status"></p>
+  </section>
+
   <!-- Health -->
   <section id="page-health" class="page">
     <div id="health" class="health-page"></div>
@@ -1255,5 +1279,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="sample.js"></script>
 <script src="settings.js"></script>
 <script src="servers.js"></script>
+<script src="security.js"></script>
 </body>
 </html>

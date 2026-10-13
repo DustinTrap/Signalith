@@ -232,6 +232,28 @@ type ServerTLS struct {
 	// PlaintextIngest is allow or deny: whether agents may still send
 	// events over plain HTTP to the HTTPS port.
 	PlaintextIngest string `yaml:"plaintext_ingest,omitempty"`
+	// CAScope is how far a certificate authority Signalith makes for
+	// itself reaches: standard (empty) also lets it vouch for private
+	// network names and addresses; strict only for this server's own
+	// names and addresses as they are when it is made. It applies to the
+	// CA made on first start and to one made on the Security page, never
+	// to the one in use.
+	CAScope string `yaml:"ca_scope,omitempty"`
+}
+
+// CA scopes (server.tls.ca_scope).
+const (
+	CAScopeStandard = "standard"
+	CAScopeStrict   = "strict"
+)
+
+// CAScope returns server.tls.ca_scope: CAScopeStrict, or CAScopeStandard
+// for an empty one.
+func (s Server) CAScope() string {
+	if s.TLS != nil && strings.EqualFold(strings.TrimSpace(s.TLS.CAScope), CAScopeStrict) {
+		return CAScopeStrict
+	}
+	return CAScopeStandard
 }
 
 // TLSMode returns the HTTPS mode in effect: server.tls.mode, or for a
@@ -304,6 +326,14 @@ func (s Server) LegacyProxy(a netip.Addr) bool {
 	return a.IsLoopback() || a.IsPrivate()
 }
 
+// LegacyProxied reports whether HTTPS is left to a reverse proxy that
+// Signalith believes only because the config was written before HTTPS
+// was the default (see LegacyProxy): HTTPS is off, and no
+// server.trusted_proxies are listed.
+func (s Server) LegacyProxied() bool {
+	return s.TLSMode() == TLSOff && (s.legacyHTTP() || s.legacyFile) && len(s.TrustedProxies) == 0
+}
+
 // TrustsProxy reports whether a is in server.trusted_proxies.
 func (s Server) TrustsProxy(a netip.Addr) bool {
 	a = a.Unmap().WithZone("")
@@ -347,6 +377,11 @@ func (s *Server) tlsProblems(resolve func(string) string) []string {
 		case "", "allow", "deny":
 		default:
 			p = append(p, fmt.Sprintf("server.tls.plaintext_ingest %q must be allow or deny", s.TLS.PlaintextIngest))
+		}
+		switch strings.ToLower(strings.TrimSpace(s.TLS.CAScope)) {
+		case "", CAScopeStandard, CAScopeStrict:
+		default:
+			p = append(p, fmt.Sprintf("server.tls.ca_scope %q must be standard (this server and private network names) or strict (only this server's own names and addresses)", s.TLS.CAScope))
 		}
 		for i, n := range s.TLS.Names {
 			if !validCertName(n) {
@@ -1236,6 +1271,11 @@ func AdminHashFileIn(dir string) string { return filepath.Join(dir, "admin-passw
 // password comes from it, else "".
 func (c *Config) AdminPasswordChanged() string { return c.adminHashFile }
 
+// PublicAdminPassword reports whether the built-in admin's password in
+// use is change-me-please, the example in an older docker-compose.yml,
+// which anyone can look up.
+func (c *Config) PublicAdminPassword() bool { return c.publicAdminPassword && c.adminHashFile == "" }
+
 // StateDirFor returns StateDir for the config file at path, reading only
 // lookups.dir from it, so it works when the rest of the file does not
 // load without the server's environment.
@@ -1597,7 +1637,7 @@ func (c *Config) Warnings() []string {
 	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
-	if c.publicAdminPassword && c.adminHashFile == "" {
+	if c.PublicAdminPassword() {
 		w = append(w, "The built-in admin's password is "+publicAdminPassword+", the example in an older docker-compose.yml, which anyone can look up. "+
 			"Remove SIGNALITH_ADMIN_PASSWORD (the Docker quick start now makes a password; from the Signalith folder: "+
 			"docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password), or set a new one with signalith passwd.")
@@ -1820,6 +1860,8 @@ const header = `# Signalith configuration.
 #                    off: plain HTTP, only behind a reverse proxy that adds HTTPS
 # server.tls.names   extra host names or IPs for the auto certificate
 # server.tls.plaintext_ingest  allow or deny agents sending over plain http://
+# server.tls.ca_scope  standard or strict: how far Signalith's own certificate
+#                    authority reaches when one is made (see docs/https.md)
 # server.trusted_proxies  IPs or CIDRs of reverse proxies whose X-Forwarded-Proto
 #                    header is believed
 # server.max_connections  open connections allowed at once (default 10000); one

@@ -40,3 +40,16 @@ func platformServiceSettings() *serviceSettings {
 // serviceStartedAfter is for systemd credentials, which Windows does not
 // have.
 func serviceStartedAfter(time.Time) (bool, error) { return true, nil }
+
+// serviceProcess is "service" when the Signalith service is installed:
+// the checks read how it is set to run from the service manager.
+var serviceProcess = func() string {
+	if platformServiceSettings() == nil {
+		return ""
+	}
+	return "service"
+}
+
+// needAdmin is what to do when a file needs more rights than this
+// account has.
+const needAdmin = "Run it in a PowerShell opened as Administrator."

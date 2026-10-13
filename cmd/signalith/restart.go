@@ -22,6 +22,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/sample"
+	"github.com/jrsamsanchez/signalith/internal/security"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
@@ -90,6 +91,9 @@ type runner struct {
 	// identity and lock, heartbeat and job lease. A restart keeps it and
 	// points it at the new OpenSearch client; nil in some tests.
 	node *cluster.Node
+	// security runs the Security page's checks and keeps the last
+	// report, which a restart keeps.
+	security *api.SecurityChecker
 
 	front *front
 	// prepared is the HTTPS certificate a restart's checks loaded or made
@@ -155,6 +159,14 @@ func newRunner(path string, log *slog.Logger) *runner {
 		front: &front{}, requests: make(chan restartRequest, 1), confirmed: make(chan *move, 1),
 	}
 	r.front.ready = r.ready
+	r.security = api.NewSecurityChecker(log)
+	r.security.Started = r.started
+	r.security.OnReport = func(rep *security.Report) {
+		// The heartbeat sums it up for the other servers' Security pages.
+		if r.node != nil {
+			r.node.SetSecurity(api.SecuritySummaryOf(rep))
+		}
+	}
 	return r
 }
 
@@ -1119,6 +1131,13 @@ func (r *runner) serveWeb(c *config.Config, ln net.Listener, certs *tlsauto.Mana
 	w.hs.ConnContext = tag
 	useTLS := c.Server.HTTPS()
 	if useTLS {
+		// Browsers and agents that refuse the certificate, for the Security
+		// page after a switch of certificate authority.
+		httpserver.OnRefusal(w.hs, func(addr string) {
+			if m := w.certs.Load(); m != nil {
+				m.NoteRefusal(addr, "https")
+			}
+		})
 		w.hs.TLSConfig.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			m := w.certs.Load()
 			if m == nil {
