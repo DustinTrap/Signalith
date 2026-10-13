@@ -37,8 +37,8 @@ The server certificate covers:
   data** page. Signalith adds it once you have entered it (not while you type), and keeps
   the 32 most recent ones.
 
-The CA can only sign names for this server, not for other websites; see
-[Names the certificate can cover](#names-the-certificate-can-cover).
+The CA can only sign names for this server and for private networks, never for public
+websites; see [Names the certificate can cover](#names-the-certificate-can-cover).
 
 The files are kept in the `tls` folder of Signalith's state folder (`SIGNALITH_STATE_DIR`,
 or else the folder that holds `lookups.dir`):
@@ -120,15 +120,15 @@ for the others: that page is then reached over a connection the browser has chec
 
 **3. Trust it.** The commands below expect the file in your Downloads folder.
 
-Windows, for every user of the computer, in an elevated PowerShell:
+Windows, for your own account (no administrator rights needed; click **Yes** on the
+security prompt Windows shows):
 
 ```powershell
-Import-Certificate -FilePath "$env:USERPROFILE\Downloads\signalith-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root
+Import-Certificate -FilePath "$env:USERPROFILE\Downloads\signalith-ca.crt" -CertStoreLocation Cert:\CurrentUser\Root
 ```
 
-or for your user only, without administrator rights:
-`certutil -user -addstore Root "$env:USERPROFILE\Downloads\signalith-ca.crt"`.
-Edge and Chrome use the Windows store; restart the browser afterwards.
+Only if every user of the computer needs it, use `Cert:\LocalMachine\Root` in an elevated
+PowerShell instead. Edge and Chrome use the Windows store; restart the browser afterwards.
 
 macOS:
 
@@ -166,10 +166,21 @@ websites**.
 Command-line tools take the file directly, for example
 `curl --cacert signalith-ca.crt -u admin https://siem.example.com:8080/api/health`.
 
-Signalith's CA only ever signs certificates for this one server. It is also limited to
-this server's names and private network addresses (see below), so even someone who took
-`ca.key` from the server could not use it to read your traffic to other websites. If you
-would rather not add a CA, [use your own certificate](#use-your-own-certificate).
+Signalith's CA only ever signs certificates for this one server, and it is limited to
+this server's names and to private network names and addresses (see below). Someone who
+took `ca.key` from the server could therefore not use it to read your traffic to public
+websites, but could still vouch for other sites on private networks (an intranet site
+ending in `.corp` or `.internal`, or a device reached by a private IP address) to every
+computer that trusts the CA. So:
+
+- trust it only on the computers and accounts that use Signalith (for your own account,
+  not the whole computer, as above);
+- keep the server's `tls` folder private (Signalith makes it readable by its own account
+  only), and include it in what you protect like other secrets;
+- if `ca.key` may have leaked, stop Signalith, delete the `tls` folder, start it again,
+  remove the old CA from the computers that trusted it, and trust the new one.
+
+If you would rather not add a CA, [use your own certificate](#use-your-own-certificate).
 
 ## Names the certificate can cover
 
