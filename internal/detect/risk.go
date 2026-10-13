@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/datamodel"
 )
 
 // Risk makes a detection add risk to the users and systems in its results,
@@ -91,7 +92,7 @@ func (e RiskEvent) Doc() map[string]any {
 		"message":          fmt.Sprintf("%s: +%g risk to %s %s", e.Message, e.Score, e.ObjectType, e.Object),
 	}
 	if e.Sample != "" {
-		d["sample"] = e.Sample
+		d[datamodel.SampleField] = e.Sample
 	}
 	if e.Priority != "" {
 		d["risk_priority"] = e.Priority

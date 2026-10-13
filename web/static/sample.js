@@ -1,12 +1,14 @@
 // Sample data: a clean card on the Add data page that loads a week of
 // made-up activity with a few attacks hidden in it, so Signalith can be
 // tried on real-looking data, and removes it in one click. Admins only;
-// others see a short read-only note. It also offers a one-line pointer on
-// empty states (Home, Search, Findings) for admins when there is no data.
+// others see a short read-only note. It also offers a one-line pointer to
+// admins when there is no data: on empty states, and near the top of
+// Dashboards and Search when nothing at all arrived in the last 7 days.
 
 let sampleInfo = null; // last api/sample reply (admins only), or null
 let samplePoll = null; // interval id while a load or remove runs
 let sampleConfirm = false; // true while Remove is in its confirm step
+let sampleRun = null; // the running view's live parts, updated in place
 
 // fetchSample reads the sample-data status for admins and caches it.
 async function fetchSample() {
@@ -17,13 +19,25 @@ async function fetchSample() {
 
 // samplePointer returns a one-line admin pointer for an empty state, or null
 // when it does not apply: not an admin, the feature is off, or sample data
-// is already loaded or a job is running.
+// is already loaded (or part loaded) or a job is running.
 function samplePointer() {
-  if (!can('admin') || !sampleInfo || !sampleInfo.available || sampleInfo.loaded || sampleInfo.running) return null;
+  if (!can('admin') || !sampleInfo || !sampleInfo.available || sampleInfo.loaded || sampleInfo.partial || sampleInfo.running) return null;
   return el('span', { class: 'sample-hint' },
     icon('wand-sparkles', 'icon--sm'), ' New here? ',
     el('a', { href: '#data', 'data-page': 'data' }, 'Load sample data'),
     ' to try Signalith on a week of activity.');
+}
+
+// syncSampleNotes shows the pointer near the top of Dashboards and Search
+// when no events at all arrived in the last 7 days (admins only).
+function syncSampleNotes() {
+  const show = !!(sampleInfo && sampleInfo.no_data && samplePointer());
+  for (const id of ['db-sample-note', 'search-sample-note']) {
+    const box = $(id);
+    if (!box) continue;
+    if (show) fill(box, samplePointer());
+    box.hidden = !show;
+  }
 }
 
 function stopSamplePoll() {
@@ -46,7 +60,7 @@ function loadSampleCard() {
     return;
   }
   card.hidden = false;
-  renderSampleCard(true);
+  renderSampleCard({ checking: true });
   fetchSample().then(() => renderSampleCard());
 }
 
@@ -59,61 +73,131 @@ function sampleHead() {
         'Load a week of made-up activity, with a few attacks hidden in it, to see detections, findings, risk and the dashboards come to life. Everything is fictional, and you remove it in one click.')));
 }
 
-// renderSampleCard draws the card body from the current status.
-function renderSampleCard(loading) {
+// renderSampleCard draws the card from the current status. focus names the
+// element to move keyboard focus to (its data-focus value); it moves only
+// when focus was in the card, or was lost with the content it replaces.
+function renderSampleCard({ checking = false, focus = null } = {}) {
   const card = $('sample-card');
   if (!card || !can('admin')) return;
-  if (loading) {
-    fill(card, sampleHead(), el('div', { class: 'card__body sample-card__body' },
-      el('p', { class: 'muted' }, 'Checking…')));
-    return;
-  }
-  if (sampleInfo === null) {
-    fill(card, sampleHead(), el('div', { class: 'card__body sample-card__body' },
-      el('div', { class: 'empty__actions' },
-        el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: loadSampleCard }, icon('refresh-cw'), 'Try again'))));
-    return;
-  }
-  if (!sampleInfo.available) {
-    fill(card, sampleHead(), el('div', { class: 'card__body sample-card__body' },
-      el('p', { class: 'muted' }, 'Sample data is not available on this server.')));
-    return;
-  }
+  const hadFocus = card.contains(document.activeElement) || document.activeElement === document.body;
+  sampleRun = null;
   let body;
-  if (sampleInfo.running) body = sampleRunningBody();
+  if (checking) body = sampleBody(el('p', { class: 'muted' }, 'Checking…'));
+  else if (sampleInfo === null) {
+    body = sampleBody(el('div', { class: 'sample-actions' },
+      el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: loadSampleCard }, icon('refresh-cw'), 'Try again')));
+  } else if (!sampleInfo.available) body = sampleBody(el('p', { class: 'muted' }, 'Sample data is not available on this server.'));
+  else if (sampleInfo.running) body = sampleRunningBody();
+  else if (sampleInfo.partial) body = samplePartialBody();
   else if (sampleInfo.loaded) body = sampleLoadedBody();
   else body = sampleIdleBody();
   fill(card, sampleHead(), body);
+  if (focus && hadFocus) {
+    const target = card.querySelector('[data-focus="' + focus + '"]');
+    if (target) target.focus();
+  }
+  syncSampleNotes();
+}
+
+const sampleBody = (...kids) => el('div', { class: 'card__body sample-card__body' }, ...kids);
+
+// sampleError shows the last job's error in plain English, with the
+// technical text behind a Details disclosure.
+function sampleError() {
+  if (!sampleInfo.error) return null;
+  return el('div', { class: 'alert sample-alert', 'data-tone': 'danger', role: 'alert' },
+    icon('circle-alert'),
+    el('div', {},
+      el('p', {}, sampleInfo.error),
+      sampleInfo.error_detail ? el('details', { class: 'sample-detail' },
+        el('summary', {}, icon('chevron-right', 'icon--sm chev'), 'Details'),
+        el('pre', {}, sampleInfo.error_detail)) : null));
 }
 
 // sampleIdleBody: nothing loaded. Pick a size and load.
 function sampleIdleBody() {
-  const size = el('select', { id: 'sample-size', class: 'select select--sm' },
-    el('option', { value: 'standard' }, 'Standard (a full week, tens of thousands of events)'),
-    el('option', { value: 'small' }, 'Small (a lighter set, quicker to load)'));
-  const loadBtn = el('button', { type: 'button', class: 'btn btn--primary', onclick: () => sampleLoad(size.value) },
+  const size = el('select', { id: 'sample-size', class: 'select select--sm', 'aria-describedby': 'sample-size-hint' },
+    el('option', { value: 'standard' }, 'Standard: a full week'),
+    el('option', { value: 'small' }, 'Small: same attacks, less noise'));
+  const loadBtn = el('button', { type: 'button', class: 'btn btn--primary', 'data-focus': 'load', onclick: () => sampleLoad(size.value) },
     icon('wand-sparkles'), 'Load sample data');
-  return el('div', { class: 'card__body sample-card__body' },
-    sampleInfo.error ? el('div', { class: 'alert', 'data-tone': 'danger', role: 'alert' },
-      icon('circle-alert'), el('p', {}, 'The last run did not finish: ' + sampleInfo.error)) : null,
+  return sampleBody(
+    sampleError(),
     el('div', { class: 'sample-load' },
       el('label', { class: 'sample-load__size' }, el('span', { class: 'label' }, 'How much'), size),
-      loadBtn));
+      loadBtn),
+    el('p', { id: 'sample-size-hint', class: 'muted sample-size-hint' }, SAMPLE_SIZE_HINT));
+}
+const SAMPLE_SIZE_HINT = 'Both have every attack. Standard adds a full week of everyday activity, about 27,000 events; Small keeps it to a few hundred. Either takes about a minute.';
+
+// sampleRunningBody: a load or remove is going. Show the step and poll;
+// the poll moves the step and the bar on in place.
+function sampleRunningBody() {
+  const verb = sampleInfo.op === 'remove' ? 'Removing sample data' : 'Loading sample data';
+  const fillBar = el('div', { class: 'sample-bar__fill' });
+  const bar = el('div', { class: 'sample-bar', role: 'progressbar', 'aria-label': verb, 'aria-valuemin': '0', 'aria-valuemax': '100' }, fillBar);
+  const phase = el('span', {});
+  const num = el('span', { class: 'sample-phase__pct', 'aria-hidden': 'true' });
+  sampleRun = { op: sampleInfo.op, phase, num, bar, fill: fillBar };
+  updateSampleRun();
+  if (!samplePoll) samplePoll = setInterval(sampleTick, 1000);
+  return sampleBody(
+    el('div', { class: 'sample-phase' },
+      el('p', { role: 'status', tabindex: '-1', 'data-focus': 'progress' }, verb + ': ', phase),
+      num),
+    bar);
 }
 
-// sampleRunningBody: a load or remove is going. Show the step and poll.
-function sampleRunningBody() {
-  const verb = sampleInfo.op === 'remove' ? 'Removing' : 'Loading';
-  const phase = sampleInfo.phase || 'Working';
-  const pct = sampleInfo.total > 0 ? Math.round((sampleInfo.done / sampleInfo.total) * 100) : null;
-  const bar = el('div', { class: 'sample-bar' + (pct === null ? ' sample-bar--indeterminate' : ''), role: 'progressbar',
-    'aria-label': verb + ' sample data' },
-    el('div', { class: 'sample-bar__fill', style: pct === null ? '' : 'width:' + pct + '%' }));
-  if (pct !== null) { bar.setAttribute('aria-valuenow', String(pct)); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); }
-  if (!samplePoll) samplePoll = setInterval(sampleTick, 1000);
-  return el('div', { class: 'card__body sample-card__body' },
-    el('p', { class: 'sample-phase' }, verb + ' sample data… ' + phase + (pct !== null ? ' (' + pct + '%)' : '')),
-    bar);
+// updateSampleRun moves the running view on without redrawing it, so the
+// status line is announced only when the step changes. It reports false
+// when there is no running view of the same job to update.
+function updateSampleRun() {
+  if (!sampleRun || sampleRun.op !== sampleInfo.op) return false;
+  const pct = Math.max(0, Math.min(100, sampleInfo.percent || 0));
+  const phase = sampleInfo.phase || 'Starting';
+  if (sampleRun.phase.textContent !== phase) sampleRun.phase.textContent = phase;
+  sampleRun.num.textContent = pct + '%';
+  sampleRun.fill.style.width = pct + '%';
+  sampleRun.bar.setAttribute('aria-valuenow', String(pct));
+  return true;
+}
+
+// samplePartialBody: a load stopped part way. Offer to remove what it wrote.
+function samplePartialBody() {
+  return sampleBody(
+    sampleError() || el('div', { class: 'alert', 'data-tone': 'warning' }, icon('triangle-alert'),
+      el('p', {}, 'The last load did not finish. Part of the sample data is in place: remove it, then load it again.')),
+    el('div', { class: 'sample-actions' },
+      el('button', { type: 'button', class: 'btn btn--secondary btn--sm', 'data-focus': 'remove', onclick: sampleRemove },
+        icon('x'), 'Remove what was loaded')));
+}
+
+// sampleTries are the loaded card's shortcuts, each to a view that covers
+// the sample's week (several pages open on the last 24 hours).
+function sampleTries(st) {
+  const go = (fn) => (ev) => {
+    if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+    ev.preventDefault();
+    fn();
+  };
+  const caseID = (st.cases || [])[0];
+  return [
+    ['See the findings that fired', 'findings', 'shield-alert', () => showPage('findings')],
+    ['Watch risk build up over the week', 'risk', 'trending-up', () => openRiskSince('7d')],
+    ['Walk through the sample investigation', 'cases', 'briefcase', () => (caseID ? openCase(caseID) : showPage('cases'))],
+    ['See the week on the dashboard', 'dashboards', 'layout-dashboard', () => window.openDashboardAt('posture', '7d')],
+    ['Search the week for threat intel matches', 'search', 'search', sampleHunt],
+  ].map(([label, page, ic, fn]) => el('li', {},
+    el('a', { href: '#' + page, onclick: go(fn) }, icon(ic, 'icon--sm'), label)));
+}
+
+// sampleHunt opens Search on the threat intel matches over the last 7 days,
+// with the time picker on that range (not saved as the viewer's choice).
+function sampleHunt() {
+  setQuery('* | threatmatch\n| table _time, threat_match_field, threat_match_value, threat_source, host, user');
+  $('time').value = '-7d';
+  showPage('search');
+  runSearch();
 }
 
 // sampleLoadedBody: a set is loaded. Offer things to try and Remove.
@@ -123,91 +207,86 @@ function sampleLoadedBody() {
     sampleCount(st.events, 'events'),
     sampleCount(st.findings, 'findings'),
     sampleCount(st.risk_events, 'risk events'),
-    sampleCount(st.indicators, 'intel matches'));
-  const tries = [
-    ['See the findings that fired', 'findings', 'shield-alert'],
-    ['Watch risk build on users and hosts', 'risk', 'trending-up'],
-    ['Open the investigation', 'cases', 'briefcase'],
-    ['Light up the dashboards', 'dashboards', 'layout-dashboard'],
-    ['Search the whole week', 'search', 'search'],
-  ];
-  const tryList = el('ul', { class: 'sample-try', role: 'list' },
-    ...tries.map(([label, page, ic]) => el('li', {},
-      el('a', { href: '#' + page, 'data-page': page }, icon(ic, 'icon--sm'), label))));
+    sampleCount(st.indicators, 'threat intel indicators'));
   const stories = (st.stories || []).map((s) => s.title).filter(Boolean);
 
   let actions;
   if (sampleConfirm) {
-    actions = el('div', { class: 'sample-confirm', role: 'group', 'aria-label': 'Remove sample data?' },
-      el('span', {}, 'Remove all sample data?'),
-      el('button', { type: 'button', class: 'btn btn--danger btn--sm', onclick: sampleRemove }, 'Yes, remove it'),
-      el('button', { type: 'button', class: 'btn btn--ghost btn--sm', onclick: () => { sampleConfirm = false; renderSampleCard(); } }, 'Cancel'));
+    actions = el('div', { class: 'sample-confirm', role: 'group', 'aria-labelledby': 'sample-confirm-q' },
+      el('span', { id: 'sample-confirm-q' }, 'Remove all sample data? Nothing of yours is touched.'),
+      el('button', { type: 'button', class: 'btn btn--danger btn--sm', 'data-focus': 'confirm', onclick: sampleRemove }, 'Yes, remove it'),
+      el('button', { type: 'button', class: 'btn btn--ghost btn--sm', onclick: () => { sampleConfirm = false; renderSampleCard({ focus: 'remove' }); } }, 'Cancel'));
   } else {
-    actions = el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: () => { sampleConfirm = true; renderSampleCard(); } },
-      icon('x'), 'Remove sample data');
+    actions = el('button', { type: 'button', class: 'btn btn--secondary btn--sm', 'data-focus': 'remove',
+      onclick: () => { sampleConfirm = true; renderSampleCard({ focus: 'confirm' }); } },
+    icon('x'), 'Remove sample data');
   }
 
-  return el('div', { class: 'card__body sample-card__body' },
+  return sampleBody(
     el('div', { class: 'sample-loaded-head' },
-      el('span', { class: 'sample-badge' }, icon('circle-check', 'icon--sm'), 'Loaded'),
+      el('span', { class: 'sample-badge', tabindex: '-1', 'data-focus': 'loaded' }, icon('circle-check', 'icon--sm'), 'Loaded'),
       el('span', { class: 'muted' }, st.loaded_at ? ago(st.loaded_at) : '')),
     counts,
     el('div', { class: 'sample-try-wrap' },
       el('p', { class: 'label' }, 'Things to try'),
-      tryList),
+      el('ul', { class: 'sample-try', role: 'list' }, ...sampleTries(st))),
     stories.length ? el('p', { class: 'muted sample-stories' }, 'Hidden in it: ' + stories.join(', ') + '.') : null,
     el('div', { class: 'sample-actions' }, actions));
 }
 
 function sampleCount(n, label) {
   return el('div', { class: 'sample-count' },
-    el('span', { class: 'sample-count__n' }, String(n == null ? 0 : n)),
+    el('span', { class: 'sample-count__n' }, Number(n || 0).toLocaleString()),
     el('span', { class: 'sample-count__l' }, label));
 }
 
-// sampleTick polls the status while a job runs and re-renders when it ends.
+// sampleTick polls the status while a job runs and redraws when it ends.
 async function sampleTick() {
+  const op = sampleRun ? sampleRun.op : sampleInfo && sampleInfo.op;
   await fetchSample();
-  if (!sampleInfo || !sampleInfo.running) {
-    stopSamplePoll();
-    renderSampleCard();
-    if (sampleInfo && sampleInfo.error) toast('Sample data: ' + sampleInfo.error, null, { tone: 'danger' });
-    else if (sampleInfo && sampleInfo.loaded) toast('Sample data loaded. Have a look around.');
-    else toast('Sample data removed.');
+  if (sampleInfo && sampleInfo.running) {
+    if (!updateSampleRun()) renderSampleCard();
     return;
   }
-  renderSampleCard();
-}
-
-async function sampleLoad(size) {
-  try {
-    await api('api/sample/load', { size });
-  } catch (e) {
-    toast(e.message || 'Could not start the load.', null, { tone: 'danger' });
-    await fetchSample();
-    renderSampleCard();
-    return;
+  stopSamplePoll();
+  if (!sampleInfo) { renderSampleCard(); return; }
+  if (sampleInfo.error) {
+    renderSampleCard({ focus: sampleInfo.partial ? 'remove' : 'load' });
+    toast(sampleInfo.error, null, { tone: 'danger' });
+  } else if (sampleInfo.loaded) {
+    renderSampleCard({ focus: 'loaded' });
+    toast('Sample data loaded. Have a look around.');
+  } else {
+    renderSampleCard({ focus: 'load' });
+    if (op === 'remove') toast('Sample data removed.');
   }
-  await fetchSample();
-  renderSampleCard();
-  if (!samplePoll) samplePoll = setInterval(sampleTick, 1000);
 }
 
-async function sampleRemove() {
+async function sampleStart(path, body, failText) {
   sampleConfirm = false;
   try {
-    await api('api/sample/remove', {});
+    await api(path, body);
   } catch (e) {
-    toast(e.message || 'Could not start the removal.', null, { tone: 'danger' });
+    toast(e.message || failText, null, { tone: 'danger' });
     await fetchSample();
-    renderSampleCard();
+    renderSampleCard({ focus: 'load' });
     return;
   }
   await fetchSample();
-  renderSampleCard();
+  renderSampleCard({ focus: 'progress' });
   if (!samplePoll) samplePoll = setInterval(sampleTick, 1000);
 }
 
-// Prefetch the status once the role is known, so the empty-state pointers on
-// Home, Search and Findings can appear on their first render for admins.
-if (typeof meReady !== 'undefined') meReady.then(() => { if (can('admin')) fetchSample(); });
+const sampleLoad = (size) => sampleStart('api/sample/load', { size }, 'Could not start loading the sample data.');
+const sampleRemove = () => sampleStart('api/sample/remove', {}, 'Could not start removing the sample data.');
+
+// Prefetch the status once the role is known, so the pointers can appear on
+// the first render of Dashboards, Search and Findings for admins.
+if (typeof meReady !== 'undefined') meReady.then(() => { if (can('admin')) fetchSample().then(syncSampleNotes); });
+
+// The pointer goes once data arrives: check again when those pages open.
+if (typeof pageHooks !== 'undefined') {
+  pageHooks.push((name) => {
+    if ((name === 'dashboards' || name === 'search') && sampleInfo && sampleInfo.no_data) fetchSample().then(syncSampleNotes);
+  });
+}

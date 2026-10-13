@@ -41,6 +41,9 @@ const TI_TYPE_SHORT = { ip: 'IP', cidr: 'Network', domain: 'Domain', url: 'URL',
 const TI_TYPE_ICON = { ip: 'globe', cidr: 'network', domain: 'link', url: 'external-link', md5: 'hash', sha1: 'hash', sha256: 'hash', email: 'mail' };
 const TI_HUNT = '* | threatmatch\n| table _time, threat_match_field, threat_match_value, threat_source, threat_target, user, sourcetype';
 const tiSourceLabel = (s) => (s === 'manual' ? 'Manual' : s);
+// TI_SAMPLE is the source of the indicators the sample data adds; they go
+// when it is removed.
+const TI_SAMPLE = 'Sample data';
 const tiChip = (ind) => el('span', { class: 'chip', 'data-kind': TI_CLASS[ind.type] || 'hash', title: ind.value }, el('span', {}, ind.value));
 const tiPlural = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many || one + 's'}`;
 // Weights may be set in quarters (the Tor exit list is 0.25).
@@ -1383,7 +1386,7 @@ function showIndicator(id) {
   const kv = [];
   const add = (k, v) => { if (v) kv.push(el('dt', {}, k), el('dd', {}, v)); };
   add('Type', TI_TYPE_LABEL[ind.type] || ind.type);
-  add('Source', ind.source === 'manual' ? 'Added by hand or uploaded' : ind.source);
+  add('Source', ind.source === 'manual' ? 'Added by hand or uploaded' : ind.source === TI_SAMPLE ? 'The sample data' : ind.source);
   add('Weight', `${tiWeight(ind.weight)} (multiplies the risk a match adds)`);
   add('First seen', ind.first_seen ? fmtTime(ind.first_seen) : '');
   add('Last seen', ind.last_seen ? fmtTime(ind.last_seen) : '');
@@ -1392,13 +1395,15 @@ function showIndicator(id) {
   // A feed's indicators return with its next download; those of a deleted
   // feed stay until they expire, and can be deleted one by one.
   const manual = ind.source === 'manual';
-  const feedGone = !manual && !tiState.feeds.some((f) => f.name === ind.source);
+  const sample = ind.source === TI_SAMPLE;
+  const feedGone = !manual && !sample && !tiState.feeds.some((f) => f.name === ind.source);
   const body = el('div', { class: 'inspector__body' },
     ind.description ? el('p', {}, ind.description) : null,
     (ind.tags || []).length ? el('section', { class: 'section', 'aria-label': 'Tags' }, el('h3', { class: 'section-title' }, 'Tags'),
       el('div', { class: 'chips' }, ...ind.tags.map((t) => el('span', { class: 'chip' }, el('span', {}, t))))) : null,
     el('section', { class: 'section', 'aria-label': 'Details' }, el('h3', { class: 'section-title' }, 'Details'), el('dl', { class: 'kv' }, ...kv)),
-    manual ? null : el('div', { class: 'callout' }, icon('info'), feedGone
+    manual ? null : sample ? el('div', { class: 'callout' }, icon('info'), el('div', {}, 'This comes with the sample data and goes when you remove it on the ', el('a', { href: '#data', 'data-page': 'data' }, 'Add data'), ' page.'))
+      : el('div', { class: 'callout' }, icon('info'), feedGone
       ? el('div', {}, 'The feed ', el('b', {}, ind.source), ' was deleted. This stays until it expires, or you can delete it now.')
       : el('div', {}, 'This comes from the feed ', el('b', {}, ind.source), ' and returns with its next download. To stop using it, turn the feed off.')));
   const foot = el('div', { class: 'inspector__foot' },

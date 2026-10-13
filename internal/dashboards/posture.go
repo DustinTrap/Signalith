@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
@@ -139,8 +140,9 @@ const (
 	qRiskByTactic    = "datamodel=Risk\n| stats count by mitre_tactic"
 	// Sample data is left out of source health: it is loaded all at once and
 	// removed all at once, so it would otherwise show as a source that goes
-	// stale the moment it is removed.
-	qSources = "NOT sample=*\n| stats max(_time) as last_seen, count by host, sourcetype"
+	// stale the moment it is removed. Its marker field is one no sender
+	// uses, so no real source is ever left out.
+	qSources = "NOT " + datamodel.SampleField + "=*\n| stats max(_time) as last_seen, count by host, sourcetype"
 )
 
 func (p *Posture) now() time.Time {

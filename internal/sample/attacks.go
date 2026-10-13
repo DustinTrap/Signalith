@@ -36,9 +36,6 @@ func (g *gen) story(s Story, end time.Time, entities ...string) {
 	s.Entities = entities
 	g.stories = append(g.stories, s)
 	g.addRunTime(end)
-	for _, e := range entities {
-		g.anchor(e)
-	}
 }
 
 // linuxBruteForce: an external host password-sprays SSH on the database
@@ -84,7 +81,17 @@ func (g *gen) phishingIntrusion() {
 	ws := g.org.host("ws-fin-07")
 	alice := g.org.Users[0].Winuser() // CORP\alice.nguyen (index 0)
 	t0 := g.day(2, 15, 10)
+	// The sample investigation follows this story.
+	g.caseFocus = []string{ws.Name, ws.IP, alice}
 	ps := `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
+
+	// The phishing e-mail's link: the workstation looks up the look-alike
+	// sign-in domain, which is in the sample threat intel (threat-activity).
+	g.b.generic(t0.Add(-3*time.Minute), "dns", map[string]any{
+		"host": ws.Name, "dest": ws.Name, "src": ws.IP, "user": alice,
+		"query": phishDomain, "answer": ipPhishHost,
+		"message": ws.Name + " resolved " + phishDomain,
+	})
 
 	// Office document spawns encoded PowerShell (office-child-shell + encoded-powershell).
 	g.sysmonProc(ws, alice, ps,
@@ -131,7 +138,7 @@ func (g *gen) phishingIntrusion() {
 	g.sysmonNet(ws, alice, ws.IP, 51002, ipC2, "updates.corp-sync.example", 4444, "tcp",
 		`C:\Users\alice.nguyen\update.exe`, t0.Add(17*time.Minute))
 	// A little exfiltration over the firewall.
-	g.b.cef("10.20.0.1", t0.Add(20*time.Minute), "Traffic", "100", "6", map[string]string{
+	g.b.cef(ipFirewall, t0.Add(20*time.Minute), "Traffic", "100", "6", map[string]string{
 		"act": "allow", "src": ws.IP, "dst": ipExfil, "spt": "51010", "dpt": "443", "proto": "6",
 		"in": "2000", "out": "4500000",
 	})
@@ -139,7 +146,7 @@ func (g *gen) phishingIntrusion() {
 	g.story(Story{
 		ID:      "phishing-to-c2",
 		Title:   "Phishing to credential theft and C2",
-		Summary: "A finance workstation (ws-fin-07, Alice Nguyen) opens a malicious invoice that launches encoded PowerShell, downloads a tool with certutil, dumps credentials with Mimikatz, runs discovery, installs persistence and beacons to a command-and-control address that is in the sample threat intel. The whole kill chain on one host.",
+		Summary: "A finance workstation (ws-fin-07, Alice Nguyen) follows a phishing link to a look-alike sign-in site, opens a malicious invoice that launches encoded PowerShell, downloads a tool with certutil, dumps credentials with Mimikatz, runs discovery, installs persistence and beacons to a command-and-control address. The domain, the tools and the C2 are all in the sample threat intel. The whole kill chain on one host.",
 		Detections: []string{"endpoint-office-child-shell", "endpoint-encoded-powershell", "endpoint-lolbin-download",
 			"endpoint-credential-dumping", "endpoint-discovery-burst", "endpoint-scheduled-task",
 			"endpoint-service-created", "network-shell-port", "threat-activity"},
@@ -198,8 +205,11 @@ func (g *gen) domainPersistence() {
 	}, t0.Add(4*time.Minute), "dc-01", "svc-helpdesk", "dan.sato")
 }
 
-// benignLookalikes are real admin and service activity that fire detections
-// as false positives, so the owner has something to close as benign.
+// benignLookalikes are ordinary admin and service activity that look
+// malicious: a backup job's encoded PowerShell raises a finding to close as
+// benign, and IT's certutil download only adds a little risk (lolbin-download
+// is a risk-only detection), which shows how risk-based alerting keeps such
+// noise out of the queue.
 func (g *gen) benignLookalikes() {
 	// IT admin uses certutil to fetch an internal tool (lolbin FP).
 	itws := g.org.host("ws-it-02")
@@ -220,7 +230,7 @@ func (g *gen) benignLookalikes() {
 	g.story(Story{
 		ID:         "benign-lookalikes",
 		Title:      "Benign activity that looks malicious",
-		Summary:    "Two everyday admin tasks that fire detections: IT fetching a tool with certutil, and a backup job using encoded PowerShell. They are false positives — good practice for closing a finding as benign.",
+		Summary:    "Two everyday admin tasks that look malicious. A backup job using encoded PowerShell on file-01 raises a finding: a false positive to practise closing as benign. IT fetching a tool with certutil on ws-it-02 only adds a little risk, the way risk-based alerting keeps such noise out of the queue.",
 		Detections: []string{"endpoint-lolbin-download", "endpoint-encoded-powershell"},
 	}, tb.Add(time.Minute), "ws-it-02", "file-01", bob, svc)
 	g.addRunTime(tf.Add(time.Minute))

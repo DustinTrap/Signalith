@@ -9,9 +9,9 @@ import (
 
 // sampleLists returns the asset and identity entries that give the sample's
 // hosts and users business context, so enrichment, risk scaling and urgency
-// have something to work with. Every entry is tagged bunit "Sample data" so
-// it is recognisable, and the overlay is merged without touching anything
-// the user already has (the user's own entries always win).
+// have something to work with. They go into the asset store's overlay,
+// never into the user's own lists, and a user's own entry always wins a
+// lookup. Every entry is tagged bunit "Sample data" so it is recognisable.
 func sampleLists(o *org) ([]assets.Asset, []assets.Identity) {
 	var as []assets.Asset
 	addHost := func(h Host) {
@@ -67,10 +67,10 @@ func categoryFor(u User) string {
 	}
 }
 
-// sampleIndicators returns the threat-intel indicators the beaconing and
-// exfiltration stories match against. They use only reserved addresses
-// (RFC 5737), example/test domains and made-up hashes, and all carry the
-// source "sample" so DeleteSource removes exactly them.
+// sampleIndicators returns the threat-intel indicators the stories match
+// against. They use only reserved addresses (RFC 5737), example/test domains
+// and made-up hashes, and all carry the source SampleIntelSource so
+// DeleteSource removes exactly them.
 func sampleIndicators(now time.Time) []intel.Indicator {
 	seen := now.Add(-5 * 24 * time.Hour)
 	ind := func(typ, val, desc string, weight float64) intel.Indicator {
@@ -84,11 +84,15 @@ func sampleIndicators(now time.Time) []intel.Indicator {
 		ind(intel.TypeIP, ipExfil, "Sample C2: data exfiltration drop", 2),
 		ind(intel.TypeIP, ipC2, "Sample C2: brute-force and command-and-control", 1.5),
 		ind(intel.TypeDomain, "updates.corp-sync.example", "Sample C2: malware update domain", 2),
-		ind(intel.TypeDomain, "login-corp.example-sso.test", "Sample phishing domain", 1.5),
+		ind(intel.TypeDomain, phishDomain, "Sample phishing domain", 1.5),
 		ind(intel.TypeSHA256, hashBeacon, "Sample malware: implant (update.exe)", 2),
 		ind(intel.TypeSHA256, hashMimikatz, "Sample malware: credential dumper", 2),
 	}
 }
+
+// phishDomain is the look-alike sign-in domain the phishing story's link
+// points at (a .test name, RFC 6761).
+const phishDomain = "login-corp.example-sso.test"
 
 // Made-up file hashes (not real malware) the endpoint stories set, so
 // threatmatch has process hashes to match.

@@ -8,6 +8,13 @@ import (
 	"strings"
 )
 
+// SampleField marks every event, risk event and finding the "Load sample
+// data" feature writes; its value is the load's ID. The name is one no
+// sender uses, so a real event is never mistaken for sample data: the live
+// detection scheduler leaves marked documents out, the sample backfill
+// reads only its own, and Remove deletes exactly those.
+const SampleField = "signalith_sample"
+
 // Field describes one normalized field.
 type Field struct {
 	Name        string   `json:"name"`

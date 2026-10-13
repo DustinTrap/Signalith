@@ -872,11 +872,11 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
 	// The one-click sample data loads a week of made-up activity through
-	// the same ingest path and removes it exactly. It records what it
-	// wrote in a small file under the state directory.
+	// the same parsers and its own ingest pipeline, and removes it exactly.
+	// It records what it wrote in a small file under the state directory.
 	sampleLoader := &sample.Loader{
 		Prefix:   c.OpenSearch.IndexPrefix,
-		Pipeline: pipeline,
+		Bulk:     cl,
 		OS:       cl,
 		Intel:    indicators,
 		Assets:   lists,

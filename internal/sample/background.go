@@ -48,11 +48,11 @@ var benignNet = []struct {
 	ip   string
 	port int
 }{
-	{"proxy.corp.example", "10.20.0.60", 3128},
-	{"file-01.corp.example", "10.20.0.20", 445},
-	{"dc-01.corp.example", "10.20.0.10", 389},
-	{"update.windows.example", "192.0.2.80", 443},
-	{"intranet.corp.example", "10.20.0.31", 443},
+	{"proxy.corp.example", ipProxy, 3128},
+	{"file-01.corp.example", netCompany + "120", 445},
+	{"dc-01.corp.example", netCompany + "110", 389},
+	{"update.windows.example", ipUpdates, 443},
+	{"intranet.corp.example", netCompany + "131", 443},
 }
 
 var benignDomains = []string{
@@ -175,14 +175,16 @@ func (g *gen) otTraffic(day window) {
 func (g *gen) firewall(t time.Time, blocked bool) {
 	srcs := g.org.Hosts
 	h := srcs[g.rng.intn(len(srcs))]
-	dstIP := fmt.Sprintf("192.0.2.%d", 1+g.rng.intn(254))
+	// Ordinary internet traffic goes to the upper half of TEST-NET-2,
+	// clear of the sample's malicious addresses.
+	dstIP := fmt.Sprintf("198.51.100.%d", 100+g.rng.intn(100))
 	act := "allow"
 	sev := "3"
 	if blocked {
 		act = "deny"
 		sev = "6"
 	}
-	g.b.cef("10.20.0.1", t, "Traffic", "100", sev, map[string]string{
+	g.b.cef(ipFirewall, t, "Traffic", "100", sev, map[string]string{
 		"act": act, "src": h.IP, "dst": dstIP, "spt": strconv.Itoa(40000 + g.rng.intn(20000)),
 		"dpt": strconv.Itoa([]int{443, 80, 53, 8080}[g.rng.intn(4)]), "proto": "6",
 		"in": strconv.Itoa(400 + g.rng.intn(4000)), "out": strconv.Itoa(400 + g.rng.intn(40000)),
@@ -194,7 +196,7 @@ func (g *gen) firewall(t time.Time, blocked bool) {
 func (g *gen) dnsLookup(h Host, query string, t time.Time) {
 	g.b.generic(t, "dns", map[string]any{
 		"host": h.Name, "dest": h.Name, "query": query,
-		"answer":  fmt.Sprintf("10.20.0.%d", 1+g.rng.intn(254)),
+		"answer":  fmt.Sprintf("%s%d", netCompany, 100+g.rng.intn(100)),
 		"message": h.Name + " resolved " + query,
 	})
 }
@@ -259,5 +261,5 @@ func (g *gen) deskIP(u User) string {
 	if h.IP != "" {
 		return h.IP
 	}
-	return "10.10.1.50"
+	return netCompany + "50"
 }

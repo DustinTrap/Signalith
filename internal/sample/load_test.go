@@ -1,23 +1,76 @@
 package sample
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/intel"
+	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
-// fakeOS is a no-op OSClient: Remove's delete-by-query and refresh against
-// OpenSearch are exercised by the integration test; here we test the
-// store-level bookkeeping (findings, cases, intel, lists).
-type fakeOS struct{ calls int }
+// fakeOS stands in for OpenSearch's REST calls the loader makes: it lists
+// the indices holding sample documents, deletes from them (refusing on a
+// write-blocked index, as OpenSearch does), and changes the block. The
+// real thing is exercised by the integration test.
+type fakeOS struct {
+	mu      sync.Mutex
+	indices []string        // indices holding sample documents
+	blocked map[string]bool // index.blocks.write
+	deleted []string        // indices deleted from
+}
 
-func (f *fakeOS) Do(_ context.Context, _, _ string, _, _ any) error         { f.calls++; return nil }
-func (f *fakeOS) ListIndices(_ context.Context, _ string) ([]string, error) { return nil, nil }
+func (f *fakeOS) Do(_ context.Context, method, path string, body, out any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	index := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)[0]
+	reply := func(v any) error {
+		if out == nil {
+			return nil
+		}
+		b, _ := json.Marshal(v)
+		return json.Unmarshal(b, out)
+	}
+	switch {
+	case strings.Contains(path, "/_search"):
+		var buckets []map[string]any
+		for _, ix := range f.indices {
+			buckets = append(buckets, map[string]any{"key": ix, "doc_count": 1})
+		}
+		return reply(map[string]any{"aggregations": map[string]any{"idx": map[string]any{"buckets": buckets}}})
+	case strings.Contains(path, "/_delete_by_query"):
+		if f.blocked[index] {
+			return &store.Error{Status: http.StatusForbidden, Body: `{"error":{"type":"cluster_block_exception","reason":"index [` + index + `] blocked by: [FORBIDDEN/8/index write (api)];"}}`}
+		}
+		f.deleted = append(f.deleted, index)
+		return reply(map[string]any{"deleted": 1})
+	case method == "GET" && strings.Contains(path, "/_settings"):
+		v := "false"
+		if f.blocked[index] {
+			v = "true"
+		}
+		return reply(map[string]any{index: map[string]any{"settings": map[string]any{"index.blocks.write": v}}})
+	case method == "PUT" && strings.HasSuffix(path, "/_settings"):
+		if f.blocked == nil {
+			f.blocked = map[string]bool{}
+		}
+		f.blocked[index] = body.(map[string]any)["index.blocks.write"] == true
+		return nil
+	}
+	return reply(map[string]any{})
+}
 
 // fakeIntel is an in-memory IntelStore.
 type fakeIntel struct{ inds []intel.Indicator }
@@ -40,161 +93,364 @@ func (f *fakeIntel) DeleteSource(_ context.Context, source string) (int, error) 
 	return n, nil
 }
 
-// TestRemoveDeletesExactlyTheSampleData seeds findings, cases, intel and
-// lists by hand — some sample, some not — and checks Remove deletes exactly
-// the sample ones and leaves everything else untouched.
-func TestRemoveDeletesExactlyTheSampleData(t *testing.T) {
-	ctx := context.Background()
-	id := "sample-20261013-120000"
-	start := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
-	loadedAt := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	inWindow := loadedAt.Add(-time.Hour)
-	beforeWindow := start.Add(-48 * time.Hour)
+// fakeBulk records the documents written; failAt makes that call (counted
+// from 1) fail as an overloaded OpenSearch would.
+type fakeBulk struct {
+	mu     sync.Mutex
+	docs   []store.IndexedDoc
+	calls  int
+	failAt int
+}
 
-	fs := findings.NewMemory()
-	cs := cases.NewMemory()
-	lists, err := assets.NewStore(t.TempDir())
+func (f *fakeBulk) Bulk(_ context.Context, docs []store.IndexedDoc) ([]store.BulkItemError, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls == f.failAt {
+		return nil, &store.Error{Status: http.StatusTooManyRequests, Body: `{"error":{"type":"es_rejected_execution_exception","reason":"rejected"}}`}
+	}
+	f.docs = append(f.docs, docs...)
+	return nil, nil
+}
+
+// A user's asset list with a line the store cannot read: the server runs
+// on with empty lists and leaves the file for the admin to fix.
+const damagedAssets = "host,ip,cidr,owner,priority,category,bunit,location\n" +
+	"real-dc,10.1.1.1,,IT,high,,Prod,\n" +
+	"dc-01,10.20.0.10,,IT,critical,,Prod,\n" +
+	"odd-box,10.1.1.2,,IT,urgent,,Prod,\n"
+
+const userIdentities = "identity,name,email,manager,priority,category,bunit,watchlist\n" +
+	"svc-backup,Real backup account,,,low,,Prod,\n"
+
+func newTestLoader(t *testing.T, dir string) (*Loader, *assets.Store, *fakeOS, *fakeIntel, *fakeBulk) {
+	t.Helper()
+	lists, _ := assets.OpenStore(dir)
+	fos := &fakeOS{indices: []string{"signalith-authentication-2026.10.09", "signalith-risk-2026.10.10"}}
+	fi := &fakeIntel{}
+	fb := &fakeBulk{}
+	return &Loader{
+		Prefix: "signalith", Bulk: fb, OS: fos, Intel: fi, Assets: lists,
+		Findings: findings.NewMemory(), Cases: cases.NewMemory(),
+		StateDir: filepath.Join(dir, "state"), Now: func() time.Time { return fixedNow },
+	}, lists, fos, fi, fb
+}
+
+func writeFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkFile(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fi := &fakeIntel{}
+	if !bytes.Equal(got, []byte(want)) {
+		t.Errorf("%s changed:\n%s\nwant:\n%s", filepath.Base(path), got, want)
+	}
+}
 
-	// Findings: sample (marked), an anchored risk-incident finding in the
-	// window (unmarked, must go), a risk-incident finding before the window
-	// (must stay), a real finding on a sample host (must stay), and an
-	// unrelated real finding (must stay).
-	mk := func(fid, det, sample string, created time.Time, entity string) *findings.Finding {
+// TestRemoveDeletesOnlyMarkedData: Remove deletes exactly what carries the
+// load's marker. Findings and cases of the user's own about hosts and users
+// that share a sample name stay, whenever they were created, and a case of
+// the user's own is never deleted: sample findings are only unlinked.
+func TestRemoveDeletesOnlyMarkedData(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	l, _, fos, fi, _ := newTestLoader(t, dir)
+	id := "sample-20261013-115500"
+	at := fixedNow.Add(-48 * time.Hour)
+	fs, cs := l.Findings, l.Cases
+
+	mk := func(fid, det, sample string, created time.Time, entity string) {
 		f := &findings.Finding{ID: fid, DetectionID: det, Sample: sample, Severity: "high",
 			Status: findings.StatusNew, Created: created, Updated: created,
-			Entities: map[string]any{"user": entity}}
+			Entities: map[string]any{"risk_object": entity}}
 		if err := fs.Create(ctx, f); err != nil {
 			t.Fatal(err)
 		}
-		return f
 	}
-	mk("S1", "endpoint-credential-dumping", id, inWindow, "dan.sato")
-	mk("S2", "auth-brute-force", id, inWindow, "bob.okafor")
-	mk("S3", "endpoint-shadow-copy-delete", id, inWindow, "dan.sato")
-	mk("R1", "risk-threshold-exceeded", "", inWindow, "dan.sato")     // anchored, in window
-	mk("R2", "risk-threshold-exceeded", "", beforeWindow, "dan.sato") // anchored, before window
-	mk("RF", "auth-brute-force", "", inWindow, "dan.sato")            // real, on anchor
-	mk("P1", "auth-password-spray", "", inWindow, "someone.else")     // unrelated real
+	mk("S1", "endpoint-credential-dumping", id, at, "ws-fin-07")
+	mk("S2", "auth-brute-force", id, at, "db-01")
+	mk("S3", "risk-threshold-exceeded", id, at, "dan.sato")
+	mk("R1", "risk-threshold-exceeded", "", at, "dc-01")                         // real, a sample host's name
+	mk("R2", "risk-multiple-tactics", "", fixedNow.Add(5*24*time.Hour), "dc-01") // real, long after the load
+	mk("P1", "auth-password-spray", "", at, "someone.else")                      // real, unrelated
 
-	// Cases: own sample case; an analyst case holding a sample finding and a
-	// real one; an analyst case holding only a sample finding.
-	own := &cases.Case{ID: "C1", Title: "Sample case", Sample: id, Status: findings.StatusInProgress,
-		Findings: []string{"S1"}, Created: loadedAt, Updated: loadedAt}
-	mixed := &cases.Case{ID: "C2", Title: "Analyst case", Status: findings.StatusInProgress,
-		Findings: []string{"S2", "P1"}, Created: loadedAt, Updated: loadedAt}
-	allSample := &cases.Case{ID: "C3", Title: "All sample", Status: findings.StatusInProgress,
-		Findings: []string{"S3"}, Created: loadedAt, Updated: loadedAt}
-	for _, c := range []*cases.Case{own, mixed, allSample} {
+	for _, c := range []*cases.Case{
+		{ID: "C1", Title: "Sample case", Sample: id, Findings: []string{"S1"}},
+		{ID: "C2", Title: "Analyst case, mixed", Findings: []string{"S2", "P1"}},
+		{ID: "C3", Title: "Analyst case, only sample findings", Findings: []string{"S3"}},
+		{ID: "C4", Title: "Real investigation of dc-01", Findings: []string{"R1"}},
+	} {
+		c.Status, c.Created, c.Updated = findings.StatusInProgress, at, at
 		if err := cs.Create(ctx, c); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	// Intel: two sample indicators, one manual.
-	fi.Add(ctx, []intel.Indicator{
+	// A feed that happens to be called "sample" is the user's.
+	_ = fi.Add(ctx, []intel.Indicator{
 		{ID: "i1", Source: SampleIntelSource, Type: intel.TypeIP, Value: "203.0.113.45"},
-		{ID: "i2", Source: SampleIntelSource, Type: intel.TypeDomain, Value: "updates.corp-sync.example"},
-		{ID: "i3", Source: intel.ManualSource, Type: intel.TypeIP, Value: "203.0.113.9"},
+		{ID: "i2", Source: intel.ManualSource, Type: intel.TypeIP, Value: "203.0.113.9"},
+		{ID: "i3", Source: "sample", Type: intel.TypeIP, Value: "203.0.113.10"},
 	})
 
-	// Lists: a sample asset/identity and the user's own.
-	lists.SetAssets(assets.MarshalAssets([]assets.Asset{
-		{Host: []string{"ws-fin-07"}, BUnit: SampleBUnit},
-		{Host: []string{"my-server"}, BUnit: "Production"},
-	}))
-	lists.SetIdentities(assets.MarshalIdentities([]assets.Identity{
-		{Identity: []string{"dan.sato"}, BUnit: SampleBUnit},
-		{Identity: []string{"real.person"}, BUnit: "Staff"},
-	}))
-
-	l := &Loader{
-		Prefix: "signalith", OS: &fakeOS{}, Intel: fi, Assets: lists,
-		Findings: fs, Cases: cs, StateDir: t.TempDir(),
-		Now: func() time.Time { return loadedAt },
+	// The user's lists (one damaged) and the sample overlay.
+	writeFile(t, filepath.Join(dir, assets.AssetsFile), damagedAssets)
+	writeFile(t, filepath.Join(dir, assets.IdentitiesFile), userIdentities)
+	if _, err := l.Assets.Reload(); err == nil {
+		t.Fatal("the damaged asset list should not load")
 	}
-	st := &State{ID: id, Size: SizeSmall, LoadedAt: loadedAt, Start: start, End: loadedAt.Add(-5 * time.Minute),
-		Anchors: []string{"dan.sato", "bob.okafor", "ws-fin-07"}, Cases: []string{"C1"}}
-	if err := l.writeState(st); err != nil {
+	d := Generate(Options{Now: fixedNow, Size: SizeSmall})
+	if err := l.Assets.SetOverlay(d.Assets, d.Identities); err != nil {
 		t.Fatal(err)
 	}
-	if !l.Loaded() {
-		t.Fatal("state not written")
-	}
 
+	if err := l.writeState(&State{ID: id, Size: SizeSmall, LoadedAt: fixedNow, Start: d.Start, End: d.End, Cases: []string{"C1"}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := l.Remove(ctx, nil); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	// Findings: the sample ones and the anchored in-window risk finding go;
-	// the rest stay.
 	left := map[string]bool{}
 	all, _, _ := fs.Search(ctx, findings.Filter{Limit: 100})
 	for _, f := range all {
 		left[f.ID] = true
 	}
-	wantGone := []string{"S1", "S2", "S3", "R1"}
-	wantKept := []string{"R2", "RF", "P1"}
-	for _, id := range wantGone {
-		if left[id] {
-			t.Errorf("finding %s should have been removed", id)
+	for _, fid := range []string{"S1", "S2", "S3"} {
+		if left[fid] {
+			t.Errorf("sample finding %s should have been removed", fid)
 		}
 	}
-	for _, id := range wantKept {
-		if !left[id] {
-			t.Errorf("finding %s should have been kept", id)
+	for _, fid := range []string{"R1", "R2", "P1"} {
+		if !left[fid] {
+			t.Errorf("finding %s is the user's and should have been kept", fid)
 		}
 	}
 
-	// Cases: own and all-sample cases gone; the mixed one kept with only its
-	// real finding.
 	if _, err := cs.Get(ctx, "C1"); err == nil {
-		t.Error("own sample case C1 should have been deleted")
+		t.Error("the sample's own case C1 should have been deleted")
 	}
-	if _, err := cs.Get(ctx, "C3"); err == nil {
-		t.Error("all-sample case C3 should have been deleted")
-	}
-	c2, err := cs.Get(ctx, "C2")
-	if err != nil {
-		t.Fatalf("mixed case C2 should have been kept: %v", err)
-	}
-	if len(c2.Findings) != 1 || c2.Findings[0] != "P1" {
-		t.Errorf("C2 findings = %v, want [P1]", c2.Findings)
+	for cid, want := range map[string][]string{"C2": {"P1"}, "C3": nil, "C4": {"R1"}} {
+		c, err := cs.Get(ctx, cid)
+		if err != nil {
+			t.Errorf("case %s is the user's and should have been kept: %v", cid, err)
+			continue
+		}
+		if strings.Join(c.Findings, ",") != strings.Join(want, ",") {
+			t.Errorf("case %s findings = %v, want %v", cid, c.Findings, want)
+		}
 	}
 
-	// Intel: sample source gone, manual kept.
+	var sources []string
 	for _, ind := range fi.inds {
-		if ind.Source == SampleIntelSource {
-			t.Errorf("sample indicator %s should have been removed", ind.ID)
-		}
+		sources = append(sources, ind.Source)
 	}
-	if len(fi.inds) != 1 || fi.inds[0].ID != "i3" {
-		t.Errorf("intel left = %v, want only manual i3", fi.inds)
+	if strings.Join(sources, ",") != intel.ManualSource+",sample" {
+		t.Errorf("intel left from sources %v, want the manual one and the user's feed called sample", sources)
 	}
 
-	// Lists: sample entries gone, the user's kept.
-	for _, a := range lists.Assets() {
-		if a.BUnit == SampleBUnit {
-			t.Errorf("sample asset %v should have been removed", a.Host)
+	// The overlay is gone and the user's files are as they were, the
+	// damaged one included.
+	for _, name := range []string{assets.OverlayAssetsFile, assets.OverlayIdentitiesFile} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s should have been deleted: %v", name, err)
 		}
+	}
+	if a, i := l.Assets.Overlay(); len(a)+len(i) != 0 {
+		t.Errorf("overlay still holds %d assets and %d identities", len(a), len(i))
+	}
+	checkFile(t, filepath.Join(dir, assets.AssetsFile), damagedAssets)
+	checkFile(t, filepath.Join(dir, assets.IdentitiesFile), userIdentities)
+
+	if strings.Join(fos.deleted, ",") != strings.Join(fos.indices, ",") {
+		t.Errorf("deleted from %v, want %v", fos.deleted, fos.indices)
+	}
+	if st, _ := l.Status(); st != nil {
+		t.Error("the state file should have been removed")
+	}
+}
+
+// TestRemoveLiftsWriteBlock: a day retention made read-only still has its
+// sample events deleted, and is read-only again afterwards.
+func TestRemoveLiftsWriteBlock(t *testing.T) {
+	l, _, fos, _, _ := newTestLoader(t, t.TempDir())
+	blocked := fos.indices[0]
+	fos.blocked = map[string]bool{blocked: true}
+	if err := l.writeState(&State{ID: "sample-x", Partial: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Remove(context.Background(), nil); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if strings.Join(fos.deleted, ",") != strings.Join(fos.indices, ",") {
+		t.Errorf("deleted from %v, want %v", fos.deleted, fos.indices)
+	}
+	if !fos.blocked[blocked] {
+		t.Errorf("%s should be read-only again", blocked)
+	}
+}
+
+// TestLoadWritesOverlayNotUserLists: a load leaves the user's list files
+// alone and a user's row always wins a lookup over a sample row for the
+// same name. Events keep their own times back to six days ago, whatever
+// the server's maximum event age, and the progress only moves forward.
+func TestLoadWritesOverlayNotUserLists(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	const userAssets = "host,ip,cidr,owner,priority,category,bunit,location\ndc-01,10.20.0.10,,IT,critical,,Prod,\n"
+	writeFile(t, filepath.Join(dir, assets.AssetsFile), userAssets)
+	writeFile(t, filepath.Join(dir, assets.IdentitiesFile), userIdentities)
+	l, lists, _, fi, fb := newTestLoader(t, dir)
+
+	var pcts []int
+	st, err := l.Load(ctx, SizeStandard, func(p Progress) { pcts = append(pcts, p.Percent) })
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if st.Partial || st.LoadedAt.IsZero() || st.Events == 0 || st.Indicators != len(fi.inds) {
+		t.Errorf("state = %+v", st)
+	}
+	for i := 1; i < len(pcts); i++ {
+		if pcts[i] < pcts[i-1] {
+			t.Fatalf("progress went back: %v", pcts)
+		}
+	}
+	if len(pcts) == 0 || pcts[len(pcts)-1] != 100 {
+		t.Errorf("progress did not end at 100: %v", pcts)
+	}
+
+	checkFile(t, filepath.Join(dir, assets.AssetsFile), userAssets)
+	checkFile(t, filepath.Join(dir, assets.IdentitiesFile), userIdentities)
+	if a, ok := lists.Asset("dc-01"); !ok || a.BUnit != "Prod" {
+		t.Errorf("dc-01 resolved to %+v; the user's row must win", a)
+	}
+	if i, ok := lists.Identity(`CORP\svc-backup`); !ok || i.BUnit != "Prod" {
+		t.Errorf("svc-backup resolved to %+v; the user's row must win", i)
+	}
+	if a, ok := lists.Asset("ws-fin-07"); !ok || a.BUnit != SampleBUnit {
+		t.Errorf("ws-fin-07 resolved to %+v, want the sample's row", a)
+	}
+	if _, ok := lists.Asset("10.10.1.26"); ok {
+		t.Error("a private address resolved to a sample asset")
 	}
 	if len(lists.Assets()) != 1 {
-		t.Errorf("assets left = %d, want 1", len(lists.Assets()))
+		t.Errorf("Assets() = %d rows, want only the user's one", len(lists.Assets()))
 	}
-	for _, i := range lists.Identities() {
-		if i.BUnit == SampleBUnit {
-			t.Errorf("sample identity %v should have been removed", i.Identity)
-		}
-	}
-	if len(lists.Identities()) != 1 {
-		t.Errorf("identities left = %d, want 1", len(lists.Identities()))
+	if own := lists.Own(); own == lists {
+		t.Error("Own() should leave the overlay out while it holds rows")
+	} else if _, ok := own.Asset("ws-fin-07"); ok {
+		t.Error("Own() still answers for a sample host")
 	}
 
-	// The state file is gone, so a fresh load would be allowed.
-	if l.Loaded() {
-		t.Error("state file should have been removed after Remove")
+	// Every event kept its own time: none was moved to the load time.
+	oldest := fixedNow
+	for _, doc := range fb.docs {
+		ts, _ := time.Parse(time.RFC3339Nano, doc.Doc["@timestamp"].(string))
+		if ts.Before(oldest) {
+			oldest = ts
+		}
+		if _, moved := doc.Doc["device_time"]; moved {
+			t.Fatalf("an event was refiled at the load time: %v", doc.Doc)
+		}
+		if doc.Doc[datamodel.SampleField] != st.ID {
+			t.Fatalf("an event lacks the marker: %v", doc.Doc)
+		}
+	}
+	if oldest.After(st.Start.Add(24 * time.Hour)) {
+		t.Errorf("oldest event %v; want the week back to %v", oldest, st.Start)
+	}
+
+	if _, err := l.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrAlreadyLoaded) {
+		t.Errorf("second Load = %v, want ErrAlreadyLoaded", err)
+	}
+}
+
+// TestFailedLoadIsRemovable: a load that fails or is cancelled part way
+// leaves a partial state, so the next load is refused and Remove takes out
+// what it wrote.
+func TestFailedLoadIsRemovable(t *testing.T) {
+	ctx := context.Background()
+	l, lists, _, fi, fb := newTestLoader(t, t.TempDir())
+	fb.failAt = 2
+
+	if _, err := l.Load(ctx, SizeStandard, nil); err == nil {
+		t.Fatal("Load should fail when OpenSearch refuses a chunk")
+	}
+	st, err := l.Status()
+	if err != nil || st == nil || !st.Partial || st.ID == "" {
+		t.Fatalf("Status after a failed load = %+v, %v; want a partial state", st, err)
+	}
+	if _, err := l.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrPartial) {
+		t.Errorf("Load after a failed one = %v, want ErrPartial", err)
+	}
+	if _, err := l.Remove(ctx, nil); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if st, _ := l.Status(); st != nil {
+		t.Error("Remove should clear the partial state")
+	}
+
+	// Cancelled (Ctrl-C) after the intel and lists went in.
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_, err = l.Load(cctx, SizeSmall, func(p Progress) {
+		if p.Phase == "Adding asset and identity context" {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Load = %v", err)
+	}
+	if st, _ := l.Status(); st == nil || !st.Partial {
+		t.Fatalf("Status after a cancelled load = %+v; want partial", st)
+	}
+	if len(fi.inds) == 0 {
+		t.Fatal("the cancelled load should have added its intel before stopping")
+	}
+	if _, err := l.Remove(ctx, nil); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if a, i := lists.Overlay(); len(fi.inds)+len(a)+len(i) != 0 {
+		t.Errorf("left after Remove: %d indicators, %d assets, %d identities", len(fi.inds), len(a), len(i))
+	}
+}
+
+// TestLockAcrossProcesses: a fresh lock from another process refuses a
+// load and shows as activity; a stale one (its holder died) is taken over.
+func TestLockAcrossProcesses(t *testing.T) {
+	ctx := context.Background()
+	l, _, _, _, _ := newTestLoader(t, t.TempDir())
+	if err := os.MkdirAll(l.StateDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	other := Activity{Op: "load", Phase: "Writing events", Percent: 12, PID: 999999, Started: time.Now(), Beat: time.Now()}
+	b, _ := json.Marshal(other)
+	writeFile(t, l.lockPath(), string(b))
+
+	if _, err := l.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Load under another's lock = %v, want ErrBusy", err)
+	}
+	if a := l.Activity(); a == nil || a.Phase != "Writing events" || a.Percent != 12 {
+		t.Errorf("Activity = %+v", a)
+	}
+
+	other.Beat = time.Now().Add(-2 * staleLock)
+	b, _ = json.Marshal(other)
+	writeFile(t, l.lockPath(), string(b))
+	if a := l.Activity(); a != nil {
+		t.Errorf("a stale lock shows as activity: %+v", a)
+	}
+	if _, err := l.Load(ctx, SizeSmall, nil); err != nil {
+		t.Fatalf("Load over a stale lock: %v", err)
+	}
+	if _, err := os.Stat(l.lockPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the lock should be gone after the load: %v", err)
 	}
 }

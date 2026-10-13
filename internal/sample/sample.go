@@ -5,16 +5,17 @@
 // dashboards — all loaded and removed in one click.
 //
 // Everything is made up and safe to load on any network: the company is
-// fictional, its domain is corp.example (RFC 6761), internal addresses are
-// in 10.0.0.0/8 and every external address is from the documentation
-// ranges in RFC 5737 (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24). The
+// fictional, its domain is corp.example (RFC 6761), and every address,
+// internal and external, is from the documentation ranges in RFC 5737
+// (192.0.2.0/24 for the company, 198.51.100.0/24 and 203.0.113.0/24 for the
+// internet), so no sample host can be mistaken for a real one. The
 // generator is deterministic (seeded) and offline, and every document it
-// makes carries a marker (ingest.SampleField) holding the load's ID, so
-// Remove deletes exactly the sample data and nothing else.
+// makes carries a marker (datamodel.SampleField) holding the load's ID:
+// the live detection scheduler leaves marked documents out, and Remove
+// deletes exactly them and nothing else.
 package sample
 
 import (
-	"fmt"
 	"net/netip"
 	"sort"
 	"time"
@@ -74,26 +75,33 @@ type Data struct {
 	Start      time.Time         // first event time
 	End        time.Time         // last event time
 	Events     []ingest.Event    // every event, marker already set
-	Indicators []intel.Indicator // sample threat-intel indicators (source "sample")
+	Indicators []intel.Indicator // sample threat-intel indicators (source SampleIntelSource)
 	Assets     []assets.Asset    // sample assets to overlay on the user's list
 	Identities []assets.Identity // sample identities to overlay
 	Stories    []Story           // the attack narratives
 	RunTimes   []time.Time       // times to run the detections at (scenario ends)
-	// Anchors are the distinctive host names, IPs and user strings every
-	// sample event uses, so findings and risk raised from the sample can
-	// be found by entity value even when they carry no marker (for example
-	// risk-notable findings the live scheduler raised).
-	Anchors []string
+	// CaseFocus are the entity values (host, address, user) of the story
+	// the sample investigation follows, to pick its findings.
+	CaseFocus []string
 }
 
 // SampleIntelSource is the threat-intel source name sample indicators use,
 // so they can be removed with intel.Store.DeleteSource without touching a
-// user's own indicators. It is reserved against feed names (see feedspec).
-const SampleIntelSource = "sample"
+// user's own indicators. No feed can have it (feed names are lowercase,
+// without spaces).
+const SampleIntelSource = intel.SampleSource
 
-// SampleBUnit tags sample asset and identity entries so they are
-// recognisable and removed exactly.
+// SampleBUnit tags the sample's asset and identity rows so they are
+// recognisable where they show (they live in the asset store's overlay,
+// never in the user's own lists).
 const SampleBUnit = "Sample data"
+
+// MaxEventAge is the event age the loader writes with, whatever the
+// server's own limit: the sample reaches back six days, and a shorter
+// limit (a short retention period, or ingest.max_event_age) would refile
+// its older events at the load time, where they would tell a false story.
+// Retention later deletes the older sample days like any others.
+const MaxEventAge = 8 * 24 * time.Hour
 
 // Generate builds the sample. It is deterministic: the same options give
 // the same data every time, and it reads nothing from the network or disk.
@@ -122,7 +130,7 @@ func Generate(opt Options) *Data {
 	}
 
 	// The last events end a few minutes before now; history reaches back
-	// six days, safely inside the seven-day default max event age.
+	// six days, inside MaxEventAge, which the loader writes with.
 	g.end = now.Add(-5 * time.Minute)
 	g.start = now.AddDate(0, 0, -6)
 
@@ -150,7 +158,7 @@ func Generate(opt Options) *Data {
 		Indicators: sampleIndicators(now),
 		Stories:    g.stories,
 		RunTimes:   g.runTimes(),
-		Anchors:    g.anchors(),
+		CaseFocus:  g.caseFocus,
 	}
 	d.Assets, d.Identities = sampleLists(g.org)
 	return d
@@ -166,7 +174,7 @@ type gen struct {
 	size       Size
 	stories    []Story
 	runTimeSet []time.Time
-	anchorSet  map[string]bool
+	caseFocus  []string
 }
 
 func (g *gen) addRunTime(t time.Time) {
@@ -194,24 +202,6 @@ func (g *gen) runTimes() []time.Time {
 	return out
 }
 
-func (g *gen) anchor(v string) {
-	if g.anchorSet == nil {
-		g.anchorSet = map[string]bool{}
-	}
-	if v != "" {
-		g.anchorSet[v] = true
-	}
-}
-
-func (g *gen) anchors() []string {
-	var out []string
-	for v := range g.anchorSet {
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // mustAddr parses an IP for the syslog sender; sample IPs are all valid.
 func mustAddr(s string) netip.Addr {
 	a, err := netip.ParseAddr(s)
@@ -221,9 +211,9 @@ func mustAddr(s string) netip.Addr {
 	return a
 }
 
-// ReservedExternal reports whether an address is one of the documentation
-// ranges the sample is allowed to use for external hosts (RFC 5737). The
-// test uses it to prove no real external address leaks in.
+// ReservedExternal reports whether an address is in one of the
+// documentation ranges (RFC 5737) the sample uses for every address. The
+// test uses it to prove no real address leaks in.
 func ReservedExternal(ip string) bool {
 	a, err := netip.ParseAddr(ip)
 	if err != nil {
@@ -237,19 +227,14 @@ func ReservedExternal(ip string) bool {
 	return false
 }
 
-// Internal reports whether an address is in the private ranges the sample
-// uses for the company's own hosts.
+// Internal reports whether an address is in the range the sample uses for
+// the company's own hosts (InternalNet).
 func Internal(ip string) bool {
 	a, err := netip.ParseAddr(ip)
 	if err != nil {
 		return false
 	}
-	return a.IsPrivate()
+	return netip.MustParsePrefix(InternalNet).Contains(a)
 }
 
 func (s Size) String() string { return string(s) }
-
-func init() {
-	// Fail loudly in tests if a story names a detection that does not exist.
-	_ = fmt.Sprint
-}

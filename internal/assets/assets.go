@@ -219,17 +219,31 @@ func ParseIdentities(data []byte) ([]Identity, error) {
 }
 
 // Store holds both lists and answers lookups. It is safe for concurrent use.
+//
+// Besides the user's own lists it can hold an overlay: extra rows another
+// feature adds for its own hosts and users (the sample data does, for the
+// made-up company it loads). The overlay lives in its own files, so the
+// user's files are never rewritten for it, and it only answers lookups the
+// user's lists do not: a user's row always wins. Assets, Identities, the
+// CSV download and uploads see the user's lists alone.
 type Store struct {
 	Dir string // where assets.csv and identities.csv live; "" keeps them in memory
 
-	mu         sync.RWMutex
+	mu       sync.RWMutex
+	own      *lookup // the user's lists
+	overlay  *lookup // rows added by the sample data, consulted second
+	modTimes [4]time.Time
+}
+
+// lookup indexes one pair of lists. It is never changed once built, so a
+// Store swaps in a new one under its lock and readers may keep the old.
+type lookup struct {
 	assets     []Asset
 	identities []Identity
 	byHost     map[string]int
 	byIP       map[netip.Addr]int
 	nets       []netEntry
 	byUser     map[string]int
-	modTimes   [2]time.Time
 }
 
 type netEntry struct {
@@ -237,16 +251,20 @@ type netEntry struct {
 	idx    int
 }
 
-// File names inside Dir.
+// File names inside Dir. The overlay files belong to the sample data: it
+// writes them when it is loaded and deletes them when it is removed.
 const (
-	AssetsFile     = "assets.csv"
-	IdentitiesFile = "identities.csv"
+	AssetsFile            = "assets.csv"
+	IdentitiesFile        = "identities.csv"
+	OverlayAssetsFile     = "sample-data-assets.csv"
+	OverlayIdentitiesFile = "sample-data-identities.csv"
 )
+
+var listFiles = [4]string{AssetsFile, IdentitiesFile, OverlayAssetsFile, OverlayIdentitiesFile}
 
 // NewStore loads the lists from dir. Missing files mean empty lists.
 func NewStore(dir string) (*Store, error) {
-	s := &Store{Dir: dir}
-	s.index(nil, nil)
+	s := &Store{Dir: dir, own: newLookup(nil, nil), overlay: newLookup(nil, nil)}
 	if dir == "" {
 		return s, nil
 	}
@@ -261,8 +279,7 @@ func NewStore(dir string) (*Store, error) {
 // ones that cannot be read, and the error. Reload picks the files up once
 // they are fixed.
 func OpenStore(dir string) (*Store, error) {
-	s := &Store{Dir: dir}
-	s.index(nil, nil)
+	s := &Store{Dir: dir, own: newLookup(nil, nil), overlay: newLookup(nil, nil)}
 	if dir == "" {
 		return s, nil
 	}
@@ -270,50 +287,70 @@ func OpenStore(dir string) (*Store, error) {
 	return s, err
 }
 
-// Reload rereads the files if they changed. It reports whether it did.
+// Reload rereads the files if they changed. It reports whether it did. The
+// user's lists and the overlay load independently, so a damaged list of
+// the user's keeps neither the overlay nor the other pair from loading.
 func (s *Store) Reload() (bool, error) {
 	if s.Dir == "" {
 		return false, nil
 	}
-	read := func(name string) ([]byte, time.Time, error) {
+	var data [4][]byte
+	var mod [4]time.Time
+	for i, name := range listFiles {
 		p := filepath.Join(s.Dir, name)
 		st, err := os.Stat(p)
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, time.Time{}, nil
+			continue
 		}
 		if err != nil {
-			return nil, time.Time{}, err
+			return false, err
 		}
-		data, err := os.ReadFile(p)
-		return data, st.ModTime(), err
-	}
-	ad, at, err := read(AssetsFile)
-	if err != nil {
-		return false, err
-	}
-	id, it, err := read(IdentitiesFile)
-	if err != nil {
-		return false, err
+		if data[i], err = os.ReadFile(p); err != nil {
+			return false, err
+		}
+		mod[i] = st.ModTime()
 	}
 	s.mu.RLock()
-	same := at.Equal(s.modTimes[0]) && it.Equal(s.modTimes[1])
+	cur := s.modTimes
 	s.mu.RUnlock()
-	if same {
-		return false, nil
+
+	var errs []error
+	var own, overlay *lookup
+	for pair := 0; pair < 2; pair++ {
+		a, b := pair*2, pair*2+1
+		if mod[a].Equal(cur[a]) && mod[b].Equal(cur[b]) {
+			continue
+		}
+		as, err := ParseAssets(data[a])
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(s.Dir, listFiles[a]), err))
+			continue
+		}
+		ids, err := ParseIdentities(data[b])
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(s.Dir, listFiles[b]), err))
+			continue
+		}
+		if pair == 0 {
+			own = newLookup(as, ids)
+		} else {
+			overlay = newLookup(as, ids)
+		}
 	}
-	as, err := ParseAssets(ad)
-	if err != nil {
-		return false, fmt.Errorf("%s: %w", filepath.Join(s.Dir, AssetsFile), err)
+	if own == nil && overlay == nil {
+		return false, errors.Join(errs...)
 	}
-	ids, err := ParseIdentities(id)
-	if err != nil {
-		return false, fmt.Errorf("%s: %w", filepath.Join(s.Dir, IdentitiesFile), err)
-	}
-	s.index(as, ids)
 	s.mu.Lock()
-	s.modTimes = [2]time.Time{at, it}
+	if own != nil {
+		s.own = own
+		s.modTimes[0], s.modTimes[1] = mod[0], mod[1]
+	}
+	if overlay != nil {
+		s.overlay = overlay
+		s.modTimes[2], s.modTimes[3] = mod[2], mod[3]
+	}
 	s.mu.Unlock()
-	return true, nil
+	return true, errors.Join(errs...)
 }
 
 func normHost(h string) string { return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), ".")) }
@@ -330,7 +367,7 @@ func normUser(u string) string {
 	return u
 }
 
-func (s *Store) index(as []Asset, ids []Identity) {
+func newLookup(as []Asset, ids []Identity) *lookup {
 	byHost := map[string]int{}
 	byIP := map[netip.Addr]int{}
 	var nets []netEntry
@@ -363,68 +400,135 @@ func (s *Store) index(as []Asset, ids []Identity) {
 			byUser[normUser(u)] = i
 		}
 	}
-	s.mu.Lock()
-	s.assets, s.identities, s.byHost, s.byIP, s.nets, s.byUser = as, ids, byHost, byIP, nets, byUser
-	s.mu.Unlock()
+	return &lookup{assets: as, identities: ids, byHost: byHost, byIP: byIP, nets: nets, byUser: byUser}
 }
 
-// Asset finds the asset for a host name or IP address.
-func (s *Store) Asset(v string) (*Asset, bool) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return nil, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (l *lookup) asset(v string) (*Asset, bool) {
 	if addr, err := netip.ParseAddr(v); err == nil {
 		addr = addr.Unmap()
-		if i, ok := s.byIP[addr]; ok {
-			return &s.assets[i], true
+		if i, ok := l.byIP[addr]; ok {
+			return &l.assets[i], true
 		}
-		for _, n := range s.nets {
+		for _, n := range l.nets {
 			if n.prefix.Contains(addr) {
-				return &s.assets[n.idx], true
+				return &l.assets[n.idx], true
 			}
 		}
 		return nil, false
 	}
 	h := normHost(v)
-	if i, ok := s.byHost[h]; ok {
-		return &s.assets[i], true
+	if i, ok := l.byHost[h]; ok {
+		return &l.assets[i], true
 	}
 	if short, _, ok := strings.Cut(h, "."); ok {
-		if i, ok := s.byHost[short]; ok {
-			return &s.assets[i], true
+		if i, ok := l.byHost[short]; ok {
+			return &l.assets[i], true
 		}
 	}
 	return nil, false
 }
 
-// Identity finds the identity for a username in any common form.
+// lookups returns the user's lists and the overlay, for lock-free reads.
+func (s *Store) lookups() (own, overlay *lookup) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.own, s.overlay
+}
+
+// Asset finds the asset for a host name or IP address: in the user's list
+// first, then in the overlay.
+func (s *Store) Asset(v string) (*Asset, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil, false
+	}
+	own, overlay := s.lookups()
+	if a, ok := own.asset(v); ok {
+		return a, true
+	}
+	return overlay.asset(v)
+}
+
+// Identity finds the identity for a username in any common form: in the
+// user's list first, then in the overlay.
 func (s *Store) Identity(v string) (*Identity, bool) {
 	u := normUser(v)
 	if u == "" {
 		return nil, false
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if i, ok := s.byUser[u]; ok {
-		return &s.identities[i], true
+	own, overlay := s.lookups()
+	if i, ok := own.byUser[u]; ok {
+		return &own.identities[i], true
+	}
+	if i, ok := overlay.byUser[u]; ok {
+		return &overlay.identities[i], true
 	}
 	return nil, false
 }
 
-// Assets and Identities return copies of the lists.
+// Assets and Identities return copies of the user's lists (never the
+// overlay).
 func (s *Store) Assets() []Asset {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]Asset(nil), s.assets...)
+	own, _ := s.lookups()
+	return append([]Asset(nil), own.assets...)
 }
 
 func (s *Store) Identities() []Identity {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return append([]Identity(nil), s.identities...)
+	own, _ := s.lookups()
+	return append([]Identity(nil), own.identities...)
+}
+
+// Overlay returns copies of the overlay's rows.
+func (s *Store) Overlay() ([]Asset, []Identity) {
+	_, overlay := s.lookups()
+	return append([]Asset(nil), overlay.assets...), append([]Identity(nil), overlay.identities...)
+}
+
+// Own returns the store without its overlay: lookups answer from the
+// user's lists only. It shares the current lists and does not reload, so
+// take it again for each use. With no overlay loaded it is s itself.
+func (s *Store) Own() *Store {
+	if s == nil {
+		return nil
+	}
+	own, overlay := s.lookups()
+	if len(overlay.assets) == 0 && len(overlay.identities) == 0 {
+		return s
+	}
+	return &Store{own: own, overlay: newLookup(nil, nil)}
+}
+
+// SetOverlay replaces the overlay with these rows and saves them to the
+// overlay files in Dir, or deletes those files when both are empty. The
+// user's own files are never touched.
+func (s *Store) SetOverlay(as []Asset, ids []Identity) error {
+	var mod [2]time.Time
+	if s.Dir != "" {
+		for i, name := range listFiles[2:] {
+			p := filepath.Join(s.Dir, name)
+			if len(as) == 0 && len(ids) == 0 {
+				if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				continue
+			}
+			data := MarshalAssets(as)
+			if i == 1 {
+				data = MarshalIdentities(ids)
+			}
+			t, err := s.write(name, data)
+			if err != nil {
+				return err
+			}
+			mod[i] = t
+		}
+	}
+	l := newLookup(append([]Asset(nil), as...), append([]Identity(nil), ids...))
+	s.mu.Lock()
+	s.overlay = l
+	s.modTimes[2], s.modTimes[3] = mod[0], mod[1]
+	s.mu.Unlock()
+	return nil
 }
 
 // SetAssets validates CSV, saves it to Dir and loads it.
@@ -436,7 +540,9 @@ func (s *Store) SetAssets(data []byte) (int, error) {
 	if err := s.save(AssetsFile, data); err != nil {
 		return 0, err
 	}
-	s.index(as, s.Identities())
+	s.mu.Lock()
+	s.own = newLookup(as, s.own.identities)
+	s.mu.Unlock()
 	return len(as), nil
 }
 
@@ -449,7 +555,9 @@ func (s *Store) SetIdentities(data []byte) (int, error) {
 	if err := s.save(IdentitiesFile, data); err != nil {
 		return 0, err
 	}
-	s.index(s.Assets(), ids)
+	s.mu.Lock()
+	s.own = newLookup(s.own.assets, ids)
+	s.mu.Unlock()
 	return len(ids), nil
 }
 
@@ -457,29 +565,38 @@ func (s *Store) save(name string, data []byte) error {
 	if s.Dir == "" {
 		return nil
 	}
-	if err := os.MkdirAll(s.Dir, 0o750); err != nil {
-		return err
-	}
-	p := filepath.Join(s.Dir, name)
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o640); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, p); err != nil {
-		return err
-	}
-	st, err := os.Stat(p)
+	t, err := s.write(name, data)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	if name == AssetsFile {
-		s.modTimes[0] = st.ModTime()
+		s.modTimes[0] = t
 	} else {
-		s.modTimes[1] = st.ModTime()
+		s.modTimes[1] = t
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// write replaces a file in Dir atomically and returns its new mod time.
+func (s *Store) write(name string, data []byte) (time.Time, error) {
+	if err := os.MkdirAll(s.Dir, 0o750); err != nil {
+		return time.Time{}, err
+	}
+	p := filepath.Join(s.Dir, name)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o640); err != nil {
+		return time.Time{}, err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		return time.Time{}, err
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return st.ModTime(), nil
 }
 
 // CSV returns a list as CSV, for download. Cells a spreadsheet would run
@@ -507,8 +624,7 @@ func csvWriter() (*bytes.Buffer, func(...string), func()) {
 func joinMulti(xs []string) string { return strings.Join(xs, "|") }
 
 // MarshalAssets serializes assets to CSV in the column order ParseAssets
-// reads, so the result round-trips. Sample data uses it to merge rows into
-// the user's list without overwriting it.
+// reads, so the result round-trips. The overlay files use it too.
 func MarshalAssets(as []Asset) []byte {
 	buf, write, flush := csvWriter()
 	write(AssetColumns...)

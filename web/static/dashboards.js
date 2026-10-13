@@ -1471,6 +1471,17 @@
     }
   });
 
+  // openDashboardAt opens a dashboard on a time range, kept as the choice
+  // for next time (the sample-data card shows the week).
+  window.openDashboardAt = (id, range) => {
+    setRange(range);
+    try { localStorage.setItem('signalith.dashRange', dash.range); } catch (_) { /* ignore */ }
+    const switching = dash.loaded && dash.current !== id;
+    if (!dash.loaded) dash.current = id;
+    showPage('dashboards');
+    return switching ? Promise.resolve(dashReady).then(() => showDashboard(id)) : dashReady;
+  };
+
   // For scripted checks and links from other pages.
   window.showDashboard = (id) => {
     if (!dash.loaded) showPage('dashboards');

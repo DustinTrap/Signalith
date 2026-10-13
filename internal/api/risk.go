@@ -48,15 +48,22 @@ func (s *Server) handleGetLookup(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(s.Assets.CSV(kind))
 		return
 	}
+	// The list is the user's own, followed by the rows the sample data
+	// adds for its made-up hosts and users while it is loaded ("sample"
+	// counts them). Those are not part of the user's list: they never
+	// override it, are not in its CSV and go when the sample is removed.
 	resp := map[string]any{}
+	oa, oi := s.Assets.Overlay()
 	if kind == "assets" {
-		list := s.Assets.Assets()
+		list := append(s.Assets.Assets(), oa...)
 		resp["count"], resp["columns"] = len(list), assets.AssetColumns
 		resp["items"] = list[:min(len(list), 1000)]
+		resp["sample"] = len(oa)
 	} else {
-		list := s.Assets.Identities()
+		list := append(s.Assets.Identities(), oi...)
 		resp["count"], resp["columns"] = len(list), assets.IdentityColumns
 		resp["items"] = list[:min(len(list), 1000)]
+		resp["sample"] = len(oi)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

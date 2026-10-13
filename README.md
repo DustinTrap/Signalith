@@ -33,11 +33,11 @@ Desktop when you sign in".
 
 ### Try it with sample data
 
-No logs to hand? On the **Add data** page (admins only), **Load sample data** fills
-Signalith with a week of made-up activity for a fictional company, with a handful of
-attacks hidden in it, so detections fire, the triage queue fills, risk builds up,
-threat intel matches and the dashboards light up. Everything is fictional and safe to
-load on any network, and one click removes all of it. See
+No logs to hand? On the **Add data** page (under Configure, admins only), **Load
+sample data** fills Signalith with a week of made-up activity for a fictional company,
+with a handful of attacks hidden in it, so detections fire, the triage queue fills,
+risk builds up, threat intel matches and the dashboards light up. Everything is
+fictional and kept apart from your own data, and one click removes all of it. See
 [docs/sample-data.md](docs/sample-data.md). From the shell or in Docker:
 
 ```sh

@@ -2,8 +2,10 @@ package sample
 
 import (
 	"fmt"
+	"net/netip"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,8 +39,8 @@ func TestDeterministic(t *testing.T) {
 			t.Fatalf("event %d differs between runs", i)
 		}
 	}
-	if !reflect.DeepEqual(a.RunTimes, b.RunTimes) || !reflect.DeepEqual(a.Anchors, b.Anchors) {
-		t.Error("run times or anchors differ between runs")
+	if !reflect.DeepEqual(a.RunTimes, b.RunTimes) || !reflect.DeepEqual(a.CaseFocus, b.CaseFocus) {
+		t.Error("run times or the case's focus differ between runs")
 	}
 }
 
@@ -86,9 +88,11 @@ var ipv4 = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 // sample must never use (only .example and .test are allowed, RFC 6761).
 var realHost = regexp.MustCompile(`\b[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\.(com|net|org|io|gov|mil|edu|co|uk|de|ru|cn|info|biz|dev|app)\b`)
 
-// TestReservedNamesAndAddresses: no event names a real external address or a
-// real domain. Internal addresses are private; external ones are the RFC 5737
-// documentation ranges; every hostname ends in .example or .test.
+// TestReservedNamesAndAddresses: no event names a real address or a real
+// domain. Every address, the made-up company's own included, is in an RFC
+// 5737 documentation range, so none can be a host on a real network (the
+// private ranges, 10/8 and the like, are where real hosts live); every
+// hostname ends in .example or .test.
 func TestReservedNamesAndAddresses(t *testing.T) {
 	d := genData(t, SizeStandard)
 	for i, e := range d.Events {
@@ -127,6 +131,62 @@ func okAddr(ip string) bool {
 		return true
 	}
 	return false
+}
+
+// TestCompanyAddressesInTestNet: the made-up company's own hosts, as the
+// asset list gives them, are all in TEST-NET-1 (and its one network row is
+// a documentation range too), so a sample asset can never answer a lookup
+// for a real host's address.
+func TestCompanyAddressesInTestNet(t *testing.T) {
+	d := genData(t, SizeStandard)
+	if len(d.Assets) == 0 {
+		t.Fatal("no sample assets")
+	}
+	for _, a := range d.Assets {
+		for _, ip := range a.IP {
+			if !Internal(ip) {
+				t.Errorf("asset %v has address %s outside %s", a.Host, ip, InternalNet)
+			}
+		}
+		for _, c := range a.CIDR {
+			p, err := netip.ParsePrefix(c)
+			if err != nil || p.Bits() < 24 || !okAddr(p.Addr().String()) {
+				t.Errorf("asset %v has network %s outside the documentation ranges", a.Host, c)
+			}
+		}
+	}
+	for _, private := range []string{"10.10.1.26", "172.16.0.1", "192.168.1.1"} {
+		if Internal(private) {
+			t.Errorf("Internal(%s) = true; the sample must not claim private addresses", private)
+		}
+	}
+}
+
+// TestEveryIndicatorMatches: each sample indicator appears in at least one
+// event, so none sits in the intel list without a match to find.
+func TestEveryIndicatorMatches(t *testing.T) {
+	d := genData(t, SizeSmall)
+	seen := map[string]bool{}
+	for _, e := range d.Events {
+		for _, v := range e.Fields {
+			if s, ok := v.(string); ok {
+				seen[strings.ToLower(s)] = true
+			}
+		}
+	}
+	for _, ind := range d.Indicators {
+		v := strings.ToLower(ind.Value)
+		found := seen[v]
+		for s := range seen {
+			if found {
+				break
+			}
+			found = strings.Contains(s, v)
+		}
+		if !found {
+			t.Errorf("indicator %s (%s) appears in no event", ind.Value, ind.Type)
+		}
+	}
 }
 
 // TestEmailsAndIdentitiesReserved: sample identities and assets stay fictional.
@@ -352,8 +412,9 @@ func globFold(pattern, s string) bool {
 	return true
 }
 
-// TestStoriesAndAnchors: the four intrusion stories and one benign story are
-// present, and every anchor is a non-empty entity value.
+// TestStories: the four intrusion stories and one benign story are
+// present, and the sample investigation has the phishing story's host and
+// user to gather its findings by.
 func TestStories(t *testing.T) {
 	d := genData(t, SizeSmall)
 	want := []string{"linux-ssh-intrusion", "phishing-to-c2", "ransomware-prep", "domain-persistence", "benign-lookalikes"}
@@ -369,12 +430,14 @@ func TestStories(t *testing.T) {
 			t.Errorf("missing story %q", id)
 		}
 	}
-	if len(d.Anchors) == 0 {
-		t.Error("no anchors")
+	for _, v := range []string{"ws-fin-07", `CORP\alice.nguyen`} {
+		if !slices.Contains(d.CaseFocus, v) {
+			t.Errorf("case focus %v lacks %s", d.CaseFocus, v)
+		}
 	}
-	for _, a := range d.Anchors {
-		if a == "" {
-			t.Error("empty anchor")
+	for _, v := range d.CaseFocus {
+		if v == "" || v == "file-01" || strings.Contains(v, "svc-backup") {
+			t.Errorf("case focus has %q, which is not the phishing story", v)
 		}
 	}
 }

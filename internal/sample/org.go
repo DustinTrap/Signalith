@@ -3,11 +3,12 @@ package sample
 import "fmt"
 
 // Everything here is a made-up organisation. Names are obviously fictional,
-// the domain is corp.example (RFC 6761 reserves example), internal
-// addresses are in 10.0.0.0/8, and every external address is from the
-// documentation ranges TEST-NET-1/2/3 (192.0.2.0/24, 198.51.100.0/24,
-// 203.0.113.0/24, RFC 5737). No real company, product or person is named,
-// so the data is safe to load on any network.
+// the domain is corp.example (RFC 6761 reserves example), and every address,
+// inside the company and out, is from the documentation ranges TEST-NET-1/2/3
+// (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, RFC 5737), which no real
+// network uses. No real company, product or person is named, and no sample
+// address can belong to a real machine, so the data is safe to load on any
+// network and never mixes with the user's own hosts.
 
 // Domain is the fictional company's Windows and DNS domain.
 const (
@@ -16,27 +17,26 @@ const (
 	CompanyID = "Northwind Turbines" // a made-up company, shown only in docs
 )
 
-// Subnets the fictional company uses, all private (RFC 1918).
+// InternalNet is the documentation range the fictional company uses for
+// its own hosts (TEST-NET-1). Its blocks stand in for subnets.
+const InternalNet = "192.0.2.0/24"
+
+// Address blocks inside InternalNet.
 const (
-	netFinance   = "10.10.1." // finance workstations
-	netIT        = "10.10.2." // IT and admin workstations
-	netServers   = "10.20.0." // data-centre servers
-	netDC        = "10.20.0." // domain controllers share the server subnet
-	netVPN       = "10.30.0." // VPN pool
-	netOT        = "10.40.5." // OT / plant-floor network (segregated)
-	netOThist    = "10.40.6." // OT historian / DMZ
-	netPrinters  = "10.10.9." // printers and appliances
-	netGuestWiFi = "10.50.0." // guest wifi
+	netCompany = "192.0.2." // every internal host
+	ipFirewall = "192.0.2.1"
+	ipProxy    = "192.0.2.160"
 )
 
-// External documentation addresses (RFC 5737). Used for VPN clients, the
-// internet-facing C2 and the brute-force source, so nothing ever points at
-// a real address.
+// External documentation addresses (RFC 5737). Used for the internet-facing
+// C2, the brute-force source and ordinary internet traffic, so nothing ever
+// points at a real address.
 const (
 	ipC2        = "203.0.113.45"  // attacker command-and-control / brute-force source
 	ipC2Beacon  = "198.51.100.23" // beaconing destination, also a sample intel IP
 	ipPhishHost = "203.0.113.77"  // host that served the malicious document
 	ipExfil     = "198.51.100.50" // exfiltration destination (sample intel IP)
+	ipUpdates   = "198.51.100.80" // a benign update service
 )
 
 // Host is one computer in the fictional company.
@@ -177,7 +177,7 @@ func buildOrg() *org {
 	addHost := func(h Host) { o.Hosts = append(o.Hosts, h) }
 	// Finance workstations (Windows).
 	for i, name := range wsFinance {
-		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netFinance, 20+i), OS: "windows",
+		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netCompany, 20+i), OS: "windows",
 			Role: "finance-workstation", Priority: "medium", Category: "workstation", BUnit: "Finance", Location: "HQ"})
 	}
 	// IT workstations (Windows).
@@ -186,48 +186,48 @@ func buildOrg() *org {
 		if name == "ws-it-01" {
 			pr = "high" // the domain admin's workstation
 		}
-		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netIT, 20+i), OS: "windows",
+		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netCompany, 30+i), OS: "windows",
 			Role: "it-workstation", Priority: pr, Category: "workstation", BUnit: "IT", Location: "HQ"})
 	}
 	// Ops workstations (Windows).
 	for i, name := range wsOps {
-		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netIT, 40+i), OS: "windows",
+		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netCompany, 40+i), OS: "windows",
 			Role: "ops-workstation", Priority: "low", Category: "workstation", BUnit: "Operations", Location: "HQ"})
 	}
 	// Engineering workstations (Windows, one is the OT jump box).
 	for i, name := range wsEng {
-		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netIT, 60+i), OS: "windows",
+		addHost(Host{Name: name, IP: fmt.Sprintf("%s%d", netCompany, 60+i), OS: "windows",
 			Role: "engineering-workstation", Priority: "high", Category: "workstation", BUnit: "Engineering", Location: "Plant"})
 	}
 	// Servers.
-	addHost(Host{Name: "dc-01", IP: netDC + "10", OS: "windows", Role: "domain-controller",
+	addHost(Host{Name: "dc-01", IP: netCompany + "110", OS: "windows", Role: "domain-controller",
 		Priority: "critical", Category: "domain-controller", BUnit: "IT", Location: "Data centre"})
-	addHost(Host{Name: "dc-02", IP: netDC + "11", OS: "windows", Role: "domain-controller",
+	addHost(Host{Name: "dc-02", IP: netCompany + "111", OS: "windows", Role: "domain-controller",
 		Priority: "critical", Category: "domain-controller", BUnit: "IT", Location: "Data centre"})
-	addHost(Host{Name: "file-01", IP: netServers + "20", OS: "windows", Role: "file-server",
+	addHost(Host{Name: "file-01", IP: netCompany + "120", OS: "windows", Role: "file-server",
 		Priority: "high", Category: "server", BUnit: "IT", Location: "Data centre"})
-	addHost(Host{Name: "app-01", IP: netServers + "30", OS: "linux", Role: "app-server",
+	addHost(Host{Name: "app-01", IP: netCompany + "130", OS: "linux", Role: "app-server",
 		Priority: "high", Category: "server", BUnit: "IT", Location: "Data centre"})
-	addHost(Host{Name: "web-01", IP: netServers + "31", OS: "linux", Role: "web-server",
+	addHost(Host{Name: "web-01", IP: netCompany + "131", OS: "linux", Role: "web-server",
 		Priority: "high", Category: "server", BUnit: "IT", Location: "Data centre"})
-	addHost(Host{Name: "db-01", IP: netServers + "40", OS: "linux", Role: "database",
+	addHost(Host{Name: "db-01", IP: netCompany + "140", OS: "linux", Role: "database",
 		Priority: "critical", Category: "server", BUnit: "IT", Location: "Data centre"})
-	addHost(Host{Name: "jump-01", IP: netServers + "50", OS: "linux", Role: "bastion",
+	addHost(Host{Name: "jump-01", IP: netCompany + "150", OS: "linux", Role: "bastion",
 		Priority: "high", Category: "server", BUnit: "IT", Location: "Data centre"})
 
 	// --- OT / plant floor ---
 	o.OT = append(o.OT,
-		Host{Name: "hist-01", IP: netOThist + "10", OS: "windows", Role: "ot-historian",
+		Host{Name: "hist-01", IP: netCompany + "210", OS: "windows", Role: "ot-historian",
 			Priority: "high", Category: "ot-historian", BUnit: "Plant", Location: "Plant DMZ"},
-		Host{Name: "hmi-01", IP: netOT + "20", OS: "windows", Role: "ot-hmi",
+		Host{Name: "hmi-01", IP: netCompany + "220", OS: "windows", Role: "ot-hmi",
 			Priority: "high", Category: "ot-hmi", BUnit: "Plant", Location: "Plant floor"},
-		Host{Name: "hmi-02", IP: netOT + "21", OS: "windows", Role: "ot-hmi",
+		Host{Name: "hmi-02", IP: netCompany + "221", OS: "windows", Role: "ot-hmi",
 			Priority: "high", Category: "ot-hmi", BUnit: "Plant", Location: "Plant floor"},
-		Host{Name: "plc-01", IP: netOT + "30", OS: "linux", Role: "ot-plc",
+		Host{Name: "plc-01", IP: netCompany + "230", OS: "linux", Role: "ot-plc",
 			Priority: "critical", Category: "ot-plc", BUnit: "Plant", Location: "Plant floor"},
-		Host{Name: "plc-02", IP: netOT + "31", OS: "linux", Role: "ot-plc",
+		Host{Name: "plc-02", IP: netCompany + "231", OS: "linux", Role: "ot-plc",
 			Priority: "critical", Category: "ot-plc", BUnit: "Plant", Location: "Plant floor"},
-		Host{Name: "plc-03", IP: netOT + "32", OS: "linux", Role: "ot-plc",
+		Host{Name: "plc-03", IP: netCompany + "232", OS: "linux", Role: "ot-plc",
 			Priority: "critical", Category: "ot-plc", BUnit: "Plant", Location: "Plant floor"},
 	)
 	return o
