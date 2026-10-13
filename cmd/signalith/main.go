@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1164,6 +1165,16 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	// osquery hosts enrolled with it.
 	tokens := &agenttokens.Registry{Client: cl, Prefix: c.OpenSearch.IndexPrefix, Log: log, Node: func() string { return sampleNode }}
 	tokens.OnRevoke(estore.RevokeToken)
+	// The shared tokens come from the configuration in use, which the
+	// server holds once it exists; set before the first load so that load
+	// and the server never race to set it.
+	var tokenSrv atomic.Pointer[api.Server]
+	tokens.Legacy = func() []agenttokens.Legacy {
+		if s := tokenSrv.Load(); s != nil {
+			return api.LegacyTokens(s.Running())
+		}
+		return api.LegacyTokens(c)
+	}
 	{
 		lctx, lcancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := tokens.Load(lctx); err != nil {
@@ -1337,6 +1348,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		srv.Cluster = r.node
 		in.node = r.node
 	}
+	tokenSrv.Store(srv)
 	in.srv, in.handler = srv, srv.Handler()
 	// The example ingest token of an older Docker quick start: decide
 	// whether this one was upgraded if that is still open, and end it for
