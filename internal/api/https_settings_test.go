@@ -178,7 +178,7 @@ func TestExportHTTPSSettings(t *testing.T) {
 	ts, _, _ := newSettingsServer(t, "server:\n  listen: 0.0.0.0:18748\n  tls:\n    mode: auto\n    names: [siem.lan]\n    plaintext_ingest: deny\n  trusted_proxies: [10.0.0.5]\n", nil)
 	_, out := do(t, ts, "GET", "/api/settings/export", "", true)
 	text := out["yaml"].(string)
-	if !strings.Contains(text, "  tls:\n    mode: auto\n    names: [siem.lan]  # this server's own names\n") || !strings.Contains(text, "    plaintext_ingest: deny\n") ||
+	if !strings.Contains(text, "  tls:\n    mode: auto  # this server only\n    names: [siem.lan]  # this server's own names\n") || !strings.Contains(text, "    plaintext_ingest: deny\n") ||
 		!strings.Contains(text, "  trusted_proxies: [10.0.0.5]\n") {
 		t.Errorf("export:\n%s", text)
 	}

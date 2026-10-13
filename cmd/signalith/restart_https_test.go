@@ -94,12 +94,12 @@ func settled(rs *running, most int) int {
 // same certificate authority, and changes to it take effect.
 func TestRestartWithHTTPS(t *testing.T) {
 	boom := errors.New("cannot start with boom.lan")
-	rs := startRunnerWith(t, func(c *config.Config) error {
+	rs := startRunnerWith(t, runOptions{fail: func(c *config.Config) error {
 		if slices.Contains(c.Server.TLSNames(), "boom.lan") {
 			return boom
 		}
 		return nil
-	}, nil, "  tls:\n    mode: auto\n    plaintext_ingest: deny\n")
+	}, server: "  tls:\n    mode: auto\n    plaintext_ingest: deny\n"})
 	ownCA := rs.ownCA()
 	ca := pemFingerprint(t, ownCA)
 
@@ -294,7 +294,7 @@ func TestRestartRefusesACertificateItCannotMake(t *testing.T) {
 // leave that certificate for a later restart: names Add data gave the
 // certificate in use in between stay in the one served after it.
 func TestRefusedRestartDoesNotKeepItsCertificate(t *testing.T) {
-	rs := startRunnerWith(t, nil, nil, "  tls:\n    mode: auto\n    plaintext_ingest: deny\n")
+	rs := startRunnerWith(t, runOptions{server: "  tls:\n    mode: auto\n    plaintext_ingest: deny\n"})
 	taken, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

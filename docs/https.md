@@ -41,7 +41,8 @@ The CA can only sign names for this server and for private networks, never for p
 websites; see [Names the certificate can cover](#names-the-certificate-can-cover).
 
 The files are kept in the `tls` folder of Signalith's state folder (`SIGNALITH_STATE_DIR`,
-or else the folder that holds `lookups.dir`):
+or else the folder that holds `lookups.dir`; [docs/servers.md](servers.md#identity) says
+when another folder is used), next to the master key and this server's identity:
 
 | Install | Folder |
 | --- | --- |

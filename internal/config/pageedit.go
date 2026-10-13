@@ -276,8 +276,8 @@ func (r *EditResult) setField(key, msg string) {
 
 // notOnPage explains why a key cannot be changed on the page.
 func notOnPage(key string) string {
-	if why, ok := Excluded[key]; ok {
-		return "This setting is not changed on this page. " + why
+	if ex, ok := Excluded[key]; ok {
+		return "This setting is not changed on this page. " + ex.Reason
 	}
 	return "There is no setting called " + key + "."
 }

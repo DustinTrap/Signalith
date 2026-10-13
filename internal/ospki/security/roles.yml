@@ -8,18 +8,25 @@
 #   GET    _cluster/health                         cluster_monitor
 #   GET    _nodes/stats/fs (retention disk guard)  cluster_monitor
 #   GET    _tasks/<id> (retention waits on these)  cluster_monitor
+#   GET    _nodes/_local/stats/os                  cluster_monitor
+#          (servers compare their clocks with OpenSearch's)
 #   GET    _cat/indices/<pattern>                  cluster_monitor, manage
 #   GET    _cat/shards/<pattern>                   cluster_monitor, manage
-#   PUT    _index_template/<prefix>                indices:admin/index_template/*
+#   PUT    _index_template/<prefix>, <prefix>_runtime
+#                                                  indices:admin/index_template/*
 #   POST   _bulk (events, threat intel, restores)  cluster_composite_ops, crud
 #   POST   _search/scroll, DELETE _search/scroll   indices:data/read/scroll*
 #          (retention archives and checks)
 #   POST   <index>/_search, <index>/_count         crud
+#   POST   _mget (heartbeats and the job lease)    cluster_composite_ops, crud
 #   GET    <index>/_doc/<id>                       crud
 #   PUT    <index>/_doc/<id>, <index>/_create/<id> crud
+#   POST   <index>/_update/<id>                    crud
+#   DELETE <index>/_doc/<id> (only if unchanged)   crud
 #   POST   <index>/_update_by_query                crud
 #   POST   <index>/_delete_by_query                crud
-#   PUT    <index> (findings, cases, threat intel, restored days)
+#   PUT    <index> (findings, cases, threat intel, restored days,
+#          <prefix>_runtime where servers find each other)
 #                                                  create_index
 #   GET    <index>/_mapping, PUT <index>/_mapping  manage
 #   GET    <index>/_settings, PUT <index>/_settings (write blocks)

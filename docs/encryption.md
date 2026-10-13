@@ -128,7 +128,8 @@ password or key (`signalith init` does), and looks for it in this order:
    Signalith warns while it is used.
 4. The key file Signalith makes, `keys/master.key` (on Windows
    `keys\master.key.dpapi`), in the state folder (`SIGNALITH_STATE_DIR`, or the
-   folder that holds the lookups folder), then next to `signalith.yaml`, then on
+   folder that holds the lookups folder; [docs/servers.md](servers.md#identity)
+   says when another folder is used), then next to `signalith.yaml`, then on
    Linux in `/var/lib/signalith`. For a config in `/etc` on Linux,
    `/var/lib/signalith` comes first, so the key is never made next to
    `signalith.yaml`, where a copy of `/etc` would carry both.
@@ -506,7 +507,7 @@ change.
 
 | Variable | Meaning |
 | --- | --- |
-| `SIGNALITH_STATE_DIR` | Folder for files Signalith makes for itself, such as its master key (in `keys/`). Default: the folder that holds the lookups folder. The systemd unit and the Docker image set `/var/lib/signalith` |
+| `SIGNALITH_STATE_DIR` | Folder for files Signalith makes for itself: its master key (in `keys/`), its HTTPS certificate (in `tls/`) and this server's identity (`node.id`). Default: the folder that holds the lookups folder (see [docs/servers.md](servers.md#identity) for when another one is used). The systemd unit and the Docker image set `/var/lib/signalith` |
 | `SIGNALITH_MASTER_KEY_FILE` | A file holding the master key (32 bytes, or one line of base64 or hex) |
 | `SIGNALITH_MASTER_KEY` | The master key itself, in base64. Weaker than a file; Signalith warns while it is used |
 | `CREDENTIALS_DIRECTORY` | Set by systemd for `LoadCredential=`; Signalith reads `master.key` there |

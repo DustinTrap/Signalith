@@ -19,6 +19,18 @@ jobs:
       - run: go test ./...
       - run: go build -o dist/ ./cmd/signalith
 
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The same tests with the data race detector on. It needs cgo, which
+      # the Linux runner has. It is slow: internal/api alone takes about 6
+      # minutes, so the 10 minute default limit is raised.
+      - run: go test -race -timeout 20m ./...
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:
@@ -107,9 +119,53 @@ jobs:
           SIGNALITH_TEST_OPENSEARCH_KEY: ${{ runner.temp }}/signalith-secrets/opensearch-client-key.pem
         run: |
           # The tests use indices of their own; stop the server so it does
-          # not work on them at the same time.
+          # not work on them at the same time. The cluster tests run in the
+          # cluster job.
           $COMPOSE stop signalith
-          go test -tags integration -count=1 -v ./internal/integration/
+          go test -tags integration -count=1 -v -skip '^TestCluster' ./internal/integration/
+      - name: Container logs
+        if: failure()
+        run: $COMPOSE logs --no-color
+
+  cluster:
+    runs-on: ubuntu-latest
+    env:
+      # The secured OpenSearch of the Docker quick start, published on this
+      # machine for the tests: servers that share one OpenSearch need its
+      # security on.
+      COMPOSE: docker compose -f deploy/docker/docker-compose.yml -f ${{ github.workspace }}/ci-opensearch-port.yml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start the Docker quick start's OpenSearch
+        run: |
+          cat > ci-opensearch-port.yml <<'EOF'
+          services:
+            opensearch:
+              ports:
+                - "127.0.0.1:9200:9200"
+          EOF
+          $COMPOSE up -d --build
+          # Signalith's OpenSearch certificate, which the test servers use;
+          # the quick start's own server is not needed.
+          secrets="$RUNNER_TEMP/signalith-secrets"
+          mkdir -p "$secrets"
+          $COMPOSE cp signalith:/run/signalith-secrets/. "$secrets/"
+          $COMPOSE stop signalith
+      # Two `signalith serve` processes per test share the OpenSearch, each
+      # with its own state folder and the test's own index prefix, and HTTPS
+      # on: one runs the background jobs, another takes over after kill -9
+      # or SIGSTOP, and none takes over while its files differ. The tests
+      # build the binary themselves, with the clustertest tag.
+      - name: Several servers sharing one OpenSearch
+        env:
+          SIGNALITH_TEST_OPENSEARCH: https://localhost:9200
+          SIGNALITH_TEST_OPENSEARCH_CA: ${{ runner.temp }}/signalith-secrets/opensearch-ca.pem
+          SIGNALITH_TEST_OPENSEARCH_CERT: ${{ runner.temp }}/signalith-secrets/opensearch-client.pem
+          SIGNALITH_TEST_OPENSEARCH_KEY: ${{ runner.temp }}/signalith-secrets/opensearch-client-key.pem
+        run: go test -tags integration -count=1 -v -run '^TestCluster' -timeout 20m ./internal/integration/
       - name: Container logs
         if: failure()
         run: $COMPOSE logs --no-color

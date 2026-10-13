@@ -490,8 +490,13 @@ func TestExportSettings(t *testing.T) {
 		t.Fatalf("%d %s", code, raw)
 	}
 	text := out["yaml"].(string)
-	for _, want := range []string{"syslog:\n", "  udp: 0.0.0.0:514\n", "  allow: [10.0.0.0/8]\n", "  # password: left out; set it here or with SIGNALITH_OPENSEARCH_PASSWORD\n", "  listen: 127.0.0.1:8080  # this server's own address\n",
-		"  public_url: \"\"  # this server's own address\n"} {
+	// Settings that belong to this server are marked, so a copy does not,
+	// for one, turn on a second job runner; shared ones are not. The
+	// public address is marked too: another server set up on its own has
+	// its own.
+	for _, want := range []string{"syslog:\n", "  udp: 0.0.0.0:514  # this server's own address\n", "  allow: [10.0.0.0/8]\n", "  # password: left out; set it here or with SIGNALITH_OPENSEARCH_PASSWORD\n", "  listen: 127.0.0.1:8080  # this server's own address\n",
+		"  public_url: \"\"  # this server's own address\n", "  scheduler: true  # this server only\n", "  ca_file: \"\"  # a file on this server\n", "  max_events: 10000\n",
+		"    mode: auto  # this server only\n", "  trusted_proxies: []\n"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("export lacks %q:\n%s", want, text)
 		}
@@ -513,6 +518,74 @@ func TestExportSettings(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(resp.Header.Get("Content-Disposition"), "signalith-settings.yaml") || string(body) != text {
 		t.Errorf("download %v", resp.Header)
+	}
+}
+
+// recordingPages is a PageStore that counts what the Settings page does
+// with it.
+type recordingPages struct {
+	config.PageStore
+	reads, writes, checks int
+}
+
+func (p *recordingPages) Read() (*config.PageSettings, error) { p.reads++; return p.PageStore.Read() }
+func (p *recordingPages) Write(ps *config.PageSettings) error {
+	p.writes++
+	return p.PageStore.Write(ps)
+}
+func (p *recordingPages) CheckEdit(e config.Edit) (*config.EditResult, error) {
+	p.checks++
+	return p.PageStore.CheckEdit(e)
+}
+
+// TestSettingsPageUsesItsPageStore checks that saves go through Pages, so
+// the settings can be kept somewhere other than the file.
+func TestSettingsPageUsesItsPageStore(t *testing.T) {
+	var pages *recordingPages
+	ts, srv, _ := newSettingsServer(t, "", func(s *Server) {
+		pages = &recordingPages{PageStore: config.PageFile{Config: s.Config.Path()}}
+		s.Pages = pages
+	})
+	code, out, _ := call(t, ts, "PUT", "/api/settings", `{"values":{"search.max_events":321}}`, "admin", "s3cret-pass", nil)
+	if code != 200 || pages.checks != 1 || pages.writes != 1 {
+		t.Fatalf("save %d %v: %+v", code, out, pages)
+	}
+	if srv.conf().Search.MaxEvents != 321 {
+		t.Errorf("not applied: %d", srv.conf().Search.MaxEvents)
+	}
+	if p, err := (config.PageFile{Config: srv.Config.Path()}).Read(); err != nil || strings.Join(p.Keys(), ",") != "search.max_events" {
+		t.Errorf("file: %v %v", p, err)
+	}
+	// A check-only save writes nothing.
+	call(t, ts, "PUT", "/api/settings", `{"values":{"search.max_events":322},"check_only":true}`, "admin", "s3cret-pass", nil)
+	if pages.checks != 2 || pages.writes != 1 {
+		t.Errorf("check only: %+v", pages)
+	}
+}
+
+// TestApplyLiveComparesTwoConfigs checks applyLive(old, new) on its own,
+// as a change that did not come from this server's page would use it: only
+// what differs and applies at once is put into use.
+func TestApplyLiveComparesTwoConfigs(t *testing.T) {
+	_, srv, _ := newSettingsServer(t, "", nil)
+	old := srv.conf()
+	next := *old
+	next.Search.MaxEvents = 777
+	next.Server.Listen = "0.0.0.0:9999" // waits for a restart
+	next.Detections.MaxFindingsPerRun = 9
+	applied := srv.applyLive(old, &next)
+	if strings.Join(applied, ",") != "search.max_events,detections.max_findings_per_run" {
+		t.Errorf("applied %v", applied)
+	}
+	if srv.conf().Search.MaxEvents != 777 || srv.Engine.Opt.MaxEvents != 777 || srv.Scheduler.MaxFindingsPerRun != 9 {
+		t.Errorf("not live: %d %d %d", srv.conf().Search.MaxEvents, srv.Engine.Opt.MaxEvents, srv.Scheduler.MaxFindingsPerRun)
+	}
+	if srv.conf().Server.Listen == "0.0.0.0:9999" {
+		t.Error("a restart setting applied at once")
+	}
+	// Nothing changed: nothing applies.
+	if applied := srv.applyLive(&next, &next); applied != nil {
+		t.Errorf("no change applied %v", applied)
 	}
 }
 

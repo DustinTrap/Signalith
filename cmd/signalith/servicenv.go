@@ -15,23 +15,31 @@ import (
 // service is given: the Environment= and EnvironmentFile= lines of its
 // systemd unit on Linux, or the Environment value of the Signalith service
 // in the Windows registry. Those put the server's own files
-// (directory.json, intel_feeds.yaml, a master key it made) in its state
-// folder, and may name its master key (SIGNALITH_MASTER_KEY_FILE). So when
+// (directory.json, intel_feeds.yaml, a master key it made, its HTTPS
+// certificate and identity) in its state folder, and may name its master
+// key (SIGNALITH_MASTER_KEY_FILE). So when
 // the service runs with the same config file, "signalith secrets",
 // "signalith validate", "signalith settings", "signalith passwd" and
 // "signalith init" use the service's folder, file and master key settings
 // too, and find the same files and key.
 
-// serviceVars are the settings taken from the service: its folders, the
-// files it keeps (not files of secrets, such as
+// serviceVars are the settings taken from the service: its folders (the
+// state folder among them, which holds its master key, HTTPS certificate
+// and identity), the files it keeps (not files of secrets, such as
 // SIGNALITH_ADMIN_PASSWORD_FILE: the server reads those itself, and a
 // command run by hand that cannot read one, such as a systemd credential
-// that exists only while the service runs, would stop) and its master key.
+// that exists only while the service runs, would stop), its master key,
+// and its name and address among the servers that share its OpenSearch,
+// so "signalith validate" checks those too.
 var serviceVars = map[string]bool{
 	"SIGNALITH_STATE_DIR": true, "SIGNALITH_LOOKUPS_DIR": true, "SIGNALITH_DETECTIONS_DIR": true,
 	"SIGNALITH_DASHBOARDS_DIR": true, "SIGNALITH_ARCHIVE_DIR": true,
 	"SIGNALITH_USERS_FILE": true, "SIGNALITH_INTEL_FEEDS_FILE": true, "SIGNALITH_SETTINGS_FILE": true,
 	"SIGNALITH_MASTER_KEY_FILE": true, "SIGNALITH_MASTER_KEY": true,
+	"SIGNALITH_NODE_NAME": true, "SIGNALITH_NODE_URL": true,
+	// systemd sets it from the unit's StateDirectory= (see
+	// parseSystemctlShow): the state folder falls back to it.
+	"STATE_DIRECTORY": true,
 }
 
 // serviceSettings is what the service is given.
@@ -147,11 +155,16 @@ func (s *serviceSettings) serves(path string) bool {
 
 // parseSystemctlShow reads "systemctl show" output: the service's command
 // line, its Environment= settings, the files EnvironmentFile= names (read
-// with readFile, later ones winning, as systemd does), and a master key
-// passed as a credential.
+// with readFile, later ones winning, as systemd does), a master key
+// passed as a credential, and its StateDirectory=, which systemd gives the
+// service as $STATE_DIRECTORY (the first one, under /var/lib), where its
+// state folder may fall back to (config.Config.StateDir). A command run by
+// hand gets the same, so it looks for the state folder where the service
+// does.
 func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *serviceSettings {
 	s := &serviceSettings{where: "systemctl show signalith", env: map[string]string{}}
 	var files []string
+	var stateDir string
 	sc := bufio.NewScanner(bytes.NewReader(show))
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -179,6 +192,14 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			if f, _, _ := strings.Cut(value, " ("); unitPathIsAbs(f) {
 				files = append(files, f)
 			}
+		case "StateDirectory":
+			// signalith, or several separated by spaces; a newer systemd
+			// may add :link to an entry.
+			if f := strings.Fields(value); len(f) > 0 {
+				if d, _, _ := strings.Cut(f[0], ":"); d != "" && !path.IsAbs(d) && !strings.Contains(d, "..") {
+					stateDir = path.Join("/var/lib", d)
+				}
+			}
 		case "LoadCredential":
 			if id, file, ok := strings.Cut(value, ":"); ok && id == "master.key" && unitPathIsAbs(file) {
 				s.cred = file
@@ -197,6 +218,10 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			s.env[k] = v
 		}
 		clear(data)
+	}
+	// systemd sets STATE_DIRECTORY itself, over any Environment= line.
+	if stateDir != "" {
+		s.env["STATE_DIRECTORY"] = stateDir
 	}
 	return s
 }

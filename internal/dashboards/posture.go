@@ -27,6 +27,11 @@ type Posture struct {
 	Detections  *detect.Library
 	Status      func() map[string]detect.RunState
 	SchedulerOn bool
+	// Elsewhere is true when another server runs the detections (RunsOn
+	// names it) or none does: this server's run times and errors are not
+	// theirs, so they are left out.
+	Elsewhere bool
+	RunsOn    string
 	// StaleAfter is how long a host and source type can be quiet before it
 	// counts as stopped (default 2h).
 	StaleAfter  time.Duration
@@ -94,6 +99,11 @@ type Health struct {
 	Total       int  `json:"total"`
 	Enabled     int  `json:"enabled"`
 	SchedulerOn bool `json:"scheduler_on"`
+	// RunsElsewhere is true when this server does not run the detections:
+	// RunsOn names the one that does, if any. NotRun and Erroring are then
+	// not known here.
+	RunsElsewhere bool   `json:"runs_elsewhere,omitempty"`
+	RunsOn        string `json:"runs_on,omitempty"`
 	// NotRun counts enabled detections that have not run since the server
 	// started.
 	NotRun   int              `json:"not_run"`
@@ -418,7 +428,8 @@ func (p *Posture) Report(ctx context.Context, rng time.Duration, rangeLabel stri
 }
 
 func (p *Posture) health(fs *findingStats, r30, sources *search.Result, errs map[string]string, now time.Time, stale, lookback time.Duration) *Health {
-	h := &Health{SchedulerOn: p.SchedulerOn, Erroring: []DetectionIssue{}, Silent: []DetectionIssue{}, StaleSources: []Source{},
+	h := &Health{SchedulerOn: p.SchedulerOn && !p.Elsewhere, RunsElsewhere: p.Elsewhere, RunsOn: p.RunsOn,
+		Erroring: []DetectionIssue{}, Silent: []DetectionIssue{}, StaleSources: []Source{},
 		StaleAfter: durLabel(stale)[1:], SourceLookback: durLabel(lookback)[1:], SilentWindow: durLabel(silentWindow)[1:]}
 	if p.Detections == nil {
 		errs["health"] = "detections are not configured on this server"
@@ -447,9 +458,11 @@ func (p *Posture) health(fs *findingStats, r30, sources *search.Result, errs map
 			h.Enabled++
 			st, ran := states[d.ID]
 			if !ran || st.LastRun.IsZero() {
-				h.NotRun++
+				if !p.Elsewhere {
+					h.NotRun++
+				}
 			}
-			if st.LastError != "" {
+			if st.LastError != "" && !p.Elsewhere {
 				h.Erroring = append(h.Erroring, DetectionIssue{ID: d.ID, Title: cleanTitle(d.Title), Error: st.LastError, LastRun: st.LastRun})
 			}
 			if canJudgeSilence && !matched[d.ID] && st.LastResults == 0 {

@@ -107,6 +107,10 @@ func New(cfg Config) *Client {
 	return c
 }
 
+// Endpoint is the OpenSearch address, as errors show it: without any
+// password.
+func (c *Client) Endpoint() string { return c.shown }
+
 // CloseIdleConnections closes the connections kept open for the next
 // request, for a client that is no longer used, such as the one of the
 // settings in use before a restart.

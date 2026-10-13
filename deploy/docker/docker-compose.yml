@@ -98,6 +98,9 @@ services:
     depends_on:
       setup: { condition: service_completed_successfully }
       opensearch: { condition: service_healthy }
+    # A stop gives the background jobs up to a minute to finish before
+    # another server takes them over.
+    stop_grace_period: 90s
     ports:
       # Web UI, API and agents, over HTTPS (http:// is sent to https://).
       - "8080:8080"
@@ -113,6 +116,9 @@ services:
       # Secrets come from files the setup service made, never from this file.
       - SIGNALITH_ADMIN_PASSWORD_FILE=/run/signalith-secrets/initial-admin-password
       - SIGNALITH_INGEST_TOKEN_FILE=/run/signalith-secrets/ingest-token
+      # This server's name on the Servers page. When several servers share
+      # one OpenSearch, give each its own.
+      - SIGNALITH_NODE_NAME=signalith-1
       # Set to https://<this computer's IP>:8080 so agents on other machines can reach it.
       # - SIGNALITH_PUBLIC_URL=https://192.168.1.20:8080
     volumes:
@@ -143,8 +149,10 @@ volumes:
   opensearch-data:
   # OpenSearch's certificates, made by the setup service.
   opensearch-certs:
-  # Detections, lists, dashboards, users, archived days and Signalith's own
-  # HTTPS certificate. Kept from earlier versions.
+  # Detections, lists, dashboards, users, archived days, and the state
+  # folder (SIGNALITH_STATE_DIR, /var/lib/signalith): Signalith's master key,
+  # its own HTTPS certificate and this server's identity. Kept from earlier
+  # versions.
   signalith-data:
   # Signalith's OpenSearch certificate, first admin password and ingest token.
   signalith-secrets:

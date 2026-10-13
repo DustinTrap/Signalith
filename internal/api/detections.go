@@ -75,7 +75,18 @@ func (s *Server) handleListDetections(w http.ResponseWriter, r *http.Request) {
 	for _, d := range ds {
 		out = append(out, detectionView{Detection: d, State: states[d.ID]})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"detections": out, "scheduler": s.conf().Detections.Scheduler})
+	// scheduler says whether detections run on this server now; when they
+	// run on another one, runs_on names it, and the run times here are
+	// not theirs.
+	resp := map[string]any{"detections": out, "scheduler": s.conf().Detections.Scheduler}
+	if s.Cluster != nil {
+		resp["scheduler"] = s.conf().Detections.Scheduler && s.Cluster.RunsJobs()
+		if !s.Cluster.RunsJobs() {
+			resp["runs_on"] = s.Cluster.JobHolder()
+			resp["scheduler_here"] = s.conf().Detections.Scheduler
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetDetection(w http.ResponseWriter, r *http.Request) {

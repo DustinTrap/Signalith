@@ -271,6 +271,9 @@ func TestDetectionsEndToEnd(t *testing.T) {
 	if err := fs.EnsureIndex(ctx); err != nil {
 		t.Fatalf("second EnsureIndex: %v", err)
 	}
+	if err := fs.Upgrade(ctx); err != nil {
+		t.Fatalf("Upgrade: %v", err)
+	}
 	lib, _, err := detect.NewLibrary("")
 	if err != nil {
 		t.Fatal(err)
@@ -429,7 +432,7 @@ tags: [attack.t1059.001]
 	if err := cl.Do(ctx, http.MethodPut, "/"+prefix+"_findings/_doc/legacy?refresh=true", legacy, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.EnsureIndex(ctx); err != nil {
+	if err := fs.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
 	list, _, err = fs.Search(ctx, findings.Filter{Urgency: []string{"low"}})
@@ -477,6 +480,9 @@ func TestThreatIntelEndToEnd(t *testing.T) {
 	}
 	if err := backend.EnsureIndex(ctx); err != nil {
 		t.Fatalf("second EnsureIndex: %v", err)
+	}
+	if err := backend.Upgrade(ctx); err != nil {
+		t.Fatalf("Upgrade: %v", err)
 	}
 	store := intel.NewStore(backend)
 	if err := store.Load(ctx); err != nil {
@@ -770,7 +776,7 @@ func TestCasesEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	fs := findings.NewOpenSearch(cl, prefix)
 	cs := cases.NewOpenSearch(cl, prefix)
-	for _, ensure := range []func(context.Context) error{fs.EnsureIndex, cs.EnsureIndex, cs.EnsureIndex} {
+	for _, ensure := range []func(context.Context) error{fs.EnsureIndex, cs.EnsureIndex, cs.EnsureIndex, cs.Upgrade} {
 		if err := ensure(ctx); err != nil {
 			t.Fatal(err)
 		}

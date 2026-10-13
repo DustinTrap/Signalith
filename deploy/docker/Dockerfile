@@ -13,7 +13,8 @@ COPY --from=build /out/signalith /usr/local/bin/signalith
 # days, owned by the nonroot user.
 COPY --from=build --chown=65532:65532 /out/data /var/lib/signalith
 # SIGNALITH_STATE_DIR holds what Signalith makes for itself: its master key
-# (keys/) and its HTTPS certificate (tls/).
+# (keys/), its HTTPS certificate (tls/), and this server's identity
+# (node.id) and its lock (cluster/).
 ENV SIGNALITH_STATE_DIR=/var/lib/signalith \
     SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections \
     SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups \

@@ -11,6 +11,9 @@ Group=signalith
 ExecStart=/usr/local/bin/signalith serve -c /etc/signalith/signalith.yaml
 Restart=on-failure
 RestartSec=5
+# A stop gives the background jobs up to a minute to finish before another
+# server takes them over.
+TimeoutStopSec=100
 # Secrets can live here instead of the config file:
 # EnvironmentFile=-/etc/signalith/signalith.env
 
@@ -74,6 +77,8 @@ SystemCallErrorNumber=EPERM
 # HTTPS certificate it makes for itself (tls/) are saved here.
 StateDirectory=signalith
 StateDirectoryMode=0750
+# This server's identity (node.id) and its lock (cluster/) are kept here
+# too, next to the master key and the HTTPS certificate.
 Environment=SIGNALITH_STATE_DIR=/var/lib/signalith
 Environment=SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
 Environment=SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
@@ -84,8 +89,8 @@ Environment=SIGNALITH_ARCHIVE_DIR=/var/lib/signalith/archive
 # The archive CLI does not see these variables; give it the folder:
 #   sudo -u signalith signalith archive list -c /etc/signalith/signalith.yaml -dir /var/lib/signalith/archive
 # The settings, validate and secrets commands read the *_DIR, *_FILE and
-# master key settings above from this unit (systemctl show signalith) when
-# the service runs with the same config file. Where systemctl cannot be
+# master key settings above, and StateDirectory, from this unit (systemctl
+# show signalith) when the service runs with the same config file. Where systemctl cannot be
 # asked, give settings and validate the Settings page's file, for example
 # to undo a change that locks people out:
 #   sudo signalith settings reset -c /etc/signalith/signalith.yaml -file /var/lib/signalith/lookups/settings.yaml server.listen

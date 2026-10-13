@@ -10,7 +10,9 @@
 # change files only in the config folder (and in data folders set in
 # signalith.yaml). Only SYSTEM, Administrators and that account can read
 # the config folder, since it holds the master key, the encrypted
-# passwords and keys, and the key of the HTTPS certificate.
+# passwords and keys, and the key of the HTTPS certificate. It is also the
+# state folder, where the server keeps its identity among the servers that
+# share one OpenSearch (node.id, and cluster\lock while it runs).
 #
 # A new config serves the web UI over HTTPS with a certificate Signalith
 # makes for itself, and receives syslog on UDP and TCP 514 and over TLS on
@@ -50,8 +52,10 @@ function Invoke-Checked {
 $existing = Get-Service -Name Signalith -ErrorAction SilentlyContinue
 if ($existing -and $existing.Status -ne "Stopped") {
   Write-Host "Stopping the Signalith service to upgrade it..."
+  # A stop may take up to 90 seconds: the background jobs finish their
+  # current step and are handed to another server first.
   Stop-Service -Name Signalith -Force
-  $existing.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(30))
+  $existing.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(120))
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
@@ -90,7 +94,9 @@ if (-not (Test-Path -LiteralPath $config)) {
 
 # The config folder is owned by Administrators, readable only by SYSTEM and
 # Administrators (not inherited from ProgramData, where every user can
-# read), and changeable by the service. Everything inside gets that list.
+# read), and changeable by the service. Everything inside gets that list,
+# the state folder's files too: the master key (keys), the HTTPS
+# certificate (tls) and this server's identity (node.id, cluster\lock).
 Invoke-Checked "Taking ownership of $ConfigDir" { icacls $ConfigDir /setowner "*$admins" /T /C /Q }
 Invoke-Checked "Protecting $ConfigDir" { icacls $ConfigDir /inheritance:r /grant:r "*${system}:(OI)(CI)F" "*${admins}:(OI)(CI)F" /Q }
 Invoke-Checked "Resetting the permissions inside $ConfigDir" { icacls "$ConfigDir\*" /reset /T /C /Q }
@@ -135,6 +141,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Signalith is running. Open https://localhost:$($Listen.Split(':')[-1])"
 Write-Host "Your browser warns about the certificate until you trust Signalith's own CA ($ConfigDir\tls\ca.pem); docs\https.md says how."
 Write-Host "The master key for the passwords and keys Signalith stores is in $ConfigDir\keys, protected for this computer only."
+Write-Host "This server's identity, shown on the Servers page, is in $ConfigDir\node.id; never copy it to another server."
 Write-Host "Keep a copy of those passwords and keys, or a key you can move, as docs\encryption.md explains."
 # The HTTPS certificate and its CA go to $ConfigDir\tls. Retention settings
 # saved in the web UI go to $ConfigDir\lookups, and days archived before

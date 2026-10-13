@@ -358,6 +358,7 @@ const JUMP_WORDS = {
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
   data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', retention: 'retention rotation archive restore delete storage disk guard policies',
   health: 'status opensearch ingest', help: 'help syntax language commands',
+  servers: 'cluster nodes servers background jobs leader failover standby readyz',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
   settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
 };
@@ -435,7 +436,7 @@ syncThemeButtons();
 // Display preferences stay in this browser after signing out. Everything
 // else stored under signalith.* (the last query, its time range, the last
 // page) belongs to whoever is signed in, so signing out removes it.
-const KEEP_ON_SIGN_OUT = new Set(['signalith.theme', 'signalith.builder', 'signalith.agentServer',
+const KEEP_ON_SIGN_OUT = new Set(['signalith.theme', 'signalith.builder', 'signalith.agentServer', 'signalith.serversUpgradeNote',
   'signalith.dashRange', 'signalith.dashAuto', 'signalith.dashRefresh']);
 function clearUserStorage() {
   try {
@@ -547,14 +548,18 @@ function renderHealthCard(h) {
   const os = h.opensearch || {};
   const ing = h.ingest || {};
   const warnings = h.warnings || [];
+  const banners = h.cluster_banners || [];
   const failed = ing.failed || 0;
   // Yellow is normal on a single node, so only red, unreachable, failed
-  // events or config warnings change the card.
+  // events, the servers' red problems or config warnings change the card.
   let state = '';
   let title = 'Healthy';
   if (!os.status || os.status === 'red' || os.status === 'unreachable') {
     state = 'down';
     title = 'OpenSearch ' + (os.status || 'unknown');
+  } else if (banners.length) {
+    state = 'down';
+    title = 'Needs attention';
   } else if (failed > 0 || warnings.length) {
     state = 'warn';
     title = 'Needs attention';
@@ -566,7 +571,7 @@ function renderHealthCard(h) {
   if (failed) meta.push(failed.toLocaleString() + ' failed');
   $('health-meta').textContent = meta.join(' · ');
   const card = $('health-card');
-  card.title = visibleText(['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n'));
+  card.title = visibleText(['OpenSearch ' + (os.status || 'unknown'), os.error, ...banners, ...warnings].filter(Boolean).join('\n'));
   card.setAttribute('aria-label', `Health: ${title}, OpenSearch ${os.status || 'unknown'}, ${meta.join(', ')}`);
   card.classList.remove('hidden');
   if (h.version) {
@@ -574,6 +579,27 @@ function renderHealthCard(h) {
     $('about-version').textContent = 'Version ' + h.version;
     $('about-version').classList.remove('hidden');
   }
+  clusterBanner.list = banners;
+  meReady.then(renderClusterBanner);
+}
+
+// ---------- app shell: the servers' red problems ----------
+// No server running detections, OpenSearch's disk full: everyone sees
+// them on every page but Servers, which says the same at more length, and
+// Health, which lists them among its own alerts. Admins get a link there;
+// it says why and what to do.
+const clusterBanner = { list: [], key: '' };
+function renderClusterBanner() {
+  const box = $('cluster-banner');
+  const list = currentPage === 'servers' || currentPage === 'health' ? [] : clusterBanner.list;
+  const key = list.join('\n') + '|' + can('admin');
+  if (key === clusterBanner.key) return;
+  clusterBanner.key = key;
+  box.replaceChildren(...list.map((text) => el('div', { class: 'alert', 'data-tone': 'danger' }, icon('circle-alert'),
+    el('p', {}, el('b', {}, text), ' ', can('admin')
+      ? el('a', { href: '#servers', 'data-page': 'servers' }, 'See why on the Servers page')
+      : 'An admin needs to look.'))));
+  box.classList.toggle('hidden', !list.length);
 }
 refreshHealthCard();
 setInterval(refreshHealthCard, 30000);
@@ -3142,6 +3168,11 @@ function healthPageRender(h) {
   else if (status === 'red') alerts.push(healthPageAlert('danger', 'circle-alert', 'OpenSearch is red.', 'Some data cannot be searched or stored until it recovers.'));
   if (failed) alerts.push(healthPageAlert('warning', 'triangle-alert', `${healthPageNum(failed)} ${failed === 1 ? 'event' : 'events'} could not be stored.`, 'Counted since the server started. OpenSearch rejected them or did not answer.'));
   if (sl.dropped) alerts.push(healthPageAlert('warning', 'triangle-alert', `${healthPageNum(sl.dropped)} syslog ${sl.dropped === 1 ? 'message was' : 'messages were'} dropped.`, 'Counted since the server started. They arrived faster than OpenSearch could store them.'));
+  // The servers' red problems, as on every page.
+  for (const b of h.cluster_banners || []) {
+    alerts.push(healthPageAlert('danger', 'circle-alert', b, can('admin')
+      ? el('span', {}, 'The ', el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page'), ' says why and what to do.') : 'An admin needs to look.'));
+  }
   for (const w of h.warnings || []) {
     const cut = w.indexOf('. ');
     alerts.push(cut > 0 ? healthPageAlert('warning', 'triangle-alert', w.slice(0, cut + 1), w.slice(cut + 2)) : healthPageAlert('warning', 'triangle-alert', w));

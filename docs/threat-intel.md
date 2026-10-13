@@ -215,9 +215,9 @@ internal address by hand if you need to.
 
 ### Schedule and aging
 
-The server with `detections.scheduler: true` downloads each enabled feed when it
-starts (unless it downloaded it within the interval, which survives restarts in
-`lookups.dir/intel_feeds.json`) and then every `interval`. Each download replaces the
+The server that runs the background jobs downloads each enabled feed when it
+starts running them (unless it downloaded it within the interval, which survives
+restarts in `lookups.dir/intel_feeds.json`) and then every `interval`. Each download replaces the
 feed's indicators: new ones are added, existing ones get a new last-seen time, and
 ones no longer listed are removed. A failed download, or one with no valid
 indicators, keeps the previous indicators and is retried within 15 minutes; if it
@@ -270,16 +270,20 @@ shown with the problem and not downloaded.
 
 ### Several servers
 
-Feeds download on the server with `detections.scheduler: true`, from its own
-`intel_feeds.yaml`. Add and change feeds on that server's page. On other servers the
-page lists the feeds read-only and says where to manage them (`"downloads": false`
-and `"manage": false` in the API, which refuses changes there with 409), and
-**Refresh now** works only for feeds from signalith.yaml, which every server shares.
+When several servers share one OpenSearch, feeds download on the one that runs the
+background jobs (one with `detections.scheduler: true`; another takes over if it
+stops), from its own `intel_feeds.yaml`. Add and change feeds on that server's page.
+On other servers the page lists the feeds read-only and says which server downloads
+them (`"downloads": false`, `"manage": false`, `"downloads_why"` and `"runs_on"` in
+the API, which refuses changes there with 409), and **Refresh now** works only for feeds from
+signalith.yaml, which every server shares. A server whose feeds differ from those of
+the server that runs the jobs does not take the jobs over by itself, so its list
+never removes the other's indicators; copy `intel_feeds.yaml` across to let it.
 Indicators are shared through OpenSearch, so matching works on every server.
 
 ### Network access and safety
 
-The scheduler server needs outbound HTTP(S) to each feed: for the catalog, port 443
+Every server that may run the background jobs needs outbound HTTP(S) to each feed: for the catalog, port 443
 (and port 80 for `cins-army`) to the hosts in the catalog URLs. Downloads use the
 proxy in `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, like the rest of Signalith; set
 them in the service's environment if your network requires a proxy.

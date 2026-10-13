@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -82,6 +83,13 @@ func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
 			out["file_error"] = err.Error()
 		}
 	}
+	if err := s.noDownloads(); err != nil {
+		// Why not, naming the server that does when there is one.
+		out["downloads_why"] = sentence(err.Error())
+		if s.Cluster != nil && !errors.Is(err, errNoSchedule) {
+			out["runs_on"] = s.Cluster.JobHolder()
+		}
+	}
 	out["feeds"] = feeds
 	writeJSON(w, http.StatusOK, out)
 }
@@ -98,9 +106,11 @@ func (s *Server) handleIntelRefresh(w http.ResponseWriter, r *http.Request) {
 	// A feed added on the page is only kept by the server that runs the
 	// schedule; indicators another server downloads for it would be
 	// removed when that server starts.
-	if fd, ok := s.Feeds.Get(name); ok && fd.Source == intel.SourceUI && !s.downloads() {
-		writeError(w, http.StatusConflict, errNoSchedule)
-		return
+	if fd, ok := s.Feeds.Get(name); ok && fd.Source == intel.SourceUI {
+		if err := s.noDownloads(); err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
@@ -243,12 +253,28 @@ var errFeedsOff = errors.New("threat intel feeds are not available on this serve
 
 // errNoSchedule refuses feed changes on a server that does not download
 // feeds: its feeds file is not the one the downloading server reads.
-var errNoSchedule = errors.New("this server does not download feeds (its detection scheduler is off), so feeds are added and changed on the Signalith server that runs detections")
+var errNoSchedule = errors.New("this server does not download feeds (detections.scheduler is off here), so feeds are added and changed on the Signalith server that runs the background jobs")
 
 // downloads reports whether this server downloads feeds on their
-// schedules (the one with the detection scheduler).
+// schedules: it runs the background jobs.
 func (s *Server) downloads() bool {
-	return s.conf() != nil && s.conf().Detections.Scheduler
+	return s.noDownloads() == nil
+}
+
+// noDownloads says why this server does not download feeds now, or nil.
+// Of the servers that share one OpenSearch, only the one that runs the
+// background jobs does, with its own list of feeds.
+func (s *Server) noDownloads() error {
+	if s.conf() == nil || !s.conf().Detections.Scheduler {
+		return errNoSchedule
+	}
+	if s.Cluster == nil || s.Cluster.RunsJobs() {
+		return nil
+	}
+	if holder := s.Cluster.JobHolder(); holder != "" {
+		return fmt.Errorf("this server does not download feeds right now: %s does, with its own list of feeds; add and change feeds there", holder)
+	}
+	return errors.New("this server does not download feeds right now, and no server runs the background jobs at the moment; the Servers page says why")
 }
 
 func (s *Server) feedsOK(w http.ResponseWriter) bool {
@@ -268,8 +294,8 @@ func (s *Server) feedsWritable(w http.ResponseWriter) bool {
 	if !s.feedsOK(w) {
 		return false
 	}
-	if !s.downloads() {
-		writeError(w, http.StatusConflict, errNoSchedule)
+	if err := s.noDownloads(); err != nil {
+		writeError(w, http.StatusConflict, err)
 		return false
 	}
 	return true

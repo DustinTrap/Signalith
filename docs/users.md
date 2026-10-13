@@ -552,7 +552,9 @@ page itself.
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
 `POST /api/intel/feeds`, `PUT /api/intel/feeds/{name}`, `DELETE /api/intel/feeds/{name}`,
 `POST /api/intel/feeds/test`, `POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/catalog`,
-`POST /api/intel/taxii/collections`, `POST /api/intel/upload`, every
+`POST /api/intel/taxii/collections`, `POST /api/intel/upload`,
+`GET /api/cluster` (the Servers page; see [servers.md](servers.md)), every
+`/api/retention` route (see [retention.md](retention.md)), every
 `/api/users` and `/api/auth/directory` route below, and every `/api/settings` route
 (`GET` and `PUT /api/settings`, `POST /api/settings/test/opensearch`,
 `POST /api/settings/test/assistant`, `POST /api/settings/restart`,

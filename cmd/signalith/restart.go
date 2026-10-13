@@ -16,6 +16,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/auth"
+	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -84,6 +85,10 @@ type runner struct {
 	sessions *auth.Sessions
 	limiter  *auth.Limiter
 	people   *users.Store
+	// node is this server among those that share its OpenSearch: its
+	// identity and lock, heartbeat and job lease. A restart keeps it and
+	// points it at the new OpenSearch client; nil in some tests.
+	node *cluster.Node
 
 	front *front
 	// prepared is the HTTPS certificate a restart's checks loaded or made
@@ -137,11 +142,30 @@ type move struct {
 }
 
 func newRunner(path string, log *slog.Logger) *runner {
-	return &runner{
+	r := &runner{
 		path: path, log: log, started: time.Now(),
 		sessions: auth.NewSessions(12 * time.Hour), limiter: auth.NewLimiter(),
 		front: &front{}, requests: make(chan restartRequest, 1), confirmed: make(chan *move, 1),
 	}
+	r.front.ready = r.ready
+	return r
+}
+
+// ready answers /readyz: whether a load balancer should send this server
+// traffic, and if not, why, in a word.
+func (r *runner) ready() (bool, string) {
+	if r.node == nil {
+		return true, ""
+	}
+	return r.node.Ready()
+}
+
+// fatal receives an error when this server must not run at all.
+func (r *runner) fatal() <-chan error {
+	if r.node == nil {
+		return nil
+	}
+	return r.node.Fatal()
 }
 
 // Restart implements api.Restarter.
@@ -242,6 +266,9 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 		r.mu.Unlock()
 		select {
 		case err := <-r.web.errc:
+			r.shutdown()
+			return err
+		case err := <-r.fatal():
 			r.shutdown()
 			return err
 		case req := <-r.requests:
@@ -430,6 +457,12 @@ func (r *runner) shutdown() error {
 	r.mu.Unlock()
 	if m != nil {
 		r.setAside(m.prev.SettingsFile(), m.refuse, "Signalith stopped before anyone opened it at "+m.To+", so it was not used")
+	}
+	if r.node != nil {
+		// First, while the web page still answers (/readyz says
+		// "stopping"): the background jobs finish their current step and
+		// are handed over, so another server takes them within seconds.
+		r.node.Stop()
 	}
 	var err error
 	if r.web != nil {
@@ -667,6 +700,11 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 			r.log.Error("Signalith could not start with the new settings or the previous ones; it tries again every 30 seconds", "new", err, "previous", err2)
 			r.cur = nil
 			r.front.resume(downHandler, downHandler)
+			if r.node != nil {
+				// Another server that shares the OpenSearch runs the jobs
+				// meanwhile.
+				r.node.Pause("Signalith could not start its parts on this server")
+			}
 			return true
 		}
 		r.cur = back
@@ -1159,7 +1197,11 @@ func (r *runner) closeRetired(addr string) {
 // downHandler answers while Signalith cannot run its parts: neither the
 // new settings nor the previous ones started. It says no more than that;
 // the log on the server says why.
-var downHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+var downHandler http.Handler = downPage{}
+
+type downPage struct{}
+
+func (downPage) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Retry-After", "30")
 	w.Header().Set("Cache-Control", "no-store")
 	const msg = "Signalith could not start and tries again every 30 seconds. Its log on the server says why."
@@ -1172,7 +1214,7 @@ var downHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write([]byte(msg + "\n"))
-})
+}
 
 // front is the handler every web listener serves. It passes requests to
 // the current components and holds new ones back while a restart swaps
@@ -1185,6 +1227,8 @@ type front struct {
 	paused   chan struct{} // closed when a pause ends; nil when not paused
 	inflight int
 	idle     chan struct{} // closed when the last request in progress ends
+	// ready says whether this server should get traffic, for /readyz.
+	ready func() (bool, string)
 }
 
 func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) { f.serve(w, r, false) }
@@ -1195,6 +1239,13 @@ func (f *front) plainSide() http.Handler {
 }
 
 func (f *front) serve(w http.ResponseWriter, r *http.Request, plain bool) {
+	// /livez and /readyz answer on both sides of a port that serves HTTPS:
+	// they carry no password or session and say only a word, and a load
+	// balancer that checks over plain HTTP should learn whether this server
+	// is ready rather than be sent to https://, which many treat as healthy.
+	if f.probe(w, r) {
+		return
+	}
 	h := f.enter(r, plain)
 	if h == nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -1205,6 +1256,59 @@ func (f *front) serve(w http.ResponseWriter, r *http.Request, plain bool) {
 	}
 	defer f.leave()
 	h.ServeHTTP(w, r)
+}
+
+// probe answers /livez and /readyz, which load balancers and container
+// platforms ask without signing in. They answer at once, even while a
+// restart holds other requests back, and say nothing more than whether
+// this server is alive and should get traffic, and if not, why in a word:
+// starting, restarting, down, opensearch, identity or stopping.
+func (f *front) probe(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path != "/livez" && r.URL.Path != "/readyz" {
+		return false
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return true
+	}
+	status, body := http.StatusOK, `{"live":true}`
+	if r.URL.Path == "/readyz" {
+		if ok, why := f.readiness(); ok {
+			body = `{"ready":true}`
+		} else {
+			status, body = http.StatusServiceUnavailable, `{"ready":false,"reason":"`+why+`"}`
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write([]byte(body + "\n"))
+	}
+	return true
+}
+
+// readiness says whether this server should get traffic now, and if
+// not, why.
+func (f *front) readiness() (bool, string) {
+	f.mu.Lock()
+	h, paused := f.h, f.paused != nil
+	f.mu.Unlock()
+	switch {
+	case paused:
+		return false, "restarting"
+	case h == nil:
+		return false, "starting"
+	}
+	if _, down := h.(downPage); down {
+		return false, "down"
+	}
+	if f.ready != nil {
+		return f.ready()
+	}
+	return true, ""
 }
 
 // enter waits while a restart swaps the components, and returns the

@@ -394,3 +394,33 @@ func TestExpandEnv(t *testing.T) {
 		t.Errorf("refs = %v", refs)
 	}
 }
+
+// A server that no longer runs the background jobs downloads no feed on
+// the schedule.
+func TestFeedsAskAllowed(t *testing.T) {
+	var mu sync.Mutex
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Write([]byte("203.0.113.9\n"))
+	}))
+	defer srv.Close()
+	allowed := false
+	f := &Feeds{Store: NewStore(NewMemory()), AllowLoopback: true, Allowed: func() bool { return allowed }, List: []Feed{
+		{Name: "blocklist", URL: srv.URL, Format: FormatLines, Type: "auto", Interval: time.Hour, MaxAge: time.Hour, Enabled: true},
+	}}
+	f.RunDue(context.Background())
+	mu.Lock()
+	n := hits
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("%d downloads while not allowed", n)
+	}
+	allowed = true
+	f.RunDue(context.Background())
+	if st := f.Status(); st[0].Status.Count != 1 {
+		t.Fatalf("status %+v", st[0])
+	}
+}

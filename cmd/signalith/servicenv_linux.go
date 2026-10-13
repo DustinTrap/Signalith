@@ -25,7 +25,7 @@ var systemctlShow = func(props ...string) ([]byte, error) {
 }
 
 func platformServiceSettings() *serviceSettings {
-	out, err := systemctlShow("ExecStart", "Environment", "EnvironmentFiles", "LoadCredential")
+	out, err := systemctlShow("ExecStart", "Environment", "EnvironmentFiles", "LoadCredential", "StateDirectory")
 	if err != nil {
 		return nil
 	}
