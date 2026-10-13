@@ -15,9 +15,29 @@ import (
 )
 
 // serviceSettingsFile is where the Linux service keeps the Settings page's
-// file: its unit points the lookups folder at /var/lib/signalith, which a
-// shell does not know about.
+// file with the unit Signalith ships, which points the lookups folder at
+// /var/lib/signalith: what a shell assumes when it cannot read the unit.
 var serviceSettingsFile = "/var/lib/signalith/lookups/settings.yaml"
+
+// serviceSettingsPath returns where the signalith service keeps the
+// Settings page's file, from its unit as the other folders it is given
+// are read (see readServiceSettings): SIGNALITH_SETTINGS_FILE, or
+// settings.yaml in SIGNALITH_LOOKUPS_DIR. When the unit cannot be read, it
+// is the shipped unit's file; "" when the unit moves neither, so the
+// service keeps the file where this command looks too.
+func serviceSettingsPath() string {
+	s := readServiceSettings()
+	if s == nil {
+		return serviceSettingsFile
+	}
+	if f := s.env["SIGNALITH_SETTINGS_FILE"]; filepath.IsAbs(f) {
+		return f
+	}
+	if d := s.env["SIGNALITH_LOOKUPS_DIR"]; filepath.IsAbs(d) {
+		return filepath.Join(d, "settings.yaml")
+	}
+	return ""
+}
 
 // settingsFileFlag adds -file, the Settings page's file, for a service
 // that names another one than signalith.yaml does.
@@ -40,10 +60,15 @@ func useSettingsFile(file string) error {
 // serviceNote points to the file the Linux service uses, when it is not
 // file and exists, with the command to use on it; otherwise it says
 // where else a service may keep it. cmd is the command to show, such as
-// "settings reset".
+// "settings reset". When the service runs with configPath and its unit
+// can be read, its folders are used already (see useServiceEnv), so file
+// is the service's own.
 func serviceNote(file, configPath, cmd string, keys []string) string {
-	svc := serviceSettingsFile
-	if runtime.GOOS == "linux" && svc != "" && svc != file {
+	svc := ""
+	if runtime.GOOS == "linux" {
+		svc = serviceSettingsPath()
+	}
+	if svc != "" && svc != file {
 		if _, err := os.Stat(svc); err == nil {
 			line := "sudo signalith " + cmd + " -c " + configPath + " -file " + svc
 			if len(keys) > 0 {
@@ -81,6 +106,9 @@ func cmdSettings(args []string) error {
 	if err := useSettingsFile(*fileFlag); err != nil {
 		return err
 	}
+	// The folders the service is given, so this finds the file it uses;
+	// -file, set above, still wins.
+	useServiceEnv(*path, os.Stdout)
 	file, err := config.SettingsFileFor(*path)
 	if err != nil {
 		return err

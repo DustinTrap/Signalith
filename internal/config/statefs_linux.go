@@ -1,6 +1,6 @@
 //go:build linux
 
-package cluster
+package config
 
 import (
 	"os"
@@ -20,10 +20,10 @@ const (
 	virtiofsMagic = 0x6A656A63
 )
 
-// folderFilesystem names the filesystem dir is on when it matters: a
-// network one (refused), or one that bind mounts from Docker Desktop and
-// WSL use (only warned about).
-func folderFilesystem(dir string) (network, shared string, err error) {
+// FolderFilesystem names the filesystem dir is on when it matters for a
+// state folder: a network one (network), or one that bind mounts from
+// Docker Desktop and WSL use, where file locks may not work (shared).
+func FolderFilesystem(dir string) (network, shared string, err error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(dir, &st); err != nil {
 		return "", "", err
@@ -51,17 +51,5 @@ func fallbackStateDirs() []string {
 	if d, _, _ := strings.Cut(os.Getenv("STATE_DIRECTORY"), ":"); d != "" {
 		out = append(out, d)
 	}
-	return append(out, "/var/lib/signalith")
-}
-
-// machineID is this computer's id (/etc/machine-id), or "".
-func machineID() string {
-	for _, f := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
-		if b, err := os.ReadFile(f); err == nil {
-			if id := strings.TrimSpace(string(b)); id != "" {
-				return id
-			}
-		}
-	}
-	return ""
+	return append(out, systemdStateDir)
 }

@@ -1,12 +1,14 @@
 package config
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/redact"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 // The Settings page shows the settings in Registry. Each one names its
@@ -157,6 +160,7 @@ func intp(n int) *int { return &n }
 var Sections = []Section{
 	{ID: "general", Title: "General", Help: "How people and agents reach this server, and how long a sign-in lasts."},
 	{ID: "web", Title: "Web server", Help: "Where the web page and the API listen."},
+	{ID: "https", Title: "HTTPS", Help: "How the web page, the API, agents and syslog over TLS are kept private on the network: the certificate, and what is still accepted over plain HTTP."},
 	{ID: "opensearch", Title: "OpenSearch", Help: "Where events, findings and investigations are stored."},
 	{ID: "search", Title: "Search", Help: "What a new search starts with, and when a quiet data source is flagged."},
 	{ID: "syslog", Title: "Syslog", Help: "Receive syslog from firewalls, switches and servers that cannot run an agent."},
@@ -168,9 +172,9 @@ var Sections = []Section{
 // Registry lists every setting on the page, in page order.
 var Registry = []Setting{
 	{Key: "server.public_url", Scope: ScopeCluster, Section: "general", Label: "Public address", Type: TypeURL,
-		Help:        "The address agents and links use to reach this server.",
+		Help:        "The address agents and links use to reach this server. With HTTPS on it starts with https://, and Signalith's own certificate is made to cover its host.",
 		Placeholder: "https://siem.example.com:8080", EmptyMeans: "worked out from the listen address",
-		Env: "SIGNALITH_PUBLIC_URL", WaitsFor: []string{"server.listen", "server.tls_cert", "server.tls_key"}},
+		Env: "SIGNALITH_PUBLIC_URL", WaitsFor: []string{"server.listen", "server.tls.mode", "server.tls_cert", "server.tls_key"}},
 	{Key: "auth.session_timeout", Scope: ScopeCluster, Section: "general", Label: "Sign out after", Type: TypeDuration,
 		Help:        "Signs people out of the web page after this long without use, unless they ticked Keep me signed in. At least 5m.",
 		Placeholder: "12h", EmptyMeans: "12h"},
@@ -182,18 +186,36 @@ var Registry = []Setting{
 		Help:        "The address and port the web page and API listen on. 0.0.0.0 accepts other computers; 127.0.0.1 only this one.",
 		Placeholder: "0.0.0.0:8080", Env: "SIGNALITH_LISTEN",
 		Confirm: "After the restart Signalith answers only at the new address. Agents and bookmarks that use the old one stop working until they are changed."},
-	{Key: "server.tls_cert", Scope: ScopeServer, File: true, Section: "web", Label: "Certificate file", Type: TypeText, Restart: true,
-		Help:        "Full path of a PEM certificate. With a key file, the web page, the API and syslog over TLS use HTTPS. When Public address is empty, it changes from http:// to https:// too.",
-		Placeholder: "/etc/signalith/tls/cert.pem", EmptyMeans: "HTTP, no certificate"},
-	{Key: "server.tls_key", Scope: ScopeServer, File: true, Section: "web", Label: "Key file", Type: TypeText, Restart: true,
-		Help:        "Full path of the certificate's PEM private key.",
-		Placeholder: "/etc/signalith/tls/key.pem"},
 	{Key: "server.max_connections", Scope: ScopeServer, Section: "web", Label: "Most connections", Type: TypeNumber, Restart: true, Min: intp(0), Max: intp(1000000),
 		Help:       "The most connections open at once from browsers, agents and the API. One computer may use a tenth of them.",
 		EmptyMeans: "10000"},
 	{Key: "server.shared_addresses", Scope: ScopeServer, Section: "web", Label: "Proxies and gateways", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges of a reverse proxy, load balancer or NAT gateway that many people and agents reach Signalith through. They are not limited like one computer.",
 		Placeholder: "10.0.0.5", EmptyMeans: "none", check: checkAddressList, problem: listProblem("server.shared_addresses")},
+
+	{Key: "server.tls.mode", Scope: ScopeServer, Section: "https", Label: "HTTPS", Type: TypeChoice, Restart: true,
+		Help: "Automatic: Signalith makes its own certificate and renews it; browsers warn until its certificate authority is trusted, which the sign-in page offers to download. " +
+			"Your own certificate files: a certificate from your organization or a public authority, in the two files below. " +
+			"Off: plain HTTP, only behind a reverse proxy that serves HTTPS, since passwords and events would otherwise cross the network unencrypted.",
+		Choices: []Choice{{TLSAuto, "Automatic: Signalith's own certificate"}, {TLSFiles, "Your own certificate files"}, {TLSOff, "Off: a reverse proxy serves HTTPS"}},
+		problem: tlsModeProblem},
+	{Key: "server.tls.names", Scope: ScopeCluster, Section: "https", Label: "Extra certificate names", Type: TypeList, Restart: true,
+		Help: "Host names or IP addresses that people and agents also use to reach Signalith, for the automatic certificate: a DNS alias, or the address a NAT or Docker publishes. " +
+			"This computer's own names and addresses and the public address are always in it.",
+		Placeholder: "siem.corp.local", EmptyMeans: "none besides those", check: checkCertNames, problem: certNamesProblem},
+	{Key: "server.tls_cert", Scope: ScopeServer, File: true, Section: "https", Label: "Certificate file", Type: TypeText, Restart: true,
+		Help:        "Only with your own certificate files: full path of the PEM certificate, followed by any intermediate certificates. Signalith loads it again when the file changes.",
+		Placeholder: "/etc/signalith/tls/cert.pem", problem: tlsFileProblem("server.tls_cert")},
+	{Key: "server.tls_key", Scope: ScopeServer, File: true, Section: "https", Label: "Key file", Type: TypeText, Restart: true,
+		Help:        "Only with your own certificate files: full path of the certificate's PEM private key.",
+		Placeholder: "/etc/signalith/tls/key.pem", problem: tlsFileProblem("server.tls_key")},
+	{Key: "server.tls.plaintext_ingest", Scope: ScopeCluster, Section: "https", Label: "Agents on plain HTTP", Type: TypeChoice,
+		Help: "Agents set up before HTTPS was the default still send to an http:// address. Accept them while you give each one a new configuration from Add data " +
+			"(the Health page lists those still on plain HTTP, whose events anyone on the network can read), then refuse them. A refused agent keeps its events and sends them again once it is updated.",
+		Choices: []Choice{{"deny", "Refuse them"}, {"allow", "Accept them for now"}}},
+	{Key: "server.trusted_proxies", Scope: ScopeCluster, Section: "https", Label: "Trusted reverse proxies", Type: TypeList,
+		Help:        "IP addresses or ranges of reverse proxies in front of Signalith. Only from them is X-Forwarded-Proto believed, so a browser that reached the proxy over HTTPS gets the HTTPS-only sign-in cookie and is not sent to https:// again.",
+		Placeholder: "10.0.0.5", EmptyMeans: "none", check: checkAddressList, problem: listProblem("server.trusted_proxies")},
 
 	{Key: "opensearch.url", Scope: ScopeBootstrap, Section: "opensearch", Label: "Address", Type: TypeURL, Restart: true,
 		Help:        "Where OpenSearch answers.",
@@ -246,7 +268,7 @@ var Registry = []Setting{
 		Help: "Address to receive syslog on over TCP.", Placeholder: "0.0.0.0:514", EmptyMeans: "off",
 		Env: "SIGNALITH_SYSLOG_TCP"},
 	{Key: "syslog.tls", Scope: ScopeServer, Section: "syslog", Label: "TLS address", Type: TypeAddress, Restart: true,
-		Help:        "Address for syslog over TLS. It uses the web server's certificate and key files.",
+		Help:        "Address for syslog over TLS. It uses the same certificate as HTTPS: Signalith's own, or your own certificate files.",
 		Placeholder: "0.0.0.0:6514", EmptyMeans: "off"},
 	{Key: "syslog.allow", Scope: ScopeCluster, Section: "syslog", Label: "Allowed senders", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges, such as 10.0.0.0/8, that may send syslog. Others are dropped and counted.",
@@ -346,6 +368,10 @@ func LeafKeys() []string {
 				walk(f.Type, prefix+name+".")
 				continue
 			}
+			if f.Type.Kind() == reflect.Pointer && sectionPointers[f.Type.Elem()] {
+				walk(f.Type.Elem(), prefix+name+".")
+				continue
+			}
 			out = append(out, prefix+name)
 		}
 	}
@@ -366,10 +392,51 @@ func yamlName(f reflect.StructField) string {
 	return name
 }
 
-// field returns the value a key names in c.
-func field(c *Config, key string) (reflect.Value, bool) {
+// sectionPointers are the sections of signalith.yaml held by a pointer,
+// whose settings are on the page one by one: server.tls, which a file
+// from before HTTPS was the default does not have. Other pointers, such
+// as auth.ldap, are one setting.
+var sectionPointers = map[reflect.Type]bool{reflect.TypeOf(ServerTLS{}): true}
+
+// tlsKeys are the settings whose change on the page fills in the
+// server.tls section of a file that has none (see Server.materializeTLS).
+func tlsKey(key string) bool {
+	return strings.HasPrefix(key, "server.tls.") || key == "server.tls_cert" || key == "server.tls_key" || key == "server.public_url"
+}
+
+// field returns the value a key names in c, to read. A setting in a
+// section c does not have, such as server.tls in a file from before
+// HTTPS was the default, reads as its zero value.
+func field(c *Config, key string) (reflect.Value, bool) { return walkField(c, key, false) }
+
+// fieldToSet is field for a setting about to be changed. A missing
+// server.tls section is filled in as in effect (see Server.materializeTLS)
+// and a shared one is copied first, so changing a shallow copy of c, as
+// the settings applied at once are, never changes c itself.
+func fieldToSet(c *Config, key string) (reflect.Value, bool) {
+	if tlsKey(key) {
+		c.Server.materializeTLS(c.Server)
+		t := *c.Server.TLS
+		t.Names = slices.Clone(t.Names)
+		c.Server.TLS = &t
+	}
+	return walkField(c, key, true)
+}
+
+func walkField(c *Config, key string, set bool) (reflect.Value, bool) {
 	v := reflect.ValueOf(c).Elem()
 	for _, part := range strings.Split(key, ".") {
+		if v.Kind() == reflect.Pointer && sectionPointers[v.Type().Elem()] {
+			switch {
+			case !v.IsNil():
+				v = v.Elem()
+			case set:
+				v.Set(reflect.New(v.Type().Elem()))
+				v = v.Elem()
+			default:
+				v = reflect.New(v.Type().Elem()).Elem()
+			}
+		}
 		if v.Kind() != reflect.Struct {
 			return reflect.Value{}, false
 		}
@@ -391,15 +458,31 @@ func field(c *Config, key string) (reflect.Value, bool) {
 // Value returns the value of a setting in c: a string, int, bool or
 // []string. Lists are never nil.
 //
-// A public address worked out from the listen address is "", as it was
-// set: that is what the page shows, compares and saves.
+// A public address worked out from the listen address is "", and an
+// http:// one read as https:// (see Validate) is the http:// one, as they
+// were set: that is what the page shows, compares and saves. The HTTPS
+// mode and plain-HTTP ingest are the ones in effect, which for a file
+// from before HTTPS was the default follow from its other settings.
 func (c *Config) Value(key string) any {
 	v, ok := field(c, key)
 	if !ok {
 		return nil
 	}
-	if key == "server.public_url" && c.publicURLDerived {
-		return ""
+	switch key {
+	case "server.public_url":
+		if c.publicURLDerived {
+			return ""
+		}
+		if c.httpPublicURL != "" {
+			return c.httpPublicURL
+		}
+	case "server.tls.mode":
+		return c.Server.TLSMode()
+	case "server.tls.plaintext_ingest":
+		if c.Server.PlaintextIngest() {
+			return "allow"
+		}
+		return "deny"
 	}
 	if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.String {
 		out := make([]string, v.Len())
@@ -422,25 +505,33 @@ func (c *Config) SetValue(key string, val any) error {
 	if !nv.Type().AssignableTo(v.Type()) {
 		return fmt.Errorf("%s takes a %s, not a %s", key, v.Type(), nv.Type())
 	}
+	v, _ = fieldToSet(c, key)
 	v.Set(nv)
 	if key == "server.public_url" {
-		c.publicURLDerived = false
+		c.publicURLDerived, c.httpPublicURL = false, ""
 	}
 	return nil
 }
 
 // CopyValue sets a setting in c to its value in from. The live settings
-// saved on the page reach the running server this way.
+// saved on the page reach the running server this way. A secret saved on
+// the page brings whether it could be decrypted with it, so Warnings and
+// the Settings page stop reporting one entered again.
 func (c *Config) CopyValue(key string, from *Config) error {
 	src, ok := field(from, key)
 	if !ok {
 		return fmt.Errorf("unknown setting %s", key)
 	}
-	dst, _ := field(c, key)
+	if key == "server.tls.mode" || key == "server.tls.plaintext_ingest" {
+		// The value in effect, which an empty one in the file is not.
+		return c.SetValue(key, from.Value(key))
+	}
+	dst, _ := fieldToSet(c, key)
 	dst.Set(src)
 	if key == "server.public_url" {
-		c.publicURLDerived = from.publicURLDerived
+		c.publicURLDerived, c.httpPublicURL = from.publicURLDerived, from.httpPublicURL
 	}
+	c.copyPageProblem(key, from)
 	return nil
 }
 
@@ -469,7 +560,11 @@ func ParseValue(s *Setting, raw any) (any, error) {
 			return nil, fmt.Errorf("enter text")
 		}
 		if s.Type == TypeSecret {
-			// Secrets are taken as typed: spaces can be part of one.
+			// Secrets are taken as typed: spaces can be part of one. One
+			// that looks encrypted would be kept as it is, not encrypted.
+			if secrets.IsSealed(str) {
+				return nil, errors.New("the value cannot start with enc:v and a number and a colon, which is how encrypted values look")
+			}
 			return str, nil
 		}
 		str = strings.TrimSpace(str)
@@ -624,6 +719,78 @@ func listProblem(key string) func(*Config) string {
 		return addressListProblem(list)
 	}
 }
+
+// tlsModeProblem words what is wrong with the HTTPS mode and the
+// certificate files together, for the mode's field.
+func tlsModeProblem(c *Config) string {
+	s := c.Server
+	files := s.TLSCert != "" || s.TLSKey != ""
+	switch s.TLSMode() {
+	case TLSAuto, TLSOff:
+		if files {
+			return "The certificate and key files below are used only with your own certificate files. Choose that, or clear them."
+		}
+	case TLSFiles:
+		if !files {
+			return "Enter your certificate and key files below, or choose Automatic."
+		}
+	default:
+		return "Choose Automatic, your own certificate files, or Off."
+	}
+	return ""
+}
+
+// tlsFileProblem words what is wrong with server.tls_cert or tls_key
+// (key) for its field.
+func tlsFileProblem(key string) func(*Config) string {
+	return func(c *Config) string {
+		s := c.Server
+		mine, other := s.TLSCert, s.TLSKey
+		what := "your certificate file"
+		if key == "server.tls_key" {
+			mine, other, what = s.TLSKey, s.TLSCert, "the certificate's key file"
+		}
+		switch mode := s.TLSMode(); {
+		case (mode == TLSAuto || mode == TLSOff) && mine != "":
+			return "Used only when HTTPS is set to your own certificate files. Choose that, or clear this."
+		case mode == TLSFiles && mine == "":
+			return "Enter the full path of " + what + "."
+		case mode == TLSFiles && key == "server.tls_cert" && other != "":
+			cert, k := c.TLSFiles()
+			if _, err := tls.LoadX509KeyPair(cert, k); err != nil {
+				return "The certificate and key files can't be used: " + err.Error() + "."
+			}
+		}
+		return ""
+	}
+}
+
+// badCertNames lists the entries of server.tls.names that cannot go in
+// a certificate.
+func badCertNames(list []string) string {
+	var bad []string
+	for _, n := range list {
+		if !validCertName(n) {
+			bad = append(bad, "“"+n+"”")
+		}
+	}
+	switch len(bad) {
+	case 0:
+		return ""
+	case 1:
+		return bad[0] + " isn't a host name or IP address."
+	}
+	return joinWords(bad) + " aren't host names or IP addresses."
+}
+
+func checkCertNames(v any) error {
+	if p := badCertNames(v.([]string)); p != "" {
+		return errors.New(p)
+	}
+	return nil
+}
+
+func certNamesProblem(c *Config) string { return badCertNames(c.Server.TLSNames()) }
 
 // modelProblem asks for a model where the provider needs one named.
 func modelProblem(c *Config) string {

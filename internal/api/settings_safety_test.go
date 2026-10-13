@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -107,7 +108,7 @@ func TestApplyLiveSendsASecretOnlyWhereItWasSaved(t *testing.T) {
 // until the real save.
 func TestCheckOnly(t *testing.T) {
 	cert, key := selfSigned(t)
-	ts, srv, _ := newSettingsServer(t, "server:\n  listen: 0.0.0.0:18746\n  public_url: http://siem.example.com:18746\n", nil)
+	ts, srv, _ := newSettingsServer(t, "server:\n  listen: 0.0.0.0:18746\n  public_url: http://siem.example.com:18746\n  tls:\n    mode: off\n", nil)
 	check := func(body string) (int, map[string]any) {
 		t.Helper()
 		code, out, _ := call(t, ts, "PUT", "/api/settings", body, "admin", "s3cret-pass", nil)
@@ -138,7 +139,7 @@ func TestCheckOnly(t *testing.T) {
 	}
 	// HTTPS on: agents told http:// stop working.
 	// json.Marshal, since Windows paths hold backslashes.
-	paths, _ := json.Marshal(map[string]string{"server.tls_cert": cert, "server.tls_key": key})
+	paths, _ := json.Marshal(map[string]string{"server.tls.mode": "files", "server.tls_cert": cert, "server.tls_key": key})
 	_, out = check(`{"check_only":true,"values":` + string(paths) + `}`)
 	confirm = out["confirm"].([]any)
 	texts := ""
@@ -270,7 +271,7 @@ func TestSetAsideChanges(t *testing.T) {
 // An empty public address, saved on the page, stays empty there: it is
 // worked out from the listen address, like the default.
 func TestEmptyPublicAddressStaysEmpty(t *testing.T) {
-	ts, _, _ := newSettingsServer(t, "server:\n  listen: 127.0.0.1:18740\n  public_url: http://127.0.0.1:18746\n", nil)
+	ts, _, _ := newSettingsServer(t, "server:\n  listen: 127.0.0.1:18740\n  public_url: http://127.0.0.1:18746\n  tls:\n    mode: off\n", nil)
 	code, out := do(t, ts, "PUT", "/api/settings", `{"values":{"server.public_url":""}}`, true)
 	f := field(t, out, "server.public_url")
 	if code != 200 || f["value"] != "" || f["empty_means"] != "http://127.0.0.1:18740, worked out from the listen address" || f["source"].(map[string]any)["kind"] != "page" {
@@ -289,18 +290,37 @@ func TestEmptyPublicAddressStaysEmpty(t *testing.T) {
 // because the public address says https://: a browser on plain HTTP would
 // never send it back.
 func TestSessionCookieFollowsTheRequest(t *testing.T) {
-	ts, _, _ := newSettingsServer(t, "", nil)
-	do(t, ts, "PUT", "/api/settings", `{"values":{"server.public_url":"https://siem.example.com:18720"}}`, true)
-	login := func(hdr map[string]string) string {
-		t.Helper()
-		resp := send(t, "POST", ts.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, hdr)
-		return resp.Header.Get("Set-Cookie")
-	}
-	if c := login(map[string]string{"Origin": ts.URL}); c == "" || strings.Contains(c, "Secure") {
-		t.Errorf("plain HTTP: %q", c)
-	}
-	if c := login(map[string]string{"Origin": ts.URL, "X-Forwarded-Proto": "https"}); !strings.Contains(c, "Secure") {
-		t.Errorf("behind an HTTPS proxy: %q", c)
+	for _, tc := range []struct {
+		name, config string
+		// proxyBelieved: X-Forwarded-Proto from this machine is believed.
+		proxyBelieved bool
+	}{
+		// A file from before HTTPS was the default, which believes a proxy
+		// on this machine.
+		{"legacy", "", true},
+		// HTTPS off: the request reaches the handlers over plain HTTP, as
+		// it does in production.
+		{"https off", "server:\n  tls:\n    mode: off\n", false},
+		{"https off, trusted proxy", "server:\n  trusted_proxies: [127.0.0.1, '::1']\n  tls:\n    mode: off\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, srv, _ := newSettingsServer(t, tc.config, nil)
+			code, out := do(t, ts, "PUT", "/api/settings", `{"values":{"server.public_url":"https://siem.example.com:18720"}}`, true)
+			if code != 200 || srv.conf().Server.PublicURL != "https://siem.example.com:18720" {
+				t.Fatalf("save %d %v", code, out)
+			}
+			login := func(hdr map[string]string) string {
+				t.Helper()
+				resp := send(t, "POST", ts.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, hdr)
+				return resp.Header.Get("Set-Cookie")
+			}
+			if c := login(map[string]string{"Origin": ts.URL}); c == "" || strings.Contains(c, "Secure") || strings.Contains(c, "__Host-") {
+				t.Errorf("plain HTTP: %q", c)
+			}
+			if c := login(map[string]string{"Origin": ts.URL, "X-Forwarded-Proto": "https"}); strings.Contains(c, "Secure") != tc.proxyBelieved {
+				t.Errorf("behind an HTTPS proxy: %q", c)
+			}
+		})
 	}
 }
 
@@ -318,5 +338,101 @@ func TestMeHasTheSearchDefault(t *testing.T) {
 	}
 	if code, out := do(t, ts, "POST", "/api/settings/restart/confirm", "", true); code != 200 || out["confirmed"] != false {
 		t.Errorf("confirm %d %v", code, out)
+	}
+}
+
+// Saving a list of trusted proxies that leaves out the one this very
+// request came through is refused: with HTTPS on, the next request
+// through it would be sent to https:// or refused, and nobody could open
+// the page through the proxy again to undo it.
+func TestTrustedProxiesCannotLockOutTheProxyInUse(t *testing.T) {
+	// A file from before HTTPS was the default, which believes a proxy on
+	// this computer.
+	ts, srv, _ := newSettingsServer(t, "", nil)
+	if !srv.conf().Server.HTTPS() {
+		t.Fatal("HTTPS is off")
+	}
+	plain := httptest.NewServer(srv.PlainHandler(srv.Handler()))
+	defer plain.Close()
+	viaProxy := func(method, path, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest(method, plain.URL+path, strings.NewReader(body))
+		req.SetBasicAuth("admin", "s3cret-pass")
+		req.Host = "siem.lan"
+		req.Header.Set("X-Forwarded-Proto", "https")
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	_, view := viaProxy("GET", "/api/settings", "")
+	if f := field(t, view, "server.trusted_proxies"); !strings.Contains(f["empty_means"].(string), "private networks") {
+		t.Errorf("empty means %v", f["empty_means"])
+	}
+	for _, body := range []string{
+		`{"values":{"server.trusted_proxies":["10.0.0.9"]},"check_only":true}`,
+		`{"values":{"server.trusted_proxies":["10.0.0.9"]}}`,
+	} {
+		code, out := viaProxy("PUT", "/api/settings", body)
+		fields, _ := out["fields"].(map[string]any)
+		if msg, _ := fields["server.trusted_proxies"].(string); code != 400 || !strings.Contains(msg, "through the reverse proxy at 127.0.0.1") {
+			t.Errorf("%s: %d %v", body, code, out)
+		}
+	}
+	if code, _ := viaProxy("GET", "/api/settings", ""); code != 200 {
+		t.Fatalf("the proxy stopped working: %d", code)
+	}
+	// Listing it keeps it working.
+	if code, out := viaProxy("PUT", "/api/settings", `{"values":{"server.trusted_proxies":["127.0.0.1","10.0.0.9"]}}`); code != 200 {
+		t.Fatalf("listing the proxy: %d %v", code, out)
+	}
+	if code, _ := viaProxy("GET", "/api/settings", ""); code != 200 {
+		t.Fatalf("the listed proxy stopped working: %d", code)
+	}
+	_, view = viaProxy("GET", "/api/settings", "")
+	if f := field(t, view, "server.trusted_proxies"); f["empty_means"] != "none" {
+		t.Errorf("empty means with a list %v", f["empty_means"])
+	}
+	// From a browser that does not use the proxy, the admin decides.
+	if code, out := do(t, ts, "PUT", "/api/settings", `{"values":{"server.trusted_proxies":["10.0.0.9"]}}`, true); code != 200 {
+		t.Errorf("without the proxy: %d %v", code, out)
+	}
+}
+
+// HTTPS turned on from behind a trusted proxy keeps the page at the
+// proxy's address: the restart names no new address to go to.
+func TestHTTPSOnBehindAProxyStaysAtTheProxy(t *testing.T) {
+	ts, srv, _ := newSettingsServer(t, "server:\n  listen: 127.0.0.1:18766\n  public_url: https://siem.example.com\n  trusted_proxies: [127.0.0.1, '::1']\n  tls:\n    mode: off\n", nil)
+	srv.Restarter = &fakeRestarter{}
+	viaProxy := func(method, path, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		req.SetBasicAuth("admin", "s3cret-pass")
+		req.Host = "siem.example.com"
+		req.Header.Set("X-Forwarded-Proto", "https")
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	if code, out := viaProxy("PUT", "/api/settings", `{"values":{"server.tls.mode":"auto"}}`); code != 200 {
+		t.Fatalf("save %d %v", code, out)
+	}
+	code, out := viaProxy("POST", "/api/settings/restart", "")
+	if code != 202 || out["go_to"] != nil || out["listen_changed"] != false {
+		t.Errorf("restart through the proxy: %d %v", code, out)
+	}
+	// Directly, the page moves to https:// at the listen address.
+	code, out = do(t, ts, "POST", "/api/settings/restart", "", true)
+	if code != 202 || out["go_to"] != "https://127.0.0.1:18766/" {
+		t.Errorf("restart without the proxy: %d %v", code, out)
 	}
 }

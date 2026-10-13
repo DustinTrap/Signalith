@@ -2,6 +2,13 @@
 
 // Package integration runs Signalith end to end against a real OpenSearch.
 // Run with: SIGNALITH_TEST_OPENSEARCH=http://localhost:9200 go test -tags integration ./internal/integration/
+//
+// For an OpenSearch with its security plugin on, as CI and the Docker quick
+// start run it, also set SIGNALITH_TEST_OPENSEARCH_CA to its CA file and
+// SIGNALITH_TEST_OPENSEARCH_CERT and SIGNALITH_TEST_OPENSEARCH_KEY to
+// Signalith's client certificate and key (signalith bootstrap-docker makes
+// them). The tests only use indices named signalith*, which is all that
+// certificate may touch.
 package integration
 
 import (
@@ -36,13 +43,24 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
+// storeConfig connects to url with the CA, certificate and key from the
+// SIGNALITH_TEST_OPENSEARCH_* variables, when they are set.
+func storeConfig(url string) store.Config {
+	return store.Config{
+		URL:      url,
+		CAFile:   os.Getenv("SIGNALITH_TEST_OPENSEARCH_CA"),
+		CertFile: os.Getenv("SIGNALITH_TEST_OPENSEARCH_CERT"),
+		KeyFile:  os.Getenv("SIGNALITH_TEST_OPENSEARCH_KEY"),
+	}
+}
+
 func setup(t *testing.T) (*store.Client, *search.Engine, string) {
 	t.Helper()
 	url := os.Getenv("SIGNALITH_TEST_OPENSEARCH")
 	if url == "" {
 		t.Skip("SIGNALITH_TEST_OPENSEARCH not set")
 	}
-	cl := store.New(store.Config{URL: url})
+	cl := store.New(storeConfig(url))
 	ctx := context.Background()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
@@ -53,7 +71,8 @@ func setup(t *testing.T) (*store.Client, *search.Engine, string) {
 		}
 		time.Sleep(2 * time.Second)
 	}
-	prefix := "sigtest" + config.RandomToken(3)
+	// Under signalith*, the indices a secured OpenSearch lets Signalith use.
+	prefix := "signalithtest" + config.RandomToken(3)
 	if err := cl.PutIndexTemplate(ctx, prefix, ingest.IndexTemplate(prefix, 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -875,18 +894,18 @@ func TestStoreErrorsHideCredentials(t *testing.T) {
 		t.Skip("SIGNALITH_TEST_OPENSEARCH not set")
 	}
 	withCreds := strings.Replace(strings.Replace(base, "https://", "https://signalith:S3cr3tPass@", 1), "http://", "http://signalith:S3cr3tPass@", 1)
-	cl := store.New(store.Config{URL: withCreds})
+	cl := store.New(storeConfig(withCreds))
 	if _, err := cl.Health(context.Background()); err != nil {
 		t.Fatalf("health with URL credentials: %v", err)
 	}
-	err := cl.Do(context.Background(), http.MethodGet, "/no-such-index-"+config.RandomToken(4)+"/_doc/1", nil, nil)
+	err := cl.Do(context.Background(), http.MethodGet, "/signalithtest-no-such-index-"+config.RandomToken(4)+"/_doc/1", nil, nil)
 	if err == nil || strings.Contains(err.Error(), "S3cr3tPass") {
 		t.Errorf("error = %v", err)
 	}
 	// Proxy variables do not apply to OpenSearch, even pointing nowhere.
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-	if _, err := store.New(store.Config{URL: base}).Health(context.Background()); err != nil {
+	if _, err := store.New(storeConfig(base)).Health(context.Background()); err != nil {
 		t.Errorf("health with proxy variables set: %v", err)
 	}
 }

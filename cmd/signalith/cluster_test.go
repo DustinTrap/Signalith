@@ -132,12 +132,49 @@ func TestProbes(t *testing.T) {
 	}
 }
 
+// With HTTPS on, /livez and /readyz answer over HTTPS and over plain HTTP
+// on the same port, where everything else is sent to HTTPS: a load
+// balancer that checks over plain HTTP learns whether the server is ready
+// instead of getting a redirect.
+func TestProbesWithHTTPS(t *testing.T) {
+	rs := startRunnerWith(t, runOptions{})
+	if rs.scheme != "https" {
+		t.Fatalf("HTTPS is off: %s", rs.scheme)
+	}
+	for _, c := range []struct {
+		name   string
+		client *http.Client
+		base   string
+	}{{"https", rs.client, "https://" + rs.addr}, {"plain", noFollow, "http://" + rs.addr}} {
+		for _, path := range []string{"/livez", "/readyz"} {
+			eventually(t, c.name+path, func() bool {
+				resp, err := c.client.Get(c.base + path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				return resp.StatusCode == 200 && strings.Contains(string(raw), "true")
+			})
+		}
+	}
+	// Anything else over plain HTTP is still sent to HTTPS.
+	resp, err := noFollow.Get("http://" + rs.addr + "/livez/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPermanentRedirect {
+		t.Errorf("plain /livez/x = %d", resp.StatusCode)
+	}
+}
+
 func TestReadiness(t *testing.T) {
 	f := &front{}
 	if ok, why := f.readiness(); ok || why != "starting" {
 		t.Errorf("before start: %v %s", ok, why)
 	}
-	f.resume(http.NotFoundHandler())
+	f.resume(http.NotFoundHandler(), http.NotFoundHandler())
 	if ok, why := f.readiness(); !ok || why != "" {
 		t.Errorf("running: %v %s", ok, why)
 	}
@@ -149,7 +186,7 @@ func TestReadiness(t *testing.T) {
 	if ok, why := f.readiness(); ok || why != "restarting" {
 		t.Errorf("restarting: %v %s", ok, why)
 	}
-	f.resume(downHandler)
+	f.resume(downHandler, downHandler)
 	if ok, why := f.readiness(); ok || why != "down" {
 		t.Errorf("down: %v %s", ok, why)
 	}

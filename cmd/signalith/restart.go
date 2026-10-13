@@ -22,6 +22,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/store"
+	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -40,6 +41,12 @@ import (
 // components stop and new ones start; if they cannot, the previous
 // settings are started again, and if even those cannot, the web page
 // stays up to say so while Signalith keeps trying.
+//
+// With HTTPS on, the web listener serves HTTPS and, on the same port,
+// plain HTTP that sends browsers to HTTPS (httpserver.ServeBoth). A
+// restart keeps the certificate in use when its settings did not change,
+// and in auto mode always keeps Signalith's own certificate authority, so
+// agents and browsers that trust it go on doing so.
 //
 // A restart that moves the web page (another address, or HTTPS turned on
 // or off) waits for an admin to reach it at the new address. When nobody
@@ -84,8 +91,13 @@ type runner struct {
 	node *cluster.Node
 
 	front *front
-	// cert is the web server's certificate, loaded again on each restart.
-	cert atomic.Pointer[tls.Certificate]
+	// prepared is the HTTPS certificate a restart's checks loaded or made
+	// for the new settings, which starting with them then uses, and
+	// preparedKey the settings it was made for. It lasts only for that
+	// restart (see forgetPrepared): a later one would get a copy that
+	// misses the names Add data gave the certificate in use since.
+	prepared    *tlsauto.Manager
+	preparedKey string
 
 	requests  chan restartRequest
 	confirmed chan *move
@@ -102,6 +114,9 @@ type runner struct {
 
 	// failStart, for tests, makes starting with a config fail.
 	failStart func(*config.Config) error
+	// keysLogged is where the master key came from when that was last
+	// logged (see useKeys).
+	keysLogged string
 }
 
 type restartRequest struct {
@@ -238,9 +253,9 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 		return err
 	}
 	r.cur, r.good = in, c
-	r.front.resume(in.handler)
-	r.web = r.serveWeb(c, ln, r.cert.Load())
-	r.log.Info("signalith listening", "addr", ln.Addr().String(), "ui", c.Server.PublicURL, "version", version)
+	r.front.resume(in.handler, in.plain)
+	r.web = r.serveWeb(c, ln, in.certs)
+	logListening(r.log, c, ln.Addr().String())
 	var retry <-chan time.Time
 	for {
 		var moveTimeout <-chan time.Time
@@ -288,13 +303,9 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 	}
 }
 
-// open loads the web server's certificate, listens on the web address
-// and starts the components.
+// open listens on the web address and starts the components, which load
+// or make the HTTPS certificate.
 func (r *runner) open(ctx context.Context, c *config.Config) (*instance, net.Listener, error) {
-	cert, err := loadCert(c)
-	if err != nil {
-		return nil, nil, keyed(err, "server.tls_cert", "server.tls_key")
-	}
 	ln, err := httpserver.Listen(c.Server.Listen, webLimits(c), r.log)
 	if err != nil {
 		return nil, nil, keyed(fmt.Errorf("cannot listen on %s: %w", c.Server.Listen, opError(err)), "server.listen")
@@ -304,8 +315,17 @@ func (r *runner) open(ctx context.Context, c *config.Config) (*instance, net.Lis
 		ln.Close()
 		return nil, nil, err
 	}
-	r.cert.Store(cert)
 	return in, ln, nil
+}
+
+// logListening says where the web page answers, and how.
+func logListening(log *slog.Logger, c *config.Config, addr string) {
+	if c.Server.HTTPS() {
+		log.Info("signalith listening", "addr", addr, "ui", c.Server.PublicURL, "https", c.Server.TLSMode(),
+			"plaintext_ingest", c.Server.PlaintextIngest(), "version", version)
+		return
+	}
+	log.Info("signalith listening", "addr", addr, "ui", c.Server.PublicURL, "https", "off", "version", version)
 }
 
 // keyedError is an error about some settings.
@@ -320,7 +340,10 @@ func (e *keyedError) Unwrap() error { return e.err }
 func keyed(err error, keys ...string) error { return &keyedError{err: err, keys: keys} }
 
 // blame returns the settings changed on the Settings page that err is
-// about, or every one that a restart applies when that is not known.
+// about, or every one that a restart applies when that is not known. A
+// password saved there that cannot be decrypted is never among them: it
+// is left out, not used, and set aside it would stay unused after the
+// master key it needs is back.
 func blame(err error, c *config.Config) []string {
 	var ke *keyedError
 	var keys []string
@@ -330,7 +353,7 @@ func blame(err error, c *config.Config) []string {
 				keys = append(keys, k)
 			}
 		}
-		if keys != nil {
+		if keys = usable(c, keys); keys != nil {
 			return keys
 		}
 	}
@@ -340,7 +363,33 @@ func blame(err error, c *config.Config) []string {
 			keys = append(keys, k)
 		}
 	}
-	return keys
+	return usable(c, keys)
+}
+
+// undecryptable returns those of keys whose password or key saved on the
+// Settings page cannot be decrypted, and so is left out of c (see
+// config.PageUnreadable).
+func undecryptable(c *config.Config, keys []string) []string {
+	var out []string
+	for _, k := range keys {
+		if c.PageSecretProblem(k) != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// usable returns keys without those undecryptable returns: a check or a
+// start that fails without such a password says nothing about it, and
+// the decryption problem is reported on its own.
+func usable(c *config.Config, keys []string) []string {
+	var out []string
+	for _, k := range keys {
+		if c.PageSecretProblem(k) == "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // openSearchKeys are the settings of the OpenSearch connection.
@@ -363,6 +412,13 @@ func (r *runner) checkPageOpenSearch(ctx context.Context, c *config.Config) *con
 	}
 	base := c.Base()
 	if !unchecked || base.OpenSearchConnection() == c.OpenSearchConnection() {
+		return c
+	}
+	// A password saved on the page that cannot be decrypted is left out,
+	// and the other settings saved there are still used: OpenSearch
+	// refusing Signalith without it says nothing about them, and the
+	// decryption problem is reported (config.PageUnreadable).
+	if len(undecryptable(c, keys)) > 0 {
 		return c
 	}
 	check := func(c *config.Config) store.Report {
@@ -463,7 +519,7 @@ func (r *runner) restart(ctx context.Context, req restartRequest) {
 	if !r.switchTo(ctx, prev, next, res, confirm) || !res.OK {
 		return
 	}
-	if err := config.MarkChecked(next.SettingsFile(), next.PageKeys()); err != nil {
+	if err := config.MarkChecked(next.SettingsFile(), usable(next, next.PageKeys())); err != nil {
 		r.log.Warn("could not note in the settings file that its settings work", "err", err)
 	}
 	if confirm {
@@ -488,21 +544,22 @@ func (r *runner) done(res *api.RestartResult, req restartRequest, start time.Tim
 	// so the page sees it at once.
 	r.finish(res, m)
 	if r.cur != nil {
-		r.front.resume(r.cur.handler)
+		r.front.resume(r.cur.handler, r.cur.plain)
 	}
 }
 
 // moved reports whether the web page answers somewhere else with next:
 // another address, or HTTPS turned on or off.
 func moved(prev, next *config.Config) bool {
-	return prev.Server.Listen != next.Server.Listen || httpsOn(prev) != httpsOn(next)
+	return prev.Server.Listen != next.Server.Listen || prev.Server.HTTPS() != next.Server.HTTPS()
 }
 
-func httpsOn(c *config.Config) bool { return c.Server.TLSCert != "" && c.Server.TLSKey != "" }
+// moveKeys are the settings that move the web page.
+var moveKeys = []string{"server.listen", "server.tls.mode"}
 
 // webAddress names where a web server answers, for people.
 func webAddress(c *config.Config) string {
-	if httpsOn(c) {
+	if c.Server.HTTPS() {
 		return "https://" + c.Server.Listen
 	}
 	return "http://" + c.Server.Listen
@@ -514,7 +571,7 @@ func (r *runner) awaitMove(prev, next *config.Config) *move {
 	m := &move{web: r.web, prev: prev, timer: time.NewTimer(moveWait)}
 	m.From, m.To, m.Until = webAddress(prev), webAddress(next), time.Now().Add(moveWait).UTC()
 	m.Keys = []string{}
-	for _, k := range []string{"server.listen", "server.tls_cert", "server.tls_key"} {
+	for _, k := range moveKeys {
 		if !config.SameValue(prev, next, k) {
 			m.Keys = append(m.Keys, k)
 			if next.Source(k).Kind == config.FromPage {
@@ -569,11 +626,13 @@ func (r *runner) revert(ctx context.Context, m *move) {
 
 // setAside sets the changes made on the Settings page to keys aside in
 // its file, for reason, and returns those it did. Keys not changed there
-// are left alone.
+// are left alone. Changes that cannot be used without them go too (see
+// config.SetAsideAlong), so the next start can still use the rest.
 func (r *runner) setAside(file string, keys []string, reason string) []string {
 	if len(keys) == 0 {
 		return nil
 	}
+	keys = config.SetAsideAlong(r.path, keys)
 	marked, err := config.MarkRefused(file, keys, reason)
 	if err != nil {
 		r.log.Error("could not set changes from the Settings page aside in its file; the next start may use them again",
@@ -588,6 +647,7 @@ func (r *runner) setAside(file string, keys []string, reason string) []string {
 // is true when a move of the web page waits to be confirmed: the old web
 // server then keeps answering until it is.
 func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *api.RestartResult, confirm bool) bool {
+	defer r.forgetPrepared()
 	res.Keys = changedSettings(prev, next)
 	plan, err := r.check(ctx, prev, next)
 	if err != nil {
@@ -596,8 +656,10 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 		if errors.As(err, &ke) {
 			res.ProblemKeys = ke.keys
 			// Not used at the next start either, until tried again. The
-			// reason is the cause alone: the setting is not in use.
-			res.Refused = r.setAside(next.SettingsFile(), ke.keys, strings.TrimSuffix(res.Error, keptRunning))
+			// reason is the cause alone: the setting is not in use. A
+			// password that cannot be decrypted is not set aside (see
+			// usable).
+			res.Refused = r.setAside(next.SettingsFile(), usable(next, ke.keys), strings.TrimSuffix(res.Error, keptRunning))
 		}
 		return false
 	}
@@ -615,7 +677,7 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 			in.stop()
 			err = keyed(fmt.Errorf("cannot listen on %s: %w", next.Server.Listen, opError(err)), "server.listen")
 			if back, lerr := httpserver.Listen(prev.Server.Listen, webLimits(prev), r.log); lerr == nil {
-				r.web = r.serveWeb(prev, back, r.cert.Load())
+				r.web = r.serveWeb(prev, back, old.certs)
 			} else {
 				r.log.Error("the previous web address cannot be listened on again", "addr", prev.Server.Listen, "err", lerr)
 			}
@@ -637,7 +699,7 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 			res.Error = fmt.Sprintf("Signalith could not start with the saved settings (%v) or the previous ones (%v). It tries again every 30 seconds.", err, err2)
 			r.log.Error("Signalith could not start with the new settings or the previous ones; it tries again every 30 seconds", "new", err, "previous", err2)
 			r.cur = nil
-			r.front.resume(downHandler)
+			r.front.resume(downHandler, downHandler)
 			if r.node != nil {
 				// Another server that shares the OpenSearch runs the jobs
 				// meanwhile.
@@ -646,20 +708,19 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 			return true
 		}
 		r.cur = back
+		r.web.certs.Store(back.certs)
 		return true
 	}
-	// The certificate is read again on each restart.
-	r.cert.Store(plan.cert)
 	if plan.moveWeb {
 		prevWeb := r.web
 		if plan.reuse != nil {
 			r.web = plan.reuse
-			r.web.cert.Store(plan.cert)
+			r.web.certs.Store(in.certs)
 			r.retired = slices.DeleteFunc(r.retired, func(w *webServer) bool { return w == plan.reuse })
 		} else {
-			r.web = r.serveWeb(next, plan.ln, plan.cert)
+			r.web = r.serveWeb(next, plan.ln, in.certs)
 		}
-		r.log.Info("signalith listening", "addr", next.Server.Listen, "ui", next.Server.PublicURL, "version", version)
+		logListening(r.log, next, next.Server.Listen)
 		if prevWeb.open() {
 			// The page at the old address asks how the restart went before
 			// it moves. A move then waits to be confirmed; otherwise the
@@ -671,7 +732,8 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 			}
 		}
 	} else {
-		r.web.cert.Store(plan.cert)
+		// The same listener serves the new certificate.
+		r.web.certs.Store(in.certs)
 	}
 	r.cur, r.good = in, next
 	res.OK = true
@@ -683,17 +745,18 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 // ran. It reports whether one did.
 func (r *runner) recover(ctx context.Context) bool {
 	try := func(c *config.Config) bool {
+		defer r.forgetPrepared()
 		if r.web == nil || !r.web.open() {
-			cert, err := loadCert(c)
+			certs, err := r.prepare(c)
 			if err != nil {
+				r.log.Error("Signalith still cannot start; it tries again in 30 seconds", "err", err)
 				return false
 			}
 			ln, err := httpserver.Listen(c.Server.Listen, webLimits(c), r.log)
 			if err != nil {
 				return false
 			}
-			r.cert.Store(cert)
-			r.web = r.serveWeb(c, ln, cert)
+			r.web = r.serveWeb(c, ln, certs)
 		}
 		in, err := r.start(ctx, c)
 		if err != nil {
@@ -701,7 +764,8 @@ func (r *runner) recover(ctx context.Context) bool {
 			return false
 		}
 		r.cur, r.good = in, c
-		r.front.resume(in.handler)
+		r.web.certs.Store(in.certs)
+		r.front.resume(in.handler, in.plain)
 		r.log.Info("Signalith started again", "audit", true)
 		r.finish(&api.RestartResult{At: time.Now().UTC(), By: "Signalith", OK: true, Keys: []string{}}, nil)
 		return true
@@ -725,7 +789,6 @@ type plan struct {
 	moveWeb bool
 	ln      net.Listener
 	reuse   *webServer
-	cert    *tls.Certificate
 }
 
 // keptRunning ends the words of a check that failed.
@@ -753,11 +816,9 @@ func (r *runner) check(ctx context.Context, old, next *config.Config) (*plan, er
 		return nil, refuse("%s. Fix it on the server, then restart again.", sentenceOf(err))
 	}
 	p := &plan{}
-	cert, err := loadCert(next)
-	if err != nil {
-		return nil, keyed(refuse("%s.", sentenceOf(err)), "server.tls_cert", "server.tls_key")
+	if _, err := r.prepare(next); err != nil {
+		return nil, keyed(refuse("%s.", sentenceOf(err)), certKeys(next)...)
 	}
-	p.cert = cert
 	if openSearchMoves(old, next) {
 		var keys []string
 		for _, k := range openSearchKeys {
@@ -766,6 +827,13 @@ func (r *runner) check(ctx context.Context, old, next *config.Config) (*plan, er
 			}
 		}
 		if rep := store.Check(ctx, next.OpenSearchConnection()); !rep.OK {
+			// Without a password saved on the Settings page that cannot be
+			// decrypted, OpenSearch may well refuse Signalith: that is what
+			// to fix, and the settings are not set aside for it.
+			if locked := undecryptable(next, openSearchKeys); len(locked) > 0 {
+				return nil, keyed(refuse("OpenSearch did not answer with the new settings: %s But the %s saved on the Settings page cannot be used, which may be why. %s",
+					rep.Message, locked[0], next.PageSecretProblem(locked[0])), locked...)
+			}
 			return nil, keyed(refuse("OpenSearch did not answer with the new settings: %s", rep.Message), keys...)
 		}
 	}
@@ -796,12 +864,14 @@ func (r *runner) check(ctx context.Context, old, next *config.Config) (*plan, er
 		return nil, err
 	}
 	// New syslog addresses must be free; one that takes a port Signalith
-	// uses now is freed by the switch.
-	inUse := []string{old.Syslog.UDP, old.Syslog.TCP, old.Syslog.TLS, old.Server.Listen}
+	// holds now, with the same protocol, is freed by the switch. Another
+	// program may hold the same port number with the other protocol.
+	type listener struct{ network, addr string }
+	inUse := []listener{{"udp", old.Syslog.UDP}, {"tcp", old.Syslog.TCP}, {"tcp", old.Syslog.TLS}, {"tcp", old.Server.Listen}}
 	for _, l := range []struct{ setting, network, addr string }{
 		{"syslog.udp", "udp", next.Syslog.UDP}, {"syslog.tcp", "tcp", next.Syslog.TCP}, {"syslog.tls", "tcp", next.Syslog.TLS},
 	} {
-		if l.addr == "" || slices.ContainsFunc(inUse, func(a string) bool { return samePort(a, l.addr) }) {
+		if l.addr == "" || slices.ContainsFunc(inUse, func(u listener) bool { return u.network == l.network && overlaps(u.addr, l.addr) }) {
 			continue
 		}
 		if err := tryListen(l.network, l.addr); err != nil {
@@ -869,20 +939,69 @@ func sentenceOf(err error) string {
 	return strings.ToUpper(s[:1]) + s[1:]
 }
 
-// loadCert loads the web server's certificate, or returns nil without TLS.
-func loadCert(c *config.Config) (*tls.Certificate, error) {
-	if !httpsOn(c) {
-		return nil, nil
+// certificates returns the HTTPS certificate for c, which syslog over
+// TLS uses too, or nil when c needs none. The one in use, or the one a
+// restart's checks prepared, is used again when it was made for the same
+// settings; a new one in auto mode comes from the same certificate
+// authority, kept in the state folder. key names the settings it is for.
+func (r *runner) certificates(c *config.Config) (*tlsauto.Manager, string, error) {
+	o, ok := certOptions(c)
+	if !ok {
+		return nil, "", nil
 	}
-	cert, err := tls.LoadX509KeyPair(c.Server.TLSCert, c.Server.TLSKey)
+	key := certKey(o)
+	if r.cur != nil && r.cur.certs != nil && r.cur.certKey == key {
+		return r.cur.certs, key, nil
+	}
+	if r.prepared != nil && r.preparedKey == key {
+		// Made by this restart's checks. Names Add data gave the
+		// certificate in use while they ran are added now.
+		if err := r.prepared.Refresh(); err != nil {
+			return nil, "", keyed(err, certKeys(c)...)
+		}
+		return r.prepared, key, nil
+	}
+	m, err := newCertificates(c, r.log)
 	if err != nil {
-		return nil, fmt.Errorf("the certificate in server.tls_cert and server.tls_key cannot be used: %w", err)
+		return nil, "", keyed(err, certKeys(c)...)
 	}
-	return &cert, nil
+	return m, key, nil
+}
+
+// prepare loads or makes the HTTPS certificate for c ahead of starting
+// with it, so a problem with it stops a restart before anything stops.
+func (r *runner) prepare(c *config.Config) (*tlsauto.Manager, error) {
+	m, key, err := r.certificates(c)
+	if err != nil {
+		return nil, err
+	}
+	r.prepared, r.preparedKey = m, key
+	return m, nil
+}
+
+// forgetPrepared drops the certificate a restart prepared, once that
+// restart is over, however it went.
+func (r *runner) forgetPrepared() { r.prepared, r.preparedKey = nil, "" }
+
+// certKey names the settings a certificate is made from.
+func certKey(o tlsauto.Options) string {
+	if o.CertFile != "" {
+		return "files\x00" + o.CertFile + "\x00" + o.KeyFile
+	}
+	return "auto\x00" + o.Dir + "\x00" + strings.Join(o.Names, "\x00")
+}
+
+// certKeys are the settings a problem with c's certificate is about.
+func certKeys(c *config.Config) []string {
+	if c.Server.TLSMode() == config.TLSFiles {
+		return []string{"server.tls_cert", "server.tls_key", "server.tls.mode"}
+	}
+	return []string{"server.tls.mode", "server.tls.names"}
 }
 
 // webChanges reports whether the web listener changes: another address,
-// HTTPS turned on or off, or other connection limits.
+// HTTPS turned on or off, or other connection limits. Another certificate
+// is served by the same listener.
 func webChanges(old, next *config.Config) bool {
 	return moved(old, next) || old.Server.MaxConnections != next.Server.MaxConnections ||
 		!slices.Equal(old.Server.SharedAddresses, next.Server.SharedAddresses)
@@ -939,40 +1058,56 @@ func changedSettings(a, b *config.Config) []string {
 
 // webServer is one web listener.
 type webServer struct {
-	hs     *http.Server
-	cfg    *config.Config
-	errc   chan error
-	closed atomic.Bool
-	// cert is its certificate, with HTTPS.
-	cert atomic.Pointer[tls.Certificate]
+	// hs serves the page and the API: over HTTPS when cfg has it on, and
+	// then plain answers plain HTTP on the same port.
+	hs, plain *http.Server
+	cfg       *config.Config
+	errc      chan error
+	closed    atomic.Bool
+	// certs is the certificate it serves, with HTTPS. A restart that
+	// keeps the listener changes it.
+	certs atomic.Pointer[tlsauto.Manager]
 	// timer closes a retired web server; nil while it is kept.
 	timer *time.Timer
 }
 
-// serveWeb serves the front handler on ln, with HTTPS when c has a
-// certificate. Requests carry the web server they came in at, so a move
-// can tell when someone reached the new one.
-func (r *runner) serveWeb(c *config.Config, ln net.Listener, cert *tls.Certificate) *webServer {
-	w := &webServer{hs: httpserver.New(r.front, webLimits(c), r.log), cfg: c, errc: make(chan error, 1)}
-	w.cert.Store(cert)
-	w.hs.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+// errNoCertificate answers a TLS handshake when no certificate is loaded,
+// which does not happen while HTTPS is on.
+var errNoCertificate = errors.New("no HTTPS certificate is loaded")
+
+// serveWeb serves the front handler on ln, with HTTPS and plain HTTP on
+// the same port when c has HTTPS on. Requests carry the web server they
+// came in at, so a move can tell when someone reached the new one.
+func (r *runner) serveWeb(c *config.Config, ln net.Listener, certs *tlsauto.Manager) *webServer {
+	lim := webLimits(c)
+	w := &webServer{hs: httpserver.New(r.front, lim, r.log), cfg: c, errc: make(chan error, 1)}
+	w.certs.Store(certs)
+	tag := func(ctx context.Context, _ net.Conn) context.Context {
 		return context.WithValue(ctx, webKey{}, w)
 	}
-	useTLS := httpsOn(c)
+	w.hs.ConnContext = tag
+	useTLS := c.Server.HTTPS()
 	if useTLS {
-		// The certificate is read again on each restart.
-		w.hs.TLSConfig.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-			return w.cert.Load(), nil
+		w.hs.TLSConfig.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			m := w.certs.Load()
+			if m == nil {
+				return nil, errNoCertificate
+			}
+			return m.GetCertificate(hello)
 		}
+		w.plain = httpserver.New(r.front.plainSide(), lim, r.log)
+		w.plain.ConnContext = tag
 	}
 	go func() {
 		var err error
 		if useTLS {
-			err = w.hs.ServeTLS(ln, "", "")
+			err = httpserver.ServeBoth(w.hs, w.plain, ln)
 		} else {
 			err = w.hs.Serve(ln)
 		}
-		if w.closed.Load() && errors.Is(err, http.ErrServerClosed) {
+		if w.closed.Load() {
+			// Closing it ends serving, with http.ErrServerClosed or, for
+			// the side that did not close the listener, net.ErrClosed.
 			return
 		}
 		w.errc <- err
@@ -982,14 +1117,23 @@ func (r *runner) serveWeb(c *config.Config, ln net.Listener, cert *tls.Certifica
 
 func (w *webServer) open() bool { return !w.closed.Load() }
 
-// close stops the listener and waits up to wait for requests in progress.
+// close stops the listener, which frees the port at once, and waits up to
+// wait for requests in progress, on both HTTPS and plain HTTP.
 func (w *webServer) close(wait time.Duration) error {
 	if w.closed.Swap(true) {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	return w.hs.Shutdown(ctx)
+	if w.plain == nil {
+		return w.hs.Shutdown(ctx)
+	}
+	var plainErr error
+	var wg sync.WaitGroup
+	wg.Go(func() { plainErr = w.plain.Shutdown(ctx) })
+	err := w.hs.Shutdown(ctx)
+	wg.Wait()
+	return errors.Join(err, plainErr)
 }
 
 // keep stops a retired web server's timer, so it is not closed.
@@ -1029,7 +1173,7 @@ func (r *runner) retire(w *webServer, after time.Duration) {
 func (r *runner) retiredAt(next *config.Config) *webServer {
 	for _, w := range r.retired {
 		c := w.cfg
-		if c == nil || !w.open() || c.Server.Listen != next.Server.Listen || httpsOn(c) != httpsOn(next) ||
+		if c == nil || !w.open() || c.Server.Listen != next.Server.Listen || c.Server.HTTPS() != next.Server.HTTPS() ||
 			c.Server.MaxConnections != next.Server.MaxConnections || !slices.Equal(c.Server.SharedAddresses, next.Server.SharedAddresses) {
 			continue
 		}
@@ -1076,8 +1220,10 @@ func (downPage) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // the current components and holds new ones back while a restart swaps
 // them.
 type front struct {
-	mu       sync.Mutex
-	h        http.Handler
+	mu sync.Mutex
+	// h serves the page and the API, and plain serves plain HTTP on a
+	// port that serves HTTPS (see api.Server.PlainHandler).
+	h, plain http.Handler
 	paused   chan struct{} // closed when a pause ends; nil when not paused
 	inflight int
 	idle     chan struct{} // closed when the last request in progress ends
@@ -1085,11 +1231,22 @@ type front struct {
 	ready func() (bool, string)
 }
 
-func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (f *front) ServeHTTP(w http.ResponseWriter, r *http.Request) { f.serve(w, r, false) }
+
+// plainSide is the handler for plain HTTP on a port that serves HTTPS.
+func (f *front) plainSide() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { f.serve(w, r, true) })
+}
+
+func (f *front) serve(w http.ResponseWriter, r *http.Request, plain bool) {
+	// /livez and /readyz answer on both sides of a port that serves HTTPS:
+	// they carry no password or session and say only a word, and a load
+	// balancer that checks over plain HTTP should learn whether this server
+	// is ready rather than be sent to https://, which many treat as healthy.
 	if f.probe(w, r) {
 		return
 	}
-	h := f.enter(r)
+	h := f.enter(r, plain)
 	if h == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "5")
@@ -1155,8 +1312,9 @@ func (f *front) readiness() (bool, string) {
 }
 
 // enter waits while a restart swaps the components, and returns the
-// handler to use, or nil when the wait was too long.
-func (f *front) enter(r *http.Request) http.Handler {
+// handler to use, the one for plain HTTP when plain is true, or nil when
+// the wait was too long.
+func (f *front) enter(r *http.Request, plain bool) http.Handler {
 	timeout := time.NewTimer(pauseLimit)
 	defer timeout.Stop()
 	for {
@@ -1164,6 +1322,9 @@ func (f *front) enter(r *http.Request) http.Handler {
 		if f.paused == nil && f.h != nil {
 			f.inflight++
 			h := f.h
+			if plain {
+				h = f.plain
+			}
 			f.mu.Unlock()
 			return h
 		}
@@ -1216,11 +1377,12 @@ func (f *front) pause(wait time.Duration) {
 	}
 }
 
-// resume serves requests with h, letting those held back through.
-func (f *front) resume(h http.Handler) {
+// resume serves requests with h, and plain HTTP on a port that serves
+// HTTPS with plain, letting those held back through.
+func (f *front) resume(h, plain http.Handler) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.h = h
+	f.h, f.plain = h, plain
 	if f.paused != nil {
 		close(f.paused)
 		f.paused = nil

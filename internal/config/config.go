@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"net/url"
@@ -26,6 +27,8 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
@@ -53,8 +56,42 @@ type Config struct {
 	// ldapBindPassword comes from SIGNALITH_LDAP_BIND_PASSWORD. It is kept
 	// apart from Auth.LDAP so saving the file never writes it out.
 	ldapBindPassword string
+	// adminHashFile is AdminHashFile when the built-in admin's password
+	// came from it.
+	adminHashFile string
+	// publicAdminPassword is set when SIGNALITH_ADMIN_PASSWORD is the
+	// example from an older docker-compose.yml.
+	publicAdminPassword bool
+	// publicURLFromEnv is set when SIGNALITH_PUBLIC_URL set
+	// server.public_url.
+	publicURLFromEnv bool
+	// httpPublicURL is the http:// public_url Validate read as https://,
+	// for Warnings.
+	httpPublicURL string
 	// sections are the top-level keys in that file.
 	sections map[string]bool
+	// file is the config as that file has it: no settings from the
+	// environment, and passwords and keys as written. Save writes it.
+	file *Config
+	// plain lists the passwords and keys stored as plain text in the file,
+	// and addressWarnings those written into addresses that cannot be
+	// encrypted there.
+	plain, addressWarnings []string
+	// unreadable lists the encrypted ones that cannot be decrypted, with
+	// what to do; locked has their fields, and feedLocked their labels by
+	// feed. See openSecrets.
+	unreadable []string
+	locked     map[string]bool
+	feedLocked map[string][]string
+	// pageUnreadable lists the passwords and keys saved on the Settings
+	// page that cannot be decrypted, with what to do, and pageLocked their
+	// settings, with what the page says about each. See applyPage. A copy
+	// of a Config shares them: they are replaced, never changed in place
+	// (see copyPageProblem).
+	pageUnreadable []pageProblem
+	pageLocked     map[string]string
+	// keys holds the master key; see Keyring.
+	keys *secrets.Keyring
 	// layers records where each setting's value came from.
 	layers *layers
 	// publicURLDerived is true when server.public_url was empty and
@@ -98,8 +135,21 @@ type Server struct {
 	// server: scheme, host and optional port, no path. It goes into the
 	// agent configs Signalith generates. SIGNALITH_PUBLIC_URL overrides it.
 	PublicURL string `yaml:"public_url"`
-	TLSCert   string `yaml:"tls_cert,omitempty"`
-	TLSKey    string `yaml:"tls_key,omitempty"`
+	// TLSCert and TLSKey are a certificate and key from your own or a
+	// public certificate authority, for server.tls.mode files. The
+	// certificate file may hold the whole chain.
+	TLSCert string `yaml:"tls_cert,omitempty"`
+	TLSKey  string `yaml:"tls_key,omitempty"`
+	// TLS controls HTTPS. A file without this section (written before
+	// HTTPS was the default) gets mode auto with plain-text ingest
+	// allowed, so agents set up for http:// keep working until they are
+	// updated; see TLSMode and PlaintextIngest.
+	TLS *ServerTLS `yaml:"tls,omitempty"`
+	// TrustedProxies lists the IP addresses or CIDRs of reverse proxies
+	// whose X-Forwarded-Proto header is believed, so a browser that
+	// reached the proxy over HTTPS is treated as such (HSTS, secure
+	// cookies) and not redirected.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 	// MaxConnections caps open connections to the UI, API and ingest;
 	// 0 means 10000. One client (an IPv4 address, or an IPv6 /64 network)
 	// may hold a tenth of them; connections from this machine, such as a
@@ -116,6 +166,35 @@ type Server struct {
 	// it out from the listen address and this computer's name, except in a
 	// container, which cannot know it. SIGNALITH_NODE_URL overrides it.
 	NodeURL string `yaml:"node_url,omitempty"`
+
+	// proxied is set by Validate for a config written before HTTPS was the
+	// default whose public_url is https:// although Signalith had no
+	// certificate: a reverse proxy in front adds HTTPS, so mode is off.
+	proxied bool
+	// legacyFile is set when signalith.yaml was written before HTTPS was
+	// the default but a server.tls setting was filled in as it was in
+	// effect, because the Settings page changed one (see materializeTLS):
+	// what LegacyProxy allows still holds.
+	legacyFile bool
+}
+
+// materializeTLS fills in the server.tls section with the HTTPS settings
+// in effect, when the file has none (it was written before HTTPS was the
+// default, and the rules for such files decide them). A setting changed
+// on the Settings page then changes only itself: for example, an https://
+// public address saved on the page does not make such a file's HTTPS
+// mode off, as an https:// public_url in the file itself would. eff is
+// the config whose settings are in effect (validated); s is changed.
+func (s *Server) materializeTLS(eff Server) {
+	if s.TLS != nil {
+		return
+	}
+	ingest := "deny"
+	if eff.PlaintextIngest() {
+		ingest = "allow"
+	}
+	s.TLS = &ServerTLS{Mode: eff.TLSMode(), PlaintextIngest: ingest}
+	s.legacyFile = s.legacyFile || eff.legacyHTTP()
 }
 
 // SharedList returns server.shared_addresses as prefixes; single addresses
@@ -128,6 +207,170 @@ func (s Server) SharedList() []netip.Prefix {
 		}
 	}
 	return out
+}
+
+// HTTPS modes (server.tls.mode).
+const (
+	// TLSAuto serves HTTPS with a certificate from Signalith's own small
+	// certificate authority, made on first start and renewed by itself.
+	TLSAuto = "auto"
+	// TLSFiles serves HTTPS with server.tls_cert and server.tls_key.
+	TLSFiles = "files"
+	// TLSOff serves plain HTTP, for a reverse proxy in front that adds
+	// HTTPS.
+	TLSOff = "off"
+)
+
+// ServerTLS is the server.tls section.
+type ServerTLS struct {
+	// Mode is auto (the default), files or off.
+	Mode string `yaml:"mode,omitempty"`
+	// Names are extra DNS names or IP addresses for the auto certificate,
+	// such as a DNS alias or the address a NAT or Docker publishes.
+	// This machine's own name and addresses are always in it.
+	Names []string `yaml:"names,omitempty"`
+	// PlaintextIngest is allow or deny: whether agents may still send
+	// events over plain HTTP to the HTTPS port.
+	PlaintextIngest string `yaml:"plaintext_ingest,omitempty"`
+}
+
+// TLSMode returns the HTTPS mode in effect: server.tls.mode, or for a
+// config from before the mode existed, files when server.tls_cert is set
+// and off when public_url is https:// without one (a reverse proxy adds
+// HTTPS), else auto.
+func (s Server) TLSMode() string {
+	if s.TLS != nil && s.TLS.Mode != "" {
+		return strings.ToLower(strings.TrimSpace(s.TLS.Mode))
+	}
+	if s.TLSCert != "" {
+		return TLSFiles
+	}
+	if s.proxied {
+		return TLSOff
+	}
+	return TLSAuto
+}
+
+// HTTPS reports whether Signalith serves HTTPS itself.
+func (s Server) HTTPS() bool { return s.TLSMode() != TLSOff }
+
+// PlaintextIngest reports whether agents may send events over plain HTTP
+// to the HTTPS port: server.tls.plaintext_ingest, else allowed only for a
+// config written before HTTPS was the default (no server.tls section and
+// no tls_cert), whose agents were set up for http://.
+func (s Server) PlaintextIngest() bool {
+	if s.TLS != nil && s.TLS.PlaintextIngest != "" {
+		return strings.EqualFold(strings.TrimSpace(s.TLS.PlaintextIngest), "allow")
+	}
+	return s.legacyHTTP()
+}
+
+// legacyHTTP reports whether the config was written when Signalith served
+// plain HTTP by default: no server.tls section and no certificate.
+func (s Server) legacyHTTP() bool { return s.TLS == nil && s.TLSCert == "" }
+
+// TLSNames returns server.tls.names.
+func (s Server) TLSNames() []string {
+	if s.TLS == nil {
+		return nil
+	}
+	return s.TLS.Names
+}
+
+// TrustedProxyList returns server.trusted_proxies as prefixes. Invalid
+// entries are skipped (Validate reports them).
+func (s Server) TrustedProxyList() []netip.Prefix {
+	var out []netip.Prefix
+	for _, a := range s.TrustedProxies {
+		if p, err := parseAllow(a); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// LegacyProxy reports whether X-Forwarded-Proto from a is believed only
+// because the config was written before HTTPS was the default and lists
+// no server.trusted_proxies. Such a config may sit behind a reverse proxy
+// set up the way older versions described (send X-Forwarded-Proto, keep
+// public_url http://), so the header is believed from this machine and
+// private networks, where that proxy would be; the Health page then asks
+// for server.trusted_proxies.
+func (s Server) LegacyProxy(a netip.Addr) bool {
+	if !(s.legacyHTTP() || s.legacyFile) || len(s.TrustedProxies) > 0 {
+		return false
+	}
+	a = a.Unmap().WithZone("")
+	return a.IsLoopback() || a.IsPrivate()
+}
+
+// TrustsProxy reports whether a is in server.trusted_proxies.
+func (s Server) TrustsProxy(a netip.Addr) bool {
+	a = a.Unmap().WithZone("")
+	for _, p := range s.TrustedProxyList() {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// tlsProblems checks the HTTPS settings. resolve makes file paths
+// relative to the config file.
+func (s *Server) tlsProblems(resolve func(string) string) []string {
+	var p []string
+	mode := s.TLSMode()
+	switch mode {
+	case TLSAuto, TLSFiles, TLSOff:
+	default:
+		return []string{fmt.Sprintf("server.tls.mode %q must be auto (Signalith makes its own certificate), files (server.tls_cert and tls_key) or off (plain HTTP behind a reverse proxy that adds HTTPS)", s.TLS.Mode)}
+	}
+	if (s.TLSCert == "") != (s.TLSKey == "") {
+		p = append(p, "server.tls_cert and server.tls_key must be set together")
+	}
+	switch {
+	case mode == TLSFiles && s.TLSCert == "" && s.TLSKey == "":
+		p = append(p, "server.tls.mode is files, so set server.tls_cert and server.tls_key to your certificate and key files (or use mode auto and Signalith makes its own)")
+	case mode == TLSAuto && (s.TLSCert != "" || s.TLSKey != ""):
+		p = append(p, "server.tls_cert and server.tls_key are set, but server.tls.mode is auto, which makes its own certificate. Set server.tls.mode: files to use them, or remove them")
+	case mode == TLSOff && (s.TLSCert != "" || s.TLSKey != ""):
+		// They would be used for nothing but syslog over TLS, which is
+		// easy to miss: they belong to mode files.
+		p = append(p, "server.tls_cert and server.tls_key are set, but server.tls.mode is off, so Signalith serves plain HTTP and does not use them. Set server.tls.mode: files to use them, or remove them")
+	case s.TLSCert != "" && s.TLSKey != "":
+		if _, err := tls.LoadX509KeyPair(resolve(s.TLSCert), resolve(s.TLSKey)); err != nil {
+			p = append(p, fmt.Sprintf("server.tls_cert and tls_key: %v", err))
+		}
+	}
+	if s.TLS != nil {
+		switch strings.ToLower(strings.TrimSpace(s.TLS.PlaintextIngest)) {
+		case "", "allow", "deny":
+		default:
+			p = append(p, fmt.Sprintf("server.tls.plaintext_ingest %q must be allow or deny", s.TLS.PlaintextIngest))
+		}
+		for i, n := range s.TLS.Names {
+			if !validCertName(n) {
+				p = append(p, fmt.Sprintf("server.tls.names[%d] %q must be a host name or IP address, such as siem.example.com or 192.168.1.20", i, n))
+			}
+		}
+	}
+	for i, a := range s.TrustedProxies {
+		if _, err := parseAllow(a); err != nil {
+			p = append(p, fmt.Sprintf("server.trusted_proxies[%d] %q must be an IP address or a CIDR such as 10.0.0.5 or 10.0.0.0/24", i, a))
+		}
+	}
+	return p
+}
+
+// validCertName reports whether n can go in a certificate as a host name
+// or IP address: the same rules as the addresses agents send to.
+func validCertName(n string) bool {
+	n = strings.TrimSpace(n)
+	if a, err := netip.ParseAddr(n); err == nil {
+		return a.Zone() == ""
+	}
+	_, err := agents.ParseServerURL("https://" + n)
+	return err == nil && !strings.ContainsAny(n, ":/")
 }
 
 // OpenSearch is the event store connection.
@@ -391,7 +634,8 @@ type Syslog struct {
 	UDP string `yaml:"udp"`
 	TCP string `yaml:"tcp"`
 	// TLS is a host:port for syslog over TLS (RFC 5425), such as
-	// 0.0.0.0:6514. It uses server.tls_cert and server.tls_key.
+	// 0.0.0.0:6514. It uses the web UI's certificate: server.tls_cert and
+	// tls_key when set, else the one Signalith makes itself.
 	TLS string `yaml:"tls"`
 	// Allow lists the sender IP addresses or CIDRs that may send syslog.
 	// Empty allows any sender.
@@ -464,9 +708,6 @@ func (s *Syslog) problems(server Server) []string {
 				p = append(p, fmt.Sprintf("%s and %s both use %s; give them different ports", tcp[i].setting, tcp[j].setting, tcp[j].addr))
 			}
 		}
-	}
-	if s.TLS != "" && (server.TLSCert == "" || server.TLSKey == "") {
-		p = append(p, "syslog.tls needs server.tls_cert and server.tls_key; syslog over TLS uses the same certificate as the web UI")
 	}
 	if s.PublicPort < 0 || s.PublicPort > 65535 {
 		p = append(p, fmt.Sprintf("syslog.public_port %d must be 1-65535 (or 0 for the port syslog.udp and syslog.tcp listen on)", s.PublicPort))
@@ -598,14 +839,14 @@ func (c *Config) IntelFeedsFile() string {
 // LookupsDir returns the absolute lookups folder.
 func (c *Config) LookupsDir() string { return c.resolve(c.Lookups.Dir) }
 
-// StateDir is where Signalith keeps files it makes for itself, such as its
-// HTTPS certificate: SIGNALITH_STATE_DIR when set, else the folder that
-// holds lookups.dir.
-func (c *Config) StateDir() string {
-	if d := os.Getenv("SIGNALITH_STATE_DIR"); d != "" {
-		return d
-	}
-	return filepath.Dir(c.LookupsDir())
+// TLSDir is where Signalith keeps its own certificate authority and HTTPS
+// certificate (server.tls.mode auto).
+func (c *Config) TLSDir() string { return filepath.Join(c.StateDir(), "tls") }
+
+// TLSFiles returns server.tls_cert and tls_key, with relative paths made
+// relative to the folder this config file is in.
+func (c *Config) TLSFiles() (cert, key string) {
+	return c.resolve(c.Server.TLSCert), c.resolve(c.Server.TLSKey)
 }
 
 func (c *Config) resolve(d string) string {
@@ -653,9 +894,12 @@ func (c *Config) Path() string { return c.path }
 func (c *Config) HasSection(name string) bool { return c.sections[name] }
 
 // Load reads a config file, applies the settings changed on the Settings
-// page, defaults and environment overrides, and validates the result.
-// Settings from the page that cannot be used never stop Signalith: it
-// starts with signalith.yaml alone, and SettingsProblem says why.
+// page, defaults and environment overrides, decrypts the passwords and keys
+// stored encrypted, and validates the result. Settings from the page that
+// cannot be used never stop Signalith: it starts with signalith.yaml
+// alone, and SettingsProblem says why. A password or key that cannot be
+// decrypted is left out and reported by Warnings rather than failing (see
+// Unreadable and PageUnreadable).
 func Load(path string) (*Config, error) {
 	return loadWith(path, nil)
 }
@@ -666,6 +910,35 @@ func Load(path string) (*Config, error) {
 func LoadSetAside(path string, keys []string, reason string) (*Config, error) {
 	now := time.Now()
 	return loadWith(path, func(p *PageSettings) { p.refuse(keys, reason, now) })
+}
+
+// SetAsideAlong returns keys and the other settings changed on the
+// Settings page that cannot be used once keys are set aside. Setting a
+// change aside must not leave the page's settings in a combination that
+// does not validate, or the next start would use none of them: setting
+// server.tls.mode aside, for one, takes along the certificate files saved
+// with it, which the mode in signalith.yaml refuses.
+func SetAsideAlong(path string, keys []string) []string {
+	out := slices.Clone(keys)
+	now := time.Now()
+	for range len(Registry) {
+		s, err := loadSaved(path, func(p *PageSettings) { p.refuse(out, "set aside", now) })
+		if err != nil || s.PageErr != nil || s.Problems == nil {
+			return out
+		}
+		more := false
+		for _, p := range s.Problems {
+			for _, k := range ProblemKeys(p) {
+				if s.Config.Source(k).Kind == FromPage && !slices.Contains(out, k) {
+					out, more = append(out, k), true
+				}
+			}
+		}
+		if !more {
+			return out
+		}
+	}
+	return out
 }
 
 func loadWith(path string, adjust func(*PageSettings)) (*Config, error) {
@@ -746,6 +1019,14 @@ func LoadFile(path string) (*Config, error) {
 	return c, nil
 }
 
+// LoadUnchecked reads a config file with defaults and environment
+// overrides, but neither decrypts nor checks it, and leaves out the
+// settings changed on the Settings page: for commands that look at, or
+// repair, a file that may not load.
+func LoadUnchecked(path string) (*Config, error) {
+	return readAndEnv(path)
+}
+
 // Saved is the configuration as saved, whether or not it is valid:
 // signalith.yaml, the settings changed on the Settings page, and the
 // environment. The Settings page shows it.
@@ -818,6 +1099,9 @@ func build(path string, page *PageSettings) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Both use the same master key.
+	base.keys = c.Keyring()
+	base.openSecrets()
 	// Validating fills in worked-out values, such as the public address.
 	_ = base.Validate()
 	c.layers.base = base
@@ -826,10 +1110,15 @@ func build(path string, page *PageSettings) (*Config, error) {
 			return nil, &PageFileError{Path: c.layers.pageFile, Err: err}
 		}
 	}
+	// The passwords and keys in signalith.yaml are decrypted once the
+	// page's settings are in: one the page replaces is not needed, as one
+	// an environment variable replaces is not.
+	c.openSecrets()
 	return c, nil
 }
 
-// readAndEnv reads signalith.yaml with defaults and the environment.
+// readAndEnv reads signalith.yaml with defaults and the environment,
+// without decrypting it.
 func readAndEnv(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -838,11 +1127,9 @@ func readAndEnv(path string) (*Config, error) {
 		}
 		return nil, err
 	}
-	c := Default()
-	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	dec.KnownFields(true)
-	if err := dec.Decode(c); err != nil && err.Error() != "EOF" {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	c, err := decodeFile(path, data)
+	if err != nil {
+		return nil, err
 	}
 	c.path = path
 	c.layers = &layers{file: map[string]bool{}, env: map[string]string{}, page: map[string]*PageEntry{}, refused: map[string]*PageEntry{}}
@@ -854,11 +1141,32 @@ func readAndEnv(path string) (*Config, error) {
 		}
 		fileKeys(top, "", c.layers.file)
 	}
+	// Keep the file's own view, before the environment changes anything.
+	if c.file, err = decodeFile(path, data); err != nil {
+		return nil, err
+	}
+	c.plain = plainLabels(c.file.secretRefs())
+	inURL, warnings := addressPlain(c.file.addressSecrets())
+	c.plain, c.addressWarnings = append(c.plain, inURL...), warnings
 	if err := c.applyEnv(); err != nil {
+		return nil, err
+	}
+	if err := c.applyAdminHashFile(); err != nil {
 		return nil, err
 	}
 	c.layers.pageFileEnv = strings.TrimSpace(os.Getenv("SIGNALITH_SETTINGS_FILE")) != ""
 	c.layers.pageFile = c.SettingsFile()
+	return c, nil
+}
+
+// decodeFile decodes signalith.yaml over the defaults.
+func decodeFile(path string, data []byte) (*Config, error) {
+	c := Default()
+	dec := yaml.NewDecoder(strings.NewReader(string(data)))
+	dec.KnownFields(true)
+	if err := dec.Decode(c); err != nil && err.Error() != "EOF" {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	return c, nil
 }
 
@@ -879,7 +1187,99 @@ func (c *Config) fromEnv(key, name string) {
 	}
 }
 
-// applyEnv lets secrets come from the environment instead of the file.
+// envSecret returns the secret in the environment variable name, or in
+// the file named by name_FILE (how Docker and Kubernetes pass secrets),
+// without its trailing newline, and which of the two it came from (both,
+// joined by " and ", when both are set). An unreadable or empty file is
+// an error, and so is setting both, except for SIGNALITH_INGEST_TOKEN,
+// where each adds a token.
+func envSecret(name string) ([]string, string, error) {
+	var out []string
+	var from []string
+	if v := os.Getenv(name); v != "" {
+		out = append(out, v)
+		from = append(from, name)
+	}
+	file := os.Getenv(name + "_FILE")
+	if file == "" {
+		return out, strings.Join(from, " and "), nil
+	}
+	if len(out) > 0 && name != "SIGNALITH_INGEST_TOKEN" {
+		return nil, "", fmt.Errorf("%s and %s_FILE are both set; set only one of them", name, name)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, "", fmt.Errorf("%s_FILE is set to %s, which cannot be read: %v", name, file, err)
+	}
+	v := strings.TrimSuffix(strings.TrimSuffix(string(b), "\n"), "\r")
+	if strings.TrimSpace(v) == "" {
+		return nil, "", fmt.Errorf("%s_FILE is set to %s, which is empty", name, file)
+	}
+	return append(out, v), strings.Join(append(from, name+"_FILE"), " and "), nil
+}
+
+// AdminHashFile is where signalith passwd keeps the built-in admin's
+// password hash when signalith.yaml cannot hold it: the password comes
+// from SIGNALITH_ADMIN_PASSWORD or SIGNALITH_ADMIN_PASSWORD_FILE (as in
+// Docker, where the first password is generated and signalith.yaml is
+// read-only). While the file exists it replaces both.
+func (c *Config) AdminHashFile() string { return AdminHashFileIn(c.StateDir()) }
+
+// AdminHashFileIn is AdminHashFile for the state folder dir.
+func AdminHashFileIn(dir string) string { return filepath.Join(dir, "admin-password-hash") }
+
+// AdminPasswordChanged returns AdminHashFile when the built-in admin's
+// password comes from it, else "".
+func (c *Config) AdminPasswordChanged() string { return c.adminHashFile }
+
+// StateDirFor returns StateDir for the config file at path, reading only
+// lookups.dir from it, so it works when the rest of the file does not
+// load without the server's environment.
+func StateDirFor(path string) string {
+	c := Default()
+	c.path = path
+	if data, err := os.ReadFile(path); err == nil {
+		var f struct {
+			Lookups Lookups `yaml:"lookups"`
+		}
+		if yaml.Unmarshal(data, &f) == nil && f.Lookups.Dir != "" {
+			c.Lookups.Dir = f.Lookups.Dir
+		}
+	}
+	if v := os.Getenv("SIGNALITH_LOOKUPS_DIR"); v != "" {
+		c.Lookups.Dir = v
+	}
+	return c.StateDir()
+}
+
+// applyAdminHashFile uses the password hash in AdminHashFile when there
+// is one.
+func (c *Config) applyAdminHashFile() error {
+	path := c.AdminHashFile()
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("the built-in admin's password, as changed with signalith passwd: %w", err)
+	}
+	h := strings.TrimSpace(string(b))
+	if _, err := bcrypt.Cost([]byte(h)); err != nil {
+		return fmt.Errorf("%s does not hold a password hash. Set the password again with signalith passwd, "+
+			"or delete the file to go back to the password in signalith.yaml or SIGNALITH_ADMIN_PASSWORD(_FILE)", path)
+	}
+	c.Auth.AdminPasswordHash = h
+	c.adminHashFile = path
+	return nil
+}
+
+// applyEnv lets secrets come from the environment instead of the file,
+// either in the variable itself or in a file it names (the variable's name
+// with _FILE added).
 func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_URL"); v != "" {
 		c.OpenSearch.URL = v
@@ -889,9 +1289,11 @@ func (c *Config) applyEnv() error {
 		c.OpenSearch.Username = v
 		c.fromEnv("opensearch.username", "SIGNALITH_OPENSEARCH_USERNAME")
 	}
-	if v := os.Getenv("SIGNALITH_OPENSEARCH_PASSWORD"); v != "" {
-		c.OpenSearch.Password = v
-		c.fromEnv("opensearch.password", "SIGNALITH_OPENSEARCH_PASSWORD")
+	if v, from, err := envSecret("SIGNALITH_OPENSEARCH_PASSWORD"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.OpenSearch.Password = v[0]
+		c.fromEnv("opensearch.password", from)
 	}
 	if v := strings.TrimSpace(os.Getenv("SIGNALITH_OPENSEARCH_PROXY")); v != "" {
 		c.OpenSearch.Proxy = v
@@ -906,6 +1308,7 @@ func (c *Config) applyEnv() error {
 			return fmt.Errorf("SIGNALITH_PUBLIC_URL %q: %v", v, err)
 		}
 		c.Server.PublicURL = v
+		c.publicURLFromEnv = true
 		c.fromEnv("server.public_url", "SIGNALITH_PUBLIC_URL")
 	}
 	if v := strings.TrimSpace(os.Getenv("SIGNALITH_NODE_URL")); v != "" {
@@ -919,20 +1322,25 @@ func (c *Config) applyEnv() error {
 		c.Cluster.NodeName = v
 		c.fromEnv("cluster.node_name", "SIGNALITH_NODE_NAME")
 	}
-	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
-		h, err := envPasswordHash(v)
+	if v, from, err := envSecret("SIGNALITH_ADMIN_PASSWORD"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		h, err := envPasswordHash(v[0])
 		if err != nil {
-			return err
+			return fmt.Errorf("SIGNALITH_ADMIN_PASSWORD: %w", err)
 		}
 		c.Auth.AdminPasswordHash = h
-		c.fromEnv("auth.admin_password_hash", "SIGNALITH_ADMIN_PASSWORD")
+		c.publicAdminPassword = v[0] == publicAdminPassword
+		c.fromEnv("auth.admin_password_hash", from)
 	}
 	if v := os.Getenv("SIGNALITH_USERS_FILE"); v != "" {
 		c.Auth.UsersFile = v
 		c.fromEnv("auth.users_file", "SIGNALITH_USERS_FILE")
 	}
-	if v := os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD"); v != "" {
-		c.ldapBindPassword = v
+	if v, _, err := envSecret("SIGNALITH_LDAP_BIND_PASSWORD"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.ldapBindPassword = v[0]
 	}
 	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
 		c.Detections.Dir = v
@@ -954,13 +1362,21 @@ func (c *Config) applyEnv() error {
 		c.Retention.ArchiveDir = v
 		c.fromEnv("retention.archive_dir", "SIGNALITH_ARCHIVE_DIR")
 	}
-	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
-		c.Assistant.APIKey = v
-		c.fromEnv("assistant.api_key", "SIGNALITH_ASSISTANT_API_KEY")
+	if v, from, err := envSecret("SIGNALITH_ASSISTANT_API_KEY"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.Assistant.APIKey = v[0]
+		c.fromEnv("assistant.api_key", from)
 	}
-	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
-		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
-		c.fromEnv("ingest.tokens", "SIGNALITH_INGEST_TOKEN")
+	if v, from, err := envSecret("SIGNALITH_INGEST_TOKEN"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		// The file's token comes first, so it is the one the Add data
+		// page gives new agents: the variable is how an older token is
+		// kept for agents that still use it.
+		slices.Reverse(v)
+		c.Ingest.Tokens = append(c.Ingest.Tokens, v...)
+		c.fromEnv("ingest.tokens", from)
 	}
 	// "off" turns a syslog listener off, since an empty variable is
 	// indistinguishable from an unset one.
@@ -1026,13 +1442,29 @@ func (c *Config) Validate() error {
 			p = append(p, fmt.Sprintf("server.shared_addresses[%d] %q must be an IP address or a CIDR such as 10.0.0.0/24", i, a))
 		}
 	}
-	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
-		p = append(p, "server.tls_cert and server.tls_key must be set together")
+	// Validating again starts from public_url as it was set: empty when
+	// it was worked out from the listen address, or the http:// address
+	// read as https:// below.
+	if c.publicURLDerived {
+		c.Server.PublicURL = ""
+	} else if c.httpPublicURL != "" && c.Server.PublicURL == httpsForHTTP(c.httpPublicURL) {
+		c.Server.PublicURL = c.httpPublicURL
 	}
-	if c.Server.PublicURL == "" || c.publicURLDerived {
+	c.publicURLDerived, c.httpPublicURL = false, ""
+	c.Server.proxied = c.Server.legacyHTTP() && strings.HasPrefix(strings.ToLower(c.Server.PublicURL), "https://")
+	p = append(p, c.Server.tlsProblems(c.resolve)...)
+	if c.Server.PublicURL == "" {
 		c.Server.PublicURL, c.publicURLDerived = defaultPublicURL(c.Server), true
-	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
+	} else if u, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
+	} else if u.Scheme == "http" && c.Server.HTTPS() {
+		// Most likely written when Signalith served plain HTTP (in the
+		// file, or in SIGNALITH_PUBLIC_URL as older Docker examples show
+		// it). The same port serves HTTPS now, so that is the address;
+		// Warnings asks for the setting to be changed. With no port it
+		// was port 80, which https:// alone would not mean.
+		c.httpPublicURL = c.Server.PublicURL
+		c.Server.PublicURL = httpsForHTTP(c.Server.PublicURL)
 	}
 	if c.Server.NodeURL != "" {
 		if _, err := agents.ParseServerURL(c.Server.NodeURL); err != nil {
@@ -1084,6 +1516,11 @@ func (c *Config) Validate() error {
 			for _, pr := range s.Problems() {
 				msg := pr.Message
 				if pr.Field == "bind_password" {
+					if c.locked["auth.ldap.bind_password"] {
+						// Reported by Warnings; directory sign-in fails
+						// without trying an empty password.
+						continue
+					}
 					msg = "set auth.ldap.bind_password, or the SIGNALITH_LDAP_BIND_PASSWORD environment variable"
 				}
 				p = append(p, "auth.ldap."+pr.Field+": "+msg)
@@ -1107,7 +1544,8 @@ func (c *Config) Validate() error {
 	switch c.Assistant.Provider {
 	case "":
 	case "anthropic":
-		if c.Assistant.APIKey == "" {
+		// A key that cannot be decrypted is reported by Warnings instead.
+		if c.Assistant.APIKey == "" && !c.locked["assistant.api_key"] && c.pageLocked["assistant.api_key"] == "" {
 			p = append(p, "assistant.api_key is required for anthropic; set it or SIGNALITH_ASSISTANT_API_KEY")
 		}
 	case "openai":
@@ -1159,15 +1597,57 @@ func (c *Config) Warnings() []string {
 	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
-	return w
+	if c.publicAdminPassword && c.adminHashFile == "" {
+		w = append(w, "The built-in admin's password is "+publicAdminPassword+", the example in an older docker-compose.yml, which anyone can look up. "+
+			"Remove SIGNALITH_ADMIN_PASSWORD (the Docker quick start now makes a password; from the Signalith folder: "+
+			"docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password), or set a new one with signalith passwd.")
+	}
+	for _, t := range c.Ingest.Tokens {
+		if IsPublicIngestToken(t) {
+			fix := "Give each agent a new configuration from the Add data page, which has this server's own token, then remove " + t
+			if len(c.Ingest.Tokens) == 1 {
+				fix = "Add a token of your own under ingest.tokens (signalith init makes one), give each agent a new configuration from the Add data page, then remove " + t
+			}
+			w = append(w, "ingest.tokens includes "+t+", the example token in an older docker-compose.yml, which anyone can look up and use to send events. "+
+				fix+" (in ingest.tokens or SIGNALITH_INGEST_TOKEN).")
+		}
+	}
+	if c.httpPublicURL != "" {
+		where, fix := "server.public_url is "+c.httpPublicURL, "Change public_url to "+c.Server.PublicURL+" in signalith.yaml"
+		if c.Source("server.public_url").Kind == FromPage {
+			fix = "Change it to " + c.Server.PublicURL + " on the Settings page"
+		}
+		if c.publicURLFromEnv {
+			where, fix = "SIGNALITH_PUBLIC_URL is "+c.httpPublicURL, "Change SIGNALITH_PUBLIC_URL to "+c.Server.PublicURL+" (in docker-compose.yml, or wherever it is set)"
+		}
+		w = append(w, where+", but Signalith serves HTTPS on that port now, so agents are set up with "+c.Server.PublicURL+". "+
+			fix+". If a reverse proxy in front adds HTTPS, use the proxy's https:// address instead.")
+	}
+	if host, _, err := net.SplitHostPort(c.Server.Listen); err == nil && !c.Server.HTTPS() && !isLoopback(host) && len(c.Server.TrustedProxies) == 0 {
+		w = append(w, "HTTPS is off (server.tls.mode: off) and server.listen accepts connections from other machines, so passwords, sessions, "+
+			"the ingest token and events cross the network unencrypted unless a reverse proxy in front adds HTTPS. Turn it on with server.tls.mode: auto, "+
+			"or list the proxy's address under server.trusted_proxies.")
+	}
+	return append(w, c.secretWarnings()...)
 }
+
+// Secrets from older example files, which anyone can look up. Warnings
+// names them while they are in use.
+const publicAdminPassword = "change-me-please"
+
+var publicIngestTokens = []string{"change-this-ingest-token"}
+
+// IsPublicIngestToken reports whether t is the example ingest token from an
+// older docker-compose.yml, which anyone can look up. The Add data page
+// never hands it to new agents.
+func IsPublicIngestToken(t string) bool { return slices.Contains(publicIngestTokens, t) }
 
 // OpenSearchConnection returns the settings Signalith connects to
 // OpenSearch with.
 func (c *Config) OpenSearchConnection() store.Config {
 	ca, cert, key := c.OpenSearchTLSFiles()
 	return store.Config{
-		URL: c.OpenSearch.URL, Username: c.OpenSearch.Username, Password: c.OpenSearch.Password,
+		URL: c.OpenSearch.URL, Username: c.OpenSearch.Username, Password: secrets.New("opensearch.password", c.OpenSearch.Password),
 		CAFile: ca, CertFile: cert, KeyFile: key,
 		TLSSkipVerify: c.OpenSearch.TLSSkipVerify, Proxy: c.OpenSearch.Proxy,
 	}
@@ -1205,14 +1685,29 @@ func ValidNodeName(name string) bool {
 	return true
 }
 
+// httpsForHTTP is an http:// public_url read as https://, now that the
+// same port serves HTTPS: the same host and port, with :80 when it had
+// none, which https:// alone would not mean.
+func httpsForHTTP(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	host := u.Host
+	if u.Port() == "" {
+		host = net.JoinHostPort(u.Hostname(), "80")
+	}
+	return "https://" + host
+}
+
 func defaultPublicURL(s Server) string {
 	host, port, err := net.SplitHostPort(s.Listen)
 	if err != nil {
 		return ""
 	}
-	scheme := "http"
-	if s.TLSCert != "" {
-		scheme = "https"
+	scheme := "https"
+	if !s.HTTPS() {
+		scheme = "http"
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "localhost"
@@ -1248,16 +1743,39 @@ func RandomToken(nBytes int) string {
 	return hex.EncodeToString(b)
 }
 
-// Save writes the config with a header comment explaining each section.
-// A config with settings from the Settings page is refused, so they stay
-// in their own file; load it with LoadFile to change signalith.yaml.
+// Save writes the config with a header comment explaining each section,
+// with its passwords and keys encrypted. A config from Load is written as
+// its file had it: settings from environment variables are never written
+// out, and neither are changes made after loading (use SetSecret or
+// SetAdminPasswordHash to change one setting in a file). A config with
+// settings from the Settings page is refused, so they stay in their own
+// file; load it with LoadFile to change signalith.yaml.
 func (c *Config) Save(path string) error {
 	if len(c.PageKeys()) > 0 {
 		return errors.New("this configuration includes settings from the Settings page; load signalith.yaml with LoadFile to save it")
 	}
+	src := c
+	if c.file != nil {
+		src = c.file
+	}
+	if c.path == "" {
+		// The master key goes with the file: a keyring made before the
+		// config had a file is made again for its folder.
+		c.path, c.keys = path, nil
+	}
 	var doc yaml.Node
-	if err := doc.Encode(c); err != nil {
+	if err := doc.Encode(src); err != nil {
 		return err
+	}
+	for _, n := range secretNodes(&doc) {
+		if !isPlain(n.node.Value, n.envRefs) {
+			continue
+		}
+		sealed, err := c.Keyring().Seal(n.field, n.node.Value)
+		if err != nil {
+			return err
+		}
+		n.node.Value, n.node.Style = sealed, 0
 	}
 	root := &doc
 	if root.Kind == yaml.DocumentNode && len(root.Content) == 1 {
@@ -1272,32 +1790,38 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
-			return err
-		}
-	}
-	content := header + string(out)
-	return os.WriteFile(path, []byte(content), 0o600)
+	return securefile.WriteFile(path, []byte(header+string(out)))
 }
 
 // sectionComments are written just above a section of the saved file.
 var sectionComments = map[string]string{
 	"syslog": `Syslog from systems that cannot run an agent (firewalls, switches, routers,
-appliances, servers). Point them at this server on UDP or TCP port 514.
-An empty address turns that listener off. tls (for example 0.0.0.0:6514)
-uses server.tls_cert and server.tls_key. allow limits who may send, as IPs
-or CIDRs such as 10.0.0.0/8; empty allows any sender.`,
+appliances, servers). Point them at this server on UDP or TCP port 514, or
+TLS port 6514 (it uses the web UI's certificate). An empty address turns
+that listener off. allow limits who may send, as IPs or CIDRs such as
+10.0.0.0/8; empty allows any sender.`,
 }
 
 const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
-# SIGNALITH_LDAP_BIND_PASSWORD.
+# SIGNALITH_LDAP_BIND_PASSWORD, or from files named by the same variables with
+# _FILE added (such as SIGNALITH_ADMIN_PASSWORD_FILE). Passwords and keys
+# below are encrypted (enc:v1:...) with Signalith's master key; a plain value
+# pasted in works too, and "signalith secrets encrypt" encrypts it (see
+# docs/encryption.md).
 #
 # server.listen      address the UI/API binds to (0.0.0.0:8080 for all interfaces)
 # server.public_url  URL agents use to reach this server (or SIGNALITH_PUBLIC_URL)
+# server.tls.mode    auto: HTTPS with a certificate Signalith makes and renews itself
+#                    (browsers warn until you trust its CA; see docs/https.md);
+#                    files: your own certificate in server.tls_cert and tls_key;
+#                    off: plain HTTP, only behind a reverse proxy that adds HTTPS
+# server.tls.names   extra host names or IPs for the auto certificate
+# server.tls.plaintext_ingest  allow or deny agents sending over plain http://
+# server.trusted_proxies  IPs or CIDRs of reverse proxies whose X-Forwarded-Proto
+#                    header is believed
 # server.max_connections  open connections allowed at once (default 10000); one
 #                    client may hold a tenth of them
 # server.shared_addresses  IPs or CIDRs of a proxy, load balancer or NAT that many
@@ -1318,7 +1842,7 @@ const header = `# Signalith configuration.
 #                    they arrived, with their own time in device_time
 # syslog.udp, .tcp   receive syslog from devices without an agent, e.g. 0.0.0.0:514
 #                    (empty = off; SIGNALITH_SYSLOG_UDP / _TCP override, "off" turns off)
-# syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses server.tls_cert and tls_key
+# syslog.tls         syslog over TLS, e.g. 0.0.0.0:6514; uses the web UI's certificate
 # syslog.allow       sender IPs or CIDRs allowed to send syslog (empty = any sender)
 # syslog.public_port port devices send to, if forwarded to another (Docker: 514 -> 5514)
 # detections.dir     folder for custom detections (relative to this file)

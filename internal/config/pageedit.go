@@ -131,7 +131,9 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		default:
 			touched[key] = true
 			delete(typed, key)
-			page.SetSecret(key, "", "", e.By, e.At)
+			if err := page.SetSecret(key, "", "", e.By, e.At); err != nil {
+				return nil, err
+			}
 		}
 	}
 	for _, key := range e.Reset {
@@ -167,23 +169,34 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 		}
 		for _, key := range sortedKeys(typed) {
 			s, _ := Lookup(key)
-			page.SetSecret(key, typed[key], s.SentTo(c), e.By, e.At)
+			// Encrypted with the master key; a key is made if there is
+			// none yet.
+			if err := page.SetSecret(key, typed[key], s.SentTo(c), e.By, e.At); err != nil {
+				return nil, err
+			}
 		}
 	}
+	// Certificate files entered now are used only with the mode set to
+	// files, as the page shows them; only ones saved before the mode
+	// existed are read as files mode without it.
+	_, cert := e.Values["server.tls_cert"]
+	_, key := e.Values["server.tls_key"]
+	page.explicitMode = cert || key
 	after, err := build(path, page)
 	if err != nil {
 		return nil, err
 	}
+	page.explicitMode = false
 	res.Page, res.Config = page, after
 	fields, rest := FieldProblems(after, problemsOf(after))
 	for _, k := range sortedKeys(fields) {
 		res.setField(k, fields[k])
 	}
 	res.Problems = append(res.Problems, rest...)
-	if touched["server.tls_cert"] || touched["server.tls_key"] {
-		if c, k := after.Server.TLSCert, after.Server.TLSKey; c != "" && k != "" {
+	if (touched["server.tls_cert"] || touched["server.tls_key"] || touched["server.tls.mode"]) && after.Server.TLSMode() == TLSFiles {
+		if c, k := after.TLSFiles(); c != "" && k != "" {
 			if _, err := tls.LoadX509KeyPair(c, k); err != nil {
-				res.setField("server.tls_cert", "The certificate and key files cannot be used: "+err.Error())
+				res.setField("server.tls_cert", "The certificate and key files can't be used: "+err.Error()+".")
 			}
 		}
 	}

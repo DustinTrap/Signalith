@@ -69,6 +69,13 @@ disabled or deleted there. Change its password on the server:
 signalith passwd -c /etc/signalith/signalith.yaml
 ```
 
+With the Docker quick start, run
+`docker compose -f deploy/docker/docker-compose.yml exec signalith signalith passwd` and
+then `docker compose -f deploy/docker/docker-compose.yml restart signalith`. There the
+first password comes from a file the setup step made (`signalith initial-password` shows
+it), and the new one is kept in `admin-password-hash` in the `signalith-data` volume,
+where it replaces the first one.
+
 Keep its password somewhere safe and use your own account day to day. No local user
 or directory user can have the built-in admin's name.
 
@@ -539,7 +546,7 @@ page itself.
 `DELETE /api/dashboards/{id}`, `POST /api/dashboards/{id}/panels`,
 `POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`.
 
-**Admin:** `GET /api/agents/config`, `POST /api/detections`,
+**Admin:** `GET /api/agents/config`, `POST /api/tls/names`, `POST /api/detections`,
 `POST /api/detections/test`, `POST /api/detections/sigma`,
 `PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,
@@ -553,7 +560,8 @@ page itself.
 
 A route added without a role is admin-only, and a test fails until it gets one. That
 includes routes registered outside the role table, straight on the server's outer
-router: any `/api/` route there other than the three public ones is admin-only.
+router: any `/api/` route there other than the public ones (sign-in, sign-out, agent
+ingest and the CA certificate, `GET /api/tls/ca.pem`) is admin-only.
 
 A refused request:
 

@@ -8,17 +8,28 @@ package integration
 // none takes over while its files differ, and a server that crashed and
 // starts again at once keeps its identity.
 //
-// The CI cluster job runs them against a real OpenSearch:
+// The CI cluster job runs them against the secured OpenSearch of the
+// Docker quick start, as servers that share one OpenSearch need it:
 //
-//	SIGNALITH_TEST_OPENSEARCH=http://localhost:9200 go test -tags integration -run '^TestCluster' ./internal/integration/
+//	SIGNALITH_TEST_OPENSEARCH=https://localhost:9200 SIGNALITH_TEST_OPENSEARCH_CA=... \
+//	SIGNALITH_TEST_OPENSEARCH_CERT=... SIGNALITH_TEST_OPENSEARCH_KEY=... \
+//	go test -tags integration -run '^TestCluster' ./internal/integration/
 //
+// The servers get the same CA, certificate and key (see storeConfig), and
+// index prefixes under signalith*, which is all that certificate may use.
 // Without SIGNALITH_TEST_OPENSEARCH they run against the in-memory fake
 // (internal/cluster/ostest), so they can be tried on a laptop; in CI that
 // is an error rather than a quiet switch. They are Linux-only because they
 // stop processes with kill -9 and SIGSTOP.
+//
+// Each server serves HTTPS with its own certificate, as by default: the
+// tests ask /readyz over plain HTTP on the same port, as a load balancer
+// may, and call the API over HTTPS, trusting that server's own CA.
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,7 +103,8 @@ type clusterHarness struct {
 // the servers made when it ends.
 func newClusterHarness(t *testing.T) *clusterHarness {
 	t.Helper()
-	h := &clusterHarness{t: t, prefix: "sigcl" + config.RandomToken(3), root: t.TempDir()}
+	// Under signalith*, the indices a secured OpenSearch lets Signalith use.
+	h := &clusterHarness{t: t, prefix: "signalithcl" + config.RandomToken(3), root: t.TempDir()}
 	h.url = os.Getenv("SIGNALITH_TEST_OPENSEARCH")
 	if h.url == "" {
 		if os.Getenv("CI") != "" {
@@ -100,7 +112,7 @@ func newClusterHarness(t *testing.T) *clusterHarness {
 		}
 		h.url = ostest.New(t).URL
 	}
-	h.os = store.New(store.Config{URL: h.url})
+	h.os = store.New(storeConfig(h.url))
 	ctx := context.Background()
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
@@ -124,7 +136,9 @@ func newClusterHarness(t *testing.T) *clusterHarness {
 			for _, n := range names {
 				_ = h.os.DeleteIndex(ctx, n)
 			}
-			_ = h.os.Do(ctx, http.MethodDelete, "/_index_template/"+h.prefix, nil, nil)
+			for _, tpl := range []string{h.prefix, h.prefix + "_runtime"} {
+				_ = h.os.Do(ctx, http.MethodDelete, "/_index_template/"+tpl, nil, nil)
+			}
 		})
 	}
 	return h
@@ -139,6 +153,8 @@ type testServer struct {
 	port int
 	cmd  *exec.Cmd
 	done chan struct{}
+	// api calls the server over HTTPS, trusting its own CA.
+	api *http.Client
 }
 
 // serverOptions are what a server is started with.
@@ -161,6 +177,12 @@ func (h *clusterHarness) add(name string, o serverOptions) *testServer {
 	}
 	cfg := fmt.Sprintf("server:\n  listen: 127.0.0.1:%d\nopensearch:\n  url: %q\n  index_prefix: %s\ncluster:\n  node_name: %s\n",
 		s.port, h.url, h.prefix, name)
+	tlsFiles := storeConfig(h.url)
+	for _, f := range []struct{ key, file string }{{"ca_file", tlsFiles.CAFile}, {"cert_file", tlsFiles.CertFile}, {"key_file", tlsFiles.KeyFile}} {
+		if f.file != "" {
+			cfg = strings.Replace(cfg, "opensearch:\n", fmt.Sprintf("opensearch:\n  %s: %q\n", f.key, f.file), 1)
+		}
+	}
 	if o.noJobs {
 		cfg += "detections:\n  scheduler: false\n"
 	}
@@ -231,6 +253,23 @@ func (s *testServer) start() {
 		}
 		return s.readyz() == http.StatusOK
 	})
+	s.api = s.httpsClient()
+}
+
+// httpsClient is a client that trusts the server's own certificate
+// authority, which it made in its state folder.
+func (s *testServer) httpsClient() *http.Client {
+	t := s.h.t
+	t.Helper()
+	pem, err := os.ReadFile(filepath.Join(s.dir, "tls", "ca.pem"))
+	if err != nil {
+		t.Fatalf("%s has no certificate authority in its state folder: %v", s.name, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		t.Fatalf("%s: no certificate in tls/ca.pem", s.name)
+	}
+	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 }
 
 func (s *testServer) logPath() string { return filepath.Join(s.dir, "signalith.log") }
@@ -272,6 +311,8 @@ func (s *testServer) resume() {
 
 var clusterHTTP = &http.Client{Timeout: 5 * time.Second}
 
+// readyz asks /readyz over plain HTTP, which answers it on the HTTPS port
+// as a load balancer's check needs.
 func (s *testServer) readyz() int {
 	resp, err := clusterHTTP.Get(fmt.Sprintf("http://127.0.0.1:%d/readyz", s.port))
 	if err != nil {
@@ -307,9 +348,13 @@ type clusterView struct {
 // view reads the server's GET /api/cluster; ok is false when it did not
 // answer.
 func (s *testServer) view() (v clusterView, ok bool) {
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/api/cluster", s.port), nil)
+	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("https://127.0.0.1:%d/api/cluster", s.port), nil)
 	req.SetBasicAuth("admin", clusterPassword)
-	resp, err := clusterHTTP.Do(req)
+	client := s.api
+	if client == nil {
+		return v, false
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return v, false
 	}

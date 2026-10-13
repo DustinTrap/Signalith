@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,6 +25,10 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/cluster/ostest"
 	"github.com/jrsamsanchez/signalith/internal/config"
 )
+
+// newFakeOpenSearch starts an in-memory OpenSearch that stops when the
+// test ends.
+func newFakeOpenSearch(t *testing.T) *ostest.Server { return ostest.New(t) }
 
 // syncBuffer collects log lines written from several goroutines.
 type syncBuffer struct {
@@ -63,8 +69,13 @@ type running struct {
 	os     *ostest.Server
 	logs   *syncBuffer
 	cookie string
-
-	// stop stops the server as an interrupt does.
+	// dir holds signalith.yaml. scheme is how the web page answers, and
+	// client what calls it: one that trusts the server's certificate
+	// with HTTPS.
+	dir    string
+	scheme string
+	client *http.Client
+	// stop stops the server as an interrupt does, and waits for it.
 	stop func()
 
 	mu      sync.Mutex
@@ -83,19 +94,31 @@ func (rs *running) starts() string {
 // fail, when set, makes starting with a config fail.
 func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]any) *running {
 	t.Helper()
-	return startRunnerWith(t, runOptions{fail: fail, page: page})
+	// Plain HTTP: these tests are about restarting; restarting with
+	// HTTPS on is tested on its own.
+	return startRunnerWith(t, runOptions{fail: fail, page: page, server: plainHTTP})
 }
+
+// plainHTTP is the server section that turns HTTPS off.
+const plainHTTP = "  tls:\n    mode: off\n"
 
 // runOptions change how startRunnerWith starts the server.
 type runOptions struct {
 	fail func(*config.Config) error
 	page map[string]any
+	// server is added to signalith.yaml's server section; "" leaves HTTPS
+	// on, as it is by default.
+	server string
 	// scheduler turns detections.scheduler on, so the server runs the
 	// background jobs.
 	scheduler bool
 }
 
+// noFollow is a client that does not follow redirects.
+var noFollow = &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
 // startRunnerWith starts the server as serve does, with its cluster node.
+// With HTTPS on, the client trusts Signalith's own certificate authority.
 func startRunnerWith(t *testing.T, o runOptions) *running {
 	t.Helper()
 	fail, page := o.fail, o.page
@@ -117,8 +140,8 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 	}
 	addr := freeAddr(t)
 	path := filepath.Join(dir, "signalith.yaml")
-	body := "server:\n  listen: " + addr + "\nopensearch:\n  url: " + fos.URL + "\nauth:\n  admin_password_hash: " + h +
-		"\ndetections:\n  scheduler: " + strconv.FormatBool(o.scheduler) + "\n"
+	body := "server:\n  listen: " + addr + "\n" + o.server + "opensearch:\n  url: " + fos.URL + "\nauth:\n  admin_password_hash: " + h +
+		"\ningest:\n  tokens: [tok-0123456789abcdef]\ndetections:\n  scheduler: " + strconv.FormatBool(o.scheduler) + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +166,7 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 	r := newRunner(path, log)
 	r.node = node
 	node.Start(context.Background())
-	rs := &running{t: t, r: r, addr: addr, os: fos, logs: logs}
+	rs := &running{t: t, r: r, addr: addr, os: fos, logs: logs, dir: dir, scheme: "http", client: &http.Client{Timeout: 10 * time.Second}}
 	r.failStart = func(c *config.Config) error {
 		rs.mu.Lock()
 		rs.started = append(rs.started, c.OpenSearch.IndexPrefix)
@@ -156,9 +179,9 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.run(ctx, c) }()
-	var stopOnce sync.Once
+	var once sync.Once
 	rs.stop = func() {
-		stopOnce.Do(func() {
+		once.Do(func() {
 			cancel()
 			select {
 			case <-done:
@@ -172,7 +195,9 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 	t.Cleanup(rs.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if resp, err := http.Get("http://" + addr + "/api/me"); err == nil {
+		// With HTTPS on, plain HTTP on the same port answers with a
+		// redirect.
+		if resp, err := noFollow.Get("http://" + addr + "/api/me"); err == nil {
 			resp.Body.Close()
 			break
 		}
@@ -181,20 +206,44 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	if c.Server.HTTPS() {
+		rs.useHTTPS(rs.ownCA())
+	}
 	rs.signIn()
 	return rs
+}
+
+// ownCA returns Signalith's own certificate authority, in PEM.
+func (rs *running) ownCA() []byte {
+	rs.t.Helper()
+	pem, err := os.ReadFile(filepath.Join(rs.dir, "tls", "ca.pem"))
+	if err != nil {
+		rs.t.Fatal(err)
+	}
+	return pem
+}
+
+// useHTTPS calls the server over HTTPS, trusting the CA certificates in
+// caPEM.
+func (rs *running) useHTTPS(caPEM []byte) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		rs.t.Fatal("no CA certificate")
+	}
+	rs.scheme = "https"
+	rs.client = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 }
 
 // signIn signs in as the built-in admin and keeps the session cookie.
 func (rs *running) signIn() {
 	rs.t.Helper()
-	resp, err := http.Post("http://"+rs.addr+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"s3cret-pass"}`))
+	resp, err := rs.client.Post(rs.scheme+"://"+rs.addr+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"s3cret-pass"}`))
 	if err != nil {
 		rs.t.Fatal(err)
 	}
 	resp.Body.Close()
 	for _, c := range resp.Cookies() {
-		if c.Name == "signalith_session" {
+		if c.Name == "signalith_session" || c.Name == "__Host-signalith_session" {
 			rs.cookie = c.Name + "=" + c.Value
 		}
 	}
@@ -210,10 +259,10 @@ func (rs *running) call(addr, method, path, body string) (int, map[string]any, e
 	if addr == "" {
 		addr = rs.addr
 	}
-	req, _ := http.NewRequest(method, "http://"+addr+path, strings.NewReader(body))
+	req, _ := http.NewRequest(method, rs.scheme+"://"+addr+path, strings.NewReader(body))
 	req.Header.Set("Cookie", rs.cookie)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := rs.client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -424,7 +473,7 @@ func TestRestartMovesToAllInterfacesOnTheSamePort(t *testing.T) {
 
 func TestFrontHoldsRequestsDuringASwap(t *testing.T) {
 	f := &front{}
-	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "old") }))
+	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "old") }), nil)
 	f.pause(time.Second)
 	got := make(chan string, 1)
 	go func() {
@@ -437,7 +486,7 @@ func TestFrontHoldsRequestsDuringASwap(t *testing.T) {
 		t.Fatalf("answered during the pause: %q", b)
 	case <-time.After(50 * time.Millisecond):
 	}
-	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "new") }))
+	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "new") }), nil)
 	if b := <-got; b != "new" {
 		t.Errorf("answered by %q", b)
 	}
@@ -487,9 +536,20 @@ func TestSettingsCommand(t *testing.T) {
 	page := &config.PageSettings{}
 	at := time.Date(2026, 10, 1, 9, 30, 0, 0, time.UTC)
 	page.Set("search.max_events", 1234, "alice", at)
-	page.SetSecret("opensearch.password", "never-printed", strings.TrimSuffix(fos.URL, "/"), "alice", at)
+	// The page's secrets are saved encrypted, with the config's master key.
+	c0, err := config.LoadUnchecked(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	useTestKeyring(t, c0.Keyring())
+	if err := page.SetSecret("opensearch.password", "never-printed", strings.TrimSuffix(fos.URL, "/"), "alice", at); err != nil {
+		t.Fatal(err)
+	}
 	if err := config.WritePageSettings(file, page); err != nil {
 		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(file); strings.Contains(string(data), "never-printed") || !strings.Contains(string(data), "secret: enc:v1:") {
+		t.Fatalf("settings file:\n%s", data)
 	}
 
 	out, err := capture(t, func() error { return cmdSettings([]string{"list", "-c", path}) })

@@ -73,8 +73,9 @@ const (
 	lastBootName = "last_boot"
 )
 
-// OpenLocal opens the state folder dir: it refuses a folder on a network
-// filesystem, takes cluster/lock, and reads node.id, making it on the
+// OpenLocal opens the state folder dir (config.Config.StateDir): it
+// refuses a folder on a network filesystem (see CheckFolder), takes
+// cluster/lock, and reads node.id, making it on the
 // first start. Close releases the lock.
 func OpenLocal(dir string, o LocalOptions) (*Local, error) {
 	if o.Hostname == nil {
@@ -97,9 +98,10 @@ func OpenLocal(dir string, o LocalOptions) (*Local, error) {
 	}
 	unlock, err := lockFile(filepath.Join(abs, "cluster", lockName))
 	if errors.Is(err, errLockUnsupported) && shared != "" {
-		// Docker Desktop and WSL bind mounts may not lock files: the
-		// heartbeat check still catches a second process that runs.
-		l.Warnings = append(l.Warnings, fmt.Sprintf("The %s mount of the state folder %s cannot lock files, so nothing stops a second Signalith process on this computer from using the folder. Run only one, or use a Docker volume or a folder on a local disk.", shared, abs))
+		// Docker Desktop and WSL bind mounts, and some network shares, may
+		// not lock files: the heartbeat check still catches a second
+		// process that runs.
+		l.Warnings = append(l.Warnings, fmt.Sprintf("The %s mount of the state folder %s cannot lock files, so nothing stops a second Signalith process from using the folder. Run only one, or use a Docker volume or a folder on a local disk.", shared, abs))
 		unlock, err = func() {}, nil
 	}
 	if errors.Is(err, errLocked) {
@@ -121,82 +123,40 @@ func OpenLocal(dir string, o LocalOptions) (*Local, error) {
 }
 
 // CheckFolder checks the filesystem the state folder dir is on, changing
-// nothing: a network share is an error, and a mount on which locks may not
-// stop a second process is a warning. A folder that does not exist yet is
-// checked where it would be made.
+// nothing: a network share is an error, unless the folder already holds
+// Signalith's own files (config.HoldsState), and a mount on which locks
+// may not stop a second process is a warning. A folder that does not
+// exist yet is checked where it would be made.
 func CheckFolder(dir string) (warnings []string, err error) {
 	warnings, _, err = checkFolder(dir)
 	return warnings, err
 }
 
 // checkFolder is CheckFolder, and names the kind of a mount whose locks
-// may not work (FUSE, 9p, virtiofs).
+// may not work (FUSE, 9p, virtiofs, or a network share kept because it
+// already holds Signalith's files).
 func checkFolder(dir string) (warnings []string, shared string, err error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, "", err
 	}
-	network, shared, err := folderFilesystem(existing(abs))
+	network, shared, err := config.FolderFilesystem(config.NearestExisting(abs))
 	switch {
 	case err != nil:
 		return []string{fmt.Sprintf("Could not check which filesystem the state folder %s is on: %v.", abs, err)}, "", nil
+	case network != "" && config.HoldsState(abs):
+		// An install from before servers had an identity may keep its
+		// master key and HTTPS certificate there: the folder stays in use
+		// rather than leave them behind. Two servers that share it share
+		// one identity, which the lock or the heartbeats find out.
+		return []string{fmt.Sprintf("The state folder %s is on a network share (%s). Signalith still uses it, since it already holds its master key, HTTPS certificate or identity, but a folder on a local disk is safer: "+
+			"two servers that share one folder share one identity, and only one of them can run. Move what is in it to a folder on a local disk and set SIGNALITH_STATE_DIR to that folder.", abs, network)}, network, nil
 	case network != "":
 		return nil, "", fmt.Errorf("the state folder %s is on a network share (%s). Keep it on a local disk: Signalith locks a file in it, and two servers that share one folder would share one identity. Set SIGNALITH_STATE_DIR to a local folder", abs, network)
 	case shared != "":
 		return []string{fmt.Sprintf("The state folder %s is on a %s mount, as Docker Desktop and WSL bind mounts are. That works, but a Docker volume or a folder on a local disk is safer, since locks on such mounts may not stop a second process.", abs, shared)}, shared, nil
 	}
 	return nil, "", nil
-}
-
-// existing returns dir, or the nearest folder above it that exists.
-func existing(dir string) string {
-	at := dir
-	for {
-		if _, err := os.Stat(at); err == nil || filepath.Dir(at) == at {
-			return at
-		}
-		at = filepath.Dir(at)
-	}
-}
-
-// PickStateDir returns the state folder to use when SIGNALITH_STATE_DIR is
-// not set: def, the folder that holds lookups.dir, unless it is on a
-// network share or this user cannot write in it. Then it returns the first
-// local folder that works of $STATE_DIRECTORY and /var/lib/signalith on
-// Linux, or %ProgramData%\Signalith on Windows, with why for the log. When
-// none works, it returns def, and OpenLocal says what is wrong with it.
-func PickStateDir(def string) (dir, why string) {
-	problem := stateDirProblem(def)
-	if problem == "" {
-		return def, ""
-	}
-	for _, d := range fallbackStateDirs() {
-		if d == "" || filepath.Clean(d) == filepath.Clean(def) || stateDirProblem(d) != "" {
-			continue
-		}
-		return d, fmt.Sprintf("this server keeps its identity in %s, because %s; set SIGNALITH_STATE_DIR to choose the folder", d, problem)
-	}
-	return def, ""
-}
-
-// stateDirProblem says why dir cannot be a state folder, or "".
-func stateDirProblem(dir string) string {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return err.Error()
-	}
-	if _, _, err := checkFolder(abs); err != nil {
-		return fmt.Sprintf("the folder that holds lookups.dir, %s, is on a network share", abs)
-	}
-	at := existing(abs)
-	f, err := os.CreateTemp(at, ".signalith-write-check-*")
-	if err != nil {
-		return fmt.Sprintf("this user cannot write in %s", at)
-	}
-	name := f.Name()
-	f.Close()
-	_ = os.Remove(name)
-	return ""
 }
 
 // load reads node.id, or makes it, and settles the name.

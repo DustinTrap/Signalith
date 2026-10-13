@@ -98,6 +98,7 @@ func (p *Pipeline) IngestBody(ctx context.Context, tag string, body []byte) (*Re
 			return nil, err
 		}
 		batch = append(batch, Normalize(tag, rec, p.now()))
+		total.noteHost(&batch[len(batch)-1])
 		size += len(raw)
 		if len(batch) >= batchEvents || size >= batchBytes {
 			if err := flush(); err != nil {

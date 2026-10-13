@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
@@ -47,6 +51,16 @@ func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 	if f, err := safelog.OpenRotating(filepath.Join(filepath.Dir(s.configPath), "signalith.log"), safelog.DefaultMaxSize, safelog.DefaultBackups); err == nil {
 		defer f.Close()
 		log = newLogger(f)
+	}
+	// A config that does not load stops the service before it reports
+	// running, so "signalith service start" and the Services console show
+	// that it failed.
+	if _, err := config.Load(s.configPath); err != nil {
+		log.Error("cannot start", "err", err)
+		if elog != nil {
+			elog.Error(1, "Signalith cannot start: "+err.Error())
+		}
+		return false, 1
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -120,23 +134,7 @@ func cmdService(args []string) error {
 	defer m.Disconnect()
 	switch args[0] {
 	case "install":
-		exe, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		abs, _ := filepath.Abs(path)
-		s, err := m.CreateService(serviceName, exe, mgr.Config{
-			DisplayName: "Signalith SIEM",
-			Description: "Signalith security event search and detection server",
-			StartType:   mgr.StartAutomatic,
-		}, "-c", abs)
-		if err != nil {
-			return err
-		}
-		defer s.Close()
-		_ = setPreshutdownTimeout(s)
-		_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
-		fmt.Printf("Installed the %s service using %s. Start it with: signalith service start\n", serviceName, abs)
+		return installService(m, path)
 	case "uninstall":
 		s, err := m.OpenService(serviceName)
 		if err != nil {
@@ -151,7 +149,10 @@ func cmdService(args []string) error {
 			return err
 		}
 		defer s.Close()
-		return s.Start()
+		if err := s.Start(); err != nil {
+			return err
+		}
+		return waitRunning(s, filepath.Join(filepath.Dir(path), "signalith.log"))
 	case "stop":
 		s, err := m.OpenService(serviceName)
 		if err != nil {
@@ -163,5 +164,194 @@ func cmdService(args []string) error {
 	default:
 		return fmt.Errorf("unknown service action %q", args[0])
 	}
+}
+
+// waitRunning waits until the service reports running and is still
+// running a few seconds later, so a service that stops right away (a
+// config it cannot load, a file it may not read) is reported here rather
+// than looking started.
+func waitRunning(s *mgr.Service, logFile string) error {
+	failed := func(st svc.Status) error {
+		return fmt.Errorf("the %s service stopped (exit code %d). See %s and the Windows event log (Application, source %s)",
+			serviceName, st.Win32ExitCode, logFile, serviceName)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		st, err := s.Query()
+		if err != nil {
+			return err
+		}
+		switch st.State {
+		case svc.Running:
+			// Still running after a few seconds: it got past loading its
+			// settings and opening its ports.
+			time.Sleep(5 * time.Second)
+			if st, err = s.Query(); err != nil {
+				return err
+			}
+			if st.State != svc.Running {
+				return failed(st)
+			}
+			fmt.Printf("The %s service is running.\n", serviceName)
+			return nil
+		case svc.Stopped:
+			return failed(st)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the %s service did not start within a minute. See %s", serviceName, logFile)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// serviceAccount is the virtual account the service runs as: an account
+// of its own that Windows manages, with no password, that can be given
+// access to exactly the files it needs (unlike LocalSystem, which can
+// read everything).
+const serviceAccount = `NT SERVICE\` + serviceName
+
+// modifyAccess is the "Modify" right on files and folders: read, write,
+// run and delete, but not change permissions or take ownership.
+const modifyAccess windows.ACCESS_MASK = 0x1301BF
+
+// installService installs the service, or updates an existing one (an
+// upgrade, or one installed by an older version as LocalSystem), so that
+// it runs this program with the config file at path, as its own virtual
+// account, and restarts after a failure.
+func installService(m *mgr.Mgr, path string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	cfg := mgr.Config{
+		DisplayName:      "Signalith SIEM",
+		Description:      "Signalith security event search and detection server",
+		StartType:        mgr.StartAutomatic,
+		ServiceStartName: serviceAccount,
+		// The service's own SID (NT SERVICE\Signalith) is in its token,
+		// so access lists naming it apply.
+		SidType: windows.SERVICE_SID_TYPE_UNRESTRICTED,
+	}
+	verb := "Installed"
+	s, err := m.OpenService(serviceName)
+	if err == nil {
+		verb = "Updated"
+		cur, err := s.Config()
+		if err != nil {
+			s.Close()
+			return err
+		}
+		cur.BinaryPathName = syscall.EscapeArg(exe) + " -c " + syscall.EscapeArg(abs)
+		cur.DisplayName, cur.Description, cur.StartType = cfg.DisplayName, cfg.Description, cfg.StartType
+		cur.ServiceStartName, cur.SidType = cfg.ServiceStartName, cfg.SidType
+		// A virtual account has no password; an empty one leaves it unset.
+		cur.Password = ""
+		if err := s.UpdateConfig(cur); err != nil {
+			s.Close()
+			return fmt.Errorf("could not update the %s service: %w", serviceName, err)
+		}
+	} else {
+		if s, err = m.CreateService(serviceName, exe, cfg, "-c", abs); err != nil {
+			return err
+		}
+	}
+	defer s.Close()
+	// At a reboot Windows waits for the service as long as for any other
+	// stop (stopWait), so the background jobs are handed over first.
+	if err := setPreshutdownTimeout(s); err != nil {
+		fmt.Printf("Warning: could not give the service time to stop when Windows shuts down: %v\n", err)
+	}
+	// Restart after 5 seconds, then 30, then every minute; count failures
+	// from zero again after a day without one.
+	actions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: time.Minute},
+	}
+	if err := s.SetRecoveryActions(actions, 24*60*60); err != nil {
+		fmt.Printf("Warning: could not set the service to restart after a failure: %v\n", err)
+	} else if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		fmt.Printf("Warning: could not set the service to restart after it stops with an error: %v\n", err)
+	}
+	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
+	sid := securefile.ServiceSID(serviceName)
+	// The folders and files signalith.yaml and the Settings page name, as
+	// the service sees them (with the environment it is given).
+	applyServiceEnv(abs)
+	// The state folder must exist to be given to the service: it keeps its
+	// identity (node.id) and lock there, next to its master key and HTTPS
+	// certificate.
+	if c, err := config.LoadUnchecked(abs); err == nil {
+		_ = os.MkdirAll(c.StateDir(), 0o750)
+	}
+	access := serviceAccess(abs)
+	for _, dir := range access.write {
+		if err := grantAccess(dir, sid, modifyAccess, true); err != nil {
+			fmt.Printf("Warning: could not give %s access to %s (%v). Run: icacls \"%s\" /grant \"*%s:(OI)(CI)M\"\n", serviceAccount, dir, err, dir, sid)
+		}
+	}
+	for _, f := range access.read {
+		if err := grantAccess(f, sid, readAccess, false); err != nil {
+			fmt.Printf("Warning: %s may not be able to read %s, which signalith.yaml or the Settings page names (%v). Run: icacls \"%s\" /grant \"*%s:RX\"\n", serviceAccount, f, err, f, sid)
+		}
+	}
+	fmt.Printf("%s the %s service using %s.\n", verb, serviceName, abs)
+	fmt.Printf("It runs as %s, which may change files in: %s\n", serviceAccount, strings.Join(access.shown, ", "))
+	if len(access.read) > 0 {
+		fmt.Printf("It may also read: %s\n", strings.Join(access.read, ", "))
+	}
+	fmt.Println("Start it with: signalith service start")
 	return nil
+}
+
+// readAccess is the "Read & execute" right on a file.
+const readAccess windows.ACCESS_MASK = 0x1200A9
+
+// grantAccess adds rights for sid to a file's or folder's access list
+// (inherited by what is in a folder when inherit is set), keeping the
+// entries already there and whether the list is its own or inherited from
+// the folder above.
+func grantAccess(path, sid string, rights windows.ACCESS_MASK, inherit bool) error {
+	s, err := windows.StringToSid(sid)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	ctrl, _, err := sd.Control()
+	if err != nil {
+		return err
+	}
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+	if ctrl&windows.SE_DACL_PROTECTED != 0 {
+		info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if inherit {
+		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: rights,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       inheritance,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(s),
+		},
+	}}, dacl)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil)
 }

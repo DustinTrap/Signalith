@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/go-ldap/ldap/v3"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 // Directory types. The type picks sensible defaults; every default can be
@@ -355,6 +356,10 @@ func (s *LDAPSettings) Problems() []Problem {
 	checkDN("bind_dn", s.BindDN, "CN=svc-signalith,OU=Service Accounts,DC=corp,DC=example,DC=com")
 	if s.BindDN != "" && s.BindPassword == "" {
 		add("bind_password", "enter the service account's password")
+	}
+	if secrets.IsSealed(s.BindPassword) {
+		// It would be stored as it is, not encrypted.
+		add("bind_password", "the password cannot start with enc:v and a number and a colon, which is how encrypted values look")
 	}
 	if s.UserBaseDN == "" && on {
 		add("user_base_dn", "enter where to search for users, like DC=corp,DC=example,DC=com")

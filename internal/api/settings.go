@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assistant"
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -270,8 +272,9 @@ func warningsByField(list []string) (map[string]string, []string) {
 	return fields, rest
 }
 
-// httpsOn reports whether the web server of c serves HTTPS.
-func httpsOn(c *config.Config) bool { return c.Server.TLSCert != "" && c.Server.TLSKey != "" }
+// httpsOn reports whether the web server of c serves HTTPS (server.tls.mode
+// auto or files).
+func httpsOn(c *config.Config) bool { return c.Server.HTTPS() }
 
 // webURL is the address of the web page at host and port, without the
 // port when it is the scheme's own.
@@ -295,7 +298,12 @@ func publicURLWarning(c *config.Config, soon bool) (string, string) {
 	if c.Server.PublicURL == "" || c.PublicURLDerived() {
 		return "", ""
 	}
-	u, err := url.Parse(c.Server.PublicURL)
+	// As it is set: an http:// one is read as https:// while HTTPS is on.
+	raw, _ := c.Value("server.public_url").(string)
+	if raw == "" {
+		raw = c.Server.PublicURL
+	}
+	u, err := url.Parse(raw)
 	_, listen, lerr := net.SplitHostPort(c.Server.Listen)
 	if err != nil || lerr != nil || u.Host == "" || listen == "0" {
 		return "", ""
@@ -349,8 +357,19 @@ func (s *Server) settingsView() (map[string]any, error) {
 	problems, general := config.FieldProblems(saved.Config, saved.Problems)
 	warnings, otherWarnings := warningsByField(saved.SettingsWarnings())
 	suggest := map[string]string{}
+	if w, sg := s.httpsWarning(saved.Config); w != "" && warnings["server.public_url"] == "" {
+		warnings["server.public_url"], suggest["server.public_url"] = w, sg
+	}
 	if w, sg := publicURLWarning(saved.Config, webMoves(running, saved.Config)); w != "" && warnings["server.public_url"] == "" {
 		warnings["server.public_url"], suggest["server.public_url"] = w, sg
+	}
+	for k, w := range s.certNamesWarnings(saved.Config) {
+		if warnings[k] == "" {
+			warnings[k] = w
+		}
+	}
+	if w := unencryptedWarning(saved.Config); w != "" && warnings["server.tls.mode"] == "" {
+		warnings["server.tls.mode"] = w
 	}
 	pending := pendingSettings(running, saved.Config)
 	waiting := map[string]bool{}
@@ -389,8 +408,17 @@ func (s *Server) settingsView() (map[string]any, error) {
 			if set.Key == "server.public_url" && saved.PublicURLDerived() {
 				f.EmptyMeans = saved.Server.PublicURL + ", worked out from the listen address"
 			}
+			// A file from before HTTPS was the default believes a proxy on
+			// this computer or a private network until one is listed.
+			if set.Key == "server.trusted_proxies" && saved.Server.LegacyProxy(netip.IPv6Loopback()) {
+				f.EmptyMeans = "this computer and private networks, until you list one (signalith.yaml is from before HTTPS was the default)"
+			}
 			if f.Set != nil && *f.Set {
 				f.SentTo = set.SentTo(saved.Config)
+			}
+			// A secret saved here that cannot be decrypted is not used.
+			if msg := saved.PageSecretProblem(set.Key); msg != "" && f.Warning == "" {
+				f.Warning = msg
 			}
 			if f.Source.Kind == config.FromEnv {
 				f.Locked, f.LockedReason = true, config.LockedReason(f.Source.Env)
@@ -456,9 +484,56 @@ func (s *Server) settingsView() (map[string]any, error) {
 		"refused":         refusedList,
 		"restart":         restart,
 		"move_wait_s":     int(MoveWait.Seconds()),
+		"tls":             s.tlsInfo(),
 		"about":           s.aboutServer(running),
 		"elsewhere":       s.managedElsewhere(running),
 	}, nil
+}
+
+// httpsWarning notes an http:// public address while HTTPS is on: agents
+// are set up with the same address over https://, which it returns for
+// the page to offer.
+func (s *Server) httpsWarning(c *config.Config) (string, string) {
+	raw, _ := c.Value("server.public_url").(string)
+	if !httpsOn(c) || !strings.HasPrefix(strings.ToLower(raw), "http://") || c.Server.PublicURL == raw {
+		return "", ""
+	}
+	return "Signalith serves HTTPS on this port, so agents are set up with " + redact.URL(c.Server.PublicURL) +
+		". Change it to that, or to the https:// address of a reverse proxy in front.", c.Server.PublicURL
+}
+
+// certNamesWarnings notes, by setting, the names for Signalith's own
+// certificate, in server.tls.names and public_url, that its certificate
+// authority may not sign, as the Add data page does for an address agents
+// are to use.
+func (s *Server) certNamesWarnings(c *config.Config) map[string]string {
+	out := map[string]string{}
+	if c.Server.TLSMode() != config.TLSAuto || s.TLS == nil || !s.TLS.LocalCA() {
+		return out
+	}
+	for _, n := range c.Server.TLSNames() {
+		if err := s.TLS.CanCover(n); err != nil {
+			out["server.tls.names"] = sentence(err.Error())
+			break
+		}
+	}
+	if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
+		if err := s.TLS.CanCover(u.Hostname()); err != nil {
+			out["server.public_url"] = sentence(err.Error())
+		}
+	}
+	return out
+}
+
+// unencryptedWarning notes HTTPS off with a listen address other
+// computers reach and no reverse proxy listed, as Validate does.
+func unencryptedWarning(c *config.Config) string {
+	host, _, err := net.SplitHostPort(c.Server.Listen)
+	if err != nil || httpsOn(c) || isLoopback(host) || len(c.Server.TrustedProxies) > 0 {
+		return ""
+	}
+	return "Other computers can reach Signalith at " + c.Server.Listen + ", so passwords, sessions and events cross the network unencrypted " +
+		"unless a reverse proxy in front serves HTTPS. List the proxy under Trusted reverse proxies, or choose Automatic."
 }
 
 // plainFileError words why the settings file cannot be read, without the
@@ -653,19 +728,7 @@ func confirmations(r *http.Request, res *config.EditResult) []confirmation {
 		}
 		out = append(out, c)
 	}
-	if httpsOn(before) != httpsOn(after) {
-		scheme, other := "https", "http"
-		if !httpsOn(after) {
-			scheme, other = "http", "https"
-		}
-		c := confirmation{Key: "server.tls_cert", Name: "HTTPS", Title: "Turn HTTPS on?",
-			Text: fmt.Sprintf("After the restart the web page and the API answer with %s:// only. Bookmarks and agents that use %s:// stop working until they are changed.", scheme, other)}
-		if scheme == "http" {
-			c.Title = "Turn HTTPS off?"
-		}
-		if !changed("server.tls_cert") {
-			c.Key = "server.tls_key"
-		}
+	if c, ok := httpsConfirmation(before, after); ok {
 		out = append(out, c)
 	}
 	// A public address that matched the old web address and does not
@@ -675,12 +738,46 @@ func confirmations(r *http.Request, res *config.EditResult) []confirmation {
 			if old, _ := publicURLWarning(before, false); old == "" {
 				set, _ := config.Lookup("server.public_url")
 				out = append(out, confirmation{Key: "server.public_url", Title: "Agents would still use the old address", Old: shownValue(after, "server.public_url"),
-					Text: "Agents are told to send to " + redact.URL(after.Server.PublicURL) + ", the old address. Unless a proxy or a port forward passes it on, they stop sending.",
+					Text: fmt.Sprintf("Agents are told to send to %v, the old address. Unless a proxy or a port forward passes it on, they stop sending.", shownValue(after, "server.public_url")),
 					Also: &alsoChange{Key: "server.public_url", Value: sg, Label: "Also change " + set.Label + " to " + sg}})
 			}
 		}
 	}
 	return out
+}
+
+// httpsConfirmation is what to ask before HTTPS is turned on or off, or
+// before Signalith's own certificate and the admin's own files trade
+// places: browsers and agents that trusted one do not trust the other.
+func httpsConfirmation(before, after *config.Config) (confirmation, bool) {
+	from, to := before.Server.TLSMode(), after.Server.TLSMode()
+	if from == to {
+		return confirmation{}, false
+	}
+	c := confirmation{Key: "server.tls.mode", Name: "HTTPS", Old: shownValue(before, "server.tls.mode"), New: shownValue(after, "server.tls.mode")}
+	switch {
+	case to == config.TLSOff:
+		c.Title = "Turn HTTPS off?"
+		c.Text = "After the restart Signalith answers with plain http:// only. Bookmarks and agents that use https:// stop working until they are changed, " +
+			"and passwords, sessions and events cross the network unencrypted unless a reverse proxy in front serves HTTPS. " +
+			"Browsers that opened Signalith by name over HTTPS keep asking for https:// there; use the proxy's address."
+	case from == config.TLSOff:
+		c.Title = "Turn HTTPS on?"
+		c.Text = "After the restart the web page and the API answer with https:// only; browsers that use http:// on the same port are sent there. " +
+			"Agents set up for http:// stop sending until they get a new configuration from Add data, unless Agents on plain HTTP accepts them for now."
+		if to == config.TLSAuto {
+			c.Text += " Browsers warn until they trust Signalith's own certificate authority, which the sign-in page offers to download."
+		}
+	case to == config.TLSAuto:
+		c.Title = "Use Signalith's own certificate?"
+		c.Text = "After the restart Signalith uses its own certificate instead of your files. Browsers warn until they trust its certificate authority, " +
+			"and agents set up to check your certificate stop sending until they get a new configuration from Add data."
+	default:
+		c.Title = "Use your own certificate files?"
+		c.Text = "After the restart Signalith uses the certificate in your files instead of its own. Agents set up with Signalith's own certificate authority " +
+			"stop sending until they get a new configuration from Add data, unless your certificate comes from an authority they already trust."
+	}
+	return c, true
 }
 
 // loopbackOnly reports whether a listen address takes connections from
@@ -734,6 +831,11 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg, "fields": res.Fields, "problems": problems})
 		return
 	}
+	if msg := s.proxyLockout(r, res.Config); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Nothing was saved. Fix the settings marked below.",
+			"fields": map[string]string{"server.trusted_proxies": msg}, "problems": []string{}})
+		return
+	}
 	if req.CheckOnly {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": nonNil(res.Changed), "confirm": confirmations(r, res)})
 		return
@@ -777,6 +879,30 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		view["backup"] = fullPath(backup)
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// proxyLockout says why next must not be saved when r came through a
+// reverse proxy that next would no longer believe: the list of trusted
+// proxies applies at once, and with HTTPS on the very next request
+// through that proxy would be sent to https:// or refused, so this page
+// could not be opened through it again to undo the change. It returns ""
+// when r did not come through such a proxy, or next still believes it.
+func (s *Server) proxyLockout(r *http.Request, next *config.Config) string {
+	if r.TLS != nil || !s.viaTrustedProxy(r) {
+		return ""
+	}
+	from := clientaddr.Parse(r.RemoteAddr)
+	if !s.conf().Server.HTTPS() && !next.Server.HTTPS() {
+		// With HTTPS off nothing is refused for it: signing in again
+		// works through the proxy.
+		return ""
+	}
+	if next.Server.TrustsProxy(from) || next.Server.LegacyProxy(from) {
+		return ""
+	}
+	addr := from.Unmap().WithZone("").String()
+	return "You reached this page through the reverse proxy at " + addr + ", which this list leaves out. Signalith would stop believing it at once, " +
+		"and this page could not be opened through it again. Add " + addr + ", or make this change from a browser that reaches Signalith without the proxy."
 }
 
 func nonNil(list []string) []string {
@@ -924,7 +1050,27 @@ func (s *Server) applyLive(old, saved *config.Config) []string {
 		a := next.Assistant
 		s.liveAI.Store(&liveModel{c: assistant.New(a.Provider, a.URL, a.Model, a.APIKey)})
 	}
+	if changed("server.public_url") {
+		s.coverPublicURL(&next)
+	}
 	return applied
+}
+
+// coverPublicURL adds the public address's host to Signalith's own HTTPS
+// certificate, as the Add data page does for the address agents are set
+// up with. One its certificate authority may not sign is left out; the
+// page says so (see certNamesWarnings).
+func (s *Server) coverPublicURL(c *config.Config) {
+	if s.TLS == nil || !s.TLS.LocalCA() || c.Server.TLSMode() != config.TLSAuto {
+		return
+	}
+	u, err := url.Parse(c.Server.PublicURL)
+	if err != nil || u.Hostname() == "" {
+		return
+	}
+	if err := s.TLS.EnsureName(u.Hostname()); err != nil {
+		s.Log.Warn("the HTTPS certificate does not cover the public address saved on the Settings page", "host", u.Hostname(), "err", err)
+	}
 }
 
 // settingsTest is the body of the test routes: form values, saved or not,
@@ -1217,7 +1363,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "restart requested", "pending", strings.Join(keys, ","), "local_only", localOnly)
 	resp := map[string]any{"restarting": true, "pending": keys, "listen_changed": false, "reachable": !localOnly}
-	if moved := newAddress(r, running, saved.Config); moved != "" {
+	if moved := newAddress(r, running, saved.Config, r.TLS == nil && s.viaTrustedProxy(r)); moved != "" {
 		resp["listen_changed"], resp["new_listen"], resp["go_to"] = true, saved.Server.Listen, moved
 		if !localOnly {
 			resp["confirm_within_s"] = int(MoveWait.Seconds())
@@ -1229,9 +1375,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 // newAddress returns where the browser finds the web page after a
 // restart that moves it, or "" when it stays: the host the browser uses
 // now (or the new listen address's own host, when it listens on one
-// address only), with the new port and scheme.
-func newAddress(r *http.Request, running, saved *config.Config) string {
-	if !webMoves(running, saved) {
+// address only), with the new port and scheme. viaProxy is set when r
+// came through a trusted reverse proxy: HTTPS turned on or off behind it
+// leaves the proxy's address as it is, and the page there confirms the
+// move.
+func newAddress(r *http.Request, running, saved *config.Config, viaProxy bool) string {
+	if !webMoves(running, saved) || (viaProxy && running.Server.Listen == saved.Server.Listen) {
 		return ""
 	}
 	lhost, port, err := net.SplitHostPort(saved.Server.Listen)
@@ -1296,11 +1445,17 @@ func (s *Server) handleExportSettings(w http.ResponseWriter, r *http.Request) {
 // serverOwn says why a setting in the export may not suit another
 // server, or returns "" for one every server can share: a file path is a
 // file on this server, and a setting of ScopeServer belongs to this server
-// alone, such as whether it may run the background jobs.
+// alone, such as whether it may run the background jobs. The public
+// address and the certificate's extra names are shared by servers that
+// share one OpenSearch, but another server set up on its own has its own.
 func serverOwn(set *config.Setting) string {
 	switch {
 	case set.File:
 		return "a file on this server"
+	case set.Key == "server.public_url":
+		return "this server's own address"
+	case set.Key == "server.tls.names":
+		return "this server's own names"
 	case set.Scope != config.ScopeServer:
 		return ""
 	case set.Type == config.TypeAddress:
@@ -1339,19 +1494,58 @@ func exportSettings(c *config.Config, from string, now time.Time) (string, error
 }
 
 func exportSection(b *strings.Builder, c *config.Config, settings []*config.Setting) error {
+	// A setting a level deeper, such as server.tls.mode, goes in its own
+	// part, written where the first of its settings is.
+	var flat []*config.Setting
+	var subs []string
+	bySub := map[string][]*config.Setting{}
 	for _, set := range settings {
 		_, name, _ := strings.Cut(set.Key, ".")
+		sub, _, nested := strings.Cut(name, ".")
+		if !nested {
+			flat = append(flat, set)
+			continue
+		}
+		if bySub[sub] == nil {
+			subs = append(subs, sub)
+			flat = append(flat, nil) // where the part goes
+		}
+		bySub[sub] = append(bySub[sub], set)
+	}
+	next := 0
+	for _, set := range flat {
+		if set == nil {
+			sub := subs[next]
+			next++
+			fmt.Fprintf(b, "  %s:\n", sub)
+			if err := exportSettingLines(b, c, bySub[sub], "    "); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := exportSettingLines(b, c, []*config.Setting{set}, "  "); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// exportSettingLines writes settings, each under the last word of its key,
+// indented by indent.
+func exportSettingLines(b *strings.Builder, c *config.Config, settings []*config.Setting, indent string) error {
+	for _, set := range settings {
+		name := set.Key[strings.LastIndex(set.Key, ".")+1:]
 		if set.Type == config.TypeSecret {
 			hint := "set it here"
 			if set.Env != "" {
 				hint += " or with " + set.Env
 			}
-			fmt.Fprintf(b, "  # %s: left out; %s\n", name, hint)
+			fmt.Fprintf(b, "%s# %s: left out; %s\n", indent, name, hint)
 			continue
 		}
 		// An address with a password in it is left out like a password.
 		if s, _ := c.Value(set.Key).(string); urlKeys[set.Key] && s != "" && redact.URL(s) != s {
-			fmt.Fprintf(b, "  # %s: left out, as it holds a password; set it here\n", name)
+			fmt.Fprintf(b, "%s# %s: left out, as it holds a password; set it here\n", indent, name)
 			continue
 		}
 		v := &yaml.Node{}
@@ -1365,7 +1559,7 @@ func exportSection(b *strings.Builder, c *config.Config, settings []*config.Sett
 		if err != nil {
 			return err
 		}
-		line := fmt.Sprintf("  %s: %s", name, strings.TrimSpace(string(out)))
+		line := fmt.Sprintf("%s%s: %s", indent, name, strings.TrimSpace(string(out)))
 		if note := serverOwn(set); note != "" {
 			line += "  # " + note
 		}

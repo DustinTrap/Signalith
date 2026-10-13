@@ -13,10 +13,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -41,8 +43,10 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
 	"github.com/jrsamsanchez/signalith/internal/search"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
+	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
 	"golang.org/x/term"
@@ -59,17 +63,23 @@ Usage:
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
   signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
+  signalith initial-password [-c file]    print the first admin password the Docker quick start made
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
+  signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith service   install|uninstall|start|stop     manage the Windows service
+  signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
+  signalith bootstrap-docker -opensearch-dir DIR -signalith-dir DIR   prepare the Docker quick start (its setup service runs this)
   signalith version
 
 The config file defaults to %s
 (override with -c or the SIGNALITH_CONFIG environment variable).
-On Linux the service keeps the Settings page's file in
-/var/lib/signalith/lookups/settings.yaml: give it to settings and
-validate with -file.
+On Linux, validate, settings and secrets use the folders, files and master
+key the signalith service is given in its unit, when it runs with the same
+config file. If the unit cannot be read, give settings and validate the
+Settings page's file with -file (the service keeps it in
+/var/lib/signalith/lookups/settings.yaml).
 `
 
 func defaultConfigPath() string {
@@ -104,6 +114,12 @@ func main() {
 		err = cmdPasswd(args)
 	case "settings":
 		err = cmdSettings(args)
+	case "initial-password":
+		err = cmdInitialPassword(args)
+	case "bootstrap-docker":
+		err = cmdBootstrapDocker(args)
+	case "opensearch-certs":
+		err = cmdOpenSearchCerts(args)
 	case "query":
 		err = cmdQuery(args)
 	case "ask":
@@ -112,6 +128,8 @@ func main() {
 		err = cmdService(args)
 	case "archive":
 		err = cmdArchive(args)
+	case "secrets":
+		err = cmdSecrets(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -141,15 +159,22 @@ func cmdInit(args []string) error {
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
 	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
 	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
+	syslogTLS := fs.String("syslog-tls", "0.0.0.0:6514", "address to receive syslog on over TLS (empty: off)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	fs.Parse(args)
 
 	if _, err := os.Stat(*path); err == nil && !*force {
 		return fmt.Errorf("%s already exists; use -force to overwrite it", *path)
 	}
+	// A service set up already (an install run again) keeps its master
+	// key where it has it.
+	useServiceEnv(*path, os.Stdout)
 	c := config.Default()
 	c.Server.Listen = *listen
 	c.Server.PublicURL = *publicURL
+	// HTTPS with a certificate the server makes for itself, and no
+	// agents over plain HTTP.
+	c.Server.TLS = &config.ServerTLS{Mode: config.TLSAuto, PlaintextIngest: "deny"}
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
 	c.OpenSearch.AllowInsecureHTTP = *osInsecure
@@ -157,6 +182,7 @@ func cmdInit(args []string) error {
 	// syslog section keep it off.
 	c.Syslog.UDP = *syslogUDP
 	c.Syslog.TCP = *syslogTCP
+	c.Syslog.TLS = *syslogTLS
 	pw := *password
 	generated := pw == ""
 	if generated {
@@ -175,16 +201,47 @@ func cmdInit(args []string) error {
 		return err
 	}
 	fmt.Printf("Wrote %s\n\n", *path)
-	fmt.Printf("  Web UI:    %s\n", c.Server.PublicURL)
-	fmt.Printf("  User:      %s\n", c.Auth.AdminUser)
+	fmt.Printf("  Web UI:      %s\n", c.Server.PublicURL)
+	fmt.Printf("  HTTPS:       the server makes its own certificate when it starts; browsers warn\n")
+	fmt.Printf("               until you trust it (see docs/https.md)\n")
+	fmt.Printf("  User:        %s\n", c.Auth.AdminUser)
 	if generated {
-		fmt.Printf("  Password:  %s   (shown once; change it with: signalith passwd)\n", pw)
+		fmt.Printf("  Password:    %s   (shown once; change it with: signalith passwd)\n", pw)
 	}
 	if s := syslogSummary(c); s != "" {
-		fmt.Printf("  Syslog:    %s\n", s)
+		fmt.Printf("  Syslog:      %s\n", s)
+	}
+	// Save encrypted the ingest token, so there is a master key now.
+	if src, err := c.Keyring().Source(); err == nil {
+		fmt.Printf("  Master key:  %s\n", src)
+		if src.Created {
+			fmt.Println("               It encrypts the passwords and keys Signalith stores. Back it up; see docs/encryption.md.")
+		}
 	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
+}
+
+// httpsSummary says how the web UI and agents are protected in transit.
+func httpsSummary(c *config.Config) string {
+	var s string
+	switch c.Server.TLSMode() {
+	case config.TLSOff:
+		s = "HTTPS is off (server.tls.mode: off), so a reverse proxy in front must add it."
+	case config.TLSFiles:
+		cert, _ := c.TLSFiles()
+		s = "HTTPS is on with the certificate in " + cert + "."
+	default:
+		s = "HTTPS is on with Signalith's own certificate, kept in " + c.TLSDir() + "."
+	}
+	if c.Server.HTTPS() {
+		if c.Server.PlaintextIngest() {
+			s += " Agents may still send over plain HTTP (server.tls.plaintext_ingest: allow); the Health page lists any that do."
+		} else {
+			s += " Agents must send over HTTPS."
+		}
+	}
+	return s
 }
 
 // syslogSummary describes the syslog listeners, or "" when syslog is off.
@@ -233,10 +290,19 @@ func cmdValidate(args []string) error {
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
 	fileFlag := settingsFileFlag(fs)
 	fs.Parse(args)
+	// -file first: the service's settings below do not replace it.
 	if err := useSettingsFile(*fileFlag); err != nil {
 		return err
 	}
-	c, err := config.Load(*path)
+	// The service's folders and master key, so this checks what it uses.
+	// Installers read the -syslog-ports output, so nothing else is
+	// printed then.
+	if *ports {
+		applyServiceEnv(*path)
+	} else {
+		useServiceEnv(*path, os.Stdout)
+	}
+	c, err := loadConfig(*path, newLogger(os.Stderr))
 	if err != nil {
 		return err
 	}
@@ -245,6 +311,21 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
+	fmt.Println(httpsSummary(c))
+	if n := len(c.Unreadable()); n > 0 {
+		fmt.Printf("Warning: %d %s in it cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
+			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
+	}
+	if n := len(c.PageUnreadable()); n > 0 {
+		fmt.Printf("Warning: %d %s saved on the Settings page cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
+			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
+	}
+	switch src, err := c.Keyring().Source(); {
+	case err == nil:
+		fmt.Printf("Master key for stored passwords and keys: %s, key id %s.\n", src, src.KeyID)
+	case !errors.Is(err, secrets.ErrNoKey):
+		fmt.Println("Warning:", err)
+	}
 	if p := c.SettingsProblem(); p != "" {
 		fmt.Println("Warning:", p)
 	} else if keys := c.PageKeys(); len(keys) > 0 {
@@ -261,8 +342,9 @@ func cmdValidate(args []string) error {
 	for _, w := range c.SettingsWarnings() {
 		fmt.Println("Warning:", w+".")
 	}
-	// The state folder holds this server's identity and its lock.
-	state, why := stateDir(c)
+	// The state folder holds the master key, the HTTPS certificate and
+	// this server's identity and its lock.
+	state, why := c.StateDirChoice()
 	if why != "" {
 		fmt.Println("Note:", strings.ToUpper(why[:1])+why[1:]+".")
 	}
@@ -308,6 +390,9 @@ func cmdValidate(args []string) error {
 		}
 		fmt.Printf("Directory sign-in is on (%s), set up in %s. Test it on the Users page.\n", s.URL, from)
 	}
+	if p := dir.Problem(); p != "" {
+		fmt.Println("Warning:", p)
+	}
 	feeds := newFeeds(c, nil, nil)
 	if err := feeds.Load(); err != nil {
 		fmt.Println("Warning:", err)
@@ -321,7 +406,9 @@ func cmdValidate(args []string) error {
 			if f.Source == intel.SourceUI {
 				page++
 			}
-			if f.Problem != "" {
+			// Problems of feeds in signalith.yaml are among the warnings
+			// below.
+			if f.Problem != "" && f.Source == intel.SourceUI {
 				fmt.Printf("Warning: threat intel feed %s (added on the Threat intel page): %s\n", f.Name, f.Problem)
 			}
 		}
@@ -371,6 +458,11 @@ func cmdPasswd(args []string) error {
 	if _, err := os.Stat(*path); err != nil {
 		return fmt.Errorf("config file %s: %w", *path, err)
 	}
+	// The service's state folder, and whether the service is given the
+	// admin password, which replaces the one in signalith.yaml: a shell
+	// has neither.
+	useServiceEnv(*path, os.Stdout)
+	svcPassword := serviceGives(*path, "SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_ADMIN_PASSWORD")
 	pw := os.Getenv("SIGNALITH_NEW_PASSWORD")
 	if pw == "" {
 		var err error
@@ -381,6 +473,25 @@ func cmdPasswd(args []string) error {
 	h, err := config.HashPassword(pw)
 	if err != nil {
 		return err
+	}
+	// Where the first password was generated and passed in a file (the
+	// Docker quick start, whose signalith.yaml is read-only), the new one
+	// is kept in the state folder and replaces it. So is every later one,
+	// and one for a service given the password in its environment.
+	hashFile := config.AdminHashFileIn(config.StateDirFor(*path))
+	_, statErr := os.Stat(hashFile)
+	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || svcPassword != "" || statErr == nil {
+		if err := writeAdminHash(hashFile, h); err != nil {
+			return err
+		}
+		if svcPassword != "" {
+			fmt.Printf("Password updated. It is kept in %s, since the signalith service is given %s; it replaces that password.\n", hashFile, svcPassword)
+			fmt.Println("Restart the service to apply it.")
+			return nil
+		}
+		fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
+		fmt.Println("Restart the server to apply it. With the Docker quick start, from the Signalith folder: docker compose -f deploy/docker/docker-compose.yml restart signalith")
+		return nil
 	}
 	// Only the hash changes in the file; settings from the environment
 	// (such as SIGNALITH_OPENSEARCH_PASSWORD) are not written into it.
@@ -397,6 +508,15 @@ func cmdPasswd(args []string) error {
 // readNewPassword asks for the new password twice without showing it.
 // When input is not a terminal (a script piping it in), it reads one line.
 func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
+	return readSecret(in, prompt, "New admin password: ", false)
+}
+
+// readSecret asks for a password or key with label, twice, without
+// showing it. When input is not a terminal (a script piping it in), it
+// reads one line. When orEmpty is set, pressing Enter at the first
+// question returns "" (so the caller can make a value); otherwise nothing
+// entered is an error.
+func readSecret(in *os.File, prompt io.Writer, label string, orEmpty bool) (string, error) {
 	fd := int(in.Fd())
 	if !term.IsTerminal(fd) {
 		line, err := bufio.NewReader(in).ReadString('\n')
@@ -405,7 +525,7 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 			if err != nil && !errors.Is(err, io.EOF) {
 				return "", err
 			}
-			return "", errors.New("no password entered")
+			return "", errors.New("nothing entered; nothing was changed")
 		}
 		return line, nil
 	}
@@ -415,21 +535,24 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 		fmt.Fprintln(prompt)
 		return string(b), err
 	}
-	pw, err := read("New admin password: ")
+	v, err := read(label)
 	if err != nil {
 		return "", err
 	}
-	if pw == "" {
-		return "", errors.New("no password entered")
+	if v == "" {
+		if orEmpty {
+			return "", nil
+		}
+		return "", errors.New("nothing entered; nothing was changed")
 	}
 	again, err := read("Type it again: ")
 	if err != nil {
 		return "", err
 	}
-	if again != pw {
-		return "", errors.New("the passwords do not match; nothing was changed")
+	if again != v {
+		return "", errors.New("the two entries do not match; nothing was changed")
 	}
-	return pw, nil
+	return v, nil
 }
 
 // openUsers opens the users file and the directory sign-in settings.
@@ -595,8 +718,73 @@ func newLogger(w io.Writer) *slog.Logger {
 	return slog.New(safelog.New(slog.NewTextHandler(w, nil)))
 }
 
-func serve(ctx context.Context, path string, log *slog.Logger) error {
+// loadConfig loads the config file and makes its master key the one the
+// files the server writes are encrypted with; a new master key made later
+// is logged.
+func loadConfig(path string, log *slog.Logger) (*config.Config, error) {
 	c, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	useKeys(c, log)
+	return c, nil
+}
+
+// logMasterKey says where the master key comes from.
+func logMasterKey(c *config.Config, log *slog.Logger) {
+	keys := c.Keyring()
+	src, err := keys.Source()
+	switch {
+	case errors.Is(err, secrets.ErrNoKey):
+		log.Info("no master key yet; one is made the first time a password or key is stored", "file", keys.DefaultPath())
+		return
+	case err != nil:
+		log.Error("the master key cannot be read, so stored passwords and keys cannot be decrypted or saved", "err", err)
+		return
+	}
+	log.Info("master key for stored passwords and keys", "key", src.String(), "key_id", src.KeyID)
+	if src.OldPath != "" {
+		log.Info("the previous master key is still kept after a rotation; remove it once nothing needs it: signalith secrets rotate-master -prune", "file", src.OldPath)
+	}
+	for _, p := range keys.Unused() {
+		log.Warn("another master key file is not used; values encrypted with it cannot be read", "file", p)
+	}
+}
+
+// useKeys makes c's master key the one the files the server writes are
+// encrypted with, says where it comes from when that is new (at the first
+// start, or after a restart in place that changed it), and encrypts the
+// plain values in those files. Each start of the components, a restart in
+// place included, goes through here, so a config loaded again brings its
+// own master key.
+func (r *runner) useKeys(c *config.Config) {
+	useKeys(c, r.log)
+	if state := keyState(c); state != r.keysLogged {
+		r.keysLogged = state
+		logMasterKey(c, r.log)
+	}
+	encryptStores(c, r.log)
+}
+
+// keyState sums up where c's master key comes from, to log it only when
+// it changes.
+func keyState(c *config.Config) string {
+	keys := c.Keyring()
+	src, err := keys.Source()
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return fmt.Sprint(src.String(), "|", src.KeyID, "|", src.OldPath, "|", src.OldKeyID, "|", keys.Unused())
+}
+
+func serve(ctx context.Context, path string, log *slog.Logger) error {
+	hardenProcess(log)
+	// A crash prints only the goroutine that failed, not every one with
+	// the values on its stack. This is Go's default; it cannot lower a
+	// GOTRACEBACK set in the environment, and on Linux hardenProcess
+	// keeps even GOTRACEBACK=crash from writing a core file.
+	debug.SetTraceback("single")
+	c, err := loadConfig(path, log)
 	if err != nil {
 		return err
 	}
@@ -620,9 +808,16 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 // the Settings page stops and builds again. The web listener, sign-in
 // sessions and the user store belong to the runner and carry over.
 type instance struct {
-	cfg      *config.Config
-	srv      *api.Server
-	handler  http.Handler
+	cfg     *config.Config
+	srv     *api.Server
+	handler http.Handler
+	// plain answers plain HTTP on the port that serves HTTPS; handler
+	// itself when HTTPS is off.
+	plain http.Handler
+	// certs is the HTTPS certificate, which syslog over TLS uses too; nil
+	// when neither needs one. certKey names the settings it is for.
+	certs    *tlsauto.Manager
+	certKey  string
 	receiver *syslog.Receiver
 	// retention is the retention manager.
 	retention *retention.Manager
@@ -630,9 +825,12 @@ type instance struct {
 	// holds the job lease, and node the cluster node that runs them.
 	jobsList []cluster.Job
 	node     *cluster.Node
-	cancel   context.CancelFunc
-	jobs     sync.WaitGroup // what runs on every server, such as index creation
-	log      *slog.Logger
+	// store is the OpenSearch client, whose idle connections stop says
+	// goodbye to.
+	store  *store.Client
+	cancel context.CancelFunc
+	jobs   sync.WaitGroup // what runs on every server, such as index creation
+	log    *slog.Logger
 }
 
 // stop ends the background jobs, retention and the syslog receiver, and
@@ -652,6 +850,9 @@ func (in *instance) stop() {
 		in.receiver.Wait()
 		s := in.receiver.Stats()
 		in.log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
+	}
+	if in.store != nil {
+		in.store.CloseIdleConnections()
 	}
 }
 
@@ -684,7 +885,25 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	for _, w := range c.Warnings() {
 		log.Warn(w)
 	}
+	if f := c.AdminPasswordChanged(); f != "" {
+		log.Info("the built-in admin's password was set with signalith passwd and is kept in a file of its own", "file", f)
+	}
+	// The HTTPS certificate, which syslog over TLS uses too. A restart
+	// keeps the one in use when its settings did not change, and its own
+	// certificate authority in any case.
+	certs, certKey, err := r.certificates(c)
+	if err != nil {
+		return nil, err
+	}
+	if certs != nil {
+		in.certs, in.certKey = certs, certKey
+		in.jobs.Go(func() { certs.Run(ctx) })
+	}
+	// The master key, again after a restart: the files saved from now on
+	// are encrypted with this config's, and their plain values with it.
+	r.useKeys(c)
 	cl := newStore(c)
+	in.store = cl
 	ret := newRetention(c, cl, log)
 	maxAge := c.MaxEventAge(retentionKeepDays(ret))
 	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
@@ -693,12 +912,15 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	templateReady := make(chan struct{})
 	var receiver *syslog.Receiver
 	if c.Syslog.Enabled() {
-		receiver = syslog.New(syslog.Config{
+		sc := syslog.Config{
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
-			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
 			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
-		}, pipeline, log)
+		}
+		if certs != nil {
+			sc.GetCertificate = certs.GetCertificate
+		}
+		receiver = syslog.New(sc, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return nil, keyed(err, "syslog.udp", "syslog.tcp", "syslog.tls")
 		}
@@ -756,7 +978,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	}
 	n := people.Count()
 	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
-	if os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" && c.Auth.LDAP == nil {
+	if (os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" || os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD_FILE") != "") && c.Auth.LDAP == nil {
 		log.Warn("SIGNALITH_LDAP_BIND_PASSWORD is set but signalith.yaml has no auth.ldap, so it is not used; directory sign-in set up on the Users page keeps its own bind password")
 	}
 	if s := dir.Settings(); s.IsEnabled() {
@@ -798,6 +1020,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
+		TLS:        certs,
 		Sessions:   r.sessions,
 		Limiter:    r.limiter,
 		Restarter:  r,
@@ -894,6 +1117,10 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		in.node = r.node
 	}
 	in.srv, in.handler = srv, srv.Handler()
+	in.plain = in.handler
+	if c.Server.HTTPS() {
+		in.plain = srv.PlainHandler(in.handler)
+	}
 	if r.node != nil {
 		// Last, once everything started: the node points at this
 		// OpenSearch, and runs these jobs while it holds the job lease.
@@ -987,7 +1214,7 @@ func nodeURL(c *config.Config) string {
 		}
 	}
 	scheme := "http"
-	if httpsOn(c) {
+	if c.Server.HTTPS() {
 		scheme = "https"
 	}
 	return scheme + "://" + net.JoinHostPort(host, port)
@@ -1009,12 +1236,13 @@ func deployment() string {
 	return ""
 }
 
-// openNode opens this server's state folder (its identity and lock) and
+// openNode opens this server's state folder (its identity and lock, next
+// to its master key and HTTPS certificate: config.Config.StateDir) and
 // returns the cluster node and the log, which names this server on every
 // record from then on.
 func openNode(c *config.Config, log *slog.Logger) (*cluster.Node, *slog.Logger, error) {
 	inContainer := cluster.InContainer()
-	dir, why := stateDir(c)
+	dir, why := c.StateDirChoice()
 	local, err := cluster.OpenLocal(dir, cluster.LocalOptions{Name: c.Cluster.NodeName, InContainer: inContainer})
 	if err != nil {
 		return nil, nil, err
@@ -1029,16 +1257,6 @@ func openNode(c *config.Config, log *slog.Logger) (*cluster.Node, *slog.Logger, 
 	log.Info("this server's identity", "node_id", local.Identity.NodeID, "state_dir", local.Dir)
 	node := cluster.New(cluster.Options{Local: local, Version: version, Deployment: deployment(), Log: log})
 	return node, log, nil
-}
-
-// stateDir is this server's state folder: SIGNALITH_STATE_DIR when set;
-// else the folder that holds lookups.dir, or a local one when that is on
-// a network share or cannot be written, with why.
-func stateDir(c *config.Config) (dir, why string) {
-	if os.Getenv("SIGNALITH_STATE_DIR") != "" {
-		return c.StateDir(), ""
-	}
-	return cluster.PickStateDir(c.StateDir())
 }
 
 // openUsers opens the user store once and keeps it across restarts, so
@@ -1064,6 +1282,51 @@ func (r *runner) openUsers(c *config.Config) (*users.Store, *users.Directory, er
 		return nil, nil, err
 	}
 	return r.people, dir, nil
+}
+
+// certOptions are the settings of c's HTTPS certificate, which syslog
+// over TLS uses too: server.tls_cert and tls_key in mode files, else one
+// from Signalith's own CA covering this machine, public_url's host and
+// server.tls.names. ok is false when c needs none.
+func certOptions(c *config.Config) (o tlsauto.Options, ok bool) {
+	if !c.Server.HTTPS() && c.Syslog.TLS == "" {
+		return o, false
+	}
+	if c.Server.TLSMode() == config.TLSFiles {
+		o.CertFile, o.KeyFile = c.TLSFiles()
+		return o, true
+	}
+	o.Dir = c.TLSDir()
+	if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
+		o.Names = append(o.Names, u.Hostname())
+	}
+	o.Names = append(o.Names, c.Server.TLSNames()...)
+	return o, true
+}
+
+// newCertificates loads or makes the HTTPS certificate (see certOptions).
+// It logs the CA's fingerprint, so admins can check the CA they install
+// elsewhere.
+func newCertificates(c *config.Config, log *slog.Logger) (*tlsauto.Manager, error) {
+	o, _ := certOptions(c)
+	o.Log = log
+	m, err := tlsauto.New(o)
+	if err != nil {
+		return nil, err
+	}
+	leaf, names := m.Leaf(), m.Names()
+	if out := m.Outside(); len(out) > 0 {
+		log.Warn("the HTTPS certificate leaves out names that Signalith's own certificate authority may not sign; "+
+			"see \"Names the certificate can cover\" in docs/https.md", "names", strings.Join(out, ","))
+	}
+	if m.LocalCA() {
+		log.Info("HTTPS certificate from Signalith's own certificate authority; browsers warn until this CA is trusted (see docs/https.md)",
+			"ca_file", m.CAPath(), "ca_sha256", m.Fingerprint(), "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly))
+	} else {
+		log.Info("HTTPS certificate from server.tls_cert; reloaded when the file changes",
+			"file", o.CertFile, "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly), "ca_sha256", m.Fingerprint())
+	}
+	return m, nil
 }
 
 // newRetention returns the retention manager. Policies saved on the Data
@@ -1097,7 +1360,10 @@ func retentionKeepDays(ret *retention.Manager) int {
 func intelFeeds(c *config.Config) []intel.Feed {
 	var out []intel.Feed
 	for _, f := range c.Intel.Feeds {
-		out = append(out, f.Feed(intel.SourceConfig))
+		fd := f.Feed(intel.SourceConfig)
+		// A feed whose key cannot be decrypted is not downloaded.
+		fd.Problem = c.FeedProblem(f.Name)
+		out = append(out, fd)
 	}
 	return out
 }

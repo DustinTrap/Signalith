@@ -12,13 +12,16 @@ COPY --from=build /out/signalith /usr/local/bin/signalith
 # Writable folders for custom detections, lookups, dashboards and archived
 # days, owned by the nonroot user.
 COPY --from=build --chown=65532:65532 /out/data /var/lib/signalith
-# The state folder keeps this server's identity (node.id) and its lock.
+# SIGNALITH_STATE_DIR holds what Signalith makes for itself: its master key
+# (keys/), its HTTPS certificate (tls/), and this server's identity
+# (node.id) and its lock (cluster/).
 ENV SIGNALITH_STATE_DIR=/var/lib/signalith \
     SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections \
     SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups \
     SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards \
     SIGNALITH_ARCHIVE_DIR=/var/lib/signalith/archive
-# Web UI and API, and syslog (see deploy/docker/signalith.yaml).
-EXPOSE 8080 5514/udp 5514/tcp
+# Web UI and API (HTTPS), syslog, and syslog over TLS (see
+# deploy/docker/signalith.yaml).
+EXPOSE 8080 5514/udp 5514/tcp 6514/tcp
 ENTRYPOINT ["/usr/local/bin/signalith"]
 CMD ["serve", "-c", "/etc/signalith/signalith.yaml"]

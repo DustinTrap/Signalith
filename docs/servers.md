@@ -138,16 +138,34 @@ docker compose up -d
 
 `docker volume ls` shows the volume's name (here `docker_signalith-data`).
 
-**The state folder.** It is `SIGNALITH_STATE_DIR` when that is set; the systemd
-unit and the Docker image set it to `/var/lib/signalith`. Otherwise it is the
-folder that holds `lookups.dir`. It must be on a local disk, never on a network
-share, and the service's user must be able to write in it. When the folder that
-holds `lookups.dir` is on a network share or cannot be written, Signalith keeps its
-identity in a local folder instead (`/var/lib/signalith` on Linux,
-`C:\ProgramData\Signalith` on Windows) and says so in its log; set
-`SIGNALITH_STATE_DIR` to choose. Servers that share `lookups.dir` on a network
-share must each set their own `SIGNALITH_STATE_DIR`. On Docker Desktop and WSL
-bind mounts, which may not lock files, Signalith starts with a warning.
+**The state folder.** Signalith keeps the files it makes for itself in one folder:
+its master key (`keys`), its HTTPS certificate and certificate authority (`tls`),
+`admin-password-hash` when the admin password was changed with `signalith passwd`,
+and this server's identity (`node.id`, and `cluster/lock` while it runs). The
+server and every command (`signalith secrets`, `signalith initial-password`,
+`signalith settings` and the others) pick the same folder:
+
+1. `SIGNALITH_STATE_DIR` when it is set. The systemd unit and the Docker image set
+   it to `/var/lib/signalith`.
+2. Otherwise the folder that holds `lookups.dir`, when it already holds any of those
+   files. An upgrade therefore keeps using the folder it used before, wherever that
+   is, and leaves nothing behind.
+3. Otherwise a local folder Signalith used instead of that one before (it notes this
+   in a `used_instead_of` file there).
+4. Otherwise the folder that holds `lookups.dir`, when it is on a local disk and the
+   service's user can write in it.
+5. Otherwise a local folder: `/var/lib/signalith` on Linux (or the systemd
+   `StateDirectory`), `C:\ProgramData\Signalith` on Windows. The log says why, and
+   Signalith keeps using that folder from then on.
+
+The folder should be on a local disk, never on a network share, since the identity's
+lock cannot be trusted there. A folder on a network share that already holds a master
+key or a certificate is still used, so nothing is lost, and the log warns: move its
+files to a local folder and set `SIGNALITH_STATE_DIR` to it. Servers that share
+`lookups.dir` on a network share must each set their own `SIGNALITH_STATE_DIR`. On
+Docker Desktop and WSL bind mounts, which may not lock files, Signalith starts with a
+warning. `signalith validate` says when the folder is not the usual one, and what is wrong
+with it, if anything.
 
 ## Adding a server by hand
 
@@ -157,7 +175,10 @@ Until servers can be added from the Servers page:
 2. Give it the same OpenSearch settings as the first server: `opensearch.url`, its
    user and password, and `opensearch.index_prefix`.
 3. Give it the same agent tokens (`ingest.tokens`), so agents can send to either
-   server.
+   server. Each server has its own master key, so passwords and tokens stored
+   encrypted (`enc:` values) cannot be copied as they are: set them on the new
+   server with `signalith secrets set`, or put them there in plain text and run
+   `signalith secrets encrypt` (see [docs/encryption.md](encryption.md)).
 4. Copy the retention, feed and detection files listed above, so it can take the
    jobs over. Copy only those files: never `node.id` or the `cluster` folder. In
    Docker they are in the data volume; copy them into the new server's volume
@@ -222,16 +243,29 @@ backend signalith
     server siem-b 10.0.0.12:8080 check
 ```
 
-When Signalith serves HTTPS (`server.tls_cert`), add `check-ssl` and the
-certificate authority to check it with (`ca-file`) to each `server` line. A
+Both addresses answer over HTTPS and also over plain `http://` on the same port
+(everything else on plain HTTP is sent to HTTPS), so the plain `check` above works
+while Signalith serves HTTPS, which it does by default. To check over HTTPS instead,
+add `check-ssl` and the certificate authority to check it with (`ca-file`, the
+server's `tls/ca.pem`; see [docs/https.md](https.md)) to each `server` line. A
 Kubernetes container:
 
 ```yaml
 readinessProbe:
-  httpGet: { path: /readyz, port: 8080 }
+  httpGet: { path: /readyz, port: 8080, scheme: HTTPS }
 livenessProbe:
-  httpGet: { path: /livez, port: 8080 }
+  httpGet: { path: /livez, port: 8080, scheme: HTTPS }
 ```
+
+Kubernetes does not check the certificate of a probe, and without `scheme: HTTPS`
+the probe uses plain HTTP, which works too.
+
+**Each server has its own HTTPS certificate.** With `server.tls.mode: auto`, each
+server makes its own certificate authority, so browsers and agents that reach
+several servers through one name must trust each server's `ca.pem`. To have one
+certificate for all of them, give every server the same certificate with
+`server.tls.mode: files` (see [docs/https.md](https.md)), or let the load balancer
+add HTTPS and pass the connection on to Signalith.
 
 **Keep each person on one server.** A sign-in to the web pages is kept by the
 server it was made on, so set the load balancer to send each person to the same

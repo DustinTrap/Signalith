@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrsamsanchez/signalith/internal/users"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,7 +22,8 @@ import (
 // systemd unit protects /etc). The file holds only the settings changed
 // on the page, with who changed them and when. Signalith rewrites it whole
 // on each save, through a temporary file and a rename, readable only by
-// its own account, since it can hold passwords and API keys.
+// its own account. Passwords and API keys saved on the page are kept in it
+// encrypted with Signalith's master key (see internal/secrets).
 //
 // Precedence: environment variable > Settings page > signalith.yaml >
 // built-in default.
@@ -29,6 +31,9 @@ import (
 // PageSettings is the content of settings.yaml.
 type PageSettings struct {
 	Settings map[string]*PageEntry `yaml:"settings"`
+	// explicitMode is set while checking an edit that enters certificate
+	// files: they need the HTTPS mode chosen with them (see pageCertMode).
+	explicitMode bool
 }
 
 // PageEntry is one setting changed on the page.
@@ -55,14 +60,38 @@ const pageFileHeader = `# Settings changed on the Settings page of Signalith. Th
 # signalith.yaml; environment variables override both. Signalith rewrites
 # this file when settings are saved on the page. To undo a change, use Reset
 # on the page, or on the server: signalith settings reset [key...]
-# It can hold passwords and API keys, so keep it private.
+# Passwords and API keys in it are encrypted with Signalith's master key
+# (enc:v1:...); keep it private all the same.
 `
 
+// pageField is the setting a secret saved on the page is encrypted for:
+// "settings." and its key, so the value cannot pass for the same setting
+// in signalith.yaml or in another file.
+func pageField(key string) string { return "settings." + key }
+
 // sealSecret and openSecret are the one place secrets saved on the page
-// are written and read. Today they keep the secret as it is, protected by
-// the file's permissions; encrypting secrets at rest only changes these.
-func sealSecret(s string) string          { return s }
-func openSecret(s string) (string, error) { return s, nil }
+// are written and read: encrypted with Signalith's master key. A secret
+// kept as plain text, as Signalith did before it encrypted them, is read
+// as it is; the server encrypts it when it next starts (see
+// ResealSettingsFile).
+func sealSecret(key, v string) (string, error) { return secrets.Seal(pageField(key), v) }
+
+// openSecret decrypts a secret saved on the page with keys, the master
+// key of the configuration it is applied to (found from signalith.yaml and
+// the environment, as for the values in signalith.yaml), or else with the
+// keyring the server and commands save with (secrets.Default), when that
+// is another one.
+func openSecret(keys *secrets.Keyring, key, v string) (string, error) {
+	plain, err := keys.Open(pageField(key), v)
+	if err != nil {
+		if d := secrets.Default(); d != keys {
+			if p, derr := d.Open(pageField(key), v); derr == nil {
+				return p, nil
+			}
+		}
+	}
+	return plain, err
+}
 
 // Empty reports whether no setting was changed on the page.
 func (p *PageSettings) Empty() bool { return p == nil || len(p.Settings) == 0 }
@@ -107,14 +136,19 @@ func (p *PageSettings) Set(key string, v any, by string, at time.Time) error {
 	return nil
 }
 
-// SetSecret records a secret entered on the page and the address it may
-// be sent to; an empty secret means none.
-func (p *PageSettings) SetSecret(key, secret, sentTo string, by string, at time.Time) {
-	sealed := sealSecret(secret)
+// SetSecret records a secret entered on the page, encrypted with the
+// master key (secrets.Seal), and the address it may be sent to; an empty
+// secret means none.
+func (p *PageSettings) SetSecret(key, secret, sentTo string, by string, at time.Time) error {
+	sealed, err := sealSecret(key, secret)
+	if err != nil {
+		return err
+	}
 	if secret == "" {
 		sentTo = ""
 	}
 	p.put(key, &PageEntry{Secret: &sealed, SentTo: sentTo, ChangedBy: by, ChangedAt: at.UTC()})
+	return nil
 }
 
 func (p *PageSettings) put(key string, e *PageEntry) {
@@ -281,9 +315,18 @@ func ReadPageSettings(path string) (*PageSettings, error) {
 	if err != nil {
 		return nil, &PageFileError{Path: path, Err: err}
 	}
+	p, err := parsePageSettings(data)
+	if err != nil {
+		return nil, &PageFileError{Path: path, Err: err}
+	}
+	return p, nil
+}
+
+// parsePageSettings reads the settings file's text.
+func parsePageSettings(data []byte) (*PageSettings, error) {
 	var p PageSettings
 	if err := yaml.Unmarshal(data, &p); err != nil {
-		return nil, &PageFileError{Path: path, Err: err}
+		return nil, err
 	}
 	for k, e := range p.Settings {
 		if e == nil {
@@ -302,24 +345,78 @@ func WritePageSettings(path string, p *PageSettings) error {
 		}
 		return nil
 	}
+	data, err := encodePageSettings(p)
+	if err != nil {
+		return err
+	}
+	// Written whole or not at all, readable only by Signalith's account
+	// (see securefile). The new file keeps the owner of the one it
+	// replaces, or run as root takes its folder's, so "sudo signalith
+	// settings reset" does not leave a file the service cannot read. A
+	// link put in its place is replaced, not followed, so the file it
+	// points to is left alone.
+	return securefile.Replace(path, data)
+}
+
+// encodePageSettings returns the settings file's text.
+func encodePageSettings(p *PageSettings) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(pageFileHeader)
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(p); err != nil {
-		return err
+		return nil, err
 	}
 	if err := enc.Close(); err != nil {
-		return err
+		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
+	return buf.Bytes(), nil
+}
+
+// ResealSettingsFile passes every password and key saved on the Settings
+// page, in the settings.yaml text data, through fn and returns the file
+// with the values fn changed, and how many it changed. Each is passed as
+// the setting "settings." and its key. A secret written by hand as a plain
+// value: is passed too, and kept as an encrypted secret: once fn changes
+// it. Empty ones are not passed.
+func ResealSettingsFile(data []byte, fn secrets.Reseal) ([]byte, int, error) {
+	p, err := parsePageSettings(data)
+	if err != nil {
+		return nil, 0, fmt.Errorf("not a settings file Signalith can read: %w", err)
 	}
-	// The new file keeps the owner of the one it replaces, or of its
-	// folder, so "sudo signalith settings reset" does not leave a file the
-	// service cannot read.
-	owner := ownerOf(path, filepath.Dir(path))
-	return users.WriteFileAtomicWith(path, buf.Bytes(), owner.apply)
+	n := 0
+	for _, key := range p.Keys() {
+		e := p.Settings[key]
+		var v string
+		switch {
+		case e.Secret != nil:
+			v = *e.Secret
+		case e.Value.Kind != 0:
+			if s, ok := Lookup(key); !ok || s.Type != TypeSecret || e.Value.Decode(&v) != nil {
+				continue
+			}
+		}
+		if v == "" {
+			continue
+		}
+		nv, err := fn(secrets.Stored{Field: pageField(key), Label: key, Value: v})
+		if err != nil {
+			return nil, 0, err
+		}
+		if nv == v {
+			continue
+		}
+		e.Secret, e.Value = &nv, yaml.Node{}
+		n++
+	}
+	if n == 0 {
+		return data, 0, nil
+	}
+	out, err := encodePageSettings(p)
+	if err != nil {
+		return nil, 0, err
+	}
+	return out, n, nil
 }
 
 // secretMismatch is a secret that is not used because the address it
@@ -336,6 +433,16 @@ type secretMismatch struct {
 // type is an error; an unknown setting is skipped with a warning.
 func (c *Config) applyPage(p *PageSettings, base *Config) error {
 	l := c.layers
+	// A file without a server.tls section gets one as in effect before
+	// the page's HTTPS settings or public address apply, so each changes
+	// only itself (see Server.materializeTLS). c is not validated yet;
+	// base is.
+	for _, key := range p.Keys() {
+		if e := p.Settings[key]; tlsKey(key) && l.env[key] == "" && e.Refused == "" {
+			c.Server.materializeTLS(pageCertMode(p, base.Server))
+			break
+		}
+	}
 	for _, key := range p.Keys() {
 		e := p.Settings[key]
 		s, ok := Lookup(key)
@@ -355,8 +462,14 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 			switch {
 			case e.Secret != nil:
 				var err error
-				if v, err = openSecret(*e.Secret); err != nil {
-					return fmt.Errorf("%s: %w", key, err)
+				if v, err = openSecret(c.Keyring(), key, *e.Secret); err != nil {
+					// Like one in signalith.yaml, a secret that cannot be
+					// decrypted does not keep Signalith from starting, nor
+					// the page's other settings from being used: it is left
+					// out, as if none were set, and reported (see
+					// PageUnreadable).
+					c.pageCannotOpen(key, err)
+					v = ""
 				}
 			case e.Value.Kind != 0:
 				if err := e.Value.Decode(&v); err != nil {
@@ -372,7 +485,7 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 		if e.Value.Kind == 0 {
 			return fmt.Errorf("%s has no value", key)
 		}
-		f, _ := field(c, key)
+		f, _ := fieldToSet(c, key)
 		nv := reflect.New(f.Type())
 		if err := e.Value.Decode(nv.Interface()); err != nil {
 			return fmt.Errorf("%s: %w", key, err)
@@ -406,6 +519,28 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 		}
 	}
 	return nil
+}
+
+// pageCertMode returns eff with the certificate file saved on the page,
+// when the page sets one but no HTTPS mode. Before the mode existed, a
+// certificate set on the page was how HTTPS was turned on, as it is in a
+// file without the mode: such settings are read as files mode, not as
+// the auto mode of a file that has no certificate itself. Certificate
+// files entered now need the mode chosen with them (explicitMode).
+func pageCertMode(p *PageSettings, eff Server) Server {
+	if e := p.Settings["server.tls.mode"]; p.explicitMode || (e != nil && e.Refused == "") {
+		return eff
+	}
+	e := p.Settings["server.tls_cert"]
+	if e == nil || e.Refused != "" || e.Value.Kind == 0 {
+		return eff
+	}
+	var cert string
+	if e.Value.Decode(&cert) != nil || strings.TrimSpace(cert) == "" {
+		return eff
+	}
+	eff.TLSCert = cert
+	return eff
 }
 
 func orNone(origin string) string {
