@@ -135,6 +135,7 @@ nav:
   - Administration:
       - Server settings: settings.md
       - Users and sign-in: users.md
+      - Agent tokens: agent-tokens.md
       - Servers: servers.md
       - Data retention: retention.md
   - Security:

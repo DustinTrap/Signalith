@@ -492,7 +492,8 @@ func dockerUpgrade(t *testing.T, path string, setup time.Time) {
 		t.Errorf("the new token over HTTPS: %d", code)
 	}
 	// Put back in the environment, the old token is not handed to new
-	// agents.
+	// agents, and neither is the shared one: they get a placeholder the
+	// Add data page fills with a token of their own.
 	c.Ingest.Tokens = append(c.Ingest.Tokens, "change-this-ingest-token")
 	slices.Reverse(c.Ingest.Tokens)
 	h, _ := config.HashPassword("an admin password")
@@ -505,7 +506,8 @@ func dockerUpgrade(t *testing.T, path string, setup time.Time) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 || strings.Contains(string(b), "change-this-ingest-token") || !strings.Contains(string(b), c.Ingest.Tokens[1]) {
+	if resp.StatusCode != 200 || strings.Contains(string(b), "change-this-ingest-token") || strings.Contains(string(b), c.Ingest.Tokens[1]) ||
+		!strings.Contains(string(b), "Bearer @@AGENT_TOKEN@@") {
 		t.Errorf("agent config: %d %s", resp.StatusCode, b)
 	}
 

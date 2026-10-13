@@ -26,6 +26,7 @@
 <symbol id="i-arrow-up-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
 <symbol id="i-ban" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.929 4.929 19.07 19.071"/></symbol>
 <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></symbol>
+<symbol id="i-bell-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742"/><path d="m2 2 20 20"/><path d="M8.668 3.01A6 6 0 0 1 18 8c0 2.687.77 4.653 1.707 6.05"/></symbol>
 <symbol id="i-book-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v16"/><path d="M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z"/></symbol>
 <symbol id="i-bookmark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2 2 0 0 1 2 2v15a1 1 0 0 1-1.496.868l-4.512-2.578a2 2 0 0 0-1.984 0l-4.512 2.578A1 1 0 0 1 5 20V5a2 2 0 0 1 2-2z"/></symbol>
 <symbol id="i-box" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
@@ -912,6 +913,17 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
             </div>
             <p id="agent-server-error" class="field-error hidden" role="alert"></p>
             <div id="agent-server-warn" class="alert hidden" data-tone="warning" role="status"></div>
+            <div class="agent-addr__row agent-token" id="agent-token-row">
+              <label class="label" for="agent-token-name" id="agent-token-label">Token for these agents</label>
+              <div class="agent-token__field">
+                <input id="agent-token-name" class="input input--sm" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="agent-token-error agent-token-help">
+                <input id="agent-token-paste" class="input input--sm mono hidden" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the token" aria-describedby="agent-token-error agent-token-help">
+                <button class="link-btn agent-token__swap" type="button" id="agent-token-swap">Use a token I already have</button>
+              </div>
+            </div>
+            <p id="agent-token-error" class="field-error hidden" role="alert"></p>
+            <p id="agent-token-help" class="hint agent-token__help">Each group of agents gets its own token, so you can revoke one group without touching the others.</p>
+            <div id="agent-token-made" class="alert hidden" data-tone="success" role="status"></div>
           </div>
           <ol id="agent-steps" class="agent-steps" role="list" aria-busy="true"></ol>
           <p id="wazuh-note" class="hint hidden"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><span>Rather not install anything on the manager? It can send alerts itself: add a <code>&lt;syslog_output&gt;</code> block with <code>&lt;format&gt;json&lt;/format&gt;</code> to its <code>ossec.conf</code>, pointed at this server’s <a href="#data" id="wazuh-syslog">syslog address</a>.</span></p>
@@ -957,6 +969,19 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
           </div>
         </div>
         <div class="card__body" id="antivirus-body" aria-busy="true"></div>
+      </div>
+
+      <div class="card tokens-card" id="tokens-card" data-min-role="admin">
+        <div class="card__head tokens-card__head">
+          <div>
+            <h3 class="card__title" id="tokens-title">Agent tokens</h3>
+            <p class="card__sub">Agents prove who they are with these. Each event records the token it came with and the address that sent it.</p>
+          </div>
+          <div class="card__actions">
+            <button class="btn btn--primary btn--sm" type="button" id="tokens-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span>New token</span></button>
+          </div>
+        </div>
+        <div class="tokens-card__body" id="tokens-body" aria-busy="true" aria-labelledby="tokens-title"></div>
       </div>
     </div>
     <p class="sr-only" id="agent-status" role="status"></p>
@@ -1423,5 +1448,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="servers.js"></script>
 <script src="security.js"></script>
 <script src="endpoints.js"></script>
+<script src="tokens.js"></script>
 </body>
 </html>
