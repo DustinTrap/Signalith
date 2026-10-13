@@ -124,14 +124,20 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	u, err := s.userStore().SetPassword(p.Username, req.New, false)
+	if errors.Is(err, users.ErrBusy) {
+		writeUserError(w, err)
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"code": "invalid_password", "field": "new_password", "error": err.Error()})
 		return
 	}
-	// Other browsers signed in as this user are signed out, and are
+	// Other browsers signed in as this user are signed out (on servers
+	// that share the users file, when they next make a request), and are
 	// strangers to the account until they sign in with the new password;
 	// this one stays known.
 	ended := s.sessions().EndUser(p.Username, p.token)
+	s.sessions().SetVersion(p.token, s.passwordStamp(p.Username))
 	if p.Method == "session" {
 		s.rememberBrowser(w, r, p.Username)
 	}
@@ -222,6 +228,8 @@ func writeUserError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, users.ErrExists), errors.Is(err, users.ErrLastAdmin), errors.Is(err, users.ErrManaged), errors.Is(err, users.ErrReserved):
 		status = http.StatusConflict
+	case errors.Is(err, users.ErrBusy):
+		status = http.StatusServiceUnavailable
 	}
 	body := map[string]any{"error": err.Error()}
 	var fe *users.FieldError
