@@ -795,3 +795,26 @@ func TestFullDiskBannerClaimsNothing(t *testing.T) {
 		t.Errorf("no holder: %q", banner)
 	}
 }
+
+func TestHeartbeatCarriesTheSecuritySummary(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	a := testNode(t, t.TempDir(), c, true)
+	b := testNode(t, t.TempDir(), c, false)
+	waitReady(t, a, 5*time.Second)
+	at := time.Date(2026, 10, 13, 14, 2, 0, 0, time.UTC)
+	a.SetSecurity(SecuritySummary{CheckedAt: &at, Risk: 1, Attention: 2, CAScope: "strict"})
+	until(t, 5*time.Second, "b sees a's security check", func() bool {
+		for _, s := range b.Status().Servers {
+			if s.NodeID == a.ID() && s.Detail != nil && s.Detail.Security != nil && s.Detail.Security.Risk == 1 {
+				sec := s.Detail.Security
+				return sec.Attention == 2 && sec.CAScope == "strict" && sec.CheckedAt != nil && sec.CheckedAt.Equal(at)
+			}
+		}
+		return false
+	})
+	// Before its first check a server says so, with no time.
+	if d := heartbeatOf(t, fos, b.ID()); d.Security == nil || d.Security.CheckedAt != nil {
+		t.Errorf("unchecked server: %+v", d.Security)
+	}
+}

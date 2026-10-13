@@ -16,7 +16,11 @@
 //     seq_no_primary_term, _source and max aggregations;
 //   - POST /<pattern>/_delete_by_query and _update_by_query (recorded,
 //     only deletes change anything);
-//   - POST /_bulk with create and index actions.
+//   - POST /_bulk with create and index actions;
+//   - GET /<pattern>/_count (every document, whatever the query);
+//   - GET /_nodes/_local/settings (path.home and path.data, see Paths);
+//   - GET /_plugins/_security/authinfo, once Secure turns sign-in on
+//     (before that, as without the security plugin, it is not found).
 //
 // Anything else is acknowledged, so a server can start against it.
 package ostest
@@ -68,6 +72,37 @@ type Server struct {
 	fault       func(method, path string) *Fault
 	requests    []string
 	autoID      int
+	// security, when set, is the account every request must sign in as
+	// (see Secure).
+	security *Account
+	// paths are the node's path.home and path.data (see SetPaths).
+	home string
+	data []string
+}
+
+// Account is the one account the fake lets in once Secure is called, and
+// what its security plugin says about it.
+type Account struct {
+	User, Password string
+	Roles          []string
+	BackendRoles   []string
+}
+
+// Secure makes the fake require sign-in as a: other requests get 401, as
+// with OpenSearch's security plugin; authinfo then answers. nil turns
+// that off again.
+func (s *Server) Secure(a *Account) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.security = a
+}
+
+// SetPaths sets the node's path.home and path.data, which
+// /_nodes/_local/settings reports; data may be empty.
+func (s *Server) SetPaths(home string, data ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.home, s.data = home, data
 }
 
 type index struct {
@@ -274,8 +309,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	s.mu.Lock()
 	s.requests = append(s.requests, r.Method+" "+r.URL.RequestURI())
-	fault := s.fault
+	fault, sec := s.fault, s.security
 	s.mu.Unlock()
+	if sec != nil {
+		if u, pw, ok := r.BasicAuth(); !ok || u != sec.User || pw != sec.Password {
+			writeError(w, http.StatusUnauthorized, "security_exception", "missing authentication credentials")
+			return
+		}
+	}
 	if fault != nil {
 		if f := fault(r.Method, r.URL.RequestURI()); f != nil {
 			if f.Drop {
@@ -347,6 +388,35 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, p string, body [
 		writeJSON(w, 200, map[string]any{"acknowledged": true})
 	case strings.HasPrefix(p, "/_cat/"):
 		writeJSON(w, 200, []any{})
+	case p == "/_plugins/_security/authinfo":
+		s.mu.Lock()
+		sec := s.security
+		s.mu.Unlock()
+		if sec == nil {
+			writeError(w, 400, "illegal_argument_exception", "no handler found for uri [/_plugins/_security/authinfo] and method [GET]")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"user_name": sec.User, "roles": sec.Roles, "backend_roles": sec.BackendRoles})
+	case p == "/_nodes/_local/settings":
+		s.mu.Lock()
+		home, data := s.home, s.data
+		s.mu.Unlock()
+		if home == "" {
+			home = "/usr/share/opensearch"
+		}
+		paths := map[string]any{"home": home}
+		if len(data) > 0 {
+			paths["data"] = data
+		}
+		writeJSON(w, 200, map[string]any{"nodes": map[string]any{"ostest-node": map[string]any{"settings": map[string]any{"path": paths}}}})
+	case len(parts) == 2 && parts[1] == "_count":
+		s.mu.Lock()
+		n := 0
+		for _, ix := range s.match(parts[0]) {
+			n += len(ix.docs)
+		}
+		s.mu.Unlock()
+		writeJSON(w, 200, map[string]any{"count": n})
 	case p == "/_mget":
 		s.mget(w, q, body)
 	case p == "/_bulk" || len(parts) == 2 && parts[1] == "_bulk":

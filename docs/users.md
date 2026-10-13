@@ -546,7 +546,8 @@ page itself.
 `DELETE /api/dashboards/{id}`, `POST /api/dashboards/{id}/panels`,
 `POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`.
 
-**Admin:** `GET /api/agents/config`, `POST /api/tls/names`, `POST /api/detections`,
+**Admin:** `GET /api/agents/config`, `POST /api/tls/names`, `GET /api/security`,
+`POST /api/security/ca`, `POST /api/detections`,
 `POST /api/detections/test`, `POST /api/detections/sigma`,
 `PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,
 `POST /api/detections/{id}/run`, `PUT /api/lookups/{kind}`,

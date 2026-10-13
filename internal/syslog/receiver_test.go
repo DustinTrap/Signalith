@@ -888,3 +888,54 @@ func TestIPv6SendersCountedByNetwork(t *testing.T) {
 		}
 	}
 }
+
+// A sender that doesn't trust the certificate is heard of, by address.
+func TestTLSRefusalIsNoted(t *testing.T) {
+	certFile, keyFile := writeCert(t)
+	refused := make(chan string, 4)
+	r, _, _ := start(t, Config{TLS: "127.0.0.1:0", CertFile: certFile, KeyFile: keyFile,
+		OnRefusal: func(addr string) { refused <- addr }}, &capture{})
+	// No CA given: the client refuses the certificate.
+	if c, err := tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{ServerName: "127.0.0.1"}); err == nil {
+		c.Close()
+		t.Fatal("the certificate was trusted")
+	}
+	select {
+	case a := <-refused:
+		if !strings.HasPrefix(a, "127.0.0.1") {
+			t.Errorf("address %q", a)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refusal was not noted")
+	}
+	// Plain text is no refusal.
+	plain, err := net.Dial("tcp", addr(t, r, "tls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprint(plain, "<13>Oct 12 13:00:00 h app: not encrypted\n")
+	plain.SetReadDeadline(time.Now().Add(5 * time.Second))
+	io.Copy(io.Discard, plain)
+	plain.Close()
+	select {
+	case a := <-refused:
+		t.Errorf("plain text noted as a refusal from %s", a)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestRefusedCertificate(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"remote error: tls: unknown certificate authority": true,
+		"remote error: tls: bad certificate":               true,
+		// An OpenSSL client's alert over TLS 1.3, sent before it encrypts.
+		"local error: tls: bad record MAC":                     true,
+		"remote error: tls: protocol version not supported":    false,
+		"tls: first record does not look like a TLS handshake": false,
+		"read tcp 127.0.0.1:6514->127.0.0.1:5000: i/o timeout": false,
+	} {
+		if got := refusedCertificate(errors.New(msg)); got != want {
+			t.Errorf("%q: %v", msg, got)
+		}
+	}
+}

@@ -322,6 +322,9 @@ them. All of this, with the commands to trust the CA on Windows, macOS and Linux
 
 ### Hardening built in
 
+- **Security check**: the Security page (**Configure > Security**) and `signalith security`
+  check how this server is set up and what to fix first. See
+  [docs/security.md](docs/security.md).
 - **Encryption in transit**: HTTPS by default, TLS 1.2 or newer, for the UI, API and
   agents, which check the server's certificate; passwords, Basic credentials and session
   cookies are refused over plain HTTP, and the session cookie is HTTPS-only
@@ -406,6 +409,7 @@ anyone else.
 | `server.public_url` | `https://` and the `listen` host and port | URL agents use (scheme, host and port); goes into generated agent configs. With HTTPS on it must be `https://` |
 | `server.tls.mode` | `auto` | `auto`: HTTPS with a certificate Signalith makes and renews itself; `files`: `server.tls_cert` and `tls_key`; `off`: plain HTTP behind a reverse proxy that adds HTTPS. See [docs/https.md](docs/https.md) |
 | `server.tls.names` | none | Extra host names or IP addresses for the `auto` certificate (this machine's names and addresses, `public_url` and addresses entered on Add data are always in it) |
+| `server.tls.ca_scope` | `standard` | How far a certificate authority Signalith makes may vouch: `standard` (this server and private network names) or `strict` (only this server's own names and addresses). Used on the first start and when you make a new one on the Security page. See [docs/https.md](docs/https.md#how-far-the-certificate-authority-reaches) |
 | `server.tls.plaintext_ingest` | `deny` (`allow` for configs from before HTTPS was the default) | Whether agents may still send events over plain `http://`; the Health page lists any that do |
 | `server.tls_cert`, `server.tls_key` | none | Your certificate (with its chain) and key, for `server.tls.mode: files`; reloaded when they change. TLS 1.2 or newer; browsers are told to use HTTPS only |
 | `server.trusted_proxies` | none | IPs or CIDRs of reverse proxies whose `X-Forwarded-Proto: https` is believed (HSTS, HTTPS-only cookie, no redirect) |

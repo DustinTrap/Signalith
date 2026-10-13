@@ -116,6 +116,8 @@ type Node struct {
 	// paused says why this server's components are not running, so it
 	// must not hold the jobs; Use clears it.
 	paused string
+	// security is this server's last security check, for its heartbeat.
+	security SecuritySummary
 
 	wake      chan struct{}
 	leaseWake chan struct{}
@@ -299,6 +301,14 @@ func (n *Node) releaseAsync(reason string) {
 		n.releasing = false
 		n.mu.Unlock()
 	}()
+}
+
+// SetSecurity keeps the summary of this server's last security check,
+// which its next heartbeat carries.
+func (n *Node) SetSecurity(s SecuritySummary) {
+	n.mu.Lock()
+	n.security = s
+	n.mu.Unlock()
 }
 
 // SetJobs replaces the background jobs this server runs while it holds
@@ -676,6 +686,8 @@ func (n *Node) heartbeatDoc(state string) Heartbeat {
 		ms := n.offset.Milliseconds()
 		hb.ClockOffsetMS = &ms
 	}
+	sec := n.security
+	hb.Security = &sec
 	hb.Problems = append(hb.Problems, n.local.Warnings...)
 	if n.paused != "" {
 		hb.Problems = append(hb.Problems, n.paused+". Its log says why.")

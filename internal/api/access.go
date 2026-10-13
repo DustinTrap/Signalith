@@ -308,6 +308,7 @@ func (s *Server) signIn(r *http.Request, name, password, method string) (*princi
 		return nil, err
 	}
 	attempt.Succeed()
+	s.notePlainSignIn(r)
 	s.Log.Info("signed in", "audit", true, "user", p.Username, "role", p.Role, "source", p.Source, "client", client, "method", method)
 	return p, nil
 }

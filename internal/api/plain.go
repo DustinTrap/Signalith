@@ -42,31 +42,46 @@ func (s *Server) viaTrustedProxy(r *http.Request) bool {
 	return false
 }
 
-// maxLegacyProxies caps the proxies legacyProxySeen remembers.
+// maxLegacyProxies caps the proxies the legacy proxy list remembers.
 const maxLegacyProxies = 16
 
-// legacyProxySeen remembers the reverse proxies believed only because the
-// config predates HTTPS by default, for the Health page.
-type legacyProxySeen struct {
-	mu sync.Mutex
-	m  map[netip.Addr]time.Time
+// addrSeen remembers addresses and when each was last seen, up to max
+// of them (maxLegacyProxies when 0): the reverse proxies believed only
+// because the config predates HTTPS by default, for the Health page, and
+// the computers that signed in over plain HTTP, for the Security page.
+type addrSeen struct {
+	max int
+	mu  sync.Mutex
+	m   map[netip.Addr]time.Time
 }
 
-func (l *legacyProxySeen) note(a netip.Addr) {
+func (l *addrSeen) note(a netip.Addr) {
 	a = a.Unmap().WithZone("")
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.m == nil {
 		l.m = map[netip.Addr]time.Time{}
 	}
-	if _, ok := l.m[a]; !ok && len(l.m) >= maxLegacyProxies {
-		return
+	if _, ok := l.m[a]; !ok {
+		switch {
+		case l.max == 0 && len(l.m) >= maxLegacyProxies:
+			return
+		case l.max > 0 && len(l.m) >= l.max:
+			// Make room by forgetting the one seen longest ago.
+			var oldest netip.Addr
+			for k, v := range l.m {
+				if !oldest.IsValid() || v.Before(l.m[oldest]) {
+					oldest = k
+				}
+			}
+			delete(l.m, oldest)
+		}
 	}
 	l.m[a] = time.Now()
 }
 
-// since lists the proxies seen since t, in address order.
-func (l *legacyProxySeen) since(t time.Time) []string {
+// since lists the addresses seen since t, in address order.
+func (l *addrSeen) since(t time.Time) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []netip.Addr

@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -355,7 +357,10 @@ func errorLog(logger *slog.Logger) *log.Logger {
 }
 
 type throttledWriter struct {
-	log        *slog.Logger
+	log *slog.Logger
+	// refused hears of each client that refused the certificate, before
+	// any throttling.
+	refused    atomic.Pointer[func(addr string)]
 	mu         sync.Mutex
 	window     time.Time
 	n          int
@@ -366,6 +371,11 @@ type throttledWriter struct {
 const errorLogBurst = 10
 
 func (w *throttledWriter) Write(p []byte) (int, error) {
+	if fn := w.refused.Load(); fn != nil {
+		if addr, ok := ParseRefusal(string(p)); ok {
+			(*fn)(addr)
+		}
+	}
 	w.mu.Lock()
 	now := time.Now()
 	if now.Sub(w.window) >= time.Minute {
@@ -384,4 +394,54 @@ func (w *throttledWriter) Write(p []byte) (int, error) {
 		w.log.Warn("http server", "detail", string(bytes.TrimSpace(p)))
 	}
 	return len(p), nil
+}
+
+// OnRefusal calls fn with the address of each client that refuses hs's
+// certificate during the TLS handshake: one that does not trust the
+// certificate authority. hs must come from New with a logger. fn must
+// be quick; it runs on the connection's own goroutine.
+func OnRefusal(hs *http.Server, fn func(addr string)) {
+	if hs.ErrorLog == nil {
+		return
+	}
+	if w, ok := hs.ErrorLog.Writer().(*throttledWriter); ok {
+		w.refused.Store(&fn)
+	}
+}
+
+// refusalAlerts are the TLS alerts a client sends when it does not trust
+// the certificate it was shown.
+var refusalAlerts = []string{"unknown certificate authority", "bad certificate", "certificate unknown"}
+
+// RefusedCertificate reports whether why, the reason a TLS handshake
+// failed, says the client refused the certificate it was shown: it sent
+// one of refusalAlerts. Over TLS 1.3, OpenSSL clients (curl, Fluent Bit)
+// send that alert before they encrypt, which Go reads as "local error:
+// tls: bad record MAC"; during a handshake that is what such a refusal
+// looks like, so it counts too.
+func RefusedCertificate(why string) bool {
+	if alert, ok := strings.CutPrefix(why, "remote error: tls: "); ok {
+		return slices.Contains(refusalAlerts, alert)
+	}
+	return why == "local error: tls: bad record MAC"
+}
+
+// ParseRefusal reads one of net/http's messages, "http: TLS handshake
+// error from {addr}: {why}", and returns the client's address when why
+// says it refused the certificate (see RefusedCertificate).
+func ParseRefusal(line string) (string, bool) {
+	const prefix = "http: TLS handshake error from "
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, prefix) {
+		return "", false
+	}
+	rest := line[len(prefix):]
+	addr, why, ok := strings.Cut(rest, ": ")
+	if !ok {
+		return "", false
+	}
+	if !RefusedCertificate(why) {
+		return "", false
+	}
+	return addr, true
 }

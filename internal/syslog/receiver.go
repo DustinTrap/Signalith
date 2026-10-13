@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/clientaddr"
+	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 )
 
@@ -70,6 +71,9 @@ type Config struct {
 	// and KeyFile are loaded once at Start.
 	GetCertificate    func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	CertFile, KeyFile string
+	// OnRefusal, when set, hears of each sender that refused the
+	// certificate during the TLS handshake, by its address.
+	OnRefusal func(addr string)
 	// Allow lists the senders that may send; empty allows any sender.
 	Allow []netip.Prefix
 	// PublicPort is the port senders use for UDP and TCP when something
@@ -631,6 +635,9 @@ func (r *Receiver) serveConn(ctx context.Context, c net.Conn, cs *connState, pro
 		err := tc.HandshakeContext(hctx)
 		cancel()
 		if err != nil {
+			if r.cfg.OnRefusal != nil && refusedCertificate(err) {
+				r.cfg.OnRefusal(from.String())
+			}
 			r.warn("handshake", "syslog TLS handshake failed", "sender", from.String(), "err", err)
 			return
 		}
@@ -993,4 +1000,17 @@ func (b *nameBudget) add(key, day string, now time.Time, maxAge time.Duration) *
 	ix := &indexNames{day: day, names: map[string]struct{}{}, senders: map[netip.Addr]int{}}
 	b.indices[key] = ix
 	return ix
+}
+
+// refusedCertificate reports whether a TLS handshake failed because the
+// sender does not trust the certificate it was shown (see
+// httpserver.RefusedCertificate).
+func refusedCertificate(err error) bool {
+	msg := err.Error()
+	if i := strings.LastIndex(msg, "remote error: tls: "); i >= 0 {
+		msg = msg[i:]
+	} else if i := strings.LastIndex(msg, "local error: tls: "); i >= 0 {
+		msg = msg[i:]
+	}
+	return httpserver.RefusedCertificate(msg)
 }
