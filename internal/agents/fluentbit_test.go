@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -108,7 +109,7 @@ func TestIsLoopback(t *testing.T) {
 }
 
 func TestGenerateUsesServerAddress(t *testing.T) {
-	a, err := Generate(Options{OS: "linux", ServerURL: "https://192.168.1.20:8443/", Token: "tok-0123456789abcdef"})
+	a, err := Generate(Options{OS: "linux", ServerURL: "https://192.168.1.20:8443/", Token: "tok-0123456789abcdef", OwnCA: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestGenerateUsesServerAddress(t *testing.T) {
 		t.Errorf("server_url = %q, loopback = %v", a.ServerURL, a.ServerLoopback)
 	}
 
-	a, err = Generate(Options{OS: "linux", ServerURL: "https://[2001:db8::20]:8443", Token: "tok-0123456789abcdef"})
+	a, err = Generate(Options{OS: "linux", ServerURL: "https://[2001:db8::20]:8443", Token: "tok-0123456789abcdef", OwnCA: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,14 +186,15 @@ func TestGenerateTrustsTheServerCA(t *testing.T) {
 	}
 
 	// Windows: the CA next to the config, and the config locked down.
-	a, err = Generate(Options{OS: "windows", ServerURL: "https://192.168.1.20:8080", Token: "tok-0123456789abcdef", CA: testCA, Sysmon: true})
+	a, err = Generate(Options{OS: "windows", ServerURL: "https://192.168.1.20:8080", Token: "tok-0123456789abcdef", CA: testCA, OwnCA: true, Sysmon: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(a.Config, `tls.ca_file          C:\Program Files\fluent-bit\conf\signalith-ca.pem`) {
 		t.Errorf("windows config:\n%s", a.Config)
 	}
-	// An IP address is no name to ask for or check.
+	// An IP address is no name to ask for or check, and Signalith's own
+	// CA vouches for nothing else.
 	if strings.Contains(a.Config, "tls.vhost") || strings.Contains(a.Config, "verify_hostname") {
 		t.Errorf("vhost for an IP address:\n%s", a.Config)
 	}
@@ -251,5 +253,49 @@ func TestGenerateWithoutCA(t *testing.T) {
 	a, _ = Generate(Options{OS: "linux", ServerURL: "https://siem.corp:8080", Token: "tok-0123456789abcdef", CAUnknown: true})
 	if !strings.Contains(a.Config, "tls.ca_file") || a.CA != "" || !strings.Contains(a.Steps[a.CAStep-1], "doesn't include it") {
 		t.Errorf("unknown CA: %q\n%s", a.Steps, a.Config)
+	}
+}
+
+// TestGenerateTiesAnIPAddressToTheServer checks agents that reach the
+// server by IP address with a CA that vouches for other computers too: a
+// company or public one. Checking only who issued the certificate would
+// let anyone with another certificate from it take the token and events,
+// so the agent checks a name the certificate carries, or there is no
+// config.
+func TestGenerateTiesAnIPAddressToTheServer(t *testing.T) {
+	for _, o := range []Options{
+		{CA: testCA},      // a company CA, in the certificate file
+		{CAUnknown: true}, // a company CA the file leaves out
+		{},                // a public CA
+	} {
+		o.OS, o.Token, o.ServerURL = "linux", "tok-0123456789abcdef", "https://192.168.1.20:8443"
+		o.CertNames = []string{"*.corp.example", "localhost", "10.0.0.1", "Siem.Corp.Example.", "other.corp.example"}
+		a, err := Generate(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"Host                 192.168.1.20\n", "tls.vhost            siem.corp.example\n", "tls.verify_hostname  On\n"} {
+			if !strings.Contains(a.Config, want) {
+				t.Errorf("%+v: config missing %q:\n%s", o, want, a.Config)
+			}
+		}
+		// Nothing to check it against: refused, saying what to do.
+		for _, names := range [][]string{nil, {"*.corp.example", "localhost"}} {
+			o.CertNames = names
+			a, err := Generate(o)
+			if !errors.Is(err, ErrNoNameToCheck) || !strings.Contains(err.Error(), "Use a host name the certificate covers") {
+				t.Errorf("%+v: no name to check: %v\n%v", o, err, a)
+			}
+		}
+		// Over loopback nothing sits in between.
+		o.ServerURL = "https://127.0.0.1:8443"
+		if a, err := Generate(o); err != nil || strings.Contains(a.Config, "vhost") {
+			t.Errorf("loopback: %v", err)
+		}
+		// Plain http has no certificate to check.
+		o.ServerURL = "http://192.168.1.20:8080"
+		if _, err := Generate(o); err != nil {
+			t.Errorf("http: %v", err)
+		}
 	}
 }

@@ -135,6 +135,40 @@ func NewHandler() (*Server, http.Handler) {
 	return s, http.HandlerFunc(s.serve)
 }
 
+// Plug is a second address of a fake, for one server's requests, that a
+// test can pull out as when that server crashes.
+type Plug struct {
+	*httptest.Server
+	mu     sync.RWMutex
+	pulled bool
+}
+
+// Plug returns a new address of s. It stops when the test ends.
+func (s *Server) Plug(t interface{ Cleanup(func()) }) *Plug {
+	p := &Plug{}
+	p.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		if p.pulled {
+			drop(w)
+			return
+		}
+		s.serve(w, r)
+	}))
+	t.Cleanup(p.Close)
+	return p
+}
+
+// Pull cuts the address off. It waits for the requests being answered,
+// and drops every later one, so that nothing sent through it before a
+// crash lands after Pull returns: a request a server sent just before it
+// was stopped can otherwise reach the fake later.
+func (p *Plug) Pull() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pulled = true
+}
+
 // Block makes every write refused with a cluster_block_exception (HTTP
 // 429), as when OpenSearch's disk passes the flood-stage watermark, or
 // lifts that. Reads and deleting whole indices still work.

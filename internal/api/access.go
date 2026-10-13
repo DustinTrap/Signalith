@@ -157,11 +157,22 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 	})
 }
 
+// backgroundHeader marks a request the web UI made on its own, with no one
+// using the page just before (a refresh on a timer). It does not count as
+// activity, so an unattended tab still signs out after the idle timeout.
+const backgroundHeader = "X-Signalith-Background"
+
+func background(r *http.Request) bool { return r.Header.Get(backgroundHeader) == "1" }
+
 // authenticate checks the session cookie, then Basic credentials. It
 // returns nil without an error when the request is not signed in.
 func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	if c, err := r.Cookie(s.cookieName(r)); err == nil {
-		if ss, ok := s.sessions().Lookup(c.Value); ok {
+		lookup := s.sessions().Lookup
+		if background(r) {
+			lookup = s.sessions().Peek
+		}
+		if ss, ok := lookup(c.Value); ok {
 			if p := s.principalFor(ss.User); p != nil {
 				p.Method, p.token = "session", c.Value
 				return p, nil

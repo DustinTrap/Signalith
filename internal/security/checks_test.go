@@ -1,6 +1,7 @@
 package security
 
 import (
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"os"
@@ -319,6 +320,9 @@ func TestCertificate(t *testing.T) {
 			}},
 		{name: "files not covering", set: func(f *Facts) { files(f); f.TLS.CoversPublicHost = false }, state: Attention,
 			line: "Your certificate doesn't cover siem.corp.local, the address agents are set up with."},
+		{name: "files with IP addresses only", set: func(f *Facts) { files(f); f.TLS.Leaf.NoName = true }, state: Attention,
+			line: "Your certificate covers only IP addresses, so agents can't check it belongs to this server, and Add data can't set them up."},
+		{name: "auto with IP addresses only", set: func(f *Facts) { f.TLS.Leaf.NoName = true }, state: Good},
 		{name: "files without CA", set: func(f *Facts) { files(f); f.TLS.CAMissing = true }, state: Attention,
 			line: "Your certificate file doesn't include the authority that issued it, so Add data can't give it to agents."},
 		{name: "weak", set: func(f *Facts) { files(f); f.TLS.Leaf.RSABits = 1024; f.TLS.Leaf.SHA1 = true }, state: Attention,
@@ -363,6 +367,13 @@ func TestCAScope(t *testing.T) {
 			}},
 		{name: "unconstrained", set: func(f *Facts) { f.TLS.CA.Scope = "unconstrained" }, state: Attention,
 			line: "Signalith's certificate authority was made by an older version and can vouch for any website, to every computer that trusts it."},
+		{name: "any use", set: func(f *Facts) { f.TLS.CA.AnyUse = true }, state: Attention,
+			line: "Signalith's certificate authority was made by an older version and isn't limited to websites. If its key were stolen, it could sign programs or email that computers trusting it would accept.",
+			fix: func(t *testing.T, c *Check) {
+				if c.Fix.Action != "ca.prepare" {
+					t.Errorf("%+v", c.Fix)
+				}
+			}},
 		{name: "mismatch", set: func(f *Facts) { f.TLS.ScopeSetup = "strict" }, state: Attention,
 			line: "You chose a strict certificate authority, but the one in use is standard. Make the new one and switch when you're ready.",
 			fix: func(t *testing.T, c *Check) {
@@ -1288,5 +1299,16 @@ func TestOwnNamesFirst(t *testing.T) {
 	got := ownNamesFirst([]string{"localhost", "127.0.0.1", "::1", "siem-1", "10.0.0.12"})
 	if strings.Join(got, ",") != "siem-1,10.0.0.12,localhost,127.0.0.1,::1" {
 		t.Error(got)
+	}
+}
+
+func TestLeafFactsNoName(t *testing.T) {
+	for _, c := range []struct {
+		dns  []string
+		want bool
+	}{{nil, true}, {[]string{"localhost", "*.corp.example"}, true}, {[]string{"localhost", "siem.corp.example"}, false}} {
+		if got := leafFacts(&x509.Certificate{DNSNames: c.dns}).NoName; got != c.want {
+			t.Errorf("%q: NoName %v, want %v", c.dns, got, c.want)
+		}
 	}
 }

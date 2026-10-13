@@ -120,18 +120,22 @@ func plaintextIngest(r *http.Request) bool {
 //   - Browsers asking for a page are sent to the same address over HTTPS.
 //   - Sign-in, and any request carrying a password (HTTP Basic) or a
 //     session for the API, is refused with a message to use https://.
-//   - Agents may still send events when server.tls.plaintext_ingest is
+//   - Agents (Fluent Bit to /api/ingest, OpenTelemetry Collectors to
+//     OTLP) may still send events when server.tls.plaintext_ingest is
 //     allow; each one is noted so the Health page can name it. Only the
-//     ingest handler sees those requests, never the rest of the API.
+//     ingest handlers see those requests, never the rest of the API.
 //     Otherwise the batch of an agent that holds a token is refused with
-//     503, which Fluent Bit keeps and sends again (it drops a batch
+//     503, which both agents keep and send again (they drop a batch
 //     refused with 4xx), and the Health page names the agent to update
 //     from the Add data page. A wrong token, or none, is refused with
 //     401, as over HTTPS: only agents with a token count.
 //   - A trusted reverse proxy that says the browser used HTTPS is served
 //     as usual.
 func (s *Server) PlainHandler(secure http.Handler) http.Handler {
-	ingestOnly := limitBodies(s.securityHeaders(http.HandlerFunc(s.handleIngest)))
+	ingestOnly := map[string]http.Handler{
+		"POST /api/ingest": limitBodies(s.securityHeaders(http.HandlerFunc(s.handleIngest))),
+		otlpLogsRoute:      limitBodies(s.securityHeaders(http.HandlerFunc(s.handleOTLPLogs))),
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.viaTrustedProxy(r) {
 			secure.ServeHTTP(w, r)
@@ -141,9 +145,9 @@ func (s *Server) PlainHandler(secure http.Handler) http.Handler {
 		route := r.Method + " " + r.URL.Path
 		// The escaped path, so /api%2Fingest, which the API's router would
 		// not take for ingest, is not taken for it here either.
-		if r.Method+" "+r.URL.EscapedPath() == "POST /api/ingest" {
+		if h, ok := ingestOnly[r.Method+" "+r.URL.EscapedPath()]; ok {
 			if s.conf().Server.PlaintextIngest() {
-				ingestOnly.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), plaintextKey{}, true)))
+				h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), plaintextKey{}, true)))
 				return
 			}
 			if !s.validToken(r) && !s.oldTokenAgent(r) {
