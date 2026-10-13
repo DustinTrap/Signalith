@@ -69,6 +69,18 @@ func (s *Sessions) Create(user string, remember bool) string {
 // Lookup returns the session for a token and marks it used. Expired
 // sessions are removed and not returned.
 func (s *Sessions) Lookup(token string) (Session, bool) {
+	return s.lookup(token, true)
+}
+
+// Peek returns the session for a token like Lookup, but does not mark it
+// used: for requests a page makes on its own, such as a refresh every
+// 30 seconds, which must not keep an unattended browser signed in past
+// the idle timeout.
+func (s *Sessions) Peek(token string) (Session, bool) {
+	return s.lookup(token, false)
+}
+
+func (s *Sessions) lookup(token string, used bool) (Session, bool) {
 	if token == "" {
 		return Session{}, false
 	}
@@ -84,7 +96,9 @@ func (s *Sessions) Lookup(token string) (Session, bool) {
 		delete(s.byID, id)
 		return Session{}, false
 	}
-	ss.LastSeen = now
+	if used {
+		ss.LastSeen = now
+	}
 	return *ss, true
 }
 

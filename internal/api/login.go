@@ -36,7 +36,10 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 		mux.HandleFunc("GET /login", s.handleLoginPage)
 		// Stylesheets, fonts, the logo and the sign-in script are public so
 		// the sign-in page can use them.
-		mux.Handle("GET /assets/", http.FileServerFS(s.UI))
+		// Only the assets folder, never the app's own pages and scripts.
+		if assets, err := fs.Sub(s.UI, "assets"); err == nil {
+			mux.Handle("GET /assets/", http.StripPrefix("/assets", staticFiles(assets, false)))
+		}
 		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/assets/favicon.svg", http.StatusMovedPermanently)
 		})

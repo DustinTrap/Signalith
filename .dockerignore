@@ -1,0 +1,14 @@
+# Only the Go source goes into the image build. Keep out the git history,
+# local builds, the website and docs, and anything in deploy/docker that a
+# local run may have written (such as a master key or secrets).
+.git
+.github
+dist
+site
+docs
+signalith
+signalith.exe
+*.yaml.local
+cmd/zz-devdemo
+deploy/docker/*
+!deploy/docker/Dockerfile

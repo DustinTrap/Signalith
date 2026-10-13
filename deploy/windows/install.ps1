@@ -58,27 +58,77 @@ if ($existing -and $existing.Status -ne "Stopped") {
   $existing.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(120))
 }
 
-New-Item -ItemType Directory -Force -Path $InstallDir, $ConfigDir | Out-Null
 $exe = Join-Path $InstallDir "signalith.exe"
 $config = Join-Path $ConfigDir "signalith.yaml"
 
-# Any user may create folders in ProgramData, so a config folder or file
-# that someone else made first could hold settings of theirs. They are
-# used only when SYSTEM, Administrators, you or the service own them.
-foreach ($path in @($ConfigDir, $config)) {
-  if (-not (Test-Path -LiteralPath $path)) { continue }
+# New-PrivateFolder creates a folder that only SYSTEM and Administrators
+# may use, owned by Administrators, from the moment it exists: in
+# ProgramData every user may otherwise add files to a new folder before
+# its permissions are tightened.
+function New-PrivateFolder {
+  param([string]$Path)
+  $acl = New-Object Security.AccessControl.DirectorySecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  $acl.SetOwner([Security.Principal.SecurityIdentifier]$admins)
+  foreach ($sid in @($system, $admins)) {
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule(([Security.Principal.SecurityIdentifier]$sid), "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.AddAccessRule($rule)
+  }
+  $parent = Split-Path -Parent $Path
+  if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+  if ($PSVersionTable.PSEdition -eq "Core") {
+    [IO.FileSystemAclExtensions]::Create([IO.DirectoryInfo]::new($Path), $acl)
+  } else {
+    [IO.Directory]::CreateDirectory($Path, $acl) | Out-Null
+  }
+}
+
+$freshConfigDir = -not (Test-Path -LiteralPath $ConfigDir)
+if ($freshConfigDir) { New-PrivateFolder $ConfigDir }
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+# Any user may create folders in ProgramData, so a config folder, or
+# anything in it, that someone else made first could hold settings,
+# users or keys of theirs. They are used only when SYSTEM,
+# Administrators, you or the service own every item.
+foreach ($item in @(Get-Item -LiteralPath $ConfigDir -Force) + @(Get-ChildItem -LiteralPath $ConfigDir -Recurse -Force -ErrorAction Stop)) {
+  $path = $item.FullName
   $owner = (Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier]).Value
   if (@($system, $admins, $me, $serviceSid) -notcontains $owner) {
     $name = $owner
     try { $name = ([Security.Principal.SecurityIdentifier]$owner).Translate([Security.Principal.NTAccount]).Value } catch { }
-    throw "$path belongs to $name, not to an administrator, so it may not be what you expect. Check what is in it; if it is yours, make Administrators its owner (icacls `"$path`" /setowner *$admins /T) and run this script again."
+    throw "$path belongs to $name, not to an administrator, so it may not be what you expect. Check what is in $ConfigDir; if it is all yours, make Administrators its owner (icacls `"$ConfigDir`" /setowner *$admins /T) and run this script again."
   }
 }
+# A new install starts from an empty folder: files someone left there
+# before Signalith was installed are not trusted.
+if (-not (Test-Path -LiteralPath $config) -and @(Get-ChildItem -LiteralPath $ConfigDir -Force).Count -gt 0) {
+  throw "$ConfigDir already has files in it but no signalith.yaml, so it was not made by this script. Check what is in it, move it aside (or delete it if you don't need it), and run this script again."
+}
+
+# The config folder is owned by Administrators and readable only by SYSTEM
+# and Administrators (not inherited from ProgramData, where every user can
+# read) before signalith init writes anything into it. Everything inside
+# gets that list, the state folder's files too: the master key (keys), the
+# HTTPS certificate (tls) and this server's identity (node.id,
+# cluster\lock).
+function Protect-ConfigFolder {
+  Invoke-Checked "Taking ownership of $ConfigDir" { icacls $ConfigDir /setowner "*$admins" /T /C /Q }
+  Invoke-Checked "Protecting $ConfigDir" { icacls $ConfigDir /inheritance:r /grant:r "*${system}:(OI)(CI)F" "*${admins}:(OI)(CI)F" /Q }
+  if (@(Get-ChildItem -LiteralPath $ConfigDir -Force).Count -gt 0) {
+    Invoke-Checked "Resetting the permissions inside $ConfigDir" { icacls "$ConfigDir\*" /reset /T /C /Q }
+  }
+}
+Protect-ConfigFolder
 
 # Outside Program Files only administrators may change the program, since
 # the service runs whatever signalith.exe is there.
 if (-not $InstallDir.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)) {
+  Invoke-Checked "Taking ownership of $InstallDir" { icacls $InstallDir /setowner "*$admins" /T /C /Q }
   Invoke-Checked "Protecting $InstallDir" { icacls $InstallDir /inheritance:r /grant:r "*${system}:(OI)(CI)F" "*${admins}:(OI)(CI)F" "*${users}:(OI)(CI)RX" "*${serviceSid}:(OI)(CI)RX" /Q }
+  if (@(Get-ChildItem -LiteralPath $InstallDir -Force).Count -gt 0) {
+    Invoke-Checked "Resetting the permissions inside $InstallDir" { icacls "$InstallDir\*" /reset /T /C /Q }
+  }
 }
 Copy-Item -Force (Join-Path $PSScriptRoot "signalith.exe") $InstallDir
 
@@ -92,14 +142,9 @@ if (-not (Test-Path -LiteralPath $config)) {
   if ($LASTEXITCODE -ne 0) { Write-Warning "Some passwords or keys could not be encrypted (see above). Check with: signalith secrets status" }
 }
 
-# The config folder is owned by Administrators, readable only by SYSTEM and
-# Administrators (not inherited from ProgramData, where every user can
-# read), and changeable by the service. Everything inside gets that list,
-# the state folder's files too: the master key (keys), the HTTPS
-# certificate (tls) and this server's identity (node.id, cluster\lock).
-Invoke-Checked "Taking ownership of $ConfigDir" { icacls $ConfigDir /setowner "*$admins" /T /C /Q }
-Invoke-Checked "Protecting $ConfigDir" { icacls $ConfigDir /inheritance:r /grant:r "*${system}:(OI)(CI)F" "*${admins}:(OI)(CI)F" /Q }
-Invoke-Checked "Resetting the permissions inside $ConfigDir" { icacls "$ConfigDir\*" /reset /T /C /Q }
+# Again for what init or the upgrade wrote, and then the service may
+# change what is in the folder.
+Protect-ConfigFolder
 Invoke-Checked "Giving NT SERVICE\Signalith access to $ConfigDir" { icacls $ConfigDir /grant "*${serviceSid}:(OI)(CI)M" /Q }
 
 Invoke-Checked "signalith validate" { & $exe validate -c $config }
@@ -113,7 +158,9 @@ Invoke-Checked "signalith service install" { & $exe service install -c $config }
 # Waits until the service runs, and stops here, naming the log, if it
 # stops again instead.
 Invoke-Checked "signalith service start" { & $exe service start -c $config }
-New-NetFirewallRule -DisplayName "Signalith" -Direction Inbound -Protocol TCP -LocalPort ($Listen.Split(":")[-1]) -Action Allow -ErrorAction SilentlyContinue | Out-Null
+# One rule for the web page, API and agents, replaced on each run.
+Remove-NetFirewallRule -DisplayName "Signalith" -ErrorAction SilentlyContinue
+New-NetFirewallRule -DisplayName "Signalith" -Direction Inbound -Protocol TCP -LocalPort ($Listen.Split(":")[-1]) -Program $exe -Action Allow -ErrorAction SilentlyContinue | Out-Null
 
 # Open the syslog ports the config turns on (syslog.udp, syslog.tcp,
 # syslog.tls), only to the senders in syslog.allow when it lists any.

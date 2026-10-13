@@ -491,7 +491,9 @@ certificate, and turn off **Skip certificate check**
 ### Sign-in sessions
 
 **Looks at:** **Sign out after** (`auth.session_timeout`, 12 hours by default): how
-long a sign-in lasts without use. Someone who ticks **Keep me signed in** isn't signed
+long a sign-in lasts without use. An open tab's own refreshes (the Health card,
+dashboards and other timers) don't count as use, so a tab left unattended still signs
+out. Someone who ticks **Keep me signed in** isn't signed
 out for being idle; every sign-in ends after 7 days at most.
 
 - Good: 24 hours or less.
