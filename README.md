@@ -46,6 +46,11 @@ docker compose -f deploy/docker/docker-compose.yml exec signalith signalith pass
 docker compose -f deploy/docker/docker-compose.yml restart signalith
 ```
 
+Settings changed on the **Settings** page are kept in the `signalith-data` volume
+(`/var/lib/signalith/lookups/settings.yaml` in the container), with Signalith's own
+certificate authority, so they survive updates; settings given in `docker-compose.yml`'s
+`environment:` show there locked.
+
 To update, run `git pull` and then the first command again. It rebuilds Signalith from the
 new code each time. After a reboot everything starts again by itself once Docker is
 running; in Docker Desktop turn on Settings > General > "Start Docker Desktop when you
@@ -93,8 +98,9 @@ same):
 6. If you had changed other things, such as ports or `SIGNALITH_PUBLIC_URL`, make the same
    changes in the new files (`SIGNALITH_PUBLIC_URL` now starts with `https://`).
 7. Once the **Health** page lists no agent still sending over plain `http://`, set
-   `plaintext_ingest: deny` in `deploy/docker/signalith.yaml` and run step 2 again. That
-   also ends the old token. An agent you missed is turned away until it gets a new
+   **Agents on plain HTTP** to **Refuse them** on the **Settings** page (the **HTTPS**
+   card; it applies at once), or set `plaintext_ingest: deny` in
+   `deploy/docker/signalith.yaml` and run step 2 again. That also ends the old token. An agent you missed is turned away until it gets a new
    configuration; it keeps its events and sends them then, and Health names it.
 
 ### Linux
@@ -196,7 +202,9 @@ Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-n
 and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
 address filled in; rsyslog and syslog-ng send over TLS when it is on, with the CA certificate
 to save. Send the test message it shows and watch it arrive on the same page.
-When syslog is off, the page gives the steps to turn it on for this system.
+When syslog is off, the page gives the steps to turn it on for this system: the
+UDP and TCP address on the **Settings** page, then **Restart now**, plus the port
+permission for a Linux service or the Windows Firewall rules.
 By hand, forwarding a Linux server's logs with rsyslog is one line in
 `/etc/rsyslog.d/90-signalith.conf`, then a restart of rsyslog:
 
@@ -216,7 +224,8 @@ event category is kept when that is shorter) or more than an hour
 ahead; then it is the time Signalith received the message, and the device's own time is
 kept in `device_time`, as for agent data (see [Ingest limits](#ingest-limits)).
 
-To accept syslog only from known senders, list them under `syslog.allow`:
+To accept syslog only from known senders, list them in **Allowed senders** on the
+Settings page, or under `syslog.allow`:
 
 ```yaml
 syslog:
@@ -267,7 +276,8 @@ redirected, and passwords and sessions are refused.
 
 To use your own certificate, set `server.tls.mode: files` with `server.tls_cert` and
 `tls_key`; behind a reverse proxy that adds HTTPS, `server.tls.mode: off` with
-`server.trusted_proxies`. Configs from earlier versions keep working: agents set up for
+`server.trusted_proxies`. All of these are also on the **Settings** page, in the
+**HTTPS** card. Configs from earlier versions keep working: agents set up for
 `http://` keep sending until they get a new configuration, and the **Health** page lists
 them. All of this, with the commands to trust the CA on Windows, macOS and Linux, is in
 [docs/https.md](docs/https.md).
@@ -315,6 +325,31 @@ Everything lives in one YAML file (`/etc/signalith/signalith.yaml` or
 `C:\ProgramData\Signalith\signalith.yaml`). `signalith init` writes a working one, and
 `signalith validate` checks it and lists every problem with the setting to fix.
 Unknown keys are rejected, so typos do not silently do nothing.
+
+### Settings page
+
+Admins can change most of these settings on the **Settings** page instead: the public
+and web addresses, HTTPS (the mode, extra certificate names, your own certificate
+files, agents on plain HTTP and trusted reverse proxies), the OpenSearch connection,
+search limits, syslog, the detection scheduler and the AI assistant. Each one shows where its value comes
+from; an environment variable wins over the page, which wins over `signalith.yaml`.
+Some apply at once; for the rest, the page restarts Signalith inside the same process,
+after checking that the new web address can be listened on and that OpenSearch
+answers, and people stay signed in. A move of the web address goes back by itself
+when nobody reaches the new one within 2 minutes, which makes a lockout unlikely,
+though a firewall or proxy in between can still cause one. Changes are kept in
+`settings.yaml` in the lookups folder (`SIGNALITH_SETTINGS_FILE` moves it), never in
+`signalith.yaml`. Passwords and keys are never shown, and are only sent to the address
+they were entered for. If a change goes wrong, `signalith settings list` shows what
+was changed on the page and `signalith settings reset [setting...]` undoes it; then
+restart the service. The Linux service keeps the file in `/var/lib/signalith/lookups`:
+give it with `-file /var/lib/signalith/lookups/settings.yaml`. See
+[docs/settings.md](docs/settings.md).
+
+Behind a reverse proxy that serves HTTPS, have it send `X-Forwarded-Proto: https` and
+list it under `server.trusted_proxies` (**Trusted reverse proxies** on the Settings
+page), so the sign-in cookie is marked for HTTPS only; the header is ignored from
+anyone else.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -374,19 +409,21 @@ Unknown keys are rejected, so typos do not silently do nothing.
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (for
 `auth.ldap` in this file only; directory sign-in set up on the Users page keeps its own) (also
-`SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`, `SIGNALITH_PUBLIC_URL`,
-`SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`, `SIGNALITH_USERS_FILE`,
-`SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and `SIGNALITH_SYSLOG_UDP` and
-`SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). Secrets can also be read from a file,
-as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PASSWORD_FILE`,
+`SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_USERNAME`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`,
+`SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
+`SIGNALITH_USERS_FILE`, `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and
+`SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). Secrets can also be read
+from a file, as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PASSWORD_FILE`,
 `SIGNALITH_ADMIN_PASSWORD_FILE`, `SIGNALITH_INGEST_TOKEN_FILE`, `SIGNALITH_LDAP_BIND_PASSWORD_FILE` or
 `SIGNALITH_ASSISTANT_API_KEY_FILE` to the file's path. Setting both forms of one is an error, except for the
-ingest token, where both tokens are accepted (agents set up on Add data get the file's). When the admin password comes from
-`SIGNALITH_ADMIN_PASSWORD_FILE`, `signalith passwd` keeps the new one in `admin-password-hash` in
+ingest token, where both tokens are accepted (agents set up on Add data get the file's). A setting set by an
+environment variable, or by a file one names, is shown locked on the Settings page. When the admin password
+comes from `SIGNALITH_ADMIN_PASSWORD_FILE`, `signalith passwd` keeps the new one in `admin-password-hash` in
 the state folder, where it replaces the file's password. `SIGNALITH_STATE_DIR` is the folder
 where Signalith keeps files it makes for itself, such as its HTTPS certificate (in `tls`); it
 defaults to the folder that holds `lookups.dir`, and the systemd unit and Docker image set it to
-`/var/lib/signalith`.
+`/var/lib/signalith`. `SIGNALITH_SETTINGS_FILE` sets where the Settings page keeps its changes
+(default `settings.yaml` in `lookups.dir`).
 
 ## Detections and findings
 
@@ -709,7 +746,7 @@ syslog devices ─UDP/TCP/TLS▶ query compiler,
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |
-| `internal/config` | YAML config, validation, password hashing |
+| `internal/config` | YAML config, validation, password hashing, the Settings page's registry and settings file |
 | `internal/httpserver` | Web server timeouts, connection limits, HTTPS and plain HTTP on one port |
 | `internal/ospki` | Certificates and security settings for a secured OpenSearch (`bootstrap-docker`, `opensearch-certs`) |
 | `internal/tlsauto` | Signalith's own certificate authority and HTTPS certificate: issue, renew, reload |

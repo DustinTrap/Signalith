@@ -32,10 +32,10 @@ func (s *Server) viaTrustedProxy(r *http.Request) bool {
 	if !from.IsValid() {
 		return false
 	}
-	if s.Config.Server.TrustsProxy(from) {
+	if s.conf().Server.TrustsProxy(from) {
 		return true
 	}
-	if s.Config.Server.LegacyProxy(from) {
+	if s.conf().Server.LegacyProxy(from) {
 		s.legacyProxies.note(from)
 		return true
 	}
@@ -125,14 +125,14 @@ func (s *Server) PlainHandler(secure http.Handler) http.Handler {
 		// The escaped path, so /api%2Fingest, which the API's router would
 		// not take for ingest, is not taken for it here either.
 		if r.Method+" "+r.URL.EscapedPath() == "POST /api/ingest" {
-			if s.Config.Server.PlaintextIngest() {
+			if s.conf().Server.PlaintextIngest() {
 				ingestOnly.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), plaintextKey{}, true)))
 				return
 			}
 			s.Pipeline.NoteRefused(clientaddr.Parse(r.RemoteAddr), ingest.RefusedPlaintext)
 			w.Header().Set("Retry-After", "60")
 			plainRefusal(w, r, http.StatusServiceUnavailable, "This server only accepts events over HTTPS, so this batch was refused; the agent keeps it and sends it again. "+
-				"Get a new configuration for this agent from the Add data page (it sends to "+s.httpsBase(r)+"), or, until every agent has one, set server.tls.plaintext_ingest: allow.")
+				"Get a new configuration for this agent from the Add data page (it sends to "+s.httpsBase(r)+"), or, until every agent has one, accept agents on plain HTTP for now on the Settings page, under HTTPS (server.tls.plaintext_ingest: allow).")
 			return
 		}
 		_, _, basic := r.BasicAuth()
@@ -183,7 +183,7 @@ func (s *Server) httpsBase(r *http.Request) string {
 		}
 		return "https://" + host
 	}
-	if u, err := url.Parse(s.Config.Server.PublicURL); err == nil && u.Host != "" {
+	if u, err := url.Parse(s.conf().Server.PublicURL); err == nil && u.Host != "" {
 		return "https://" + u.Host
 	}
 	return "https://localhost"

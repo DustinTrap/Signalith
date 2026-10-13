@@ -550,8 +550,17 @@ func (m *Manager) usable(leaf *x509.Certificate) bool {
 	if leaf == nil || leaf.CheckSignatureFrom(m.ca) != nil || !m.now().Before(leaf.NotAfter.Add(-RenewBefore)) {
 		return false
 	}
+	want := map[string]bool{}
 	for _, n := range m.wantNames() {
 		if leaf.VerifyHostname(n) != nil {
+			return false
+		}
+		want[n] = true
+	}
+	// Nor more: a name taken out of server.tls.names leaves the
+	// certificate when Signalith next starts.
+	for _, n := range certNames(leaf) {
+		if n, ok := normalizeName(n); !ok || !want[n] {
 			return false
 		}
 	}

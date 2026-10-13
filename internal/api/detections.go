@@ -75,7 +75,7 @@ func (s *Server) handleListDetections(w http.ResponseWriter, r *http.Request) {
 	for _, d := range ds {
 		out = append(out, detectionView{Detection: d, State: states[d.ID]})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"detections": out, "scheduler": s.Config.Detections.Scheduler})
+	writeJSON(w, http.StatusOK, map[string]any{"detections": out, "scheduler": s.conf().Detections.Scheduler})
 }
 
 func (s *Server) handleGetDetection(w http.ResponseWriter, r *http.Request) {

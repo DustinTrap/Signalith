@@ -13,8 +13,10 @@ server:
     # allow: agents set up before HTTPS was the default may still send over
     # plain http://, including with the old example token
     # change-this-ingest-token, and the Health page lists them. Once every
-    # agent has its configuration from the Add data page, change this to
-    # deny and run docker compose up -d again; that also ends the old token.
+    # agent has its configuration from the Add data page, set Agents on
+    # plain HTTP to Refuse them on the Settings page (HTTPS), or change this
+    # to deny and run docker compose up -d again; that also ends the old
+    # token.
     plaintext_ingest: allow
 opensearch:
   # HTTPS, checked with OpenSearch's CA; Signalith signs in with its own

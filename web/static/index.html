@@ -186,6 +186,7 @@
       <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
       <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
+      <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
   </nav>
@@ -1140,6 +1141,21 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     </dialog>
   </section>
 
+  <!-- Settings (admins) -->
+  <section id="page-settings" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Settings</h2>
+        <p class="page-head__desc">How this server runs. Settings not changed on this page come from signalith.yaml or their defaults.</p>
+      </div>
+    </div>
+    <div id="st-alerts" class="st-alerts"></div>
+    <div class="st-layout">
+      <nav class="st-nav" id="st-nav" aria-label="Settings sections"></nav>
+      <div class="st-main" id="st-main" aria-busy="true"></div>
+    </div>
+  </section>
+
   <!-- Health -->
   <section id="page-health" class="page">
     <div id="health" class="health-page"></div>
@@ -1204,5 +1220,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="cases.js"></script>
 <script src="users.js"></script>
 <script src="retention.js"></script>
+<script src="settings.js"></script>
 </body>
 </html>

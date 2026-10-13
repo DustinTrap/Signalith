@@ -672,7 +672,7 @@ function timelineCard(c, linked) {
   // Search composer: runs now and keeps its first 50 rows on the timeline.
   const sq = el('textarea', { id: 'cs-query', class: 'textarea mono c-query-input', rows: '2', spellcheck: 'false', placeholder: 'datamodel=Authentication user=bob | stats count by src', 'aria-label': 'Query' });
   sq.value = draft.query;
-  const stime = caseSelect('cs-time', [['-1h', 'Last hour'], ['-24h', 'Last 24 hours'], ['-7d', 'Last 7 days'], ['-30d', 'Last 30 days'], ['', 'All time']], draft.earliest, 'Time range');
+  const stime = caseSelect('cs-time', [['-1h', 'Last hour'], ['-24h', 'Last 24 hours'], ['-7d', 'Last 7 days'], ['-30d', 'Last 30 days'], ['0', 'All time']], draft.earliest, 'Time range');
   stime.classList.remove('select--block');
   const reason = el('input', { id: 'cs-reason', class: 'input', type: 'text', placeholder: 'Why you ran it (optional)', 'aria-label': 'Why you ran it', value: draft.reason });
   const searchBtn = el('button', { type: 'submit', class: 'btn btn--primary' }, icon('play'), 'Run and add');
@@ -835,7 +835,7 @@ function changeRun(run) {
 function searchSummary(e) {
   const n = (e.rows || []).length;
   const range = { '-1h': 'Last hour', '-24h': 'Last 24 hours', '-7d': 'Last 7 days', '-30d': 'Last 30 days' };
-  const bits = [!e.earliest ? 'All time' : !e.latest && range[e.earliest] ? range[e.earliest] : `From ${e.earliest}${e.latest ? ' to ' + e.latest : ''}`];
+  const bits = [!e.earliest || e.earliest === '0' ? 'All time' : !e.latest && range[e.earliest] ? range[e.earliest] : `From ${e.earliest}${e.latest ? ' to ' + e.latest : ''}`];
   if (e.result_kind === 'events') bits.push(plural(e.matched || 0, 'matching event'));
   else bits.push(plural(n, 'row'));
   if (e.truncated) bits.push(`first ${n} kept`);
@@ -1081,7 +1081,7 @@ if ($('search-to-case')) {
     if (!query) { showQueryError(new Error('Write or ask for a query first.')); return; }
     const id = await pickCase({ title: lastAsk && lastAsk.query.trim() === query ? lastAsk.question : '' });
     if (!id) return;
-    const earliest = $('time').value === '0' ? '' : $('time').value;
+    const earliest = timeEarliest();
     try {
       const res = await api('api/cases/' + encodeURIComponent(id) + '/entries', { kind: 'search', query, earliest });
       toast(`Search saved to ${res.case.title}.`, { label: 'Open case', run: () => openCase(id) });

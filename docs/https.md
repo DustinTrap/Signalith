@@ -14,6 +14,10 @@ is nothing to set up: the server makes its own certificate the first time it sta
 - [Settings](#settings)
 - [Troubleshooting](#troubleshooting)
 
+Every HTTPS setting described here can also be changed on the **Settings** page
+(**Configure > Settings**, the **HTTPS** card), without editing `signalith.yaml`: see
+[Settings page](#on-the-settings-page) below.
+
 ## What happens by default
 
 With `server.tls.mode: auto` (the default), the first start creates a small certificate
@@ -342,6 +346,31 @@ use `https://`; give them the CA, for example `curl --cacert ca.pem`.
 | `server.tls_cert`, `server.tls_key` | none | Your certificate (with its chain) and key, for `mode: files` |
 | `syslog.tls` | off (`init` sets `0.0.0.0:6514`) | Syslog over TLS, with the same certificate |
 | `SIGNALITH_STATE_DIR` | the folder holding `lookups.dir` | Where the `tls` folder is kept |
+
+### On the Settings page
+
+The **HTTPS** card of the **Settings** page has the same settings: **HTTPS** (`mode`),
+**Extra certificate names**, **Certificate file** and **Key file** (used only with your
+own certificate files), **Agents on plain HTTP** and **Trusted reverse proxies**. What
+is saved there wins over `signalith.yaml` (see [the Settings page](settings.md)); an
+`http://` public address saved there is read as `https://` and the page offers to change
+it, as for `signalith.yaml`.
+
+- **Agents on plain HTTP** and **Trusted reverse proxies** apply as soon as they are
+  saved.
+- The mode, the extra names and the certificate files apply after a restart, which the
+  page does in place. The certificate keeps coming from the same certificate authority,
+  so nothing has to be trusted again; a restart with new names gives a certificate that
+  has them, and a name taken out of the list leaves the certificate at the next restart.
+- A public address saved on the page joins the certificate at once, as one entered on
+  **Add data** does. A name Signalith's own CA may not sign is shown as a warning on the
+  page.
+- Turning HTTPS off or on moves the page between `http://` and `https://` on the same
+  port, so you sign in again there; going between Signalith's own certificate and your
+  files asks first, since agents set up to check one do not trust the other. A
+  certificate that cannot be loaded or made stops the restart before anything stops.
+- Below the settings, **In use now** shows the mode in use, the names the certificate
+  covers and the CA's fingerprint, with a link to download the CA.
 
 ## Troubleshooting
 

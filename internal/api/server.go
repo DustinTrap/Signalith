@@ -101,6 +101,12 @@ type Server struct {
 	// up again; 0 means every 5 minutes.
 	DirectoryRecheck time.Duration
 
+	// Restarter restarts the server with the settings saved on the
+	// Settings page; nil means the page cannot restart it. Started is when
+	// the process started, for the page's uptime.
+	Restarter Restarter
+	Started   time.Time
+
 	authOnce     sync.Once
 	creds        credCache  // recently checked Basic credentials
 	routes       []route    // every API route and its role, from Handler
@@ -110,10 +116,41 @@ type Server struct {
 	dirSlotsOnce sync.Once
 	dirSlots     chan struct{}  // limits directory connections at once
 	background   sync.WaitGroup // directory checks still running
+	settingsMu   sync.Mutex     // serializes saves on the Settings page
+	testMu       sync.Mutex     // one connection test at a time
+	// live holds Config with the settings saved on the Settings page that
+	// apply at once, and liveAI the assistant they give.
+	live   atomic.Pointer[config.Config]
+	liveAI atomic.Pointer[liveModel]
 
 	// legacyProxies are reverse proxies believed only because the config
 	// predates HTTPS by default (see viaTrustedProxy).
 	legacyProxies legacyProxySeen
+}
+
+// liveModel is the assistant after a change on the Settings page; nil
+// when it was turned off.
+type liveModel struct{ c *assistant.Client }
+
+// conf returns the configuration in use: Config, with the settings saved
+// on the Settings page that apply at once.
+func (s *Server) conf() *config.Config {
+	if c := s.live.Load(); c != nil {
+		return c
+	}
+	return s.Config
+}
+
+// Running returns the configuration in use: the one the server started
+// with, plus the settings applied at once from the Settings page since.
+func (s *Server) Running() *config.Config { return s.conf() }
+
+// model returns the AI assistant in use, or nil when it is off.
+func (s *Server) model() *assistant.Client {
+	if m := s.liveAI.Load(); m != nil {
+		return m.c
+	}
+	return s.Assistant
 }
 
 // Handler returns the HTTP handler. Every API route is registered with
@@ -148,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeCases(api)
 	s.routeUsers(api)
 	s.routeRetention(api)
+	s.routeSettings(api)
 	if s.UI != nil {
 		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
 	}
@@ -410,7 +448,7 @@ func (s *Server) validToken(r *http.Request) bool {
 	if tok == "" {
 		return false
 	}
-	for _, t := range s.Config.Ingest.Tokens {
+	for _, t := range s.conf().Ingest.Tokens {
 		if subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1 {
 			return true
 		}
@@ -639,7 +677,8 @@ func (s *Server) handleLanguage(w http.ResponseWriter, r *http.Request) {
 // server with its CA, and the certificate is made to cover the address.
 func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
-	server := s.Config.Server.PublicURL
+	conf := s.conf()
+	server := conf.Server.PublicURL
 	fieldError := func(err error) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "server"})
 	}
@@ -649,7 +688,7 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 			fieldError(err)
 			return
 		}
-		if u.Scheme == "http" && s.Config.Server.HTTPS() {
+		if u.Scheme == "http" && conf.Server.HTTPS() {
 			fieldError(fmt.Errorf("this server only accepts agents over HTTPS; use https://%s", u.Host))
 			return
 		}
@@ -663,7 +702,7 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	// With HTTPS off, a certificate kept for syslog over TLS is not the
 	// one agents meet (a proxy in front has its own).
 	certs := s.TLS
-	if !s.Config.Server.HTTPS() {
+	if !conf.Server.HTTPS() {
 		certs = nil
 	}
 	// Building the config changes nothing: the page adds the address to
@@ -713,13 +752,14 @@ type agentConfig struct {
 // the example token from an older docker-compose.yml, which anyone can
 // look up (kept only for agents that still use it).
 func (s *Server) agentToken() string {
-	for _, t := range s.Config.Ingest.Tokens {
+	tokens := s.conf().Ingest.Tokens
+	for _, t := range tokens {
 		if !config.IsPublicIngestToken(t) {
 			return t
 		}
 	}
-	if len(s.Config.Ingest.Tokens) > 0 {
-		return s.Config.Ingest.Tokens[0]
+	if len(tokens) > 0 {
+		return tokens[0]
 	}
 	return ""
 }
@@ -762,19 +802,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	out["config_file"] = s.Config.Path()
+	out["config_file"] = s.conf().Path()
 	// For the steps that turn syslog on: edit the section or add one.
 	out["config_has_syslog"] = s.Config.HasSection("syslog")
 	out["runtime"] = s.runtimeInfo()
 	out["tls"] = s.tlsInfo()
-	osURL := redact.URL(s.Config.OpenSearch.URL)
+	osURL := redact.URL(s.conf().OpenSearch.URL)
 	if err != nil {
 		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
 	} else {
 		out["opensearch"] = map[string]any{"status": status, "url": osURL}
 	}
-	warnings := s.Config.Warnings()
-	if len(s.Config.Ingest.Tokens) == 0 {
+	warnings := s.conf().Warnings()
+	if len(s.conf().Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
 	}
 	since := time.Now().Add(-plaintextWindow)
@@ -807,7 +847,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // /api/tls/ca.pem). own_ca says the CA is Signalith's own, which issues
 // certificates for this server only.
 func (s *Server) tlsInfo() map[string]any {
-	t := map[string]any{"mode": s.Config.Server.TLSMode()}
+	t := map[string]any{"mode": s.conf().Server.TLSMode()}
 	if s.TLS != nil {
 		t["names"] = s.TLS.Names()
 	}
@@ -835,11 +875,11 @@ func plaintextWarning(senders []ingest.Sender, docker bool) string {
 	if n == 1 {
 		msg = "An agent still sends events over plain HTTP, which anyone on the network can read: " + list + ". " +
 			"On the Add data page, get a new configuration for it, which uses HTTPS, and put it on that agent. " +
-			"Then set server.tls.plaintext_ingest: deny in " + where + "."
+			"Then refuse agents on plain HTTP on the Settings page, under HTTPS, or set server.tls.plaintext_ingest: deny in " + where + "."
 	} else {
 		msg = fmt.Sprintf("%d agents still send events over plain HTTP, which anyone on the network can read: %s. "+
 			"On the Add data page, get a new configuration, which uses HTTPS, and put it on each of them. "+
-			"Once all are updated, set server.tls.plaintext_ingest: deny in %s.", n, list, where)
+			"Once all are updated, refuse agents on plain HTTP on the Settings page, under HTTPS, or set server.tls.plaintext_ingest: deny in %s.", n, list, where)
 	}
 	return msg + dockerNote(senders, docker)
 }
@@ -920,8 +960,8 @@ func dockerNote(senders []ingest.Sender, docker bool) string {
 // config predates HTTPS by default, and says how to keep them working.
 func legacyProxyWarning(proxies []string) string {
 	return "A reverse proxy at " + joinAnd(proxies) + " sends requests to Signalith over plain HTTP, saying the browser used HTTPS (X-Forwarded-Proto). " +
-		"Signalith believes it for now only because signalith.yaml was written before HTTPS was the default. Add server.trusted_proxies: [" +
-		strings.Join(proxies, ", ") + "] to signalith.yaml and restart Signalith."
+		"Signalith believes it for now only because signalith.yaml was written before HTTPS was the default. List it under Trusted reverse proxies on the Settings page, " +
+		"under HTTPS, or add server.trusted_proxies: [" + strings.Join(proxies, ", ") + "] to signalith.yaml and restart Signalith."
 }
 
 // joinAnd joins a list as "a, b and c".

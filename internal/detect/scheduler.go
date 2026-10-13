@@ -100,6 +100,14 @@ func (s *Scheduler) log() *slog.Logger {
 	return slog.Default()
 }
 
+// SetMaxFindingsPerRun changes the cap on findings, for runs that start
+// after it returns.
+func (s *Scheduler) SetMaxFindingsPerRun(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.MaxFindingsPerRun = n
+}
+
 // Status returns the run state of every detection that has run.
 func (s *Scheduler) Status() map[string]RunState {
 	s.mu.Lock()
@@ -306,7 +314,9 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 		return nil, err
 	}
 	out := &RunResult{Results: len(res.Rows), Earliest: earliest, Latest: latest, Findings: []*findings.Finding{}}
+	s.mu.Lock()
 	maxF := s.MaxFindingsPerRun
+	s.mu.Unlock()
 	if maxF <= 0 {
 		maxF = 100
 	}

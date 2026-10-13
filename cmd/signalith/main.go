@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,7 +30,6 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
-	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
@@ -57,6 +57,7 @@ Usage:
   signalith serve     [-c file]           run the server
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
+  signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
   signalith initial-password [-c file]    print the first admin password the Docker quick start made
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
@@ -68,6 +69,9 @@ Usage:
 
 The config file defaults to %s
 (override with -c or the SIGNALITH_CONFIG environment variable).
+On Linux the service keeps the Settings page's file in
+/var/lib/signalith/lookups/settings.yaml: give it to settings and
+validate with -file.
 `
 
 func defaultConfigPath() string {
@@ -100,6 +104,8 @@ func main() {
 		err = cmdValidate(args)
 	case "passwd":
 		err = cmdPasswd(args)
+	case "settings":
+		err = cmdSettings(args)
 	case "initial-password":
 		err = cmdInitialPassword(args)
 	case "bootstrap-docker":
@@ -262,7 +268,11 @@ func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	path := configFlag(fs)
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
+	fileFlag := settingsFileFlag(fs)
 	fs.Parse(args)
+	if err := useSettingsFile(*fileFlag); err != nil {
+		return err
+	}
 	c, err := config.Load(*path)
 	if err != nil {
 		return err
@@ -273,6 +283,22 @@ func cmdValidate(args []string) error {
 	}
 	fmt.Printf("%s is valid.\n", *path)
 	fmt.Println(httpsSummary(c))
+	if p := c.SettingsProblem(); p != "" {
+		fmt.Println("Warning:", p)
+	} else if keys := c.PageKeys(); len(keys) > 0 {
+		fmt.Printf("Changed on the Settings page (%s): %s.\n", c.SettingsFile(), strings.Join(keys, ", "))
+	}
+	for _, r := range c.Refused() {
+		fmt.Printf("Set aside on the Settings page, not used: %s (%s)\n", r.Key, strings.TrimSuffix(r.Reason, "."))
+	}
+	if *fileFlag == "" {
+		if note := serviceNote(c.SettingsFile(), *path, "validate", nil); strings.HasPrefix(note, "The Signalith service") {
+			fmt.Println("Note:", note)
+		}
+	}
+	for _, w := range c.SettingsWarnings() {
+		fmt.Println("Warning:", w+".")
+	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
 		return err
@@ -464,17 +490,7 @@ func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
 }
 
 func newStore(c *config.Config) *store.Client {
-	ca, cert, key := c.OpenSearchTLSFiles()
-	return store.New(store.Config{
-		URL:           c.OpenSearch.URL,
-		Username:      c.OpenSearch.Username,
-		Password:      c.OpenSearch.Password,
-		CAFile:        ca,
-		CertFile:      cert,
-		KeyFile:       key,
-		TLSSkipVerify: c.OpenSearch.TLSSkipVerify,
-		Proxy:         c.OpenSearch.Proxy,
-	})
+	return store.New(c.OpenSearchConnection())
 }
 
 func newEngine(c *config.Config, s store.Searcher) *search.Engine {
@@ -623,26 +639,101 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	return newRunner(path, log).run(ctx, c)
+}
+
+// instance is every component built from one config: what a restart from
+// the Settings page stops and builds again. The web listener, sign-in
+// sessions and the user store belong to the runner and carry over.
+type instance struct {
+	cfg     *config.Config
+	srv     *api.Server
+	handler http.Handler
+	// plain answers plain HTTP on the port that serves HTTPS; handler
+	// itself when HTTPS is off.
+	plain http.Handler
+	// certs is the HTTPS certificate, which syslog over TLS uses too; nil
+	// when neither needs one. certKey names the settings it is for.
+	certs    *tlsauto.Manager
+	certKey  string
+	receiver *syslog.Receiver
+	// retention is the retention manager when this server runs retention.
+	retention *retention.Manager
+	// store is the OpenSearch client, whose idle connections stop says
+	// goodbye to.
+	store  *store.Client
+	cancel context.CancelFunc
+	jobs   sync.WaitGroup // background jobs
+	log    *slog.Logger
+}
+
+// stop ends the background jobs, retention and the syslog receiver, and
+// waits for them, so the next instance does not run them twice.
+func (in *instance) stop() {
+	in.cancel()
+	in.jobs.Wait()
+	if in.retention != nil {
+		in.retention.Wait()
+	}
+	if in.receiver != nil {
+		// Stop receiving and write out what is queued.
+		in.receiver.Wait()
+		s := in.receiver.Stats()
+		in.log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
+	}
+	if in.store != nil {
+		in.store.CloseIdleConnections()
+	}
+}
+
+// start builds every component from c and starts the background jobs.
+// On an error, what had started is stopped again.
+func (r *runner) start(parent context.Context, c *config.Config) (*instance, error) {
+	log := r.log
+	ctx, cancel := context.WithCancel(parent)
+	in := &instance{cfg: c, cancel: cancel, log: log}
+	started := false
+	defer func() {
+		if !started {
+			in.stop()
+		}
+	}()
+	if r.failStart != nil {
+		if err := r.failStart(c); err != nil {
+			return nil, err
+		}
+	}
+	if p := c.SettingsProblem(); p != "" {
+		log.Error("settings from the Settings page are not in use", "file", c.SettingsFile(), "problem", p)
+	}
+	for _, w := range c.SettingsWarnings() {
+		log.Warn("Settings page: " + w)
+	}
+	if keys := c.PageKeys(); len(keys) > 0 {
+		log.Info("settings changed on the Settings page are in use", "settings", strings.Join(keys, ","), "file", c.SettingsFile())
+	}
 	for _, w := range c.Warnings() {
 		log.Warn(w)
 	}
 	if f := c.AdminPasswordChanged(); f != "" {
 		log.Info("the built-in admin's password was set with signalith passwd and is kept in a file of its own", "file", f)
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The HTTPS certificate, which syslog over TLS uses too. A restart
+	// keeps the one in use when its settings did not change, and its own
+	// certificate authority in any case.
+	certs, certKey, err := r.certificates(c)
+	if err != nil {
+		return nil, err
+	}
+	if certs != nil {
+		in.certs, in.certKey = certs, certKey
+		in.jobs.Go(func() { certs.Run(ctx) })
+	}
 	cl := newStore(c)
+	in.store = cl
 	ret := newRetention(c, cl, log)
 	maxAge := c.MaxEventAge(retentionKeepDays(ret))
 	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
-	// The HTTPS certificate, which syslog over TLS uses too.
-	var certs *tlsauto.Manager
-	if c.Server.HTTPS() || c.Syslog.TLS != "" {
-		if certs, err = newCertificates(c, log); err != nil {
-			return err
-		}
-		go certs.Run(ctx)
-	}
 	// Closed once the index template is in place, so syslog does not
 	// create the day's first indices with the wrong field types.
 	templateReady := make(chan struct{})
@@ -658,15 +749,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		}
 		receiver = syslog.New(sc, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
-			return err
+			return nil, keyed(err, "syslog.udp", "syslog.tcp", "syslog.tls")
 		}
-		// On the way out: stop receiving and write out what is queued.
-		defer func() {
-			cancel()
-			receiver.Wait()
-			s := receiver.Stats()
-			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
-		}()
+		in.receiver = receiver
 		var addrs []any
 		for _, l := range receiver.Stats().Listeners {
 			addrs = append(addrs, l.Protocol, l.Address)
@@ -678,13 +763,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		log.Info("syslog receiver listening", append(addrs, "allow", allow)...)
 	}
 	eng := newEngine(c, cl)
-	lists, err := assets.NewStore(c.LookupsDir())
+	// A damaged list must not keep Signalith from starting: it starts with
+	// empty lists, and picks the file up once it is fixed.
+	lists, err := assets.OpenStore(c.LookupsDir())
 	if err != nil {
-		return err
+		log.Error("asset or identity list has errors; using empty lists until it is fixed", "err", err)
 	}
 	log.Info("asset and identity lists loaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()), "dir", c.LookupsDir())
 	eng.Assets = lists
-	go reloadLookups(ctx, lists, log)
+	in.jobs.Go(func() { reloadLookups(ctx, lists, log) })
 	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
@@ -694,7 +781,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, p := range problems {
 		// One bad file should not stop the SIEM; it is skipped and reported.
@@ -702,16 +789,16 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	boards, err := dashboards.NewStore(c.DashboardsDir())
 	if err != nil {
-		return fmt.Errorf("dashboards.dir: %w", err)
+		return nil, fmt.Errorf("dashboards.dir: %w", err)
 	}
 	if _, problems, err := boards.List(); err == nil {
 		for _, p := range problems {
 			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
 		}
 	}
-	people, dir, err := openUsers(c)
+	people, dir, err := r.openUsers(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, clash := people.Get(c.Auth.AdminUser); clash {
 		log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
@@ -740,6 +827,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
 			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
+	// Sessions and the failed sign-in limits carry over a restart.
+	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{
 		Config:     c,
 		Engine:     eng,
@@ -759,11 +848,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Users:      people,
 		Directory:  dir,
 		TLS:        certs,
+		Sessions:   r.sessions,
+		Limiter:    r.limiter,
+		Restarter:  r,
+		Started:    r.started,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,
 	}
-	go func() {
+	in.jobs.Go(func() {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
 		}
@@ -771,12 +864,12 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		if err := ibackend.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
-			go indicators.Watch(ctx, time.Minute, log)
+			in.jobs.Go(func() { indicators.Watch(ctx, time.Minute, log) })
 			if c.Detections.Scheduler {
 				// Feeds can be added on the page at any time, so the
 				// downloader runs even with none yet.
 				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
-				go feeds.Start(ctx)
+				in.jobs.Go(func() { feeds.Start(ctx) })
 			}
 		}
 		if err := cstore.EnsureIndex(ctx); err != nil {
@@ -792,71 +885,75 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		} else {
 			log.Info("detection scheduler is off (detections.scheduler: false)")
 		}
-	}()
+	})
 	if c.Detections.Scheduler {
 		// Like detections, retention runs on one server only.
-		go ret.Start(ctx)
+		in.retention = ret
+		in.jobs.Go(func() { ret.Start(ctx) })
 	} else {
 		log.Warn("retention does not run on this server: it runs on the server with detections.scheduler: true, " +
 			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
 	}
-
-	lim := httpserver.Limits{Max: c.Server.MaxConnections, Shared: c.Server.SharedList()}
-	handler := srv.Handler()
-	hs := httpserver.New(handler, lim, log)
-	ln, err := httpserver.Listen(c.Server.Listen, lim, log)
-	if err != nil {
-		return err
-	}
-	servers := []*http.Server{hs}
-	errc := make(chan error, 1)
+	in.srv, in.handler = srv, srv.Handler()
+	in.plain = in.handler
 	if c.Server.HTTPS() {
-		// HTTPS and, on the same port, plain HTTP that sends browsers to
-		// HTTPS (and takes events from old agents while allowed).
-		hs.TLSConfig.GetCertificate = certs.GetCertificate
-		plain := httpserver.New(srv.PlainHandler(handler), lim, log)
-		servers = append(servers, plain)
-		go func() {
-			log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "https", c.Server.TLSMode(),
-				"plaintext_ingest", c.Server.PlaintextIngest(), "version", version)
-			errc <- httpserver.ServeBoth(hs, plain, ln)
-		}()
-	} else {
-		go func() {
-			log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "https", "off", "version", version)
-			errc <- httpserver.Serve(hs, ln, "", "")
-		}()
+		in.plain = srv.PlainHandler(in.handler)
 	}
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-		log.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var errs []error
-		for _, s := range servers {
-			errs = append(errs, s.Shutdown(shutdownCtx))
-		}
-		return errors.Join(errs...)
-	}
+	started = true
+	return in, nil
 }
 
-// newCertificates loads or makes the HTTPS certificate: server.tls_cert
-// and tls_key when set, else one from Signalith's own CA covering this
-// machine, public_url's host and server.tls.names. It logs the CA's
-// fingerprint, so admins can check the CA they install elsewhere.
-func newCertificates(c *config.Config, log *slog.Logger) (*tlsauto.Manager, error) {
-	o := tlsauto.Options{Log: log}
-	if c.Server.TLSCert != "" {
-		o.CertFile, o.KeyFile = c.TLSFiles()
-	} else {
-		o.Dir = c.TLSDir()
-		if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
-			o.Names = append(o.Names, u.Hostname())
+// openUsers opens the user store once and keeps it across restarts, so
+// sign-in sessions stay valid; the directory sign-in settings are read
+// again each time.
+func (r *runner) openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
+	if r.people == nil || r.people.Path() != c.UsersFile() {
+		people, err := users.Open(c.UsersFile())
+		if err != nil {
+			return nil, nil, err
 		}
-		o.Names = append(o.Names, c.Server.TLSNames()...)
+		r.people = people
 	}
+	if r.people.BuiltinAdmin != c.Auth.AdminUser {
+		r.people.BuiltinAdmin = c.Auth.AdminUser
+	}
+	fromFile, err := c.LDAP()
+	if err != nil {
+		return nil, nil, err
+	}
+	dir, err := users.OpenDirectory(c.DirectoryFile(), fromFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	return r.people, dir, nil
+}
+
+// certOptions are the settings of c's HTTPS certificate, which syslog
+// over TLS uses too: server.tls_cert and tls_key in mode files, else one
+// from Signalith's own CA covering this machine, public_url's host and
+// server.tls.names. ok is false when c needs none.
+func certOptions(c *config.Config) (o tlsauto.Options, ok bool) {
+	if !c.Server.HTTPS() && c.Syslog.TLS == "" {
+		return o, false
+	}
+	if c.Server.TLSMode() == config.TLSFiles {
+		o.CertFile, o.KeyFile = c.TLSFiles()
+		return o, true
+	}
+	o.Dir = c.TLSDir()
+	if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
+		o.Names = append(o.Names, u.Hostname())
+	}
+	o.Names = append(o.Names, c.Server.TLSNames()...)
+	return o, true
+}
+
+// newCertificates loads or makes the HTTPS certificate (see certOptions).
+// It logs the CA's fingerprint, so admins can check the CA they install
+// elsewhere.
+func newCertificates(c *config.Config, log *slog.Logger) (*tlsauto.Manager, error) {
+	o, _ := certOptions(c)
+	o.Log = log
 	m, err := tlsauto.New(o)
 	if err != nil {
 		return nil, err

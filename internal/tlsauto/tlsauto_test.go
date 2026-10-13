@@ -180,6 +180,11 @@ func TestRestartReusesCAAndCertificate(t *testing.T) {
 	if m3.Fingerprint() != m1.Fingerprint() || m3.Leaf().SerialNumber.Cmp(m1.Leaf().SerialNumber) == 0 || !m3.Covers("siem.corp.lan") {
 		t.Error("new name not added with the same CA")
 	}
+	// The name taken out again: it leaves the certificate, the CA stays.
+	m5 := newAuto(t, dir, c, "siem.example.com")
+	if m5.Fingerprint() != m1.Fingerprint() || m5.Covers("siem.corp.lan") || !m5.Covers("siem.example.com") {
+		t.Errorf("removed name still covered, or a new CA: %v", certNames(m5.Leaf()))
+	}
 	// One the CA may not sign is left out, and said so; the rest still
 	// verify.
 	m4 := newAuto(t, dir, c, "siem.example.com", "alias.example.com", "203.0.113.9")

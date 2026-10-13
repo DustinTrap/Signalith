@@ -49,7 +49,7 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 func (s *Server) sessions() *auth.Sessions {
 	s.authOnce.Do(func() {
 		if s.Sessions == nil {
-			s.Sessions = auth.NewSessions(s.Config.SessionIdle())
+			s.Sessions = auth.NewSessions(s.conf().SessionIdle())
 		}
 		if s.Limiter == nil {
 			s.Limiter = auth.NewLimiter()
@@ -58,7 +58,7 @@ func (s *Server) sessions() *auth.Sessions {
 			s.Users = users.NewMemory()
 		}
 		if s.Users.BuiltinAdmin == "" {
-			s.Users.BuiltinAdmin = s.Config.Auth.AdminUser
+			s.Users.BuiltinAdmin = s.conf().Auth.AdminUser
 		}
 		if s.Directory == nil {
 			s.Directory, _ = users.OpenDirectory("", nil)
@@ -128,10 +128,16 @@ func clientIP(r *http.Request) string {
 }
 
 // secureCookie reports whether the session cookie is sent over HTTPS
-// only: when the browser reached Signalith over HTTPS, or, with HTTPS
-// off, when public_url says a proxy in front adds it.
+// only: when the browser reached Signalith over HTTPS, itself or through
+// a trusted proxy that says so with X-Forwarded-Proto, or, with HTTPS
+// off (server.tls.mode: off), when public_url says a proxy in front adds
+// it. While Signalith serves HTTPS itself, a request over plain HTTP
+// never gets this far (see PlainHandler), so an https:// public_url
+// cannot make the cookie Secure for a browser on plain HTTP, which would
+// then never send it back.
 func (s *Server) secureCookie(r *http.Request) bool {
-	return s.overHTTPS(r) || (!s.Config.Server.HTTPS() && strings.HasPrefix(s.Config.Server.PublicURL, "https://"))
+	c := s.conf()
+	return s.overHTTPS(r) || (!c.Server.HTTPS() && strings.HasPrefix(c.Server.PublicURL, "https://"))
 }
 
 // cookieName is the session cookie's name for a request.

@@ -1,6 +1,7 @@
 // Package auth keeps sign-in sessions for the web UI and limits password
-// guessing. Sessions live in memory, so a server restart signs everyone
-// out; API clients can keep using HTTP Basic auth.
+// guessing. Sessions live in memory: a restart from the Settings page keeps
+// them, but stopping the server signs everyone out; API clients can keep
+// using HTTP Basic auth.
 package auth
 
 import (
@@ -85,6 +86,14 @@ func (s *Sessions) Lookup(token string) (Session, bool) {
 	}
 	ss.LastSeen = now
 	return *ss, true
+}
+
+// SetIdle changes how long a session lasts without a request, for every
+// session, the current ones included.
+func (s *Sessions) SetIdle(idle time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Idle = idle
 }
 
 // Delete ends a session.
