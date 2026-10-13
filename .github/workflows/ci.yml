@@ -79,7 +79,13 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "$(jq -n --arg p "$password" '{username: "admin", password: $p}')" \
             https://localhost:8080/api/login > /dev/null
-          health=$(curl -sf -b "$RUNNER_TEMP/cookies" --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/health)
+          # OpenSearch loads its security settings a moment after it starts
+          # answering, so the health may say "not initialized" at first.
+          for i in $(seq 1 60); do
+            health=$(curl -sf -b "$RUNNER_TEMP/cookies" --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/health) &&
+              echo "$health" | jq -e '.opensearch.status == "green" or .opensearch.status == "yellow"' > /dev/null && break
+            sleep 2
+          done
           echo "$health" | jq -e '.opensearch.status == "green" or .opensearch.status == "yellow"'
           # The public example password from earlier versions is refused.
           code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$RUNNER_TEMP/signalith-ca.pem" \
