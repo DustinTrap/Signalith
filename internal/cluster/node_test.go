@@ -272,9 +272,14 @@ func TestStaleCopyOfAnIdentityStarts(t *testing.T) {
 	fos := ostest.New(t)
 	c := store.New(store.Config{URL: fos.URL})
 	dir := t.TempDir()
-	a := testNode(t, dir, c, true)
+	// a has an address of its own, pulled out when it crashes: a heartbeat
+	// it sent just before would otherwise land while b watches, and b
+	// would rightly take a for alive.
+	plug := fos.Plug(t)
+	a := testNode(t, dir, store.New(store.Config{URL: plug.URL}), true)
 	waitReady(t, a, 5*time.Second)
 	crash(a)
+	plug.Pull()
 	// The folder restored from a backup elsewhere, with its old server
 	// gone: the heartbeat does not change, so it is a stale copy.
 	b := testNode(t, copyIdentity(t, dir), c, true)
