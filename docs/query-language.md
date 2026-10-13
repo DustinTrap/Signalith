@@ -99,10 +99,14 @@ model is configured, questions with unknown words go to it; see the README.
 - An event search without `stats` returns the newest 100 events, or up to
   `search.max_events` (at most 100,000) when later commands need to sort or filter
   them all.
-- Wildcard values (`*`, `?`) can be up to 1,000 characters long.
-- At most 8 searches run at once (detections are counted separately). Others wait their
-  turn for up to 15 seconds, then fail with "Signalith is busy running other searches";
-  try again shortly.
+- Wildcard values (`*`, `?`) can be up to 1,000 characters long, and the wildcard values
+  in `where` commands up to 4,096 characters together (`where` runs over every row in the
+  server, so put long filters in the search before the first `|`). An `IN` list holds at
+  most 1,000 values.
+- At most 8 searches run at once (detections are counted separately), and one user's
+  searches take at most 4 of those turns. Others wait their turn for up to 15 seconds,
+  then fail with "Signalith is busy running other searches" (or "You already have several
+  searches running"); try again shortly.
 
 Use **Explain** in the UI, or `signalith query -explain "<query>"`, to see the plain-English
 steps and the exact OpenSearch request.

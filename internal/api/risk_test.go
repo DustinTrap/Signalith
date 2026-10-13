@@ -34,6 +34,9 @@ func TestLookupLists(t *testing.T) {
 	if code, _ := put(t, ts.URL+"/api/lookups/identities", "identity,name,priority\nbob,Bob,high\n"); code != 200 {
 		t.Fatalf("identities = %d", code)
 	}
+	if code, body := put(t, ts.URL+"/api/lookups/assets", "host\n"+strings.Repeat("web1\n", maxUploadBytes/5)); code != 413 || !strings.Contains(body, "larger than 16 MB") {
+		t.Fatalf("oversized list = %d %s", code, body)
+	}
 	if code, _ := put(t, ts.URL+"/api/lookups/printers", "x\n"); code != 404 {
 		t.Errorf("unknown list = %d", code)
 	}

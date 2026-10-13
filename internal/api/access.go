@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/auth"
+	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -153,7 +154,10 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 			return
 		}
 		s.noteName(r)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, p)))
+		// Searches the request runs count against the user's share of
+		// the search slots.
+		ctx := search.ForUser(context.WithValue(r.Context(), userKey{}, p), p.Username)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
