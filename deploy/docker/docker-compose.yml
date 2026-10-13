@@ -197,6 +197,7 @@ services:
     environment:
       # Secrets come from files the setup service made, never from this file.
       - SIGNALITH_ADMIN_PASSWORD_FILE=/run/signalith-secrets/initial-admin-password
+      # A shared token for agents set up before per-agent tokens; Add data gives new agents their own.
       - SIGNALITH_INGEST_TOKEN_FILE=/run/signalith-secrets/ingest-token
       # This server's name on the Servers page. When several servers share
       # one OpenSearch, give each its own.

@@ -221,8 +221,11 @@ Until servers can be added from the Servers page:
 1. Install Signalith on the new computer as usual.
 2. Give it the same OpenSearch settings as the first server: `opensearch.url`, its
    user and password, and `opensearch.index_prefix`.
-3. Give it the same agent tokens (`ingest.tokens`), so agents can send to either
-   server. Each server has its own master key, so passwords and tokens stored
+3. Agent tokens made on **Add data** are kept in OpenSearch, so the new server
+   accepts them as soon as it starts, and a token revoked on one server is refused by
+   all of them within seconds (see [agent-tokens.md](agent-tokens.md)). Shared tokens
+   from older setups (`ingest.tokens`) are in each server's own configuration: give the
+   new server the same ones, so agents that still use them can send to either server. Each server has its own master key, so passwords and tokens stored
    encrypted (`enc:` values) cannot be copied as they are: set them on the new
    server with `signalith secrets set`, or put them there in plain text and run
    `signalith secrets encrypt` (see [docs/encryption.md](encryption.md)).

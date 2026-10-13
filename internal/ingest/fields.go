@@ -57,6 +57,10 @@ var knownFields = func() map[string]string {
 		// new-name budget; handleFields leaves it out of the fields rail.
 		datamodel.SampleField: kw,
 
+		// Where each event came from (origin.go): mapped up front so they
+		// survive the known-fields-only retry.
+		IntakeField: kw, TokenField: kw, TokenIDField: kw, SenderField: kw,
+
 		// Windows and Linux parsers.
 		"src_host": kw, "logon_type_name": kw, "member": kw,
 		// Sysmon process fields that Sigma rules match on.

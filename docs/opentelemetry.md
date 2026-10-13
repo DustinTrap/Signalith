@@ -20,7 +20,8 @@ Either way the Collector also listens on `127.0.0.1:4317` (gRPC) and `127.0.0.1:
 The page gives the steps and a complete `config.yaml` for the
 [Collector Contrib](https://github.com/open-telemetry/opentelemetry-collector-releases/releases)
 distribution (`otelcol-contrib`, 0.100 or later): it already holds this server's
-address, the ingest token and, over HTTPS, Signalith's CA certificate to check the
+address, an [agent token](agent-tokens.md) of its own (made when you copy or download
+the configuration) and, over HTTPS, Signalith's CA certificate to check the
 server with. It keeps unsent logs and its place in each log on disk, so a restart or
 an outage of Signalith neither loses nor repeats events.
 
@@ -35,7 +36,7 @@ Any OTLP/HTTP sender works. Point it at:
 | Setting | Value |
 | --- | --- |
 | Logs endpoint | `https://<server>:8080/api/otlp/v1/logs` (or endpoint `https://<server>:8080/api/otlp`, to which the exporter adds `/v1/logs`) |
-| Header | `Authorization: Bearer <ingest token>` |
+| Header | `Authorization: Bearer <agent token>`; make one on **Add data** under **Agent tokens**, or with `signalith tokens create` (see [agent-tokens.md](agent-tokens.md#create-a-token)) |
 | Encoding | protobuf (`application/x-protobuf`, the Collector's default) or JSON (`application/json`) |
 | Compression | gzip (the Collector's default) or none |
 | CA | Signalith's CA certificate (`/api/tls/ca.pem`), unless the server has a certificate your systems trust |

@@ -913,6 +913,17 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
             </div>
             <p id="agent-server-error" class="field-error hidden" role="alert"></p>
             <div id="agent-server-warn" class="alert hidden" data-tone="warning" role="status"></div>
+            <div class="agent-addr__row agent-token" id="agent-token-row">
+              <label class="label" for="agent-token-name" id="agent-token-label">Token for these agents</label>
+              <div class="agent-token__field">
+                <input id="agent-token-name" class="input input--sm" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="agent-token-error agent-token-help">
+                <input id="agent-token-paste" class="input input--sm mono hidden" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the token" aria-describedby="agent-token-error agent-token-help">
+                <button class="link-btn agent-token__swap" type="button" id="agent-token-swap">Use a token I already have</button>
+              </div>
+            </div>
+            <p id="agent-token-error" class="field-error hidden" role="alert"></p>
+            <p id="agent-token-help" class="hint agent-token__help">Each group of agents gets its own token, so you can revoke one group without touching the others.</p>
+            <div id="agent-token-made" class="alert hidden" data-tone="success" role="status"></div>
           </div>
           <ol id="agent-steps" class="agent-steps" role="list" aria-busy="true"></ol>
           <p id="wazuh-note" class="hint hidden"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><span>Rather not install anything on the manager? It can send alerts itself: add a <code>&lt;syslog_output&gt;</code> block with <code>&lt;format&gt;json&lt;/format&gt;</code> to its <code>ossec.conf</code>, pointed at this server’s <a href="#data" id="wazuh-syslog">syslog address</a>.</span></p>
@@ -958,6 +969,19 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
           </div>
         </div>
         <div class="card__body" id="antivirus-body" aria-busy="true"></div>
+      </div>
+
+      <div class="card tokens-card" id="tokens-card" data-min-role="admin">
+        <div class="card__head tokens-card__head">
+          <div>
+            <h3 class="card__title" id="tokens-title">Agent tokens</h3>
+            <p class="card__sub">Agents prove who they are with these. Each event records the token it came with and the address that sent it.</p>
+          </div>
+          <div class="card__actions">
+            <button class="btn btn--primary btn--sm" type="button" id="tokens-new"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg><span>New token</span></button>
+          </div>
+        </div>
+        <div class="tokens-card__body" id="tokens-body" aria-busy="true" aria-labelledby="tokens-title"></div>
       </div>
     </div>
     <p class="sr-only" id="agent-status" role="status"></p>
@@ -1424,5 +1448,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="servers.js"></script>
 <script src="security.js"></script>
 <script src="endpoints.js"></script>
+<script src="tokens.js"></script>
 </body>
 </html>

@@ -2588,6 +2588,113 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
   #page-data .sample-try { grid-template-columns: 1fr; }
   #page-data .sample-load__size .select { min-width: 0; }
 }
+/* the token for these agents: a name field under "Agents send to", with
+   the same label width so the two fields line up */
+#page-data #agent-body .agent-addr__row > .label { min-width: 152px; }
+#page-data .agent-token { align-items: flex-start; margin-top: var(--sp-2); }
+#page-data .agent-token > .label { padding-top: 6px; }
+#page-data .agent-token__field { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; flex: 1; min-width: 0; }
+#page-data .agent-token__field .input { flex: 0 1 340px; min-width: 0; }
+#page-data .agent-token__swap { font-size: var(--fs-sm); white-space: nowrap; }
+#page-data :is(.agent-token__help, #agent-token-error) { margin-left: calc(152px + 12px); line-height: 18px; }
+#page-data #agent-token-made { margin-top: var(--sp-1); }
+/* where the token goes in the config and commands, until it exists */
+#page-data .agent-token-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: var(--r-full); vertical-align: 0;
+  font: 500 var(--fs-xs)/18px var(--font-sans); text-indent: 0; white-space: nowrap; color: var(--accent);
+  background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent);
+}
+
+/* Agent tokens: a table of tokens, then the shared tokens kept from older
+   setups. On phones each row stacks. */
+#page-data .tokens-card { overflow: hidden; }
+#page-data .tokens-card__head { padding-bottom: 14px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+#page-data .tokens-card__body:empty { display: none; }
+#page-data .tk-table th:first-child, #page-data .tk-table td:first-child { padding-left: 16px; }
+#page-data .tk-table td { height: 56px; }
+#page-data .tk-table [data-col="created"] { width: 140px; }
+#page-data .tk-table [data-col="used"] { width: 110px; }
+#page-data .tk-table [data-col="events"] { width: 130px; }
+#page-data .tk-table [data-col="status"] { width: 110px; }
+#page-data .tk-table [data-col="act"] { width: 48px; padding-left: 0; text-align: right; }
+#page-data .tk-table td[data-col="name"] { max-width: 0; }
+#page-data .tk-table td[data-col="created"] { color: var(--text-2); white-space: nowrap; }
+#page-data .tk-table td[data-col="used"] { color: var(--text-2); white-space: nowrap; }
+#page-data .tk-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; color: var(--text); }
+#page-data .tk-hint { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-3); }
+#page-data .tk-muted { color: var(--text-3); }
+#page-data .tk-num { font-variant-numeric: tabular-nums; color: var(--text-2); }
+#page-data .tk-skel-gap { height: 6px; }
+#page-data tr.tk-off .tk-name, #page-data .tk-off .tk-name { color: var(--text-2); font-weight: 400; }
+#page-data .tk-menu .menu__panel { min-width: 180px; }
+/* status: a dot carries the state, as on the Users page */
+#page-data .tk-status { --st: var(--success); display: inline-flex; align-items: center; gap: 8px; color: var(--text-2); white-space: nowrap; }
+#page-data .tk-status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--st); }
+#page-data .tk-status[data-state="warn"] { --st: var(--warning); }
+#page-data .tk-status[data-state="off"] { --st: transparent; }
+#page-data .tk-status[data-state="off"]::before { box-shadow: inset 0 0 0 1.5px var(--text-3); }
+#page-data .tk-empty .empty__icon { color: var(--accent); background: var(--accent-soft-2); }
+#page-data .tk-alert { align-items: center; margin: 12px 16px; }
+#page-data .tk-alert__body { flex: 1; min-width: 0; }
+#page-data .tk-foot { padding: 8px 16px 10px; box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-data .tk-toggle { font-size: var(--fs-sm); color: var(--text-2); }
+#page-data .tk-toggle .chev { transition: transform var(--t) var(--ease); }
+#page-data .tk-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+
+/* shared tokens: a warning, then one line per token */
+#page-data .tk-legacy { display: grid; gap: 4px; padding: 16px; box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-data .tk-legacy > .alert { margin-bottom: 8px; }
+#page-data .tk-legacy__list { display: grid; margin: 0; padding: 0; list-style: none; }
+#page-data .tk-legacy__row { display: grid; grid-template-columns: minmax(0, 1fr) 200px 150px auto; align-items: center; gap: 8px 20px; padding: 12px 0; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+#page-data .tk-legacy__row:last-child { padding-bottom: 0; box-shadow: none; }
+#page-data .tk-legacy__main { min-width: 0; }
+#page-data .tk-legacy__src { margin-top: 2px; font-size: var(--fs-sm); color: var(--text-3); overflow-wrap: anywhere; }
+#page-data .tk-legacy__public { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; font-size: var(--fs-sm); line-height: 18px; color: var(--danger); }
+#page-data .tk-legacy__public .icon { margin-top: 2px; flex: none; }
+#page-data .tk-legacy__facts { display: grid; grid-template-columns: 76px auto; gap: 20px; margin: 0; }
+#page-data .tk-legacy__facts dt { font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+#page-data .tk-legacy__facts dd { margin: 2px 0 0; color: var(--text-2); white-space: nowrap; }
+#page-data .tk-legacy__act { justify-self: end; }
+
+/* the New token dialog (at the end of <body>) */
+.tk-dialog { width: min(540px, calc(100vw - 32px)); }
+.tk-dialog .modal__close { margin: -4px -8px 0 auto; flex: none; }
+.tk-dialog .tk-secret { display: flex; gap: 8px; align-items: flex-start; }
+.tk-dialog .tk-secret__value { flex: 1; min-width: 0; height: auto; padding-block: 8px; resize: none; overflow: hidden; word-break: break-all; line-height: 1.5; font-family: var(--font-mono); font-size: var(--fs-sm); }
+.tk-dialog .tk-secret__copy { flex: none; }
+@media (max-width: 480px) { .tk-dialog .tk-secret { flex-direction: column; align-items: stretch; } .tk-dialog .tk-secret__copy { align-self: flex-start; } }
+.tk-dialog .tk-secret__copy.is-copied, .tk-dialog .tk-secret__copy.is-copied .icon { color: var(--success); }
+
+@media (max-width: 760px) {
+  #page-data .tk-legacy__row { grid-template-columns: minmax(0, 1fr) auto; }
+  #page-data .tk-legacy__facts { grid-column: 1; grid-row: 2; }
+  #page-data .tk-legacy__state { grid-column: 2; grid-row: 1; justify-self: end; }
+  #page-data .tk-legacy__act { grid-column: 2; grid-row: 2; }
+}
+@media (max-width: 600px) {
+  #page-data #agent-body .agent-addr__row > .label { min-width: 0; }
+  #page-data .agent-token > .label { padding-top: 0; }
+  #page-data :is(.agent-token__help, #agent-token-error) { margin-left: 0; }
+  #page-data .agent-token__field .input { flex: 1 1 100%; }
+  #page-data .tokens-card__head { flex-wrap: wrap; }
+  #page-data .tk-table thead { display: none; }
+  #page-data .tk-table, #page-data .tk-table tbody { display: block; }
+  #page-data .tk-table tr { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 12px 8px 12px 16px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+  #page-data .tk-table tbody tr:last-child { box-shadow: none; }
+  #page-data .tk-table td { display: block; width: auto !important; max-width: none !important; height: auto; padding: 0 !important; box-shadow: none !important; background: none !important; font-size: var(--fs-sm); text-align: left; }
+  #page-data .tk-table td[data-col="name"] { flex: 1 1 calc(100% - 64px); min-width: 0; font-size: var(--fs-base); }
+  #page-data .tk-table td[data-col="act"] { flex: none; }
+  #page-data .tk-table td[data-col="status"] { order: 2; flex-basis: 100%; }
+  #page-data .tk-table td[data-col="created"] { order: 3; }
+  #page-data .tk-table td[data-col="used"] { order: 4; }
+  #page-data .tk-table td[data-col="created"]::before { content: "Created "; color: var(--text-3); }
+  #page-data .tk-table td[data-col="used"]::before { content: "Last used: "; color: var(--text-3); }
+  #page-data .tk-table td[data-col="events"] { order: 5; }
+  #page-data .tk-table td[data-col="events"]::after { content: " in the last hour"; color: var(--text-3); }
+  #page-data .tk-alert { flex-wrap: wrap; }
+  #page-data .tk-legacy__facts { gap: 14px; }
+  #page-data .agent-token-chip { white-space: normal; line-height: 16px; padding: 1px 7px; }
+}
 /* ==== end page:data ==== */
 
 /* ==== page:antivirus (styles for this page only) ==== */
