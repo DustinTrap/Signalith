@@ -277,7 +277,10 @@
     if (PB.detections) return PB.detections;
     try {
       const r = await api('api/detections');
-      PB.detections = (r.detections || []).map((d) => ({ id: d.id, title: (d.title || d.id).replace(/\$[a-z0-9_.]+\$/gi, '…') }));
+      // A title such as "Brute force against $dest$ from $src$" reads as
+      // "Brute force": it stops before the first value it would fill in.
+      const plain = (d) => (d.title || '').split(/\s+(?:against|from|to|on|of|by|for|in|at|via|with)?\s*\$/i)[0].trim() || d.id;
+      PB.detections = (r.detections || []).map((d) => ({ id: d.id, title: plain(d) }));
     } catch (_) { PB.detections = []; }
     return PB.detections;
   }
