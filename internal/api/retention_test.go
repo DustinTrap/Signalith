@@ -218,6 +218,9 @@ func TestRetentionAPI(t *testing.T) {
 	if _, docs, ok := mem.Index(first["index"].(string)); !ok || len(docs) != 1 {
 		t.Errorf("restored index has %d docs", len(docs))
 	}
+	// The restore writes its line in the history file after it shows as
+	// done; wait for that, or removing the test's folder can fail.
+	idle(t, call)
 }
 
 func TestRetentionAPIOff(t *testing.T) {

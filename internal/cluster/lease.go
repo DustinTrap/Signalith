@@ -481,19 +481,20 @@ func (l *Lease) guard(doc LeaseDoc, fresh bool) bool {
 	if mine.Combined() == doc.Fingerprint {
 		return true
 	}
-	who := doc.HolderName
-	if who == "" {
-		who = "the server that ran the jobs last"
-	}
-	parts := mine.Differ(doc.Fingerprints)
+	l.mu.Lock()
+	l.cannot = cannotTakeOver(mine.Differ(doc.Fingerprints), holderName(doc))
+	l.mu.Unlock()
+	return false
+}
+
+// cannotTakeOver says why a server whose files differ from holder's (parts,
+// from Fingerprints.Differ) does not take the jobs over.
+func cannotTakeOver(parts []string, holder string) string {
 	what := "files the jobs use"
 	if len(parts) > 0 {
 		what = joinWords(parts)
 	}
-	l.mu.Lock()
-	l.cannot = fmt.Sprintf("its %s differ from %s's", what, who)
-	l.mu.Unlock()
-	return false
+	return fmt.Sprintf("its %s differ from %s's", what, holder)
 }
 
 // create makes a lease where there is none, with an epoch above every

@@ -186,6 +186,7 @@
       <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
       <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
+      <a class="nav__item" href="#servers" data-page="servers"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
       <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
@@ -1161,6 +1162,17 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     <div id="health" class="health-page"></div>
   </section>
 
+  <!-- Servers -->
+  <section id="page-servers" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Servers</h2>
+        <p class="page-head__desc">The Signalith servers that share this OpenSearch. One of them runs the background jobs: detections, threat intel downloads and data retention.</p>
+      </div>
+    </div>
+    <div id="servers" class="sv-page"></div>
+  </section>
+
   <!-- Help -->
   <section id="page-help" class="page">
     <article class="card guide">
@@ -1221,5 +1233,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="users.js"></script>
 <script src="retention.js"></script>
 <script src="settings.js"></script>
+<script src="servers.js"></script>
 </body>
 </html>

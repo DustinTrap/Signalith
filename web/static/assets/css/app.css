@@ -2577,6 +2577,55 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 }
 /* ==== end page:health ==== */
 
+/* ==== page:servers (styles for this page only) ==== */
+/* Alerts only when something needs a look, then one list of servers.
+   Colour means something: the accent badge marks the server that runs
+   the jobs, red a server that stopped answering, amber what to fix. */
+#page-servers .sv-page { display: grid; gap: var(--sp-4); }
+#page-servers .sv-alerts { display: grid; gap: var(--sp-2); }
+#page-servers .sv-alerts .alert > div { min-width: 0; overflow-wrap: anywhere; }
+#page-servers .sv-table :is(th, td):first-child { padding-left: 16px; }
+#page-servers .sv-table :is(th, td):last-child { padding-right: 16px; }
+#page-servers .sv-table td { height: 64px; }
+#page-servers .sv-table td[data-col="server"] { max-width: 0; }
+#page-servers .sv-table [data-col="status"] { width: 210px; }
+#page-servers .sv-table [data-col="jobs"] { width: 32%; }
+#page-servers .sv-table [data-col="version"] { width: 120px; }
+#page-servers .sv-server { display: flex; align-items: center; gap: 12px; min-width: 0; }
+#page-servers .sv-server__icon { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: var(--r-md); color: var(--text-2); background: var(--hover); }
+#page-servers .sv-server__text { min-width: 0; }
+#page-servers .sv-server__name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; color: var(--text); }
+#page-servers .sv-server__name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#page-servers .sv-server__name .badge { height: 18px; flex: none; }
+#page-servers .sv-server__addr { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-servers tr.sv-gone .sv-server__name { color: var(--text-2); }
+#page-servers .sv-state { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; color: var(--text); white-space: nowrap; }
+#page-servers .sv-sub { display: flex; align-items: flex-start; gap: 5px; margin-top: 3px; font-size: var(--fs-sm); line-height: 1.4; color: var(--text-3); }
+#page-servers [data-col="status"] .sv-sub { padding-left: 18px; }
+#page-servers .sv-sub .icon { margin-top: 1px; }
+#page-servers .sv-warn { color: var(--warning); }
+#page-servers .sv-standby { color: var(--text-2); }
+#page-servers .sv-none { color: var(--text-3); }
+#page-servers [data-col="version"] .mono { font-size: var(--fs-sm); color: var(--text-2); }
+#page-servers .sv-foot-note { margin-left: auto; }
+#page-servers .sv-note { line-height: 1.5; }
+#page-servers .sv-note i { font-style: normal; font-weight: 500; color: var(--text); }
+
+@media (max-width: 720px) {
+  /* each server stacks: name and version, then status, then jobs */
+  #page-servers .sv-table thead { display: none; }
+  #page-servers .sv-table, #page-servers .sv-table tbody { display: block; }
+  #page-servers .sv-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 14px 16px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+  #page-servers .sv-table tbody tr:last-child { box-shadow: none; }
+  #page-servers .sv-table td[data-col] { display: block; width: auto; max-width: none; height: auto; padding: 0; box-shadow: none; }
+  #page-servers .sv-table tbody tr:hover td { background: none; }
+  #page-servers .sv-table td[data-col="version"] { grid-column: 2; grid-row: 1; padding-top: 8px; }
+  #page-servers .sv-table td[data-col="version"]::before { content: "Version "; font-size: var(--fs-sm); color: var(--text-3); }
+  #page-servers .sv-table td:is([data-col="status"], [data-col="jobs"]) { grid-column: 1 / -1; padding-left: 44px; }
+  #page-servers .sv-foot-note { margin-left: 0; }
+}
+/* ==== end page:servers ==== */
+
 /* ==== page:users (styles for this page only) ==== */
 /* Users tab: one table, row menu on the right. Directory tab: the settings
    form with a test card beside it on wide screens. Dialogs live at the end

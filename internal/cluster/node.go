@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -812,6 +813,37 @@ func holderName(d LeaseDoc) string {
 	return "the server that ran them last"
 }
 
+// fixFiles says how to make server's files the same as holder's where
+// they differ (parts, from Fingerprints.Differ), so that server may take
+// the jobs over.
+func fixFiles(parts []string, server, holder string) string {
+	var what []string
+	shared := false
+	for _, p := range parts {
+		switch p {
+		case "retention policies":
+			what = append(what, "retention policies (retention.yaml in the lookups folder, and retention in signalith.yaml)")
+		case "threat intel feeds":
+			what = append(what, "threat intel feeds (intel_feeds.yaml in the lookups folder, and intel in signalith.yaml)")
+		case "archives":
+			shared = true
+		default:
+			what = append(what, p)
+		}
+	}
+	var out []string
+	if len(what) > 0 {
+		out = append(out, fmt.Sprintf("Make %s's %s the same as %s's, then restart %s.", server, joinWords(what), holder, server))
+	}
+	if shared {
+		out = append(out, "Keep archives in one shared folder: set retention.archive_dir to the same folder on every server, then restart them.")
+	}
+	if len(out) == 0 {
+		return fmt.Sprintf("Make the files the jobs use the same on %s as on %s, then restart %s.", server, holder, server)
+	}
+	return strings.Join(out, " ")
+}
+
 // goneLocked reports whether another server is offline or stopped. The
 // caller holds n.mu.
 func (n *Node) goneLocked(m *member) bool {
@@ -875,9 +907,11 @@ type ServerStatus struct {
 	StartedAt   time.Time  `json:"started_at"`
 	HeartbeatAt time.Time  `json:"heartbeat_at"`
 	Detail      *Heartbeat `json:"-"`
-	// CannotTakeOver says why this server would not take the jobs over,
-	// for this server only.
+	// CannotTakeOver says why this server would not take the jobs over
+	// by itself: its files differ from those of the server that ran them
+	// last. differ lists those files (Fingerprints.Differ).
 	CannotTakeOver string `json:"-"`
+	differ         []string
 }
 
 // JobsStatus is the job lease.
@@ -922,7 +956,7 @@ func (n *Node) Status() Status {
 		}
 	}
 	mine := ServerStatus{NodeID: self.NodeID, Name: self.Name, Self: true, State: self.State, Version: self.Version,
-		StartedAt: self.StartedAt, HeartbeatAt: self.HeartbeatAt, Detail: &self, CannotTakeOver: view.CannotTake}
+		StartedAt: self.StartedAt, HeartbeatAt: self.HeartbeatAt, Detail: &self}
 	servers := []ServerStatus{mine}
 	holderID := ""
 	if view.Found {
@@ -957,6 +991,23 @@ func (n *Node) Status() Status {
 		if s.Self && !eligible {
 			s.Detail.NotEligible = notWhy
 		}
+		// The fingerprint guard: a server that may run the jobs does not
+		// take them over by itself while its files differ from those of
+		// the server that ran them last. This server knows from its own
+		// check of the lease; the others are compared through the
+		// fingerprints in their heartbeats, so every server's page shows
+		// it.
+		d := view.Doc
+		if s.Jobs != "standby" || !view.Found || d.Fingerprint == "" || s.NodeID == d.Holder || d.Holder == "" && s.NodeID == d.ReleasedBy {
+			continue
+		}
+		switch {
+		case s.Self && view.CannotTake != "":
+			s.CannotTakeOver, s.differ = view.CannotTake, s.Detail.FilesFingerprint.Differ(d.Fingerprints)
+		case !s.Self && s.Detail.FilesFingerprint.Combined() != d.Fingerprint:
+			s.differ = s.Detail.FilesFingerprint.Differ(d.Fingerprints)
+			s.CannotTakeOver = cannotTakeOver(s.differ, holderName(d))
+		}
 	}
 	sort.Slice(servers, func(i, j int) bool {
 		if servers[i].Name != servers[j].Name {
@@ -981,45 +1032,46 @@ func (n *Node) Status() Status {
 	return st
 }
 
-// warningsLocked lists what an admin should know. The caller holds n.mu.
+// warningsLocked lists what an admin should know, each as a short first
+// sentence, then what it means and what to do. The caller holds n.mu.
 func (n *Node) warningsLocked(st Status, view LeaseView) []Warning {
 	w := []Warning{}
 	if n.conflict != "" {
 		w = append(w, Warning{"red", n.conflict})
 	}
 	if n.writesRefused {
-		w = append(w, Warning{"red", "OpenSearch refuses writes, as it does when its disk is full: new events are refused, and only the retention disk guard runs to free space."})
+		w = append(w, Warning{"red", fullDiskWarning(st.Jobs)})
 	}
 	runs := false
+	var standby, blocked []ServerStatus
 	for _, s := range st.Servers {
-		if s.Jobs == "runs" {
-			runs = true
-		}
-	}
-	// This server cannot take the jobs over from the server that ran them
-	// last, because its files differ.
-	blocked := view.CannotTake != "" && !view.Mine && view.Found && view.Doc.Fingerprint != "" && n.settings.Eligible && n.paused == "" && n.conflict == ""
-	if !runs && n.hb.checked && view.Seen {
-		standby := false
-		for _, s := range st.Servers {
-			if s.Jobs == "standby" && !(s.Self && blocked) {
-				standby = true
-			}
-		}
 		switch {
-		case standby:
-			w = append(w, Warning{"amber", "No server runs detections, threat intel downloads or retention right now; a server that may run them takes over within a minute."})
-		case blocked:
-			w = append(w, Warning{"red", fmt.Sprintf("No server is running detections, threat intel or retention: %s, the only one that may, does not take them over from %s by itself, because %s. Copy those files across, so either server can run them.",
-				n.Name(), holderName(view.Doc), view.CannotTake)})
-			blocked = false
-		default:
-			w = append(w, Warning{"red", "No server is running detections, threat intel or retention: none that shares this OpenSearch has detections.scheduler on, or none of them is up."})
+		case s.Jobs == "runs":
+			runs = true
+		case s.Jobs == "standby" && s.CannotTakeOver != "":
+			blocked = append(blocked, s)
+		case s.Jobs == "standby":
+			standby = append(standby, s)
 		}
 	}
-	if blocked {
-		w = append(w, Warning{"amber", fmt.Sprintf("%s would not take the background jobs over from %s by itself if %s stopped, because %s. Copy those files across, so either server can run them.",
-			n.Name(), holderName(view.Doc), holderName(view.Doc), view.CannotTake)})
+	holder := holderName(view.Doc)
+	const none = "No server is running detections, threat intel downloads or retention."
+	if !runs && n.hb.checked && view.Seen {
+		switch {
+		case len(standby) > 0:
+			w = append(w, Warning{"amber", fmt.Sprintf("No server runs detections, threat intel downloads or retention right now. %s takes them over within a minute.", standby[0].Name)})
+		case len(blocked) > 0:
+			b := blocked[0]
+			w = append(w, Warning{"red", fmt.Sprintf("%s %s may run them, but does not take them over from %s by itself, because %s. %s",
+				none, b.Name, holder, b.CannotTakeOver, fixFiles(b.differ, b.Name, holder))})
+			blocked = blocked[1:]
+		default:
+			w = append(w, Warning{"red", none + " No server that may run them is up. Start one, or turn on Run detections on schedule (detections.scheduler) on the Settings page of one of them."})
+		}
+	}
+	for _, b := range blocked {
+		w = append(w, Warning{"amber", fmt.Sprintf("%s would not take the background jobs over if %s stopped. Its %s. %s",
+			b.Name, holder, strings.TrimPrefix(b.CannotTakeOver, "its "), fixFiles(b.differ, b.Name, holder))})
 	}
 	for _, msg := range n.local.Warnings {
 		w = append(w, Warning{"amber", msg})
@@ -1028,9 +1080,20 @@ func (n *Node) warningsLocked(st Status, view LeaseView) []Warning {
 		if s.Detail != nil && s.Detail.ClockOffsetMS != nil && s.State != StateOffline && s.State != StateStopped {
 			off := time.Duration(*s.Detail.ClockOffsetMS) * time.Millisecond
 			if off.Abs() > 2*time.Second {
-				w = append(w, Warning{"amber", fmt.Sprintf("%s's clock is %s off OpenSearch's. Keep every server's clock in sync (NTP or Windows Time): detections are scheduled by the clock.", s.Name, off.Abs().Round(100*time.Millisecond))})
+				w = append(w, Warning{"amber", fmt.Sprintf("%s's clock is %s off OpenSearch's. Detections are scheduled by the clock: keep every server's clock in sync with NTP (Windows Time on Windows).", s.Name, off.Abs().Round(100*time.Millisecond))})
 			}
 		}
 	}
 	return w
+}
+
+// fullDiskWarning says that OpenSearch refuses writes, what Signalith does
+// about it, and what an admin can do.
+func fullDiskWarning(jobs JobsStatus) string {
+	head := "OpenSearch's disk is full, so it refuses new events. "
+	if jobs.Holder == "" {
+		return head + "No server runs the disk guard right now, so nothing frees space by itself. Give OpenSearch more disk, or start a server that runs the background jobs."
+	}
+	return head + fmt.Sprintf("%s keeps only the retention disk guard running: unless it was turned off on the Data retention page, it deletes the oldest days until there is room. "+
+		"New events are stored again by themselves after that; agents keep theirs until then. To make room sooner, give OpenSearch more disk.", jobs.HolderName)
 }

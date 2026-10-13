@@ -451,3 +451,99 @@ func TestReadyNeedsOpenSearch(t *testing.T) {
 		t.Errorf("status %+v", st)
 	}
 }
+
+// Every server's list shows a server whose files differ from the job
+// holder's, and says how to fix it: the holder's own list too, not only
+// the list of the server that would not take over.
+func TestEveryServerShowsWhoCannotTakeOver(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	start := func(retention string) *Node {
+		l, err := OpenLocal(t.TempDir(), testOptions("host-"+retention))
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := New(Options{Local: l, Version: "1.0.0", Timing: fast})
+		ctx, cancel := context.WithCancel(context.Background())
+		n.Start(ctx)
+		n.Use(c, "s", Settings{Eligible: true, Fingerprints: func() Fingerprints {
+			return Fingerprints{Retention: retention, Feeds: "f", Detections: "d"}
+		}})
+		t.Cleanup(func() {
+			cancel()
+			n.Close()
+		})
+		return n
+	}
+	a := start("r1")
+	deadline := time.Now().Add(5 * time.Second)
+	for !a.RunsJobs() {
+		if time.Now().After(deadline) {
+			t.Fatal("no lease")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	b := start("r2")
+	waitReady(t, b, 5*time.Second)
+	check := func(n *Node) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			st := n.Status()
+			var row ServerStatus
+			for _, s := range st.Servers {
+				if s.NodeID == b.ID() {
+					row = s
+				}
+			}
+			text := ""
+			for _, w := range st.Warnings {
+				text += w.Level + ": " + w.Text + "\n"
+			}
+			if row.Jobs == "standby" && row.CannotTakeOver == "its retention policies differ from "+a.Name()+"'s" &&
+				strings.Contains(text, "amber: "+b.Name()+" would not take the background jobs over if "+a.Name()+" stopped.") &&
+				strings.Contains(text, "Make "+b.Name()+"'s retention policies (retention.yaml in the lookups folder, and retention in signalith.yaml) the same as "+a.Name()+"'s, then restart "+b.Name()+".") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: row %+v warnings:\n%s", n.Name(), row, text)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	check(a)
+	check(b)
+	// The holder crashes: b does not take over, and says why in red.
+	crash(a)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		st := b.Status()
+		if len(st.Warnings) > 0 && st.Warnings[0].Level == "red" && strings.HasPrefix(st.Warnings[0].Text, "No server is running detections") &&
+			strings.Contains(st.Warnings[0].Text, "because its retention policies differ") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("warnings %+v", st.Warnings)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if b.RunsJobs() {
+		t.Error("b took the jobs over with different retention policies")
+	}
+}
+
+func TestFixFiles(t *testing.T) {
+	for _, tc := range []struct {
+		parts []string
+		want  string
+	}{
+		{[]string{"detections folder"}, "Make siem-b's detections folder the same as siem-a's, then restart siem-b."},
+		{[]string{"threat intel feeds", "detections folder"}, "Make siem-b's threat intel feeds (intel_feeds.yaml in the lookups folder, and intel in signalith.yaml) and detections folder the same as siem-a's, then restart siem-b."},
+		{[]string{"archives"}, "Keep archives in one shared folder: set retention.archive_dir to the same folder on every server, then restart them."},
+		{nil, "Make the files the jobs use the same on siem-b as on siem-a, then restart siem-b."},
+	} {
+		if got := fixFiles(tc.parts, "siem-b", "siem-a"); got != tc.want {
+			t.Errorf("%v:\n got %s\nwant %s", tc.parts, got, tc.want)
+		}
+	}
+}

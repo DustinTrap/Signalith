@@ -90,7 +90,10 @@ func TestClusterViewersSeeNamesAndStates(t *testing.T) {
 	if lease["holder_name"] != "siem-a" || lease["frozen"] != false || lease["holder"] != nil || lease["epoch"] != nil {
 		t.Errorf("viewer lease %v", lease)
 	}
-	for _, hidden := range []string{"warnings", "self", "writes_refused"} {
+	if out["writes_refused"] != false {
+		t.Errorf("viewer writes_refused %v", out["writes_refused"])
+	}
+	for _, hidden := range []string{"warnings", "self"} {
 		if _, ok := out[hidden]; ok {
 			t.Errorf("a viewer sees %s", hidden)
 		}

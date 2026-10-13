@@ -308,7 +308,9 @@ sets where the Settings page keeps its changes (default `settings.yaml` in `look
 
 Several Signalith servers can share one OpenSearch, for example behind a load
 balancer. They find each other through OpenSearch: each writes a heartbeat to the
-`<prefix>_runtime` index every 10 seconds, and `GET /api/cluster` lists them. One of
+`<prefix>_runtime` index every 10 seconds. The **Servers** page (under Health)
+lists them, which one runs the background jobs, and what to fix when something is
+wrong; `GET /api/cluster` returns the same list. One of
 them runs the background jobs (detections, threat intel downloads, retention and
 index upgrades); the others take over within about 40 seconds if it stops, or within
 seconds when it is stopped on purpose. Two servers never run them at once: the one
@@ -332,9 +334,15 @@ Load balancers and container platforms can ask `GET /readyz` (200
 `opensearch`, `identity` or `stopping`) and `GET /livez` (200 while the process
 runs). Both answer without signing in and say nothing else.
 
+Until sessions are shared, a web sign-in is kept by the server it was made on: set
+the load balancer to keep each person on one server (sticky sessions).
+
 **Upgrading a pair of servers:** older versions ignore the shared job lease, so
 upgrade both servers together, or first set `detections.scheduler: false` on the
 server you upgrade last.
+
+See [docs/servers.md](docs/servers.md) for the Servers page, how the jobs move,
+adding a server by hand, and load balancer examples.
 
 ## Detections and findings
 
@@ -677,6 +685,16 @@ go test ./...
 go build -o signalith ./cmd/signalith                         # Linux
 GOOS=windows GOARCH=amd64 go build -o signalith.exe ./cmd/signalith  # Windows
 ```
+
+The end-to-end tests need an OpenSearch without security, such as the one in CI:
+
+```sh
+SIGNALITH_TEST_OPENSEARCH=http://localhost:9200 go test -tags integration ./internal/integration/
+```
+
+The `TestCluster` tests among them start several `signalith serve` processes that
+share one OpenSearch, and stop them with kill -9 and SIGSTOP (Linux only). Without
+`SIGNALITH_TEST_OPENSEARCH` they run against a built-in stand-in for OpenSearch.
 
 ## Roadmap
 

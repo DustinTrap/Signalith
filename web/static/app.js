@@ -358,6 +358,7 @@ const JUMP_WORDS = {
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
   data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', retention: 'retention rotation archive restore delete storage disk guard policies',
   health: 'status opensearch ingest', help: 'help syntax language commands',
+  servers: 'cluster nodes servers background jobs leader failover standby readyz',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
   settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
 };

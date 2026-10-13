@@ -113,10 +113,11 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		health = "unreachable"
 	}
-	out := map[string]any{"servers": servers, "lease": lease, "opensearch": map[string]any{"status": health}}
+	// writes_refused is for everyone: the page says that OpenSearch's disk
+	// is full, which affects what everyone sees.
+	out := map[string]any{"servers": servers, "lease": lease, "opensearch": map[string]any{"status": health}, "writes_refused": st.WritesRefused}
 	if admin {
 		out["self"] = st.Self
-		out["writes_refused"] = st.WritesRefused
 		out["warnings"] = st.Warnings
 		out["opensearch"] = map[string]any{"status": health, "url": redact.URL(s.conf().OpenSearch.URL)}
 	}
