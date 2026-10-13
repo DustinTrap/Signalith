@@ -182,16 +182,23 @@ func progressPrinter(out io.Writer) sample.ProgressFn {
 	}
 }
 
+// errSampleBusy is the command's answer while another load or removal
+// runs, or may still run.
+var errSampleBusy = errors.New("a sample-data load or removal is already running (in the web page, on a server that shares this OpenSearch, or in another signalith sample-data command); wait for it to finish. If it was stopped without finishing, \"signalith sample-data remove\" takes out what it left, once it has checked for a minute that it is not running")
+
 func sampleLoadCmd(ctx context.Context, loader *sample.Loader, size sample.Size) error {
 	fmt.Printf("Loading the %s sample data. This writes a week of made-up activity and runs the detections over it.\n", size)
 	st, err := loader.Load(ctx, size, progressPrinter(os.Stdout))
+	var old *sample.OldJobsServerError
 	switch {
+	case errors.As(err, &old):
+		return err
 	case errors.Is(err, sample.ErrAlreadyLoaded):
 		return errors.New("sample data is already loaded; run \"signalith sample-data remove\" first")
 	case errors.Is(err, sample.ErrPartial):
-		return errors.New("the last load did not finish; run \"signalith sample-data remove\" to take out what it loaded, then load again")
+		return errors.New("the last load or removal did not finish; run \"signalith sample-data remove\" to take out what is left, then load again")
 	case errors.Is(err, sample.ErrBusy):
-		return errors.New("a sample-data load or removal is already running (here, in the web page, or on another server that shares this OpenSearch); wait for it to finish")
+		return errSampleBusy
 	case errors.Is(err, context.Canceled):
 		return errors.New("the load was stopped before it finished; run \"signalith sample-data remove\" to take out what it loaded")
 	case err != nil:
@@ -210,7 +217,7 @@ func sampleLoadCmd(ctx context.Context, loader *sample.Loader, size sample.Size)
 }
 
 func sampleRemoveCmd(ctx context.Context, loader *sample.Loader) error {
-	cur, err := loader.Status(ctx)
+	cur, act, err := loader.Current(ctx)
 	if err != nil {
 		return err
 	}
@@ -218,14 +225,40 @@ func sampleRemoveCmd(ctx context.Context, loader *sample.Loader) error {
 		fmt.Println("There is no sample data to remove.")
 		return nil
 	}
-	if cur.Partial {
+	if act != nil {
+		// This command has only just looked: watch the record to tell a
+		// job that runs from one that stopped without finishing.
+		fmt.Printf("Sample data is being %s%s, or was until it stopped. Checking for up to a minute whether that is still going...\n",
+			sampleVerb(act), sampleWhereCmd(act))
+		w, _, err := loader.WatchJob(ctx, sample.StaleJob+15*time.Second)
+		switch {
+		case err != nil:
+			return err
+		case w == sample.JobRunning:
+			return errSampleBusy
+		case w == sample.JobUnknown:
+			return errors.New("could not tell whether the other sample-data load or removal is still running; try again in a minute")
+		}
+		if cur, err = loader.Status(ctx); err != nil {
+			return err
+		}
+		if cur == nil {
+			fmt.Println("There is no sample data to remove.")
+			return nil
+		}
+		fmt.Println("It is not running any more.")
+	}
+	switch {
+	case cur.Partial && cur.Removing:
+		fmt.Println("Finishing the removal that did not finish.")
+	case cur.Partial:
 		fmt.Println("Removing what the unfinished load wrote.")
-	} else {
+	default:
 		fmt.Println("Removing the sample data.")
 	}
 	st, err := loader.Remove(ctx, progressPrinter(os.Stdout))
 	if errors.Is(err, sample.ErrBusy) {
-		return errors.New("a sample-data load or removal is already running (here, in the web page, or on another server that shares this OpenSearch); wait for it to finish")
+		return errSampleBusy
 	}
 	if err != nil {
 		return err
@@ -238,28 +271,59 @@ func sampleRemoveCmd(ctx context.Context, loader *sample.Loader) error {
 	return nil
 }
 
+// sampleVerb is "loaded" or "removed", for a job.
+func sampleVerb(a *sample.Activity) string {
+	if a.Op == "remove" {
+		return "removed"
+	}
+	return "loaded"
+}
+
+// sampleWhereCmd says where a job runs, for the command's output.
+func sampleWhereCmd(a *sample.Activity) string {
+	switch {
+	case a.Command && a.Server != "":
+		return " with the signalith sample-data command on " + a.Server
+	case a.Server != "":
+		return " on the server " + a.Server
+	}
+	return ""
+}
+
 func sampleStatusCmd(ctx context.Context, loader *sample.Loader) error {
 	st, a, err := loader.Current(ctx)
 	if err != nil {
 		return err
 	}
 	if a != nil {
-		verb := "loading"
-		if a.Op == "remove" {
-			verb = "removing"
-		}
-		where := ""
+		// This command has only just looked: a job that runs moves its
+		// record on every few seconds.
+		w, cur, err := loader.WatchJob(ctx, 12*time.Second)
 		switch {
-		case a.Command && a.Server != "":
-			where = " with the signalith sample-data command on " + a.Server
-		case a.Server != "":
-			where = " on the server " + a.Server
+		case err != nil:
+			return err
+		case w == sample.JobRunning:
+			fmt.Printf("Sample data is being %s%s: %s (%d%%).\n", sampleVerb(cur), sampleWhereCmd(cur), cur.Phase, cur.Percent)
+			return nil
+		case w == sample.JobNone:
+			// It ended while this command looked.
+			if st, err = loader.Status(ctx); err != nil {
+				return err
+			}
+		default:
+			fmt.Printf("Sample data was being %s%s (%s, %d%%), but that has not moved on for a while, so it may have stopped.\n",
+				sampleVerb(a), sampleWhereCmd(a), a.Phase, a.Percent)
+			fmt.Println("If it has, \"signalith sample-data remove\" takes out what it left, once it has checked for a minute that it is not running.")
+			return nil
 		}
-		fmt.Printf("Sample data is %s%s: %s (%d%%).\n", verb, where, a.Phase, a.Percent)
-		return nil
 	}
 	if st == nil {
 		fmt.Println("No sample data is loaded.")
+		return nil
+	}
+	if st.Partial && st.Removing {
+		fmt.Println("A removal of the sample data did not finish; part of it is still in place.")
+		fmt.Println("Run \"signalith sample-data remove\" to take out the rest.")
 		return nil
 	}
 	if st.Partial {

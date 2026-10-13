@@ -1015,9 +1015,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	// it does not wait for the job lease. What it wrote is recorded in the
 	// runtime index, which every server that shares this OpenSearch reads,
 	// so they all show the same sample and only one load happens at a time.
-	sampleServer := ""
+	sampleServer, sampleNode := "", ""
 	if r.node != nil {
-		sampleServer = r.node.Name()
+		sampleServer, sampleNode = r.node.Name(), r.node.ID()
 	}
 	if sampleServer == "" {
 		sampleServer, _ = os.Hostname()
@@ -1035,10 +1035,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Cases:    cstore,
 		Risk:     &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix},
 		Server:   sampleServer,
+		NodeID:   sampleNode,
 		Log:      log,
 	}
 	// Each server keeps the sample's asset and identity context in its own
-	// lookups folder: follow a load or removal made on another server.
+	// lookups folder, and its threat intel in memory: follow a load or
+	// removal made on another server.
 	in.jobs.Go(func() { sampleLoader.WatchLists(ctx, time.Minute) })
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
@@ -1058,6 +1060,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Cases:      cstore,
 		Retention:  ret,
 		Sample:     sampleLoader,
+		Background: r.backgroundContext(parent),
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,

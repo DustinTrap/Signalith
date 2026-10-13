@@ -56,7 +56,16 @@ progress on the card, with where it runs.
 If a load stops part way (an error, a restart, or Ctrl-C), what it wrote so
 far is recorded. The card says **The last load did not finish** and offers
 **Remove what was loaded**; `signalith sample-data remove` does the same. A
-new load is refused until it is removed.
+new load is refused until it is removed. A removal that stops part way works
+the same way: the card says **The last removal did not finish** and offers
+**Finish removing**, and `signalith sample-data remove` finishes it too.
+
+When you stop or restart a server (or its container) in the middle of a load
+or removal, it notes that the job did not finish before it exits, so the card
+says so as soon as the server is back. If `signalith sample-data remove` finds
+a load or removal recorded as running somewhere else, it first checks, for up
+to a minute, whether that is still going: it waits for it if so, and finishes
+the job if not.
 
 ## What it contains
 
@@ -165,6 +174,12 @@ removal lifts that for the delete and puts it back.
 When several Signalith servers share one OpenSearch (see
 [servers.md](servers.md)), they share one set of sample data:
 
+- **Upgrade every server first.** The server that runs the background jobs
+  must run a version that knows about sample data: an older one's scheduled
+  detections would raise findings from the sample that removal cannot tell
+  from yours, and its threat intel downloads would delete the sample's
+  indicators. While it runs an older version, a load is refused with a message
+  that names it.
 - **Load or remove it on any of them.** It is not one of the background jobs,
   so it does not wait for the server that runs those. The detections the load
   runs over the sample's week run on the server you loaded from, and only over
@@ -175,15 +190,19 @@ When several Signalith servers share one OpenSearch (see
   `<prefix>_runtime` index where the servers find each other. So the card shows
   the same set on every server, a second load is refused wherever you try it,
   and a load running on one server shows its progress on the others.
-- **Asset and identity entries follow within a minute.** Each server keeps the
-  sample's two lookup files in its own lookups folder. The server you load from
-  writes them at once; the others add them within a minute of the load
-  finishing, and take them out within a minute of a removal, wherever it was
-  made.
+- **Threat intel, asset and identity entries follow.** Each server keeps the
+  threat intel in memory, and the sample's two lookup files in its own lookups
+  folder. The server you load from has them at once. The others read the
+  threat intel again, and add the lookup files, as soon as their card shows the
+  load (within a minute when nobody has the card open), and take them out the
+  same way after a removal, wherever it was made.
 
-If a server stops in the middle of a load or removal, the others wait a minute
-for it, then treat the job as stopped: the card offers **Remove what was
-loaded**, on any server.
+If a server stops in the middle of a load or removal without saying so (it
+crashed, or lost touch with OpenSearch), the others wait until its record has
+not changed for a minute, then treat the job as stopped: the card offers
+**Remove what was loaded** or **Finish removing**, on any server. That minute
+is timed by each server's own clock from the last change it saw, so a
+computer whose clock is wrong cannot make a running job look stopped.
 
 ## Notes
 
@@ -193,5 +212,6 @@ loaded**, on any server.
   older sample days on its usual schedule; nothing else changes.
 - After an upgrade, the findings and investigations indices learn the sample's
   marker field from the server that runs the background jobs. Loading sample
-  data adds that one field itself if it is not there yet, so the load works
-  straight away on any server.
+  data adds that one field itself if it is not there yet, so you need not wait
+  for that server to get to it. Every server must still run the new version
+  (see [Several servers](#several-servers)).

@@ -23,13 +23,21 @@ import (
 
 // fakeOS stands in for OpenSearch's REST calls the loader makes: it lists
 // the indices holding sample documents, deletes from them (refusing on a
-// write-blocked index, as OpenSearch does), and changes the block. The
-// real thing is exercised by the integration test.
+// write-blocked index, as OpenSearch does), counts what is left, and
+// changes the block. The real thing is exercised by the integration test.
 type fakeOS struct {
 	mu      sync.Mutex
-	indices []string        // indices holding sample documents
-	blocked map[string]bool // index.blocks.write
-	deleted []string        // indices deleted from
+	indices []string // indices holding sample documents
+	// late are indices whose sample documents a refresh has yet to make
+	// searchable; onDelete runs after each delete, as writes that land
+	// meanwhile would.
+	late      []string
+	onDelete  func(f *fakeOS)
+	refreshes int
+	blocked   map[string]bool // index.blocks.write
+	deleted   []string        // indices deleted from
+	cleared   map[string]bool // indices with no sample documents left
+	log       []string        // refresh, search, count and delete:<index>, in order
 }
 
 func (f *fakeOS) Do(_ context.Context, method, path string, body, out any) error {
@@ -44,10 +52,31 @@ func (f *fakeOS) Do(_ context.Context, method, path string, body, out any) error
 		return json.Unmarshal(b, out)
 	}
 	switch {
+	case strings.Contains(path, "/_refresh"):
+		f.log = append(f.log, "refresh")
+		f.refreshes++
+		f.indices = append(f.indices, f.late...)
+		for _, ix := range f.late {
+			delete(f.cleared, ix)
+		}
+		f.late = nil
+		return nil
+	case strings.Contains(path, "/_count"):
+		f.log = append(f.log, "count")
+		n := 0
+		for _, ix := range f.indices {
+			if !f.cleared[ix] {
+				n++
+			}
+		}
+		return reply(map[string]any{"count": n})
 	case strings.Contains(path, "/_search"):
+		f.log = append(f.log, "search")
 		var buckets []map[string]any
 		for _, ix := range f.indices {
-			buckets = append(buckets, map[string]any{"key": ix, "doc_count": 1})
+			if !f.cleared[ix] {
+				buckets = append(buckets, map[string]any{"key": ix, "doc_count": 1})
+			}
 		}
 		return reply(map[string]any{"aggregations": map[string]any{"idx": map[string]any{"buckets": buckets}}})
 	case strings.Contains(path, "/_delete_by_query"):
@@ -55,6 +84,14 @@ func (f *fakeOS) Do(_ context.Context, method, path string, body, out any) error
 			return &store.Error{Status: http.StatusForbidden, Body: `{"error":{"type":"cluster_block_exception","reason":"index [` + index + `] blocked by: [FORBIDDEN/8/index write (api)];"}}`}
 		}
 		f.deleted = append(f.deleted, index)
+		f.log = append(f.log, "delete:"+index)
+		if f.cleared == nil {
+			f.cleared = map[string]bool{}
+		}
+		f.cleared[index] = true
+		if f.onDelete != nil {
+			f.onDelete(f)
+		}
 		return reply(map[string]any{"deleted": 1})
 	case method == "GET" && strings.Contains(path, "/_settings"):
 		v := "false"
@@ -209,6 +246,9 @@ type fakeBulk struct {
 	docs   []store.IndexedDoc
 	calls  int
 	failAt int
+	// rejectAll turns every document away, as indices that refuse writes
+	// would.
+	rejectAll bool
 }
 
 func (f *fakeBulk) Bulk(_ context.Context, docs []store.IndexedDoc) ([]store.BulkItemError, error) {
@@ -217,6 +257,13 @@ func (f *fakeBulk) Bulk(_ context.Context, docs []store.IndexedDoc) ([]store.Bul
 	f.calls++
 	if f.calls == f.failAt {
 		return nil, &store.Error{Status: http.StatusTooManyRequests, Body: `{"error":{"type":"es_rejected_execution_exception","reason":"rejected"}}`}
+	}
+	if f.rejectAll {
+		errs := make([]store.BulkItemError, len(docs))
+		for i, d := range docs {
+			errs[i] = store.BulkItemError{Index: d.Index, Pos: i, Type: "cluster_block_exception", Reason: "index [" + d.Index + "] blocked"}
+		}
+		return errs, nil
 	}
 	f.docs = append(f.docs, docs...)
 	return nil, nil
@@ -541,14 +588,46 @@ func TestFailedLoadIsRemovable(t *testing.T) {
 	}
 }
 
+// testClock is a monotonic clock a test moves on by hand.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) get() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) add(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// useClock gives l a clock of the test's, and a pause that moves it on
+// instead of waiting.
+func useClock(l *Loader) *testClock {
+	c := &testClock{now: time.Unix(1000, 0)}
+	l.clock = c.get
+	l.sleep = func(ctx context.Context, d time.Duration) error {
+		c.add(d)
+		return ctx.Err()
+	}
+	return c
+}
+
 // TestJobAcrossServers: a job running elsewhere (another server, or the
 // command line) refuses a load and a removal and shows as activity; one
-// whose heartbeat stopped is taken over by a removal.
+// whose record stood still for a minute is taken over by a removal.
 func TestJobAcrossServers(t *testing.T) {
 	ctx := context.Background()
 	l, _, _, _, _ := newTestLoader(t, t.TempDir())
+	clk := useClock(l)
 	docs := l.Docs.(*memDocs)
-	other := &Activity{Op: "load", Phase: "Writing events", Percent: 12, Server: "siem-b", PID: 999999, Started: time.Now(), Beat: time.Now()}
+	other := &Activity{Op: "load", Phase: "Writing events", Percent: 12, Server: "siem-b", Node: "n_b", Process: "p_b",
+		PID: 999999, Started: time.Now(), Beat: time.Now()}
 	docs.put(t, stateDoc{Kind: stateKind, State: &State{ID: "sample-b", Partial: true}, Job: other})
 
 	if _, err := l.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrBusy) {
@@ -561,9 +640,12 @@ func TestJobAcrossServers(t *testing.T) {
 		t.Errorf("Activity = %+v", a)
 	}
 
-	// siem-b stopped mid-load.
-	other.Beat = time.Now().Add(-2 * staleJob)
-	docs.put(t, stateDoc{Kind: stateKind, State: &State{ID: "sample-b", Partial: true}, Job: other})
+	// siem-b stopped mid-load: its record stands still.
+	clk.add(StaleJob - time.Second)
+	if a := l.Activity(ctx); a == nil {
+		t.Fatal("a job quiet for less than a minute shows as stopped")
+	}
+	clk.add(time.Second)
 	if a := l.Activity(ctx); a != nil {
 		t.Errorf("a stopped job shows as activity: %+v", a)
 	}
@@ -642,6 +724,7 @@ func TestJobTakenOver(t *testing.T) {
 		if p.Phase == "Adding threat intel" {
 			rec := docs.record(t)
 			rec.Job = &Activity{Op: "remove", Server: "siem-b", Beat: time.Now()}
+			rec.Owner = "siem-b-removal"
 			docs.put(t, *rec)
 		}
 	})

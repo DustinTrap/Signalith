@@ -85,6 +85,23 @@ const leaseID = "lease:jobs"
 
 func nodeDocID(nodeID string) string { return "node:" + nodeID }
 
+// LeaseDocID is the job lease's document id in the runtime index.
+const LeaseDocID = leaseID
+
+// NodeDocID returns the id of the heartbeat of the server nodeID.
+func NodeDocID(nodeID string) string { return nodeDocID(nodeID) }
+
+// Features of this version that another server or the command line may
+// need to find in the heartbeat of the server running the background jobs.
+const (
+	// FeatureSampleData: the background jobs leave the one-click sample
+	// data out (the scheduled detections and the threat intel feeds).
+	FeatureSampleData = "sample_data"
+)
+
+// features are this version's, as its heartbeats list them.
+var features = []string{FeatureSampleData}
+
 // Server states in heartbeats.
 const (
 	StateStarting = "starting"
@@ -148,6 +165,9 @@ type Heartbeat struct {
 	// CannotTakeOver says why this server, though it may run the jobs,
 	// would not take them over by itself now.
 	CannotTakeOver string `json:"cannot_take_over,omitempty"`
+	// Features lists what this server's version can do that an older one
+	// cannot, where another server must know it (see FeatureSampleData).
+	Features []string `json:"features,omitempty"`
 }
 
 // Syslog is where a server listens for syslog.

@@ -24,9 +24,9 @@ import (
 var (
 	// ErrAlreadyLoaded means a sample set is already loaded; Remove it first.
 	ErrAlreadyLoaded = errors.New("sample data is already loaded; remove it before loading again")
-	// ErrPartial means an earlier load stopped part way; Remove what it
-	// loaded before loading again.
-	ErrPartial = errors.New("the last sample-data load did not finish; remove what it loaded before loading again")
+	// ErrPartial means an earlier load or removal stopped part way;
+	// Remove what is left before loading again.
+	ErrPartial = errors.New("the last sample-data load or removal did not finish; remove what is left before loading again")
 	// ErrNothingWritten means OpenSearch accepted none of the sample events.
 	ErrNothingWritten = errors.New("OpenSearch did not accept any of the sample events")
 )
@@ -77,8 +77,24 @@ type Loader struct {
 	// command, whose Server is the computer's name.
 	Server  string
 	Command bool
-	Now     func() time.Time
-	Log     *slog.Logger
+	// NodeID is this server's node ID ("" for the command). A job this
+	// node recorded from another process is known to have stopped.
+	NodeID string
+	Now    func() time.Time
+	Log    *slog.Logger
+
+	// clock and sleep stand in for the monotonic clock and waiting, in
+	// tests.
+	clock func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
+	// obs is the record as this loader last read it (see state.go).
+	obsMu sync.Mutex
+	obs   observation
+	// intelFor is the sample set the threat intel was last synced for
+	// (see Follow), and intelSynced whether it was.
+	followMu    sync.Mutex
+	intelFor    string
+	intelSynced bool
 }
 
 // State is the bookkeeping for a loaded sample set, kept in its record in
@@ -87,9 +103,11 @@ type State struct {
 	ID   string `json:"id"`
 	Size Size   `json:"size"`
 	// Partial is set from the moment a load starts writing until it has
-	// finished: a state that keeps it was stopped part way (an error, a
-	// restart, Ctrl-C) and should be removed.
+	// finished, and from the moment a removal starts: a state that keeps
+	// it was stopped part way (an error, a restart, Ctrl-C) and what is
+	// left should be removed. Removing says it was a removal.
 	Partial  bool      `json:"partial,omitempty"`
+	Removing bool      `json:"removing,omitempty"`
 	Started  time.Time `json:"started"`
 	LoadedAt time.Time `json:"loaded_at,omitzero"`
 	Start    time.Time `json:"start"`
@@ -170,10 +188,13 @@ func (r *reporter) within(phase string, from, to, done, total int) {
 // take out what was written.
 func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (res *State, err error) {
 	// A quick look first, so a refused load prepares nothing.
-	if d, _, err := l.read(ctx); err != nil {
+	if d, v, err := l.read(ctx); err != nil {
 		return nil, err
 	} else if d != nil {
-		return nil, refusal(d)
+		return nil, l.refusal(d, v)
+	}
+	if err := l.CheckJobsServer(ctx); err != nil {
+		return nil, err
 	}
 	if err := l.prepareIndices(ctx); err != nil {
 		return nil, err
@@ -191,8 +212,14 @@ func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (res *Sta
 	defer func() {
 		// Whatever happened, the record keeps what was written, and no job
 		// runs any more: a load that stopped part way stays partial, for
-		// Remove to take out.
-		if eerr := j.end(st); err == nil && eerr != nil {
+		// Remove to take out. When OpenSearch took none of the events,
+		// nothing but the record was written: it goes, so the next step
+		// is simply to load again.
+		keep := st
+		if errors.Is(err, ErrNothingWritten) {
+			keep = nil
+		}
+		if eerr := j.end(keep); err == nil && eerr != nil {
 			err = eerr
 		}
 		if err = takenOver(ctx, err); err != nil {
@@ -440,8 +467,9 @@ func (l *Loader) buildCase(ctx context.Context, d *Data) []string {
 // risk events, findings, the sample investigation, the sample threat intel
 // and the asset and identity overlay. It works on a partial load too. A
 // case of the user's own that holds sample findings is kept, with them
-// unlinked. Nothing else is touched. The record goes last, so a removal
-// that stops part way can be run again.
+// unlinked. Nothing else is touched. The record goes last, once a fresh
+// look finds nothing marked left, so a removal that stops part way can be
+// run again.
 func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (res *State, err error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -466,6 +494,12 @@ func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (res *State, err e
 	r := &reporter{op: "remove", fn: prog, job: j}
 
 	r.step("Deleting events and risk", 0)
+	// Events and risk events become searchable only at the next refresh
+	// (every few seconds): without one, those written just before, by a
+	// load that was stopped a moment ago, would be missed.
+	if err := l.refresh(ctx, l.Prefix+"-*"); err != nil {
+		return nil, fmt.Errorf("finding the sample events: %w", err)
+	}
 	if err := l.deleteBySample(ctx, st.ID, r); err != nil {
 		return nil, err
 	}
@@ -504,6 +538,15 @@ func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (res *State, err e
 		}
 	}
 
+	// A last look, after a refresh, for marked events written while the
+	// removal ran: OpenSearch may still have been writing what a load
+	// stopped just before had sent. Once the record is gone, nothing
+	// could remove them.
+	r.step("Checking nothing is left", 98)
+	if err := l.sweep(ctx, st.ID, r); err != nil {
+		return nil, err
+	}
+
 	removed = true
 	if err := j.end(nil); err != nil {
 		return nil, fmt.Errorf("everything was removed, but the record of the load could not be cleared: %w", err)
@@ -517,20 +560,65 @@ func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (res *State, err e
 // every load and size.
 func Lists() ([]assets.Asset, []assets.Identity) { return sampleLists(buildOrg()) }
 
-// SyncLists makes this server's asset and identity overlay follow the
-// sample data in OpenSearch. Each server keeps the overlay in its own
-// lookups folder, so a load or removal done on another server, or with the
-// signalith sample-data command on another computer, reaches this one
-// here: the overlay is added while a finished load is in place, and taken
-// out once none is. A load that did not finish, or a job still running,
-// is left alone.
+// SyncLists makes this server's copies of the sample's context follow the
+// sample data in OpenSearch: see Follow.
 func (l *Loader) SyncLists(ctx context.Context) error {
-	if l.Assets == nil {
+	st, act, err := l.Current(ctx)
+	if err != nil {
+		return err
+	}
+	return l.Follow(ctx, st, act)
+}
+
+// Follow makes this server's own copies of the sample's context follow the
+// record st and act (as Current returned them), so a load or removal done
+// on another server, or with the signalith sample-data command on another
+// computer, reaches this one:
+//
+//   - the threat intel, which each server holds in memory, is read again
+//     once the record names another sample set (or none), so the sample's
+//     indicators match here as soon as the page says it is loaded;
+//   - the asset and identity overlay, which each server keeps in its own
+//     lookups folder, is added while a finished load is in place, and
+//     taken out once none is.
+//
+// A load or removal that did not finish, or a job still running, is left
+// alone. Follow is cheap when nothing changed: the status page calls it on
+// every look.
+func (l *Loader) Follow(ctx context.Context, st *State, act *Activity) error {
+	if act != nil || (st != nil && st.Partial) {
 		return nil
 	}
-	st, act, err := l.Current(ctx)
-	if err != nil || act != nil || (st != nil && st.Partial) {
-		return err
+	set := ""
+	if st != nil {
+		set = st.ID
+	}
+	var errs []error
+	if s, ok := l.Intel.(intelSyncer); ok {
+		l.followMu.Lock()
+		need := !l.intelSynced || l.intelFor != set
+		l.followMu.Unlock()
+		if need {
+			if _, err := s.Sync(ctx); err != nil {
+				errs = append(errs, fmt.Errorf("reading threat intel: %w", err))
+			} else {
+				l.followMu.Lock()
+				l.intelFor, l.intelSynced = set, true
+				l.followMu.Unlock()
+			}
+		}
+	}
+	if err := l.followLists(st); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// followLists adds the sample's asset and identity overlay while a
+// finished load is in place, and takes it out once none is.
+func (l *Loader) followLists(st *State) error {
+	if l.Assets == nil {
+		return nil
 	}
 	as, ids := l.Assets.Overlay()
 	has := len(as)+len(ids) > 0
@@ -556,7 +644,7 @@ func (l *Loader) WatchLists(ctx context.Context, every time.Duration) {
 	defer t.Stop()
 	for {
 		if err := l.SyncLists(ctx); err != nil && ctx.Err() == nil {
-			l.log().Debug("could not check the sample data's asset and identity context", "err", err)
+			l.log().Debug("could not check the sample data's threat intel and asset and identity context", "err", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -681,6 +769,40 @@ func (l *Loader) removeCases(ctx context.Context, id string, sampleFindings map[
 		}
 	}
 	return nil
+}
+
+// sweep makes sure no event or risk event with the marker is left,
+// deleting again what turns up.
+func (l *Loader) sweep(ctx context.Context, id string, r *reporter) error {
+	for range 3 {
+		if err := l.refresh(ctx, l.Prefix+"-*"); err != nil {
+			return fmt.Errorf("checking for sample events left: %w", err)
+		}
+		n, err := l.countMarked(ctx, id)
+		if err != nil {
+			return fmt.Errorf("checking for sample events left: %w", err)
+		}
+		if n == 0 {
+			return nil
+		}
+		l.log().Info("sample: more sample events turned up during the removal; deleting them too", "count", n)
+		if err := l.deleteBySample(ctx, id, r); err != nil {
+			return err
+		}
+	}
+	return errors.New("sample events keep appearing (is a sample-data load still sending them?); try removing again")
+}
+
+// countMarked counts the events and risk events with the marker.
+func (l *Loader) countMarked(ctx context.Context, id string) (int, error) {
+	var out struct {
+		Count int `json:"count"`
+	}
+	path := "/" + url.PathEscape(l.Prefix+"-*") + "/_count?ignore_unavailable=true&allow_no_indices=true"
+	if err := l.OS.Do(ctx, "POST", path, map[string]any{"query": sampleQuery(id)}, &out); err != nil {
+		return 0, err
+	}
+	return out.Count, nil
 }
 
 // deleteBySample deletes the marked documents, index by index. Retention

@@ -77,6 +77,11 @@ type Server struct {
 	// Sample loads and removes the one-click sample data; nil disables the
 	// sample-data card and its endpoints.
 	Sample *sample.Loader
+	// Background is the context of work a request starts that runs on
+	// after it, such as a sample-data load: it ends when the process stops
+	// (not at a restart in place), so that work can stop cleanly and say
+	// so. nil is context.Background().
+	Background context.Context
 	// Assistant is an optional AI model for plain-English questions.
 	Assistant *assistant.Client
 	UI        fs.FS // web UI files; nil disables the UI

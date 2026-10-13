@@ -74,8 +74,10 @@ function sampleHead() {
 }
 
 // renderSampleCard draws the card from the current status. focus names the
-// element to move keyboard focus to (its data-focus value); it moves only
-// when focus was in the card, or was lost with the content it replaces.
+// element to move keyboard focus to (its data-focus value), or the card's
+// first such element when the new card has no element by that name; it
+// moves only when focus was in the card, or was lost with the content it
+// replaces.
 function renderSampleCard({ checking = false, focus = null } = {}) {
   const card = $('sample-card');
   if (!card || !can('admin')) return;
@@ -93,7 +95,7 @@ function renderSampleCard({ checking = false, focus = null } = {}) {
   else body = sampleIdleBody();
   fill(card, sampleHead(), body);
   if (focus && hadFocus) {
-    const target = card.querySelector('[data-focus="' + focus + '"]');
+    const target = card.querySelector('[data-focus="' + focus + '"]') || card.querySelector('[data-focus]');
     if (target) target.focus();
   }
   syncSampleNotes();
@@ -164,14 +166,35 @@ function updateSampleRun() {
   return true;
 }
 
-// samplePartialBody: a load stopped part way. Offer to remove what it wrote.
+// samplePartialBody: a load or removal stopped part way. Offer to remove
+// what is left.
 function samplePartialBody() {
+  const removing = !!(sampleInfo.state && sampleInfo.state.removing);
+  const text = removing
+    ? 'The last removal did not finish. Part of the sample data is still in place: finish removing it.'
+    : 'The last load did not finish. Part of the sample data is in place: remove it, then load it again.';
   return sampleBody(
-    sampleError() || el('div', { class: 'alert', 'data-tone': 'warning' }, icon('triangle-alert'),
-      el('p', {}, 'The last load did not finish. Part of the sample data is in place: remove it, then load it again.')),
+    sampleError() || el('div', { class: 'alert', 'data-tone': 'warning', role: 'status' }, icon('triangle-alert'),
+      el('p', {}, text)),
     el('div', { class: 'sample-actions' },
       el('button', { type: 'button', class: 'btn btn--secondary btn--sm', 'data-focus': 'remove', onclick: sampleRemove },
-        icon('x'), 'Remove what was loaded')));
+        icon('x'), removing ? 'Finish removing' : 'Remove what was loaded')));
+}
+
+// sampleUnfinishedText is the toast for a job elsewhere that stopped part
+// way.
+function sampleUnfinishedText() {
+  return sampleInfo.state && sampleInfo.state.removing
+    ? 'The sample-data removal did not finish. Use Finish removing to take out the rest.'
+    : 'The sample-data load did not finish. Remove what was loaded, then load it again.';
+}
+
+// sampleFocusFor names where focus goes for the card as it is now.
+function sampleFocusFor() {
+  if (!sampleInfo) return 'load';
+  if (sampleInfo.running) return 'progress';
+  if (sampleInfo.partial || sampleInfo.loaded) return 'remove';
+  return 'load';
 }
 
 // sampleTries are the loaded card's shortcuts, each to a view that covers
@@ -255,6 +278,10 @@ async function sampleTick() {
   if (sampleInfo.error) {
     renderSampleCard({ focus: sampleInfo.partial ? 'remove' : 'load' });
     toast(sampleInfo.error, null, { tone: 'danger' });
+  } else if (sampleInfo.partial) {
+    // A job on another server, or the command line, stopped part way.
+    renderSampleCard({ focus: 'remove' });
+    toast(sampleUnfinishedText(), null, { tone: 'danger' });
   } else if (sampleInfo.loaded) {
     renderSampleCard({ focus: 'loaded' });
     toast('Sample data loaded. Have a look around.');
@@ -271,7 +298,7 @@ async function sampleStart(path, body, failText) {
   } catch (e) {
     toast(e.message || failText, null, { tone: 'danger' });
     await fetchSample();
-    renderSampleCard({ focus: 'load' });
+    renderSampleCard({ focus: sampleFocusFor() });
     return;
   }
   await fetchSample();
