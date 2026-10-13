@@ -103,7 +103,8 @@ func TestUsersDocListsEveryRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := string(b)
+	// Git on Windows may check the doc out with CRLF line endings.
+	doc := strings.ReplaceAll(string(b), "\r\n", "\n")
 	start := strings.Index(doc, "### Roles of every route")
 	end := strings.Index(doc, "A route added without a role")
 	if start < 0 || end < start {
