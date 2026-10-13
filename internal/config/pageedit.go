@@ -176,10 +176,17 @@ func CheckEdit(path string, e Edit) (*EditResult, error) {
 			}
 		}
 	}
+	// Certificate files entered now are used only with the mode set to
+	// files, as the page shows them; only ones saved before the mode
+	// existed are read as files mode without it.
+	_, cert := e.Values["server.tls_cert"]
+	_, key := e.Values["server.tls_key"]
+	page.explicitMode = cert || key
 	after, err := build(path, page)
 	if err != nil {
 		return nil, err
 	}
+	page.explicitMode = false
 	res.Page, res.Config = page, after
 	fields, rest := FieldProblems(after, problemsOf(after))
 	for _, k := range sortedKeys(fields) {

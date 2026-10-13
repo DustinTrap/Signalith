@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"net/netip"
 	"os"
 	"reflect"
@@ -221,5 +222,103 @@ func TestSecretFilesLockTheirSettings(t *testing.T) {
 	}
 	if c.OpenSearch.Password != "os pass" {
 		t.Errorf("password %q", c.OpenSearch.Password)
+	}
+}
+
+// Setting the HTTPS mode aside takes the certificate files saved with it
+// along, so what is left still validates and the next start uses the
+// page's other settings.
+func TestSetAsideAlong(t *testing.T) {
+	cert, key := writeTestPair(t, t.TempDir())
+	save := func(path string, values map[string]any) {
+		t.Helper()
+		res, err := CheckEdit(path, Edit{By: "alice", Values: values})
+		if err != nil || !res.OK() {
+			t.Fatalf("%v %v %v", err, res.Fields, res.Problems)
+		}
+		if err := WritePageSettings(res.Config.SettingsFile(), res.Page); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setAside := func(path string, keys []string) *Config {
+		t.Helper()
+		c, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := MarkRefused(c.SettingsFile(), keys, "nobody confirmed it"); err != nil {
+			t.Fatal(err)
+		}
+		c, err = Load(path)
+		if err != nil || c.SettingsProblem() != "" {
+			t.Fatalf("after setting %v aside: %v %s", keys, err, c.SettingsProblem())
+		}
+		return c
+	}
+
+	// signalith.yaml says off; the page says files, with the files.
+	path := writeConfig(t, "server:\n  tls:\n    mode: off\n")
+	save(path, map[string]any{"server.tls.mode": "files", "server.tls_cert": cert, "server.tls_key": key, "search.max_events": float64(777)})
+	got := SetAsideAlong(path, []string{"server.tls.mode"})
+	slices.Sort(got)
+	if !reflect.DeepEqual(got, []string{"server.tls.mode", "server.tls_cert", "server.tls_key"}) {
+		t.Errorf("off, files on the page: %v", got)
+	}
+	if c := setAside(path, got); c.Server.HTTPS() || c.Search.MaxEvents != 777 {
+		t.Errorf("https %v, max_events %d", c.Server.HTTPS(), c.Search.MaxEvents)
+	}
+	// Nothing to take along.
+	if got := SetAsideAlong(path, []string{"search.max_events"}); !reflect.DeepEqual(got, []string{"search.max_events"}) {
+		t.Errorf("max_events: %v", got)
+	}
+
+	// The other way: files in signalith.yaml, auto on the page with the
+	// files cleared, and a certificate that cannot be made.
+	path = writeConfig(t, "server:\n  tls_cert: '"+cert+"'\n  tls_key: '"+key+"'\n  tls:\n    mode: files\n")
+	save(path, map[string]any{"server.tls.mode": "auto", "server.tls_cert": "", "server.tls_key": "", "search.max_events": float64(778)})
+	got = SetAsideAlong(path, []string{"server.tls.mode", "server.tls.names"})
+	slices.Sort(got)
+	if !reflect.DeepEqual(got, []string{"server.tls.mode", "server.tls.names", "server.tls_cert", "server.tls_key"}) {
+		t.Errorf("files, auto on the page: %v", got)
+	}
+	if c := setAside(path, got); c.Server.TLSMode() != TLSFiles || c.Search.MaxEvents != 778 {
+		t.Errorf("mode %s, max_events %d", c.Server.TLSMode(), c.Search.MaxEvents)
+	}
+}
+
+// A settings file from before the HTTPS mode existed, where setting your
+// own certificate on the page was how HTTPS was turned on, still loads on
+// a signalith.yaml from then: as files mode, the way the same settings in
+// signalith.yaml are read, and with the page's other settings.
+func TestOlderPageCertificateMeansFiles(t *testing.T) {
+	cert, key := writeTestPair(t, t.TempDir())
+	path := writeConfig(t, "server:\n  listen: 0.0.0.0:8080\n")
+	quoted := func(s string) string { b, _ := json.Marshal(s); return string(b) }
+	writePage(t, path, "settings:\n"+
+		"  server.tls_cert:\n    value: "+quoted(cert)+"\n    changed_by: alice\n"+
+		"  server.tls_key:\n    value: "+quoted(key)+"\n    changed_by: alice\n"+
+		"  search.max_events:\n    value: 777\n    changed_by: alice\n")
+	c, err := Load(path)
+	if err != nil || c.SettingsProblem() != "" {
+		t.Fatalf("%v %s", err, c.SettingsProblem())
+	}
+	if c.Server.TLSMode() != TLSFiles || c.Server.PlaintextIngest() || c.Search.MaxEvents != 777 {
+		t.Errorf("mode %s, plain-text agents %v, max_events %d", c.Server.TLSMode(), c.Server.PlaintextIngest(), c.Search.MaxEvents)
+	}
+	if got, _ := c.TLSFiles(); got != cert {
+		t.Errorf("certificate %s", got)
+	}
+	// Changing another HTTPS setting on the page keeps it so.
+	res, err := CheckEdit(path, Edit{Values: map[string]any{"server.tls.names": []any{"siem.lan"}}})
+	if err != nil || !res.OK() || res.Config.Server.TLSMode() != TLSFiles {
+		t.Errorf("edit: %v %v %s", err, res.Fields, res.Config.Server.TLSMode())
+	}
+	// A mode saved on the page with them decides, as before.
+	writePage(t, path, "settings:\n"+
+		"  server.tls.mode:\n    value: off\n"+
+		"  server.tls_cert:\n    value: "+quoted(cert)+"\n"+
+		"  server.tls_key:\n    value: "+quoted(key)+"\n")
+	if c, err := Load(path); err != nil || !strings.Contains(c.SettingsProblem(), "server.tls.mode is off") {
+		t.Errorf("mode off with files: %v %q", err, c.SettingsProblem())
 	}
 }

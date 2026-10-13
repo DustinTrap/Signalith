@@ -128,16 +128,15 @@ func clientIP(r *http.Request) string {
 }
 
 // secureCookie reports whether the session cookie is sent over HTTPS
-// only: when the browser reached Signalith over HTTPS, itself or through
-// a trusted proxy that says so with X-Forwarded-Proto, or, with HTTPS
-// off (server.tls.mode: off), when public_url says a proxy in front adds
-// it. While Signalith serves HTTPS itself, a request over plain HTTP
-// never gets this far (see PlainHandler), so an https:// public_url
-// cannot make the cookie Secure for a browser on plain HTTP, which would
-// then never send it back.
+// only: when this very request reached Signalith over HTTPS, itself or
+// through a trusted reverse proxy that says so with X-Forwarded-Proto.
+// It does not go by server.public_url, which can say https:// while the
+// request came over plain HTTP (HTTPS off, and the address saved on the
+// Settings page, which applies at once): a Secure cookie would then never
+// come back, and nobody could sign in. Behind a proxy that adds HTTPS,
+// list the proxy under server.trusted_proxies.
 func (s *Server) secureCookie(r *http.Request) bool {
-	c := s.conf()
-	return s.overHTTPS(r) || (!c.Server.HTTPS() && strings.HasPrefix(c.Server.PublicURL, "https://"))
+	return s.overHTTPS(r)
 }
 
 // cookieName is the session cookie's name for a request.

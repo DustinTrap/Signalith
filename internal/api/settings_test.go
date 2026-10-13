@@ -469,9 +469,17 @@ func TestNewAddress(t *testing.T) {
 		{cfg("0.0.0.0:8080", ""), cfg("192.0.2.7:8080", ""), "http://192.0.2.7:8080/"},
 		{cfg("0.0.0.0:8080", ""), cfg("[::]:8443", "x.pem"), "https://10.0.0.5:8443/"},
 	} {
-		if got := newAddress(r, c.from, c.to); got != c.want {
+		if got := newAddress(r, c.from, c.to, false); got != c.want {
 			t.Errorf("%s -> %s: %q, want %q", c.from.Server.Listen, c.to.Server.Listen, got, c.want)
 		}
+	}
+	// Through a trusted reverse proxy, HTTPS turned on or off leaves the
+	// proxy's address as it is; another port is still a move.
+	if got := newAddress(r, cfg("127.0.0.1:8080", ""), cfg("127.0.0.1:8080", "x.pem"), true); got != "" {
+		t.Errorf("HTTPS on behind a proxy: %q", got)
+	}
+	if got := newAddress(r, cfg("127.0.0.1:8080", ""), cfg("127.0.0.1:9090", ""), true); got != "http://127.0.0.1:9090/" {
+		t.Errorf("another port behind a proxy: %q", got)
 	}
 }
 

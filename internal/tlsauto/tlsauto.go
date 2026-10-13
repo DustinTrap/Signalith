@@ -303,6 +303,32 @@ func (m *Manager) EnsureName(host string) error {
 	return nil
 }
 
+// Refresh takes in the names another Manager for the same folder added
+// with EnsureName since this one was made (they are kept in names.txt),
+// and issues a certificate that covers them when this one does not. A
+// restart prepares the new certificate before it stops the one in use,
+// which Add data may still give names to meanwhile.
+func (m *Manager) Refresh() error {
+	if !m.LocalCA() {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	saved := m.readNames()
+	if slices.Equal(saved, m.added) {
+		return nil
+	}
+	m.added = saved
+	if m.usable(m.Leaf()) {
+		return nil
+	}
+	if err := m.issue(); err != nil {
+		return err
+	}
+	m.log().Info("HTTPS certificate now also covers the names added on the Add data page", "names", strings.Join(certNames(m.Leaf()), ", "))
+	return nil
+}
+
 // Run renews the auto certificate before it expires, and in files mode
 // loads the files again when they change, until ctx ends.
 func (m *Manager) Run(ctx context.Context) {

@@ -31,6 +31,9 @@ import (
 // PageSettings is the content of settings.yaml.
 type PageSettings struct {
 	Settings map[string]*PageEntry `yaml:"settings"`
+	// explicitMode is set while checking an edit that enters certificate
+	// files: they need the HTTPS mode chosen with them (see pageCertMode).
+	explicitMode bool
 }
 
 // PageEntry is one setting changed on the page.
@@ -380,7 +383,7 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 	// base is.
 	for _, key := range p.Keys() {
 		if e := p.Settings[key]; tlsKey(key) && l.env[key] == "" && e.Refused == "" {
-			c.Server.materializeTLS(base.Server)
+			c.Server.materializeTLS(pageCertMode(p, base.Server))
 			break
 		}
 	}
@@ -460,6 +463,28 @@ func (c *Config) applyPage(p *PageSettings, base *Config) error {
 		}
 	}
 	return nil
+}
+
+// pageCertMode returns eff with the certificate file saved on the page,
+// when the page sets one but no HTTPS mode. Before the mode existed, a
+// certificate set on the page was how HTTPS was turned on, as it is in a
+// file without the mode: such settings are read as files mode, not as
+// the auto mode of a file that has no certificate itself. Certificate
+// files entered now need the mode chosen with them (explicitMode).
+func pageCertMode(p *PageSettings, eff Server) Server {
+	if e := p.Settings["server.tls.mode"]; p.explicitMode || (e != nil && e.Refused == "") {
+		return eff
+	}
+	e := p.Settings["server.tls_cert"]
+	if e == nil || e.Refused != "" || e.Value.Kind == 0 {
+		return eff
+	}
+	var cert string
+	if e.Value.Decode(&cert) != nil || strings.TrimSpace(cert) == "" {
+		return eff
+	}
+	eff.TLSCert = cert
+	return eff
 }
 
 func orNone(origin string) string {

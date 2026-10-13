@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assistant"
+	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -405,6 +407,11 @@ func (s *Server) settingsView() (map[string]any, error) {
 			// empty, with what it works out to now.
 			if set.Key == "server.public_url" && saved.PublicURLDerived() {
 				f.EmptyMeans = saved.Server.PublicURL + ", worked out from the listen address"
+			}
+			// A file from before HTTPS was the default believes a proxy on
+			// this computer or a private network until one is listed.
+			if set.Key == "server.trusted_proxies" && saved.Server.LegacyProxy(netip.IPv6Loopback()) {
+				f.EmptyMeans = "this computer and private networks, until you list one (signalith.yaml is from before HTTPS was the default)"
 			}
 			if f.Set != nil && *f.Set {
 				f.SentTo = set.SentTo(saved.Config)
@@ -823,6 +830,11 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg, "fields": res.Fields, "problems": problems})
 		return
 	}
+	if msg := s.proxyLockout(r, res.Config); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Nothing was saved. Fix the settings marked below.",
+			"fields": map[string]string{"server.trusted_proxies": msg}, "problems": []string{}})
+		return
+	}
 	if req.CheckOnly {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": nonNil(res.Changed), "confirm": confirmations(r, res)})
 		return
@@ -866,6 +878,30 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		view["backup"] = fullPath(backup)
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+// proxyLockout says why next must not be saved when r came through a
+// reverse proxy that next would no longer believe: the list of trusted
+// proxies applies at once, and with HTTPS on the very next request
+// through that proxy would be sent to https:// or refused, so this page
+// could not be opened through it again to undo the change. It returns ""
+// when r did not come through such a proxy, or next still believes it.
+func (s *Server) proxyLockout(r *http.Request, next *config.Config) string {
+	if r.TLS != nil || !s.viaTrustedProxy(r) {
+		return ""
+	}
+	from := clientaddr.Parse(r.RemoteAddr)
+	if !s.conf().Server.HTTPS() && !next.Server.HTTPS() {
+		// With HTTPS off nothing is refused for it: signing in again
+		// works through the proxy.
+		return ""
+	}
+	if next.Server.TrustsProxy(from) || next.Server.LegacyProxy(from) {
+		return ""
+	}
+	addr := from.Unmap().WithZone("").String()
+	return "You reached this page through the reverse proxy at " + addr + ", which this list leaves out. Signalith would stop believing it at once, " +
+		"and this page could not be opened through it again. Add " + addr + ", or make this change from a browser that reaches Signalith without the proxy."
 }
 
 func nonNil(list []string) []string {
@@ -1312,7 +1348,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "restart requested", "pending", strings.Join(keys, ","), "local_only", localOnly)
 	resp := map[string]any{"restarting": true, "pending": keys, "listen_changed": false, "reachable": !localOnly}
-	if moved := newAddress(r, running, saved.Config); moved != "" {
+	if moved := newAddress(r, running, saved.Config, r.TLS == nil && s.viaTrustedProxy(r)); moved != "" {
 		resp["listen_changed"], resp["new_listen"], resp["go_to"] = true, saved.Server.Listen, moved
 		if !localOnly {
 			resp["confirm_within_s"] = int(MoveWait.Seconds())
@@ -1324,9 +1360,12 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 // newAddress returns where the browser finds the web page after a
 // restart that moves it, or "" when it stays: the host the browser uses
 // now (or the new listen address's own host, when it listens on one
-// address only), with the new port and scheme.
-func newAddress(r *http.Request, running, saved *config.Config) string {
-	if !webMoves(running, saved) {
+// address only), with the new port and scheme. viaProxy is set when r
+// came through a trusted reverse proxy: HTTPS turned on or off behind it
+// leaves the proxy's address as it is, and the page there confirms the
+// move.
+func newAddress(r *http.Request, running, saved *config.Config, viaProxy bool) string {
+	if !webMoves(running, saved) || (viaProxy && running.Server.Listen == saved.Server.Listen) {
 		return ""
 	}
 	lhost, port, err := net.SplitHostPort(saved.Server.Listen)

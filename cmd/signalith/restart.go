@@ -88,7 +88,9 @@ type runner struct {
 	front *front
 	// prepared is the HTTPS certificate a restart's checks loaded or made
 	// for the new settings, which starting with them then uses, and
-	// preparedKey the settings it was made for.
+	// preparedKey the settings it was made for. It lasts only for that
+	// restart (see forgetPrepared): a later one would get a copy that
+	// misses the names Add data gave the certificate in use since.
 	prepared    *tlsauto.Manager
 	preparedKey string
 
@@ -591,11 +593,13 @@ func (r *runner) revert(ctx context.Context, m *move) {
 
 // setAside sets the changes made on the Settings page to keys aside in
 // its file, for reason, and returns those it did. Keys not changed there
-// are left alone.
+// are left alone. Changes that cannot be used without them go too (see
+// config.SetAsideAlong), so the next start can still use the rest.
 func (r *runner) setAside(file string, keys []string, reason string) []string {
 	if len(keys) == 0 {
 		return nil
 	}
+	keys = config.SetAsideAlong(r.path, keys)
 	marked, err := config.MarkRefused(file, keys, reason)
 	if err != nil {
 		r.log.Error("could not set changes from the Settings page aside in its file; the next start may use them again",
@@ -610,6 +614,7 @@ func (r *runner) setAside(file string, keys []string, reason string) []string {
 // is true when a move of the web page waits to be confirmed: the old web
 // server then keeps answering until it is.
 func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *api.RestartResult, confirm bool) bool {
+	defer r.forgetPrepared()
 	res.Keys = changedSettings(prev, next)
 	plan, err := r.check(ctx, prev, next)
 	if err != nil {
@@ -702,6 +707,7 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 // ran. It reports whether one did.
 func (r *runner) recover(ctx context.Context) bool {
 	try := func(c *config.Config) bool {
+		defer r.forgetPrepared()
 		if r.web == nil || !r.web.open() {
 			certs, err := r.prepare(c)
 			if err != nil {
@@ -820,12 +826,14 @@ func (r *runner) check(ctx context.Context, old, next *config.Config) (*plan, er
 		return nil, err
 	}
 	// New syslog addresses must be free; one that takes a port Signalith
-	// uses now is freed by the switch.
-	inUse := []string{old.Syslog.UDP, old.Syslog.TCP, old.Syslog.TLS, old.Server.Listen}
+	// holds now, with the same protocol, is freed by the switch. Another
+	// program may hold the same port number with the other protocol.
+	type listener struct{ network, addr string }
+	inUse := []listener{{"udp", old.Syslog.UDP}, {"tcp", old.Syslog.TCP}, {"tcp", old.Syslog.TLS}, {"tcp", old.Server.Listen}}
 	for _, l := range []struct{ setting, network, addr string }{
 		{"syslog.udp", "udp", next.Syslog.UDP}, {"syslog.tcp", "tcp", next.Syslog.TCP}, {"syslog.tls", "tcp", next.Syslog.TLS},
 	} {
-		if l.addr == "" || slices.ContainsFunc(inUse, func(a string) bool { return samePort(a, l.addr) }) {
+		if l.addr == "" || slices.ContainsFunc(inUse, func(u listener) bool { return u.network == l.network && overlaps(u.addr, l.addr) }) {
 			continue
 		}
 		if err := tryListen(l.network, l.addr); err != nil {
@@ -908,6 +916,11 @@ func (r *runner) certificates(c *config.Config) (*tlsauto.Manager, string, error
 		return r.cur.certs, key, nil
 	}
 	if r.prepared != nil && r.preparedKey == key {
+		// Made by this restart's checks. Names Add data gave the
+		// certificate in use while they ran are added now.
+		if err := r.prepared.Refresh(); err != nil {
+			return nil, "", keyed(err, certKeys(c)...)
+		}
 		return r.prepared, key, nil
 	}
 	m, err := newCertificates(c, r.log)
@@ -927,6 +940,10 @@ func (r *runner) prepare(c *config.Config) (*tlsauto.Manager, error) {
 	r.prepared, r.preparedKey = m, key
 	return m, nil
 }
+
+// forgetPrepared drops the certificate a restart prepared, once that
+// restart is over, however it went.
+func (r *runner) forgetPrepared() { r.prepared, r.preparedKey = nil, "" }
 
 // certKey names the settings a certificate is made from.
 func certKey(o tlsauto.Options) string {

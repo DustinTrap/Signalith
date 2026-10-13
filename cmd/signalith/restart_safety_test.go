@@ -203,6 +203,42 @@ func TestSamePortOnAnotherAddressIsRefused(t *testing.T) {
 	}
 }
 
+// A syslog address on a port Signalith holds with the other protocol is
+// still tried before anything stops: another program may hold it with
+// this one.
+func TestSyslogPortHeldWithTheOtherProtocol(t *testing.T) {
+	rs := startRunner(t, nil, nil)
+	// A port free for UDP, for syslog.udp.
+	var addr string
+	for range 20 {
+		addr = freeAddr(t)
+		if pc, err := net.ListenPacket("udp", addr); err == nil {
+			pc.Close()
+			break
+		}
+	}
+	rs.save(`{"syslog.udp":"` + addr + `"}`)
+	if _, res := rs.restart(); !res.OK {
+		t.Fatalf("syslog.udp %+v\n%s", res, rs.logs.String())
+	}
+	// Another program takes the same port over TCP.
+	held, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("the port was taken meanwhile: %v", err)
+	}
+	defer held.Close()
+	before := rs.starts()
+	rs.save(`{"syslog.tls":"` + addr + `"}`)
+	_, res := rs.restart()
+	if res.OK || res.RolledBack || !strings.Contains(res.Error, "cannot receive syslog on "+addr+"/tcp") ||
+		strings.Join(res.Refused, ",") != "syslog.tls" {
+		t.Fatalf("restart %+v", res)
+	}
+	if rs.starts() != before || !rs.signedIn("") {
+		t.Errorf("components replaced (%s -> %s) or the server stopped", before, rs.starts())
+	}
+}
+
 // At startup, an OpenSearch connection saved on the page and never
 // checked is set aside when OpenSearch answers with signalith.yaml's
 // settings but not with it.

@@ -897,6 +897,35 @@ func LoadSetAside(path string, keys []string, reason string) (*Config, error) {
 	return loadWith(path, func(p *PageSettings) { p.refuse(keys, reason, now) })
 }
 
+// SetAsideAlong returns keys and the other settings changed on the
+// Settings page that cannot be used once keys are set aside. Setting a
+// change aside must not leave the page's settings in a combination that
+// does not validate, or the next start would use none of them: setting
+// server.tls.mode aside, for one, takes along the certificate files saved
+// with it, which the mode in signalith.yaml refuses.
+func SetAsideAlong(path string, keys []string) []string {
+	out := slices.Clone(keys)
+	now := time.Now()
+	for range len(Registry) {
+		s, err := loadSaved(path, func(p *PageSettings) { p.refuse(out, "set aside", now) })
+		if err != nil || s.PageErr != nil || s.Problems == nil {
+			return out
+		}
+		more := false
+		for _, p := range s.Problems {
+			for _, k := range ProblemKeys(p) {
+				if s.Config.Source(k).Kind == FromPage && !slices.Contains(out, k) {
+					out, more = append(out, k), true
+				}
+			}
+		}
+		if !more {
+			return out
+		}
+	}
+	return out
+}
+
 func loadWith(path string, adjust func(*PageSettings)) (*Config, error) {
 	s, err := loadSaved(path, adjust)
 	if err != nil {

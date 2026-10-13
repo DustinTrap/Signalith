@@ -306,6 +306,15 @@ you upgrade:
 - **A config with `tls_cert`** gets `mode: files` and works as before.
 - **A config without `tls_cert` whose `public_url` is `https://`** was behind a proxy that
   adds HTTPS, so it gets `mode: off` and works as before.
+- **Settings saved on the Settings page by an earlier version** count as the config they
+  were saved on, with two differences. Certificate files saved there mean `mode: files`,
+  as in `signalith.yaml`. An `https://` public address saved there does not turn HTTPS
+  off, as one in `signalith.yaml` would, since the page now offers `https://` for every
+  address while HTTPS is on: Signalith serves HTTPS on the same port, and a proxy on this
+  machine or a private network that sends `X-Forwarded-Proto: https` keeps working (see
+  above). Behind a proxy elsewhere, list it under `server.trusted_proxies` in
+  `signalith.yaml`, or under **Trusted reverse proxies** on the page opened at
+  Signalith's own `https://` address.
 - **The Docker quick start** has HTTPS set in its own files now. Updating it also brings
   generated passwords and a secured OpenSearch; see
   [Upgrading the Docker quick start](../README.md#upgrading-the-docker-quick-start).
@@ -357,7 +366,8 @@ is saved there wins over `signalith.yaml` (see [the Settings page](settings.md))
 it, as for `signalith.yaml`.
 
 - **Agents on plain HTTP** and **Trusted reverse proxies** apply as soon as they are
-  saved.
+  saved. A list of trusted proxies that leaves out the proxy you opened the page through
+  is refused while HTTPS is on, since that proxy would stop working at once.
 - The mode, the extra names and the certificate files apply after a restart, which the
   page does in place. The certificate keeps coming from the same certificate authority,
   so nothing has to be trusted again; a restart with new names gives a certificate that
@@ -366,7 +376,8 @@ it, as for `signalith.yaml`.
   **Add data** does. A name Signalith's own CA may not sign is shown as a warning on the
   page.
 - Turning HTTPS off or on moves the page between `http://` and `https://` on the same
-  port, so you sign in again there; going between Signalith's own certificate and your
+  port, so you sign in again there (behind a trusted reverse proxy the page stays at the
+  proxy's address); going between Signalith's own certificate and your
   files asks first, since agents set up to check one do not trust the other. A
   certificate that cannot be loaded or made stops the restart before anything stops.
 - Below the settings, **In use now** shows the mode in use, the names the certificate

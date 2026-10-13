@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/config"
 )
 
@@ -286,6 +287,77 @@ func TestRestartRefusesACertificateItCannotMake(t *testing.T) {
 	}
 	if c, err := config.Load(rs.r.path); err != nil || c.Server.HTTPS() {
 		t.Errorf("the next start would use it: %v", err)
+	}
+}
+
+// A restart refused after its checks prepared a certificate does not
+// leave that certificate for a later restart: names Add data gave the
+// certificate in use in between stay in the one served after it.
+func TestRefusedRestartDoesNotKeepItsCertificate(t *testing.T) {
+	rs := startRunnerWith(t, nil, nil, "  tls:\n    mode: auto\n    plaintext_ingest: deny\n")
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	rs.save(`{"server.tls.names":["alias1.lan"],"server.listen":"` + taken.Addr().String() + `"}`)
+	if _, res := rs.restart(); res.OK || !slices.Contains(res.Refused, "server.listen") {
+		t.Fatalf("restart on a taken port %+v", res)
+	}
+	if code, out, err := rs.call("", "POST", "/api/tls/names", `{"name":"agents.lan"}`); err != nil || code != 200 {
+		t.Fatalf("add a name: %d %v %v", code, out, err)
+	}
+	if err := peerCert(t, rs.addr).VerifyHostname("agents.lan"); err != nil {
+		t.Fatalf("the certificate in use leaves out the name added: %v", err)
+	}
+	if code, out, err := rs.call("", "PUT", "/api/settings", `{"reset":["server.listen"]}`); err != nil || code != 200 {
+		t.Fatalf("reset %d %v %v", code, out, err)
+	}
+	_, res := rs.restart()
+	if !res.OK || strings.Join(res.Keys, ",") != "server.tls.names" {
+		t.Fatalf("restart %+v\n%s", res, rs.logs.String())
+	}
+	leaf := peerCert(t, rs.addr)
+	for _, name := range []string{"agents.lan", "alias1.lan"} {
+		if err := leaf.VerifyHostname(name); err != nil {
+			t.Errorf("the certificate after the restart leaves out %s: %v", name, err)
+		}
+	}
+}
+
+// Turning HTTPS on with your own certificate files, when nobody confirms
+// it, sets the files aside with the mode: signalith.yaml's mode (off)
+// would refuse them, and the next start would then use none of the
+// page's settings.
+func TestUnconfirmedHTTPSMoveSetsAsideItsFiles(t *testing.T) {
+	moveWait = 600 * time.Millisecond
+	t.Cleanup(func() { moveWait = api.MoveWait })
+	rs := startRunner(t, nil, nil)
+	cert, key, _ := writePair(t, t.TempDir())
+	files, _ := json.Marshal(map[string]any{"server.tls.mode": "files", "server.tls_cert": cert, "server.tls_key": key, "search.max_events": 777})
+	rs.save(string(files))
+	out, res := rs.restart()
+	if !res.OK || out["confirm_within_s"] == nil {
+		t.Fatalf("restart %+v %v", res, out)
+	}
+	waitFor(t, "the move to be undone", func() bool {
+		st := rs.r.RestartStatus()
+		return st.Last != nil && st.Last.Reverted && !st.InProgress
+	})
+	last := rs.r.RestartStatus().Last
+	refused := slices.Clone(last.Refused)
+	slices.Sort(refused)
+	if !last.OK || strings.Join(refused, ",") != "server.tls.mode,server.tls_cert,server.tls_key" {
+		t.Errorf("reverted %+v", last)
+	}
+	c, err := config.Load(rs.r.path)
+	if err != nil || c.SettingsProblem() != "" || c.Server.HTTPS() || c.Search.MaxEvents != 777 {
+		t.Fatalf("the next start: %v %q https %v max_events %d", err, c.SettingsProblem(), c.Server.HTTPS(), c.Search.MaxEvents)
+	}
+	// The page still saves, and a restart is not blocked.
+	rs.save(`{"search.max_events":800}`)
+	if _, res := rs.restart(); !res.OK {
+		t.Errorf("restart after going back %+v", res)
 	}
 }
 

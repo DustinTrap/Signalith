@@ -389,14 +389,21 @@ func TestSessionCookieOverHTTPS(t *testing.T) {
 	if pc == nil || pc.Secure {
 		t.Errorf("cookie over plain HTTP: %+v", pc)
 	}
-	// HTTPS off behind a proxy that adds it (public_url https): Secure.
+	// HTTPS off behind a trusted proxy that adds it: Secure.
 	off, _ := newTestServerWith(t, func(s *Server) {
 		s.Config.Server.TLS = &config.ServerTLS{Mode: "off"}
 		s.Config.Server.PublicURL = "https://siem.example.com"
+		s.Config.Server.TrustedProxies = []string{"127.0.0.1", "::1"}
 	})
-	resp = send(t, "POST", off.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, nil)
+	resp = send(t, "POST", off.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, map[string]string{"X-Forwarded-Proto": "https"})
 	if cs := resp.Cookies(); len(cs) != 1 || cs[0].Name != "__Host-signalith_session" || !cs[0].Secure {
-		t.Errorf("mode off, https public_url: %+v", cs)
+		t.Errorf("mode off, through a trusted proxy: %+v", cs)
+	}
+	// The same server reached over plain HTTP: an https:// public_url does
+	// not make the cookie Secure, which the browser would never send back.
+	resp = send(t, "POST", off.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, nil)
+	if cs := resp.Cookies(); len(cs) != 1 || cs[0].Name != sessionCookie || cs[0].Secure {
+		t.Errorf("mode off, https public_url, plain HTTP: %+v", cs)
 	}
 }
 

@@ -287,6 +287,47 @@ func TestEnsureName(t *testing.T) {
 	}
 }
 
+// TestRefreshTakesNamesAddedElsewhere checks that a Manager made for new
+// settings takes in the names the Manager in use added since (a restart
+// prepares one before it stops the other), and does not lose them when it
+// adds one of its own.
+func TestRefreshTakesNamesAddedElsewhere(t *testing.T) {
+	fakeMachine(t)
+	dir := t.TempDir()
+	c := &clock{time.Now()}
+	cur := newAuto(t, dir, c)
+	next := newAuto(t, dir, c, "extra.example.lan")
+	if err := cur.EnsureName("10.9.8.7"); err != nil || !cur.Covers("10.9.8.7") {
+		t.Fatalf("EnsureName: %v", err)
+	}
+	if next.Covers("10.9.8.7") {
+		t.Fatal("the other Manager already covers it")
+	}
+	before := next.Leaf()
+	if err := next.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if !next.Covers("10.9.8.7") || !next.Covers("extra.example.lan") || next.Leaf() == before {
+		t.Errorf("after Refresh: %v", certNames(next.Leaf()))
+	}
+	// Nothing new: the same certificate.
+	before = next.Leaf()
+	if err := next.Refresh(); err != nil || next.Leaf() != before {
+		t.Errorf("a second Refresh made a new certificate: %v", err)
+	}
+	// Its own EnsureName keeps the other's names in names.txt.
+	if err := next.EnsureName("192.168.7.7"); err != nil {
+		t.Fatal(err)
+	}
+	if again := newAuto(t, dir, c, "extra.example.lan"); !again.Covers("10.9.8.7") || !again.Covers("192.168.7.7") {
+		t.Errorf("names.txt lost names: %v", certNames(again.Leaf()))
+	}
+	// Files mode has nothing to refresh.
+	if err := (&Manager{opts: Options{CertFile: "x", KeyFile: "y"}}).Refresh(); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestCANameConstraints checks that Signalith's CA can only vouch for
 // this server: names it was made with, private names and private
 // addresses. A certificate it signed for another website fails to

@@ -1303,7 +1303,9 @@
         st.done = true;
         renderAlerts();
         if (st.reachable === false) return;
-        if (st.goTo) follow(st);
+        // A move this very page confirmed (it asked through a reverse
+        // proxy whose address stays the same) is already where it goes.
+        if (st.goTo && !last.confirmed) follow(st);
         else {
           try { sessionStorage.setItem(RESTART_NOTE, '1'); } catch (_) { /* ignore */ }
           location.reload();
