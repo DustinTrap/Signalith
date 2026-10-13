@@ -432,7 +432,7 @@ tags: [attack.t1059.001]
 	if err := cl.Do(ctx, http.MethodPut, "/"+prefix+"_findings/_doc/legacy?refresh=true", legacy, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.EnsureIndex(ctx); err != nil {
+	if err := fs.Upgrade(ctx); err != nil {
 		t.Fatal(err)
 	}
 	list, _, err = fs.Search(ctx, findings.Filter{Urgency: []string{"low"}})
