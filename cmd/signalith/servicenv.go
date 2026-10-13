@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -145,11 +146,11 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			}
 		case "EnvironmentFiles":
 			// /etc/signalith/signalith.env (ignore_errors=yes)
-			if f, _, _ := strings.Cut(value, " ("); filepath.IsAbs(f) {
+			if f, _, _ := strings.Cut(value, " ("); unitPathIsAbs(f) {
 				files = append(files, f)
 			}
 		case "LoadCredential":
-			if id, file, ok := strings.Cut(value, ":"); ok && id == "master.key" && filepath.IsAbs(file) {
+			if id, file, ok := strings.Cut(value, ":"); ok && id == "master.key" && unitPathIsAbs(file) {
 				s.cred = file
 			}
 		}
@@ -237,3 +238,8 @@ func sameFile(a, b string) bool {
 	sb, err2 := os.Stat(bb)
 	return err1 == nil && err2 == nil && os.SameFile(sa, sb)
 }
+
+// unitPathIsAbs reports whether a path in a systemd unit is absolute.
+// Units always use /-paths, which filepath.IsAbs does not accept on
+// Windows, where the parser still runs in tests.
+func unitPathIsAbs(p string) bool { return path.IsAbs(p) || filepath.IsAbs(p) }

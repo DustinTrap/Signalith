@@ -317,7 +317,8 @@ func TestRestartSetsUpTheMasterKey(t *testing.T) {
 	rs := startRunner(t, nil, nil)
 	dir := filepath.Dir(rs.r.path)
 	file := filepath.Join(dir, "lookups", "settings.yaml")
-	if got := secrets.Default().DefaultPath(); got != filepath.Join(dir, "keys", "master.key") {
+	// master.key, or master.key.dpapi on Windows.
+	if got := secrets.Default().DefaultPath(); filepath.Dir(got) != filepath.Join(dir, "keys") || !strings.HasPrefix(filepath.Base(got), "master.key") {
 		t.Errorf("the default keyring is not the config's: %s", got)
 	}
 	rs.save(`{"opensearch.password":"page-pw"}`)

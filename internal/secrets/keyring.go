@@ -187,6 +187,12 @@ func (k *Keyring) lookFor(p string) (bool, error) {
 	case err == nil:
 		return true, nil
 	case errors.Is(err, fs.ErrNotExist):
+		// Where the keys folder is a file, Windows says "not found" while
+		// Linux says "not a directory". Either way the key path cannot be
+		// read, which is not a missing key.
+		if st, serr := os.Stat(filepath.Dir(p)); serr == nil && !st.IsDir() {
+			return false, fmt.Errorf("%s is not a folder", filepath.Dir(p))
+		}
 		return false, nil
 	case errors.Is(err, fs.ErrPermission) && slices.Contains(k.also, filepath.Dir(filepath.Dir(p))):
 		return false, nil
