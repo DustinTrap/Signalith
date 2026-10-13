@@ -8,6 +8,7 @@ package assets
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -19,7 +20,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 )
 
 // Priorities, lowest first. Priority scales risk and raises urgency.
@@ -229,10 +229,14 @@ func ParseIdentities(data []byte) ([]Identity, error) {
 type Store struct {
 	Dir string // where assets.csv and identities.csv live; "" keeps them in memory
 
-	mu       sync.RWMutex
-	own      *lookup // the user's lists
-	overlay  *lookup // rows added by the sample data, consulted second
-	modTimes [4]time.Time
+	mu      sync.RWMutex
+	own     *lookup // the user's lists
+	overlay *lookup // rows added by the sample data, consulted second
+	// sums are the contents last loaded from each file in listFiles,
+	// zero for a missing one. Contents, not modification times: a file
+	// rewritten within the file system's time resolution (Windows) keeps
+	// its time.
+	sums [4][sha256.Size]byte
 }
 
 // lookup indexes one pair of lists. It is never changed once built, so a
@@ -295,30 +299,28 @@ func (s *Store) Reload() (bool, error) {
 		return false, nil
 	}
 	var data [4][]byte
-	var mod [4]time.Time
+	var mod [4][sha256.Size]byte
 	for i, name := range listFiles {
 		p := filepath.Join(s.Dir, name)
-		st, err := os.Stat(p)
+		b, err := os.ReadFile(p)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
 			return false, err
 		}
-		if data[i], err = os.ReadFile(p); err != nil {
-			return false, err
-		}
-		mod[i] = st.ModTime()
+		data[i] = b
+		mod[i] = sha256.Sum256(data[i])
 	}
 	s.mu.RLock()
-	cur := s.modTimes
+	cur := s.sums
 	s.mu.RUnlock()
 
 	var errs []error
 	var own, overlay *lookup
 	for pair := 0; pair < 2; pair++ {
 		a, b := pair*2, pair*2+1
-		if mod[a].Equal(cur[a]) && mod[b].Equal(cur[b]) {
+		if mod[a] == cur[a] && mod[b] == cur[b] {
 			continue
 		}
 		as, err := ParseAssets(data[a])
@@ -343,11 +345,11 @@ func (s *Store) Reload() (bool, error) {
 	s.mu.Lock()
 	if own != nil {
 		s.own = own
-		s.modTimes[0], s.modTimes[1] = mod[0], mod[1]
+		s.sums[0], s.sums[1] = mod[0], mod[1]
 	}
 	if overlay != nil {
 		s.overlay = overlay
-		s.modTimes[2], s.modTimes[3] = mod[2], mod[3]
+		s.sums[2], s.sums[3] = mod[2], mod[3]
 	}
 	s.mu.Unlock()
 	return true, errors.Join(errs...)
@@ -502,7 +504,7 @@ func (s *Store) Own() *Store {
 // overlay files in Dir, or deletes those files when both are empty. The
 // user's own files are never touched.
 func (s *Store) SetOverlay(as []Asset, ids []Identity) error {
-	var mod [2]time.Time
+	var mod [2][sha256.Size]byte
 	if s.Dir != "" {
 		for i, name := range listFiles[2:] {
 			p := filepath.Join(s.Dir, name)
@@ -526,7 +528,7 @@ func (s *Store) SetOverlay(as []Asset, ids []Identity) error {
 	l := newLookup(append([]Asset(nil), as...), append([]Identity(nil), ids...))
 	s.mu.Lock()
 	s.overlay = l
-	s.modTimes[2], s.modTimes[3] = mod[0], mod[1]
+	s.sums[2], s.sums[3] = mod[0], mod[1]
 	s.mu.Unlock()
 	return nil
 }
@@ -571,32 +573,29 @@ func (s *Store) save(name string, data []byte) error {
 	}
 	s.mu.Lock()
 	if name == AssetsFile {
-		s.modTimes[0] = t
+		s.sums[0] = t
 	} else {
-		s.modTimes[1] = t
+		s.sums[1] = t
 	}
 	s.mu.Unlock()
 	return nil
 }
 
-// write replaces a file in Dir atomically and returns its new mod time.
-func (s *Store) write(name string, data []byte) (time.Time, error) {
+// write replaces a file in Dir atomically and returns the sum of its
+// contents.
+func (s *Store) write(name string, data []byte) ([sha256.Size]byte, error) {
 	if err := os.MkdirAll(s.Dir, 0o750); err != nil {
-		return time.Time{}, err
+		return [sha256.Size]byte{}, err
 	}
 	p := filepath.Join(s.Dir, name)
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o640); err != nil {
-		return time.Time{}, err
+		return [sha256.Size]byte{}, err
 	}
 	if err := os.Rename(tmp, p); err != nil {
-		return time.Time{}, err
+		return [sha256.Size]byte{}, err
 	}
-	st, err := os.Stat(p)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return st.ModTime(), nil
+	return sha256.Sum256(data), nil
 }
 
 // CSV returns a list as CSV, for download. Cells a spreadsheet would run
