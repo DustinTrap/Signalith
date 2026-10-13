@@ -1,9 +1,12 @@
 package security
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
 )
@@ -15,7 +18,16 @@ const textWidth = 78
 // columns with hanging indents. Words, and so links, are never broken.
 // The commands shown are those for the report's own deployment. It is
 // what signalith security prints and what the page's export gives.
+//
+// Control and formatting characters are shown escaped (\x1b, \u202e):
+// another server's name comes from its own heartbeat, and must not be
+// able to move the cursor, clear the screen or hide a link in the
+// terminal of whoever reads the report.
 func Text(r *Report) string {
+	return printable(text(r))
+}
+
+func text(r *Report) string {
 	var b strings.Builder
 	w := func(s string) { b.WriteString(s + "\n") }
 	name := r.Server.Name
@@ -95,7 +107,7 @@ func Text(r *Report) string {
 		w("")
 		w("Other servers")
 		for _, o := range r.Others {
-			b.WriteString(wrap("- "+o.Name+": "+otherText(o), "  ", "    "))
+			b.WriteString(wrap("- "+cutName(o.Name, maxPeerName)+": "+otherText(o), "  ", "    "))
 		}
 	}
 	if len(r.AlwaysOn) > 0 {
@@ -114,6 +126,42 @@ func Text(r *Report) string {
 		b.WriteString(wrap("How to check these yourself: "+NotCheckedDocs(r.Server.Version).URL, "  ", "  "))
 	}
 	return b.String()
+}
+
+// maxPeerName caps how much of another server's name the report shows.
+const maxPeerName = 80
+
+// cutName cuts s to at most n characters, ending with "...".
+func cutName(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n-3]) + "..."
+}
+
+// printable escapes the characters in s that a terminal would act on
+// rather than show (control characters other than line ends, and
+// invisible formatting such as right-to-left overrides).
+func printable(s string) string {
+	if !strings.ContainsFunc(s, unsafeRune) {
+		return s
+	}
+	var b strings.Builder
+	for _, c := range s {
+		switch {
+		case !unsafeRune(c):
+			b.WriteRune(c)
+		case c < 0x100:
+			fmt.Fprintf(&b, "\\x%02x", c)
+		default:
+			fmt.Fprintf(&b, "\\u%04x", c)
+		}
+	}
+	return b.String()
+}
+
+func unsafeRune(c rune) bool {
+	return c != '\n' && (unicode.IsControl(c) || unicode.Is(unicode.Cf, c) || c == utf8.RuneError)
 }
 
 // tipText renders a tip: one step after its label, or the label on a

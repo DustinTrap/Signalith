@@ -171,12 +171,15 @@ websites**.
 Command-line tools take the file directly, for example
 `curl --cacert signalith-ca.crt -u admin https://siem.example.com:8080/api/health`.
 
-Signalith's CA only ever signs certificates for this one server, and it is limited to
-this server's names and to private network names and addresses (see below). Someone who
-took `ca.key` from the server could therefore not use it to read your traffic to public
-websites, but could still vouch for other sites on private networks (an intranet site
+Signalith's CA only ever signs certificates for this one server. It is limited to
+websites (its extended key usage is server authentication only), and to this server's
+names and to private network names and addresses (see below). Someone who took `ca.key`
+from the server could therefore not use it to read your traffic to public websites, nor
+to sign programs, email or client sign-in certificates that computers trusting it would
+accept. They could still vouch for other websites on private networks (an intranet site
 ending in `.corp` or `.internal`, or a device reached by a private IP address) to every
-computer that trusts the CA. So:
+computer that trusts the CA. A CA made by a version before the website-only limit lacks
+it; the Security page says so and offers to make a new one. So:
 
 - trust it only on the computers and accounts that use Signalith (for your own account,
   not the whole computer, as above);
@@ -195,8 +198,10 @@ If you would rather not add a CA, [use your own certificate](#use-your-own-certi
 ## Names the certificate can cover
 
 Computers that trust a CA accept every certificate it signs, so Signalith's CA is made
-with limits (X.509 name constraints) that browsers, Fluent Bit and other TLS clients
-enforce. It can only sign:
+with limits that browsers, Fluent Bit and other TLS clients enforce. Its extended key
+usage is server authentication only, so what it signs is good for websites and nothing
+else. Its X.509 name constraints permit no email address or URI (only ones under
+`invalid`, a name reserved never to exist), and it can only sign:
 
 - the names and addresses this server had when the CA was made: its host name, full DNS
   name and IP addresses, the `server.public_url` host and `server.tls.names`;
@@ -239,7 +244,8 @@ gets a CA for `dev`, not for every `.dev` website.
   `127.0.0.1` and `::1`, the `server.public_url` host, `server.tls.names`, and the
   addresses entered under **Agents send to** on Add data. Each name and address is
   allowed on its own: not the names under it, nor its whole network. A stolen `ca.key`
-  then lets someone pose only as this server, to computers that trust the CA. But a
+  then lets someone pose only as this server's website, to computers that trust the CA
+  (the website-only limit above keeps it from vouching for anything else). But a
   new name or address later means a new CA, which every browser and agent must trust
   again.
 
@@ -411,8 +417,15 @@ The Fluent Bit setup on the **Add data** page checks the server's certificate:
 - When agents send to a name rather than an IP address, it also sets `tls.vhost` to that
   name and `tls.verify_hostname On`, so the agent checks the certificate is for this
   server and not just from a CA it trusts. That needs Fluent Bit 3.1 or later, which the
-  install steps get. (Fluent Bit cannot check an IP address against a certificate; with
-  Signalith's own CA, which signs nothing else, checking the CA is enough.)
+  install steps get.
+- Fluent Bit cannot check an IP address against a certificate. With Signalith's own CA,
+  which signs nothing but this server's certificate, checking the CA is enough. With
+  [your own certificate](#use-your-own-certificate), whose CA also vouches for other
+  computers, an agent sending to an IP address sets `tls.vhost` to a host name the
+  certificate carries and checks that instead, so a certificate the same CA issued to
+  another computer is refused. A certificate that covers only IP addresses gives it
+  nothing to check, so Add data won't make the configuration: use a certificate that
+  also includes a host name (agents can keep the IP address), or send to a name.
 - One of the steps saves the CA next to the configuration. The page shows its fingerprint,
   **Download** and **Copy** buttons, and the certificate itself under **Show certificate**.
 - The steps also make the configuration readable only by root (Linux) or SYSTEM and
@@ -456,7 +469,9 @@ What agents get depends on the chain:
 The certificate must cover the address agents send to. If it does not, the Add data page
 says so and names what it covers. Agents sending to a name check that the certificate is
 for that name (`tls.verify_hostname`), so a certificate for another site, even one from
-the same CA, is refused.
+the same CA, is refused. Agents sending to an IP address check one of the certificate's
+host names instead, so it must include at least one (see
+[Agents and syslog](#agents-and-syslog)).
 
 ## Behind a reverse proxy
 

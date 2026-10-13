@@ -188,6 +188,13 @@ func checkCertificate(f *Facts) *Check {
 			Steps: []string{"Add the certificate of the authority that issued yours after it, in the certificate file."},
 			Docs:  doc(docHTTPSOwn)}})
 	}
+	if !auto && leaf.NoName {
+		// Agents set up with an IP address check the certificate against
+		// a host name it carries, since its CA vouches for others too.
+		probs = append(probs, problem{Attention, "Your certificate covers only IP addresses, so agents can't check it belongs to this server, and Add data can't set them up.", &Fix{
+			Steps: []string{"Get a certificate that also includes this server's host name. Agents can keep using its IP address."},
+			Docs:  doc(docHTTPSOwn)}})
+	}
 	if !auto && (leaf.RSABits > 0 && leaf.RSABits < 2048 || leaf.SHA1) {
 		var weak []string
 		if leaf.RSABits > 0 && leaf.RSABits < 2048 {
@@ -253,6 +260,9 @@ func checkCAScope(f *Facts) *Check {
 		}
 	case t.CA.Scope == tlsauto.ScopeUnconstrained:
 		c = &Check{State: Attention, Line: "Signalith's certificate authority was made by an older version and can vouch for any website, to every computer that trusts it.", Fix: prepare}
+	case t.CA.AnyUse:
+		c = &Check{State: Attention, Line: "Signalith's certificate authority was made by an older version and isn't limited to websites. " +
+			"If its key were stolen, it could sign programs or email that computers trusting it would accept.", Fix: prepare}
 	case t.CA.Scope != setting:
 		c = &Check{State: Attention, Line: "You chose a " + setting + " certificate authority, but the one in use is " + t.CA.Scope +
 			". Make the new one and switch when you're ready.", Fix: prepare}

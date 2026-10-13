@@ -22,6 +22,10 @@ type Clock interface {
 	Mono() time.Duration
 	// After receives once d has passed.
 	After(d time.Duration) <-chan time.Time
+	// Until receives once Mono reaches at, or at once if it has. A wait
+	// for a deadline worked out from an earlier Mono reading uses it, so
+	// that time passing between the reading and the wait is not added.
+	Until(at time.Duration) <-chan time.Time
 }
 
 // realClock is the computer's clock.
@@ -58,6 +62,8 @@ func (c realClock) Mono() time.Duration {
 }
 
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
+func (c realClock) Until(at time.Duration) <-chan time.Time { return time.After(at - c.Mono()) }
 
 // Timing holds the intervals the cluster uses. The defaults are the ones
 // in the multi-server design; tests shorten them.

@@ -55,6 +55,20 @@ func (c *Clock) After(d time.Duration) <-chan time.Time {
 	return ch
 }
 
+// Until returns a channel that receives the wall time once Mono reaches
+// at, or at once if it has.
+func (c *Clock) Until(at time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	if at <= c.mono {
+		ch <- c.wall
+		return ch
+	}
+	c.timers = append(c.timers, &timer{at: at, ch: ch})
+	return ch
+}
+
 // Advance moves both times forward by d and fires the timers that are
 // due, in order.
 func (c *Clock) Advance(d time.Duration) {

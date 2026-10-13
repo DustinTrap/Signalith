@@ -187,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	s.sessions()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/ingest", s.handleIngest)
+	mux.HandleFunc(otlpLogsRoute, s.handleOTLPLogs)
 
 	api := &router{s: s, mux: http.NewServeMux()}
 	api.viewer("GET /api/health", s.handleHealth)
@@ -220,7 +221,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeSettings(api)
 	s.routeCluster(api)
 	if s.UI != nil {
-		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
+		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(staticFiles(s.UI, true)))
 	}
 	s.routes = api.routes
 	s.routeLogin(mux)
@@ -350,7 +351,18 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(res.Errors) > 0 {
-		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "first", res.Errors[0].Reason)
+		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "temporary", res.Temporary, "first", res.Errors[0].Reason)
+	}
+	if res.Temporary > 0 {
+		// OpenSearch may take these later (its disk is full, or it is too
+		// busy): 503 makes Fluent Bit send the batch again instead of
+		// dropping it. Events already stored count as duplicates then.
+		w.Header().Set("Retry-After", "30")
+		writeJSON(w, http.StatusServiceUnavailable, struct {
+			Error string `json:"error"`
+			*ingest.Result
+		}{"some events could not be stored right now; send them again later", res})
+		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
@@ -411,27 +423,36 @@ func (e *batchError) Unwrap() error { return e.err }
 // too large, 408 when it did not arrive in time, and 503 (retry shortly)
 // when too many batches are arriving at once.
 func (s *Server) batchReadFailed(w http.ResponseWriter, r *http.Request, err error) {
+	status, retry, msg := s.batchFailure(r, err)
+	if retry != "" {
+		w.Header().Set("Retry-After", retry)
+	}
+	writeError(w, status, msg)
+}
+
+// batchFailure is how to answer a batch that could not be read: the
+// status, the Retry-After header ("" for none) and the message.
+func (s *Server) batchFailure(r *http.Request, err error) (int, string, error) {
 	var tooBig *http.MaxBytesError
 	var bad *ingest.BodyError
 	var be *batchError
 	errors.As(err, &be)
 	switch {
 	case errors.As(err, &tooBig):
-		writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20))
+		return http.StatusRequestEntityTooLarge, "", fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20)
 	case errors.As(err, &bad):
-		writeError(w, bad.Status, bad)
+		return bad.Status, "", bad
 	case errors.Is(err, ingest.ErrBusy), errors.Is(err, ingest.ErrSenderBusy):
-		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, errors.Unwrap(err))
+		return http.StatusServiceUnavailable, "5", errors.Unwrap(err)
 	case errors.Is(err, os.ErrDeadlineExceeded) && be != nil:
 		took := be.took.Round(time.Second)
 		s.warnSlowBatch("an agent batch took too long to arrive and was refused; the agent will send it again (logged at most once a minute)",
 			"client", r.RemoteAddr, "received_bytes", be.received, "took", took.String())
-		writeError(w, http.StatusRequestTimeout, fmt.Errorf("the batch took too long to arrive (%d KB in %s). A batch must arrive within %s, "+
+		return http.StatusRequestTimeout, "", fmt.Errorf("the batch took too long to arrive (%d KB in %s). A batch must arrive within %s, "+
 			"or within %s while at least %d KB arrives every %s. Send smaller batches (for example a lower Flush in Fluent Bit's [SERVICE] section) or check the network",
-			be.received>>10, took, ingestReadTimeout, ingestMaxReadTime, ingestProgressBytes>>10, ingestProgressWindow))
+			be.received>>10, took, ingestReadTimeout, ingestMaxReadTime, ingestProgressBytes>>10, ingestProgressWindow)
 	default:
-		writeError(w, http.StatusBadRequest, fmt.Errorf("the request body could not be read: %w", errors.Unwrap(err)))
+		return http.StatusBadRequest, "", fmt.Errorf("the request body could not be read: %w", errors.Unwrap(err))
 	}
 }
 
@@ -764,14 +785,23 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		Token:       token,
 		LinuxSource: v.Get("source"),
 		Sysmon:      v.Get("sysmon") == "true",
+		CollectorOS: v.Get("collector"),
 	}
 	if certs != nil {
 		// While a new certificate authority is prepared, agents get both,
 		// so they keep sending after the switch.
 		opts.CA = string(certs.AgentCAPEM())
 		opts.CAUnknown = opts.CA == "" && !certs.PublicCA()
+		opts.OwnCA = certs.LocalCA()
+		if leaf := certs.Leaf(); leaf != nil {
+			opts.CertNames = leaf.DNSNames
+		}
 	}
 	a, err := agents.Generate(opts)
+	if errors.Is(err, agents.ErrNoNameToCheck) {
+		fieldError(err)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
