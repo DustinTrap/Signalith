@@ -85,6 +85,7 @@ func setup(t *testing.T) (*store.Client, *search.Engine, string) {
 		_ = cl.DeleteIndex(ctx, prefix+"_findings")
 		_ = cl.DeleteIndex(ctx, prefix+"_intel")
 		_ = cl.DeleteIndex(ctx, prefix+"_cases")
+		_ = cl.DeleteIndex(ctx, prefix+"_runtime")
 	})
 	eng := &search.Engine{Store: cl, Opt: search.Options{IndexPrefix: prefix, DefaultEarliest: "-24h"}}
 	return cl, eng, prefix

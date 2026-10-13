@@ -63,6 +63,17 @@ func (s *OpenSearch) Upgrade(ctx context.Context) error {
 	return s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index)+"/_mapping", map[string]any{"properties": properties()}, nil)
 }
 
+// EnsureSampleField maps the sample-data marker (the "sample" field) on an
+// index made before it existed. The sample-data load needs it to find its
+// own cases again and calls this itself, on whichever server it runs:
+// adding one field is quick and changes nothing for servers of an older
+// version, so it does not wait for Upgrade on the server that runs the
+// background jobs.
+func (s *OpenSearch) EnsureSampleField(ctx context.Context) error {
+	return s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index)+"/_mapping",
+		map[string]any{"properties": map[string]any{"sample": properties()["sample"]}}, nil)
+}
+
 type doc struct {
 	*Case
 	EntityValues []string `json:"entity_values,omitempty"`

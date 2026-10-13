@@ -1010,11 +1010,23 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	}
 	// The one-click sample data loads a week of made-up activity through
 	// the same parsers and its own ingest pipeline, and removes it exactly.
-	// It records what it wrote in a small file under the state directory.
+	// An admin may load or remove it on any server: it is not a background
+	// job, and its detection backfill reads and marks only its own data, so
+	// it does not wait for the job lease. What it wrote is recorded in the
+	// runtime index, which every server that shares this OpenSearch reads,
+	// so they all show the same sample and only one load happens at a time.
+	sampleServer := ""
+	if r.node != nil {
+		sampleServer = r.node.Name()
+	}
+	if sampleServer == "" {
+		sampleServer, _ = os.Hostname()
+	}
 	sampleLoader := &sample.Loader{
 		Prefix:   c.OpenSearch.IndexPrefix,
 		Bulk:     cl,
 		OS:       cl,
+		Docs:     cl,
 		Intel:    indicators,
 		Assets:   lists,
 		Library:  lib,
@@ -1022,9 +1034,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Findings: fstore,
 		Cases:    cstore,
 		Risk:     &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix},
-		StateDir: c.StateDir(),
+		Server:   sampleServer,
 		Log:      log,
 	}
+	// Each server keeps the sample's asset and identity context in its own
+	// lookups folder: follow a load or removal made on another server.
+	in.jobs.Go(func() { sampleLoader.WatchLists(ctx, time.Minute) })
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{

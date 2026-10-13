@@ -2,13 +2,10 @@ package sample
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -54,9 +51,10 @@ type intelSyncer interface {
 }
 
 // Loader loads and removes the sample data. One load exists at a time,
-// recorded in a small state file (written before anything else, so even a
-// load that stops part way can be removed), and one load or removal runs
-// at a time, across processes, under a lock file next to it.
+// recorded in a document in OpenSearch that every server sharing it sees
+// (see state.go): it is written before anything else, so even a load that
+// stops part way can be removed, and one load or removal runs at a time
+// across all servers and the signalith sample-data command.
 type Loader struct {
 	Prefix string
 	// Bulk writes the sample events (the OpenSearch client). The loader
@@ -71,12 +69,20 @@ type Loader struct {
 	Findings findings.Store
 	Cases    cases.Store
 	Risk     detect.RiskStore
-	StateDir string // where the sample.json bookkeeping file and the lock live
-	Now      func() time.Time
-	Log      *slog.Logger
+	// Docs keeps the load's bookkeeping in the runtime index
+	// (<prefix>_runtime); the OpenSearch client.
+	Docs Docs
+	// Server names this server in a running job, so the other servers can
+	// say where it runs; Command is set by the signalith sample-data
+	// command, whose Server is the computer's name.
+	Server  string
+	Command bool
+	Now     func() time.Time
+	Log     *slog.Logger
 }
 
-// State is the bookkeeping for a loaded sample set, written to sample.json.
+// State is the bookkeeping for a loaded sample set, kept in its record in
+// OpenSearch (see state.go).
 type State struct {
 	ID   string `json:"id"`
 	Size Size   `json:"size"`
@@ -126,32 +132,13 @@ func (l *Loader) log() *slog.Logger {
 	return slog.Default()
 }
 
-func (l *Loader) stateFile() string { return filepath.Join(l.StateDir, "sample.json") }
-
-// Status returns the sample's state, or nil when none is loaded. A state
-// with Partial set is a load that did not finish.
-func (l *Loader) Status() (*State, error) {
-	b, err := os.ReadFile(l.stateFile())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var st State
-	if err := json.Unmarshal(b, &st); err != nil {
-		return nil, err
-	}
-	return &st, nil
-}
-
 // reporter turns each step's own progress into one figure for the whole
 // job, so a progress bar only ever moves forward, and passes it to the
-// caller and to the lock (for other processes to show).
+// caller and to the job's document (for the other servers to show).
 type reporter struct {
 	op   string
 	fn   ProgressFn
-	lock *jobLock
+	job  *job
 	last int
 }
 
@@ -159,8 +146,8 @@ type reporter struct {
 func (r *reporter) step(phase string, pct int) {
 	pct = max(min(pct, 100), r.last)
 	r.last = pct
-	if r.lock != nil {
-		r.lock.set(phase, pct)
+	if r.job != nil {
+		r.job.set(phase, pct)
 	}
 	if r.fn != nil {
 		r.fn(Progress{Op: r.op, Phase: phase, Percent: pct})
@@ -178,29 +165,41 @@ func (r *reporter) within(phase string, from, to, done, total int) {
 
 // Load generates and writes the sample set, runs the detections over it and
 // records what it wrote. It refuses while a set (or a partial one) is
-// loaded, and while another load or removal runs. The state file is
-// written first, so whatever happens part way, Remove can take out what
-// was written.
-func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (*State, error) {
-	if err := l.checkFree(); err != nil {
+// loaded, and while another load or removal runs, on any server. The
+// bookkeeping is written first, so whatever happens part way, Remove can
+// take out what was written.
+func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (res *State, err error) {
+	// A quick look first, so a refused load prepares nothing.
+	if d, _, err := l.read(ctx); err != nil {
+		return nil, err
+	} else if d != nil {
+		return nil, refusal(d)
+	}
+	if err := l.prepareIndices(ctx); err != nil {
 		return nil, err
 	}
-	lk, err := l.acquire("load")
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	d := Generate(Options{Now: l.now(), Size: size})
+	st := &State{ID: d.ID, Size: d.Size, Partial: true, Started: l.now().UTC(), Start: d.Start, End: d.End, Stories: d.Stories}
+	// Creating the record is what claims the load: another server that
+	// started one at the same moment is refused here.
+	j, err := l.startLoad(ctx, cancel, st)
 	if err != nil {
 		return nil, err
 	}
-	defer lk.release()
-	// Another process may have loaded between the check and the lock.
-	if err := l.checkFree(); err != nil {
-		return nil, err
-	}
-	r := &reporter{op: "load", fn: prog, lock: lk}
-	r.step("Generating a week of activity", 0)
-	d := Generate(Options{Now: l.now(), Size: size})
-	st := &State{ID: d.ID, Size: d.Size, Partial: true, Started: l.now().UTC(), Start: d.Start, End: d.End, Stories: d.Stories}
-	if err := l.writeState(st); err != nil {
-		return nil, err
-	}
+	defer func() {
+		// Whatever happened, the record keeps what was written, and no job
+		// runs any more: a load that stopped part way stays partial, for
+		// Remove to take out.
+		if eerr := j.end(st); err == nil && eerr != nil {
+			err = eerr
+		}
+		if err = takenOver(ctx, err); err != nil {
+			res = nil
+		}
+	}()
+	r := &reporter{op: "load", fn: prog, job: j}
 	r.step("Generating a week of activity", 2)
 
 	// Events, through a pipeline of the loader's own: the sample reaches
@@ -235,7 +234,7 @@ func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (*State, 
 	if err := l.refresh(ctx, l.Prefix+"-*"); err != nil {
 		return nil, err
 	}
-	_ = l.writeState(st)
+	_ = j.save(st)
 
 	r.step("Adding threat intel", 25)
 	if l.Intel != nil {
@@ -246,7 +245,8 @@ func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (*State, 
 	}
 
 	// Asset and identity context, in the store's overlay: the user's own
-	// files are never rewritten, and their rows always win a lookup.
+	// files are never rewritten, and their rows always win a lookup. The
+	// other servers add it to theirs (SyncLists) once the load is done.
 	r.step("Adding asset and identity context", 26)
 	if l.Assets != nil {
 		if err := l.Assets.SetOverlay(d.Assets, d.Identities); err != nil {
@@ -254,7 +254,7 @@ func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (*State, 
 		}
 		st.Assets, st.Identities = len(d.Assets), len(d.Identities)
 	}
-	_ = l.writeState(st)
+	_ = j.save(st)
 
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -265,7 +265,6 @@ func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (*State, 
 		nf, nr, err := l.backfill(ctx, d, r)
 		st.Findings, st.RiskEvents = nf, nr
 		if err != nil {
-			_ = l.writeState(st)
 			return nil, err
 		}
 	}
@@ -274,32 +273,46 @@ func (l *Loader) Load(ctx context.Context, size Size, prog ProgressFn) (*State, 
 	r.step("Building a sample investigation", 97)
 	st.Cases = l.buildCase(ctx, d)
 	if err := ctx.Err(); err != nil {
-		_ = l.writeState(st)
 		return nil, err
 	}
 
 	st.Partial = false
 	st.LoadedAt = l.now().UTC()
-	if err := l.writeState(st); err != nil {
-		return nil, err
-	}
 	r.step("Done", 100)
 	l.log().Info("sample data loaded", "id", d.ID, "events", st.Events, "findings", st.Findings, "risk_events", st.RiskEvents, "audit", true)
 	return st, nil
 }
 
-// checkFree refuses a load while a set, complete or partial, is loaded.
-func (l *Loader) checkFree() error {
-	st, err := l.Status()
-	switch {
-	case err != nil:
-		return err
-	case st == nil:
-		return nil
-	case st.Partial:
-		return ErrPartial
+// indexPreparer is a findings or cases store kept in OpenSearch.
+type indexPreparer interface {
+	EnsureIndex(ctx context.Context) error
+	EnsureSampleField(ctx context.Context) error
+}
+
+// prepareIndices makes sure the findings and cases indices exist and map
+// the sample marker, which the load needs to find its own findings and
+// investigation again, and Remove to take them out. On a fresh install the
+// indices may not be made yet; on an upgraded one the marker is mapped
+// only once the server that runs the background jobs brings the indices up
+// to date, which may be later, or never while that server runs an older
+// version.
+func (l *Loader) prepareIndices(ctx context.Context) error {
+	for _, s := range []struct {
+		what  string
+		store any
+	}{{"findings", l.Findings}, {"cases", l.Cases}} {
+		p, ok := s.store.(indexPreparer)
+		if !ok {
+			continue
+		}
+		if err := p.EnsureIndex(ctx); err != nil {
+			return fmt.Errorf("preparing the %s index: %w", s.what, err)
+		}
+		if err := p.EnsureSampleField(ctx); err != nil {
+			return fmt.Errorf("preparing the %s index: %w", s.what, err)
+		}
 	}
-	return ErrAlreadyLoaded
+	return nil
 }
 
 // isRiskModel reports whether a detection searches the Risk data model (the
@@ -315,6 +328,13 @@ func isRiskModel(d *detect.Detection) bool {
 // Component detections run first (they write risk), then the risk-incident
 // rules. Its runs read only this load's documents (detect.ScopeSample), so
 // real activity is never marked as sample data.
+//
+// It runs on whichever server the admin loaded from, whether or not that
+// server holds the job lease: it is part of the load, not a background job.
+// It never repeats the schedule's work (the schedule leaves sample data
+// out), it writes only documents marked with this load's ID, and the
+// load's record keeps it to one load at a time across servers. Its
+// scheduler has no Allowed check, and RunAt is never fenced by one.
 func (l *Loader) backfill(ctx context.Context, d *Data, r *reporter) (findingsN, riskN int, err error) {
 	bf := &detect.Scheduler{
 		Library: l.Library, Engine: l.Engine, Findings: l.Findings,
@@ -420,21 +440,30 @@ func (l *Loader) buildCase(ctx context.Context, d *Data) []string {
 // risk events, findings, the sample investigation, the sample threat intel
 // and the asset and identity overlay. It works on a partial load too. A
 // case of the user's own that holds sample findings is kept, with them
-// unlinked. Nothing else is touched.
-func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (*State, error) {
-	st, err := l.Status()
-	if err != nil || st == nil {
+// unlinked. Nothing else is touched. The record goes last, so a removal
+// that stops part way can be run again.
+func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (res *State, err error) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	j, err := l.startRemove(ctx, cancel)
+	if err != nil || j == nil {
 		return nil, err
 	}
-	lk, err := l.acquire("remove")
-	if err != nil {
-		return nil, err
-	}
-	defer lk.release()
-	if st, err = l.Status(); err != nil || st == nil {
-		return nil, err
-	}
-	r := &reporter{op: "remove", fn: prog, lock: lk}
+	st := j.state()
+	removed := false
+	defer func() {
+		if !removed {
+			// Stopped part way: keep the record, with no job, so the
+			// removal can be run again.
+			if eerr := j.end(st); err == nil && eerr != nil {
+				err = eerr
+			}
+		}
+		if err = takenOver(ctx, err); err != nil {
+			res = nil
+		}
+	}()
+	r := &reporter{op: "remove", fn: prog, job: j}
 
 	r.step("Deleting events and risk", 0)
 	if err := l.deleteBySample(ctx, st.ID, r); err != nil {
@@ -475,12 +504,66 @@ func (l *Loader) Remove(ctx context.Context, prog ProgressFn) (*State, error) {
 		}
 	}
 
-	if err := os.Remove(l.stateFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	removed = true
+	if err := j.end(nil); err != nil {
+		return nil, fmt.Errorf("everything was removed, but the record of the load could not be cleared: %w", err)
 	}
 	r.step("Done", 100)
 	l.log().Info("sample data removed", "id", st.ID, "audit", true)
 	return st, nil
+}
+
+// Lists returns the sample's asset and identity entries, the same for
+// every load and size.
+func Lists() ([]assets.Asset, []assets.Identity) { return sampleLists(buildOrg()) }
+
+// SyncLists makes this server's asset and identity overlay follow the
+// sample data in OpenSearch. Each server keeps the overlay in its own
+// lookups folder, so a load or removal done on another server, or with the
+// signalith sample-data command on another computer, reaches this one
+// here: the overlay is added while a finished load is in place, and taken
+// out once none is. A load that did not finish, or a job still running,
+// is left alone.
+func (l *Loader) SyncLists(ctx context.Context) error {
+	if l.Assets == nil {
+		return nil
+	}
+	st, act, err := l.Current(ctx)
+	if err != nil || act != nil || (st != nil && st.Partial) {
+		return err
+	}
+	as, ids := l.Assets.Overlay()
+	has := len(as)+len(ids) > 0
+	switch {
+	case st != nil && !has:
+		as, ids := Lists()
+		if err := l.Assets.SetOverlay(as, ids); err != nil {
+			return err
+		}
+		l.log().Info("sample data is loaded: added its asset and identity context here too", "id", st.ID)
+	case st == nil && has:
+		if err := l.Assets.SetOverlay(nil, nil); err != nil {
+			return err
+		}
+		l.log().Info("sample data was removed: removed its asset and identity context here too")
+	}
+	return nil
+}
+
+// WatchLists runs SyncLists every interval until ctx ends.
+func (l *Loader) WatchLists(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if err := l.SyncLists(ctx); err != nil && ctx.Err() == nil {
+			l.log().Debug("could not check the sample data's asset and identity context", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // sampleFindingIDs returns the IDs of the findings carrying the marker.
@@ -702,21 +785,6 @@ func (l *Loader) writeBlocked(ctx context.Context, index string) bool {
 
 func (l *Loader) refresh(ctx context.Context, pattern string) error {
 	return l.OS.Do(ctx, "POST", "/"+url.PathEscape(pattern)+"/_refresh?ignore_unavailable=true&allow_no_indices=true", nil, nil)
-}
-
-func (l *Loader) writeState(st *State) error {
-	if err := os.MkdirAll(l.StateDir, 0o750); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := l.stateFile() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o640); err != nil {
-		return err
-	}
-	return os.Rename(tmp, l.stateFile())
 }
 
 // EventsSince counts the events (sample or not) in the last d, so the web

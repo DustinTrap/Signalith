@@ -39,9 +39,22 @@ func runtimeMappings() map[string]any {
 	}
 }
 
+// Doer sends OpenSearch REST requests. *store.Client has it.
+type Doer interface {
+	Do(ctx context.Context, method, path string, body any, out any) error
+}
+
+// EnsureRuntime creates the runtime index if it is missing, for what keeps
+// a document there besides the servers' own heartbeats and lease, such as
+// the sample data's bookkeeping, which the signalith sample-data command
+// may write before any server has run.
+func EnsureRuntime(ctx context.Context, c Doer, prefix string) error {
+	return ensureRuntime(ctx, c, prefix)
+}
+
 // ensureRuntime creates the runtime index if it is missing. Any server
 // may, at any time; one that finds it already made carries on.
-func ensureRuntime(ctx context.Context, c *store.Client, prefix string) error {
+func ensureRuntime(ctx context.Context, c Doer, prefix string) error {
 	err := c.Do(ctx, http.MethodPut, "/"+url.PathEscape(RuntimeIndex(prefix)), map[string]any{"settings": runtimeSettings(), "mappings": runtimeMappings()}, nil)
 	var oe *store.Error
 	if errors.As(err, &oe) && oe.Status == http.StatusBadRequest && strings.Contains(oe.Body, "resource_already_exists_exception") {

@@ -135,3 +135,48 @@ func TestSampleScopeNotInDrilldown(t *testing.T) {
 		}
 	}
 }
+
+// TestScheduledRunsLeaveSampleOut: the schedule, which runs only on the
+// server holding the job lease (Allowed), leaves sample documents out of
+// every search it runs, and runs nothing once that server loses the lease.
+// The sample backfill is part of an admin's load, not a background job: it
+// runs on whichever server the admin used, lease or not, and reads only its
+// own load's documents.
+func TestScheduledRunsLeaveSampleOut(t *testing.T) {
+	lib, _, err := NewLibrary(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Detection{ID: "x-sched", Title: "Scheduled", Query: "user=bob | stats count by user", Enabled: true, Schedule: "5m", Lookback: "1h"}
+	if err := lib.Put(d); err != nil {
+		t.Fatal(err)
+	}
+	holds := true
+	live := &queryRecorder{}
+	s := &Scheduler{Library: lib, Engine: live, Findings: findings.NewMemory(), Allowed: func() bool { return holds }}
+	s.RunDue(context.Background())
+	if len(live.seen) == 0 {
+		t.Fatal("the schedule ran nothing on the server holding the lease")
+	}
+	for _, q := range live.seen {
+		if !strings.Contains(q, "NOT signalith_sample=*") {
+			t.Errorf("scheduled search %q does not leave sample data out", q)
+		}
+	}
+	holds = false
+	n := len(live.seen)
+	s.Now = func() time.Time { return time.Now().Add(time.Hour) } // due again
+	s.RunDue(context.Background())
+	if len(live.seen) != n {
+		t.Errorf("a server without the lease ran %d scheduled searches", len(live.seen)-n)
+	}
+
+	fill := &queryRecorder{}
+	bf := &Scheduler{Library: lib, Engine: fill, Findings: findings.NewMemory(), SampleMark: "sample-x", Allowed: func() bool { return false }}
+	if _, err := bf.RunAt(context.Background(), d, time.Now()); err != nil {
+		t.Fatalf("backfill on a server without the lease: %v", err)
+	}
+	if len(fill.seen) != 1 || !strings.Contains(fill.seen[0], "signalith_sample=sample-x") {
+		t.Errorf("backfill searches = %q", fill.seen)
+	}
+}

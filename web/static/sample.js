@@ -145,7 +145,9 @@ function sampleRunningBody() {
     el('div', { class: 'sample-phase' },
       el('p', { role: 'status', tabindex: '-1', 'data-focus': 'progress' }, verb + ': ', phase),
       num),
-    bar);
+    bar,
+    // A job another server (or the command line) runs: say where.
+    sampleInfo.where ? el('p', { class: 'muted sample-where' }, sampleInfo.where + ' It carries on there; this page follows it.') : null);
 }
 
 // updateSampleRun moves the running view on without redrawing it, so the

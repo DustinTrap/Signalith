@@ -2542,6 +2542,7 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .sample-phase__pct { flex: none; color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 #page-data .sample-bar { height: 8px; border-radius: var(--r-full); background: var(--hover); overflow: hidden; }
 #page-data .sample-bar__fill { width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width var(--t) linear; }
+#page-data .sample-where { margin: -6px 0 0; font-size: var(--fs-sm); }
 #page-data .sample-alert > div { min-width: 0; }
 #page-data .sample-detail > summary { display: inline-flex; align-items: center; gap: 4px; margin-top: 4px; list-style: none; cursor: pointer; color: var(--text-2); font-size: var(--fs-sm); }
 #page-data .sample-detail > summary::-webkit-details-marker { display: none; }

@@ -26,8 +26,9 @@ var errSampleOff = errors.New("sample data is not available on this server")
 
 // sampleJob tracks the sample-data load or remove this server started. Its
 // own mutex guards the fields; the long-running work runs in a goroutine so
-// the request returns at once. The loader's lock file keeps one job at a
-// time across processes (the CLI, or this server after a restart in place).
+// the request returns at once. The loader's record in OpenSearch keeps one
+// job at a time across processes: other servers that share the OpenSearch,
+// the command line, or this server after a restart in place.
 type sampleJob struct {
 	mu      sync.Mutex
 	running bool
@@ -84,6 +85,9 @@ type sampleStatus struct {
 	Op      string `json:"op,omitempty"`
 	Phase   string `json:"phase,omitempty"`
 	Percent int    `json:"percent,omitempty"`
+	// Where says, in a sentence, where a job this server did not start
+	// runs: another server that shares the OpenSearch, or the command line.
+	Where string `json:"where,omitempty"`
 	// Error says in plain English what went wrong with the last job this
 	// server ran and what to do; ErrorDetail is the technical text.
 	Error       string            `json:"error,omitempty"`
@@ -101,7 +105,9 @@ func (s *Server) handleSampleStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, sampleStatus{Available: false})
 		return
 	}
-	st, err := s.Sample.Status()
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	st, act, err := s.Sample.Current(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -119,12 +125,11 @@ func (s *Server) handleSampleStatus(w http.ResponseWriter, r *http.Request) {
 		Sizes:      sample.Sizes,
 		CannotFire: s.Sample.CannotFire(),
 	}
-	// A job in another process (the command line, or this server before a
-	// restart in place) reports through the loader's lock.
-	if !running {
-		if a := s.Sample.Activity(); a != nil {
-			resp.Running, resp.Op, resp.Phase, resp.Percent = true, a.Op, a.Phase, a.Percent
-		}
+	// A job in another process (another server, the command line, or this
+	// server before a restart in place) reports through the loader's record.
+	if !running && act != nil {
+		resp.Running, resp.Op, resp.Phase, resp.Percent = true, act.Op, act.Phase, act.Percent
+		resp.Where = sampleWhere(act)
 	}
 	if resp.Running {
 		// While a load runs, its state is partial by design.
@@ -138,6 +143,19 @@ func (s *Server) handleSampleStatus(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// sampleWhere says where a job this server did not start runs.
+func sampleWhere(a *sample.Activity) string {
+	switch {
+	case a.Command && a.Server != "":
+		return "Started with the signalith sample-data command on " + a.Server + "."
+	case a.Command:
+		return "Started with the signalith sample-data command."
+	case a.Server != "":
+		return "Started on the server " + a.Server + "."
+	}
+	return ""
 }
 
 // sampleErrorText puts a failed job's error in plain English with what to
@@ -157,6 +175,8 @@ func sampleErrorText(op string, err error, partial bool) (string, string) {
 	switch {
 	case errors.Is(err, sample.ErrBusy):
 		return "Another sample-data load or removal is running. Wait for it to finish.", ""
+	case errors.Is(err, sample.ErrTakenOver):
+		msg = "This server lost touch with OpenSearch for a while, so another server took the job over."
 	case errors.Is(err, sample.ErrAlreadyLoaded):
 		return "Sample data is already loaded. Remove it before loading again.", ""
 	case errors.Is(err, sample.ErrPartial):
@@ -198,7 +218,7 @@ func (s *Server) handleSampleLoad(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("size must be \"standard\" or \"small\""))
 		return
 	}
-	if !s.sampleFree(w, true) {
+	if !s.sampleFree(w, r, true) {
 		return
 	}
 	loader := s.Sample
@@ -224,7 +244,7 @@ func (s *Server) handleSampleRemove(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errSampleOff)
 		return
 	}
-	if !s.sampleFree(w, false) {
+	if !s.sampleFree(w, r, false) {
 		return
 	}
 	loader := s.Sample
@@ -246,15 +266,22 @@ func (s *Server) handleSampleRemove(w http.ResponseWriter, r *http.Request) {
 
 // sampleFree answers 409 and reports false when a job runs anywhere, or
 // when the state does not allow the step: a load needs nothing loaded, a
-// removal needs something loaded (complete or partial).
-func (s *Server) sampleFree(w http.ResponseWriter, load bool) bool {
-	if running, _, _, _ := s.sampleJob.snapshot(); running || s.Sample.Activity() != nil {
+// removal needs something loaded (complete or partial). The loader checks
+// again when it starts, so two servers asked at once cannot both go ahead.
+func (s *Server) sampleFree(w http.ResponseWriter, r *http.Request, load bool) bool {
+	if running, _, _, _ := s.sampleJob.snapshot(); running {
 		sampleBusy(w)
 		return false
 	}
-	st, err := s.Sample.Status()
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	st, act, err := s.Sample.Current(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return false
+	}
+	if act != nil {
+		sampleBusy(w)
 		return false
 	}
 	switch {

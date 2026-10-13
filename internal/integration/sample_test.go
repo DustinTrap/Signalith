@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,12 @@ import (
 // survive removal, the user's list files are never rewritten, and a day
 // retention made read-only is still cleaned. Finally a load cancelled part
 // way is removable.
+//
+// The findings and cases indices are made the way a version from before the
+// sample data made them, without its marker field, and the background
+// jobs' Upgrade never runs: the load maps the field itself. A second
+// server sharing the OpenSearch sees the load, refuses to load again and
+// takes the sample's asset and identity context up and down with it.
 func TestSampleDataEndToEnd(t *testing.T) {
 	cl, eng, prefix := setup(t)
 	ctx := context.Background()
@@ -58,10 +65,31 @@ func TestSampleDataEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range []func(context.Context) error{fstore.EnsureIndex, cstore.EnsureIndex, ibackend.EnsureIndex} {
-		if err := e(ctx); err != nil {
+	// Findings and cases indices from before the sample data: no "sample"
+	// field. The server that runs the background jobs has not upgraded
+	// them (it may run an older version).
+	kw := map[string]any{"type": "keyword"}
+	off := map[string]any{"type": "object", "enabled": false}
+	date := map[string]any{"type": "date"}
+	title := map[string]any{"type": "text", "fields": map[string]any{"raw": kw}}
+	for index, props := range map[string]map[string]any{
+		fstore.Index: {"id": kw, "detection_id": kw, "severity": kw, "urgency": kw, "status": kw, "owner": kw,
+			"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw, "case_id": kw,
+			"title": title, "description": map[string]any{"type": "text"}, "created": date, "updated": date,
+			"result": off, "entities": off, "comments": off, "history": off, "context": off,
+			"query": map[string]any{"type": "keyword", "index": false}},
+		cstore.Index: {"id": kw, "status": kw, "severity": kw, "owner": kw, "findings": kw, "entity_values": kw, "created_by": kw,
+			"title": title, "description": map[string]any{"type": "text"}, "resolution": map[string]any{"type": "text"},
+			"created": date, "updated": date, "entities": off, "entries": off, "history": off},
+	} {
+		body := map[string]any{"settings": map[string]any{"number_of_shards": 1, "number_of_replicas": 0},
+			"mappings": map[string]any{"dynamic": "false", "properties": props}}
+		if err := cl.Do(ctx, http.MethodPut, "/"+index, body, nil); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := ibackend.EnsureIndex(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if err := indicators.Load(ctx); err != nil {
 		t.Fatal(err)
@@ -92,9 +120,16 @@ func TestSampleDataEndToEnd(t *testing.T) {
 	// Real data that must be left alone.
 	now := time.Now()
 	loader := &sample.Loader{
-		Prefix: prefix, Bulk: cl, OS: cl, Intel: indicators, Assets: lists,
+		Prefix: prefix, Bulk: cl, OS: cl, Docs: cl, Intel: indicators, Assets: lists,
 		Library: lib, Engine: eng, Findings: fstore, Cases: cstore, Risk: riskStore,
-		StateDir: t.TempDir(), Log: log,
+		Server: "siem-a", Log: log,
+	}
+	// Another server sharing the OpenSearch, with lookups of its own.
+	listsB, _ := assets.OpenStore(t.TempDir())
+	other := &sample.Loader{
+		Prefix: prefix, Bulk: cl, OS: cl, Docs: cl, Intel: indicators, Assets: listsB,
+		Library: lib, Engine: eng, Findings: fstore, Cases: cstore, Risk: riskStore,
+		Server: "siem-b", Log: log,
 	}
 	runTimes := sample.Generate(sample.Options{Now: now, Size: sample.SizeSmall}).RunTimes
 	sshAt := runTimes[len(runTimes)/2] // a time the backfill searches
@@ -146,6 +181,35 @@ func TestSampleDataEndToEnd(t *testing.T) {
 	}
 	refresh()
 	mark := datamodel.SampleField + "=" + st.ID
+
+	// The load mapped its marker on the old indices.
+	for _, index := range []string{fstore.Index, cstore.Index} {
+		var m map[string]struct {
+			Mappings struct {
+				Properties map[string]any `json:"properties"`
+			} `json:"mappings"`
+		}
+		if err := cl.Do(ctx, http.MethodGet, "/"+index+"/_mapping", nil, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m[index].Mappings.Properties["sample"] == nil {
+			t.Errorf("%s has no sample field after the load", index)
+		}
+	}
+
+	// The other server sees the load and will not load a second one.
+	if cur, err := other.Status(ctx); err != nil || cur == nil || cur.ID != st.ID || cur.Partial {
+		t.Fatalf("the other server sees %+v, %v", cur, err)
+	}
+	if _, err := other.Load(ctx, sample.SizeSmall, nil); !errors.Is(err, sample.ErrAlreadyLoaded) {
+		t.Fatalf("a second load from the other server: %v", err)
+	}
+	if err := other.SyncLists(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, ok := listsB.Asset("ws-fin-07"); !ok || a.BUnit != sample.SampleBUnit {
+		t.Errorf("the other server's ws-fin-07 = %+v", a)
+	}
 
 	// Every enabled detection that raises findings raised at least one.
 	sampleFindings, _, err := fstore.Search(ctx, findings.Filter{Sample: st.ID, Limit: 10000})
@@ -306,8 +370,17 @@ func TestSampleDataEndToEnd(t *testing.T) {
 		t.Error("sample list rows remain")
 	}
 	checkBytes(t, filepath.Join(listDir, assets.AssetsFile), userAssets)
-	if cur, _ := loader.Status(); cur != nil {
+	if cur, _ := loader.Status(ctx); cur != nil {
 		t.Error("state remained after removal")
+	}
+	if cur, _ := other.Status(ctx); cur != nil {
+		t.Error("the other server still sees the removed load")
+	}
+	if err := other.SyncLists(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, i := listsB.Overlay(); len(a)+len(i) != 0 {
+		t.Error("the other server kept the sample's asset and identity context")
 	}
 
 	// A load stopped part way (Ctrl-C during the detections) is partial,
@@ -322,7 +395,7 @@ func TestSampleDataEndToEnd(t *testing.T) {
 	if err == nil {
 		t.Fatal("the cancelled load succeeded")
 	}
-	cur, _ := loader.Status()
+	cur, _ := loader.Status(ctx)
 	if cur == nil || !cur.Partial {
 		t.Fatalf("status after a cancelled load: %+v", cur)
 	}

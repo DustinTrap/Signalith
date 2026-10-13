@@ -72,6 +72,115 @@ func (f *fakeOS) Do(_ context.Context, method, path string, body, out any) error
 	return reply(map[string]any{})
 }
 
+// memDocs is the bit of OpenSearch the loader keeps its record in: one
+// index of documents with versions, which a write that names an old
+// version is refused, as OpenSearch refuses it. Servers that share one
+// OpenSearch share one memDocs.
+type memDocs struct {
+	mu   sync.Mutex
+	docs map[string]memDoc
+	seq  int64
+}
+
+type memDoc struct {
+	src json.RawMessage
+	ver store.Version
+}
+
+func newMemDocs() *memDocs { return &memDocs{docs: map[string]memDoc{}} }
+
+func (m *memDocs) key(index, id string) string { return index + "/" + id }
+
+func (m *memDocs) next(body any) (memDoc, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return memDoc{}, err
+	}
+	m.seq++
+	return memDoc{src: b, ver: store.Version{SeqNo: m.seq, PrimaryTerm: 1, Version: m.seq}}, nil
+}
+
+func (m *memDocs) Get(_ context.Context, index, id string) (json.RawMessage, store.Version, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.docs[m.key(index, id)]
+	return d.src, d.ver, ok, nil
+}
+
+func (m *memDocs) Create(_ context.Context, index, id string, body any, _ bool) (store.Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.docs[m.key(index, id)]; ok {
+		return store.Version{}, store.ErrExists
+	}
+	d, err := m.next(body)
+	if err != nil {
+		return store.Version{}, err
+	}
+	m.docs[m.key(index, id)] = d
+	return d.ver, nil
+}
+
+func (m *memDocs) PutIf(_ context.Context, index, id string, body any, v store.Version, _ bool) (store.Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.docs[m.key(index, id)]
+	switch {
+	case !ok:
+		return store.Version{}, store.ErrNotFound
+	case !cur.ver.Same(v):
+		return store.Version{}, store.ErrConflict
+	}
+	d, err := m.next(body)
+	if err != nil {
+		return store.Version{}, err
+	}
+	m.docs[m.key(index, id)] = d
+	return d.ver, nil
+}
+
+func (m *memDocs) DeleteIf(_ context.Context, index, id string, v store.Version, _ bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.docs[m.key(index, id)]
+	switch {
+	case !ok:
+		return store.ErrNotFound
+	case !cur.ver.Same(v):
+		return store.ErrConflict
+	}
+	delete(m.docs, m.key(index, id))
+	return nil
+}
+
+// put replaces the record as another process would, whatever its version.
+func (m *memDocs) put(t *testing.T, doc stateDoc) {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, err := m.next(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.docs[m.key("signalith_runtime", stateID)] = d
+}
+
+// record returns the record, or nil.
+func (m *memDocs) record(t *testing.T) *stateDoc {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.docs[m.key("signalith_runtime", stateID)]
+	if !ok {
+		return nil
+	}
+	var out stateDoc
+	if err := json.Unmarshal(d.src, &out); err != nil {
+		t.Fatal(err)
+	}
+	return &out
+}
+
 // fakeIntel is an in-memory IntelStore.
 type fakeIntel struct{ inds []intel.Indicator }
 
@@ -131,9 +240,17 @@ func newTestLoader(t *testing.T, dir string) (*Loader, *assets.Store, *fakeOS, *
 	fb := &fakeBulk{}
 	return &Loader{
 		Prefix: "signalith", Bulk: fb, OS: fos, Intel: fi, Assets: lists,
-		Findings: findings.NewMemory(), Cases: cases.NewMemory(),
-		StateDir: filepath.Join(dir, "state"), Now: func() time.Time { return fixedNow },
+		Findings: findings.NewMemory(), Cases: cases.NewMemory(), Docs: newMemDocs(),
+		Server: "siem-a", Now: func() time.Time { return fixedNow },
 	}, lists, fos, fi, fb
+}
+
+// seed records st as loaded (or partly loaded), as a load would have.
+func seed(t *testing.T, l *Loader, st *State) {
+	t.Helper()
+	if _, err := l.Docs.Create(context.Background(), l.index(), stateID, stateDoc{Kind: stateKind, State: st}, false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeFile(t *testing.T, path, data string) {
@@ -211,9 +328,7 @@ func TestRemoveDeletesOnlyMarkedData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := l.writeState(&State{ID: id, Size: SizeSmall, LoadedAt: fixedNow, Start: d.Start, End: d.End, Cases: []string{"C1"}}); err != nil {
-		t.Fatal(err)
-	}
+	seed(t, l, &State{ID: id, Size: SizeSmall, LoadedAt: fixedNow, Start: d.Start, End: d.End, Cases: []string{"C1"}})
 	if _, err := l.Remove(ctx, nil); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -272,8 +387,11 @@ func TestRemoveDeletesOnlyMarkedData(t *testing.T) {
 	if strings.Join(fos.deleted, ",") != strings.Join(fos.indices, ",") {
 		t.Errorf("deleted from %v, want %v", fos.deleted, fos.indices)
 	}
-	if st, _ := l.Status(); st != nil {
-		t.Error("the state file should have been removed")
+	if st, _ := l.Status(ctx); st != nil {
+		t.Error("the record of the load should have been removed")
+	}
+	if rec := l.Docs.(*memDocs).record(t); rec != nil {
+		t.Errorf("record left: %+v", rec)
 	}
 }
 
@@ -283,9 +401,7 @@ func TestRemoveLiftsWriteBlock(t *testing.T) {
 	l, _, fos, _, _ := newTestLoader(t, t.TempDir())
 	blocked := fos.indices[0]
 	fos.blocked = map[string]bool{blocked: true}
-	if err := l.writeState(&State{ID: "sample-x", Partial: true}); err != nil {
-		t.Fatal(err)
-	}
+	seed(t, l, &State{ID: "sample-x", Partial: true})
 	if _, err := l.Remove(context.Background(), nil); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -383,7 +499,7 @@ func TestFailedLoadIsRemovable(t *testing.T) {
 	if _, err := l.Load(ctx, SizeStandard, nil); err == nil {
 		t.Fatal("Load should fail when OpenSearch refuses a chunk")
 	}
-	st, err := l.Status()
+	st, err := l.Status(ctx)
 	if err != nil || st == nil || !st.Partial || st.ID == "" {
 		t.Fatalf("Status after a failed load = %+v, %v; want a partial state", st, err)
 	}
@@ -393,7 +509,7 @@ func TestFailedLoadIsRemovable(t *testing.T) {
 	if _, err := l.Remove(ctx, nil); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if st, _ := l.Status(); st != nil {
+	if st, _ := l.Status(ctx); st != nil {
 		t.Error("Remove should clear the partial state")
 	}
 
@@ -408,8 +524,11 @@ func TestFailedLoadIsRemovable(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled Load = %v", err)
 	}
-	if st, _ := l.Status(); st == nil || !st.Partial {
+	if st, _ := l.Status(ctx); st == nil || !st.Partial {
 		t.Fatalf("Status after a cancelled load = %+v; want partial", st)
+	}
+	if rec := l.Docs.(*memDocs).record(t); rec == nil || rec.Job != nil {
+		t.Errorf("a stopped load should leave its record with no job running: %+v", rec)
 	}
 	if len(fi.inds) == 0 {
 		t.Fatal("the cancelled load should have added its intel before stopping")
@@ -422,35 +541,114 @@ func TestFailedLoadIsRemovable(t *testing.T) {
 	}
 }
 
-// TestLockAcrossProcesses: a fresh lock from another process refuses a
-// load and shows as activity; a stale one (its holder died) is taken over.
-func TestLockAcrossProcesses(t *testing.T) {
+// TestJobAcrossServers: a job running elsewhere (another server, or the
+// command line) refuses a load and a removal and shows as activity; one
+// whose heartbeat stopped is taken over by a removal.
+func TestJobAcrossServers(t *testing.T) {
 	ctx := context.Background()
 	l, _, _, _, _ := newTestLoader(t, t.TempDir())
-	if err := os.MkdirAll(l.StateDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	other := Activity{Op: "load", Phase: "Writing events", Percent: 12, PID: 999999, Started: time.Now(), Beat: time.Now()}
-	b, _ := json.Marshal(other)
-	writeFile(t, l.lockPath(), string(b))
+	docs := l.Docs.(*memDocs)
+	other := &Activity{Op: "load", Phase: "Writing events", Percent: 12, Server: "siem-b", PID: 999999, Started: time.Now(), Beat: time.Now()}
+	docs.put(t, stateDoc{Kind: stateKind, State: &State{ID: "sample-b", Partial: true}, Job: other})
 
 	if _, err := l.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrBusy) {
-		t.Fatalf("Load under another's lock = %v, want ErrBusy", err)
+		t.Fatalf("Load while siem-b loads = %v, want ErrBusy", err)
 	}
-	if a := l.Activity(); a == nil || a.Phase != "Writing events" || a.Percent != 12 {
+	if _, err := l.Remove(ctx, nil); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Remove while siem-b loads = %v, want ErrBusy", err)
+	}
+	if a := l.Activity(ctx); a == nil || a.Phase != "Writing events" || a.Percent != 12 || a.Server != "siem-b" {
 		t.Errorf("Activity = %+v", a)
 	}
 
-	other.Beat = time.Now().Add(-2 * staleLock)
-	b, _ = json.Marshal(other)
-	writeFile(t, l.lockPath(), string(b))
-	if a := l.Activity(); a != nil {
-		t.Errorf("a stale lock shows as activity: %+v", a)
+	// siem-b stopped mid-load.
+	other.Beat = time.Now().Add(-2 * staleJob)
+	docs.put(t, stateDoc{Kind: stateKind, State: &State{ID: "sample-b", Partial: true}, Job: other})
+	if a := l.Activity(ctx); a != nil {
+		t.Errorf("a stopped job shows as activity: %+v", a)
+	}
+	if _, err := l.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrPartial) {
+		t.Fatalf("Load over siem-b's unfinished load = %v, want ErrPartial", err)
+	}
+	if st, err := l.Remove(ctx, nil); err != nil || st == nil || st.ID != "sample-b" {
+		t.Fatalf("Remove of siem-b's unfinished load = %+v, %v", st, err)
+	}
+	if rec := docs.record(t); rec != nil {
+		t.Errorf("record left after the removal: %+v", rec)
 	}
 	if _, err := l.Load(ctx, SizeSmall, nil); err != nil {
-		t.Fatalf("Load over a stale lock: %v", err)
+		t.Fatalf("Load once clear: %v", err)
 	}
-	if _, err := os.Stat(l.lockPath()); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the lock should be gone after the load: %v", err)
+	if rec := docs.record(t); rec == nil || rec.Job != nil || rec.State.Partial {
+		t.Errorf("record after the load: %+v", rec)
+	}
+}
+
+// TestServersShareOneLoad: two servers that share one OpenSearch see one
+// load. The second refuses to load again, can remove what the first
+// loaded, and each server's asset and identity overlay follows.
+func TestServersShareOneLoad(t *testing.T) {
+	ctx := context.Background()
+	a, listsA, _, _, _ := newTestLoader(t, t.TempDir())
+	b, listsB, _, _, _ := newTestLoader(t, t.TempDir())
+	b.Docs, b.Server = a.Docs, "siem-b"
+
+	if _, err := a.Load(ctx, SizeSmall, nil); err != nil {
+		t.Fatalf("load on siem-a: %v", err)
+	}
+	if st, err := b.Status(ctx); err != nil || st == nil || st.Partial {
+		t.Fatalf("siem-b sees %+v, %v; want the load", st, err)
+	}
+	if _, err := b.Load(ctx, SizeSmall, nil); !errors.Is(err, ErrAlreadyLoaded) {
+		t.Errorf("second load on siem-b = %v, want ErrAlreadyLoaded", err)
+	}
+	if _, ok := listsB.Asset("ws-fin-07"); ok {
+		t.Fatal("siem-b has the sample's context before syncing")
+	}
+	if err := b.SyncLists(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if as, _ := listsB.Overlay(); len(as) == 0 {
+		t.Error("siem-b did not add the sample's context")
+	}
+	if a, ok := listsB.Asset("ws-fin-07"); !ok || a.BUnit != SampleBUnit {
+		t.Errorf("siem-b: ws-fin-07 = %+v", a)
+	}
+
+	if _, err := b.Remove(ctx, nil); err != nil {
+		t.Fatalf("remove on siem-b: %v", err)
+	}
+	if st, _ := a.Status(ctx); st != nil {
+		t.Errorf("siem-a still sees %+v", st)
+	}
+	if as, _ := listsA.Overlay(); len(as) == 0 {
+		t.Fatal("siem-a lost its context before syncing; the test proves nothing")
+	}
+	if err := a.SyncLists(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if as, ids := listsA.Overlay(); len(as)+len(ids) != 0 {
+		t.Errorf("siem-a kept %d sample assets and %d identities after the removal", len(as), len(ids))
+	}
+}
+
+// TestJobTakenOver: a job whose record another process changed under it
+// (it took the job for stopped) stops, and says so.
+func TestJobTakenOver(t *testing.T) {
+	ctx := context.Background()
+	l, _, _, _, _ := newTestLoader(t, t.TempDir())
+	docs := l.Docs.(*memDocs)
+	_, err := l.Load(ctx, SizeSmall, func(p Progress) {
+		if p.Phase == "Adding threat intel" {
+			rec := docs.record(t)
+			rec.Job = &Activity{Op: "remove", Server: "siem-b", Beat: time.Now()}
+			docs.put(t, *rec)
+		}
+	})
+	if !errors.Is(err, ErrTakenOver) {
+		t.Fatalf("Load = %v, want ErrTakenOver", err)
+	}
+	if rec := docs.record(t); rec == nil || rec.Job == nil || rec.Job.Server != "siem-b" {
+		t.Errorf("the job that was taken over wrote its record after all: %+v", rec)
 	}
 }

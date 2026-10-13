@@ -7,12 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/cluster/ostest"
 	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -32,6 +31,7 @@ func TestSampleErrorText(t *testing.T) {
 		{"load", &store.Error{Status: 429, Body: "busy"}, false, "OpenSearch was too busy to load the sample data. Check the Health page. Try again."},
 		{"load", context.Canceled, true, "Signalith stopped before it could load the sample data."},
 		{"load", sample.ErrBusy, false, "Another sample-data load or removal is running."},
+		{"load", sample.ErrTakenOver, true, "another server took the job over. Remove what was loaded, then load it again."},
 		{"load", errors.New("boom"), false, "Something went wrong and Signalith could not load the sample data. Try again."},
 	} {
 		msg, detail := sampleErrorText(tc.op, tc.err, tc.partial)
@@ -48,17 +48,38 @@ func TestSampleErrorText(t *testing.T) {
 }
 
 // A load that stopped part way shows as partial, and a new load is refused
-// until it is removed; a job in another process shows as running.
+// until it is removed; a job in another process, such as another server
+// that shares the OpenSearch, shows as running, with where it runs. The
+// record is in OpenSearch's runtime index, so every server sees it.
 func TestSampleStatusPartialAndElsewhere(t *testing.T) {
-	stateDir := t.TempDir()
-	loader := &sample.Loader{Prefix: "signalith", StateDir: stateDir}
+	fake := ostest.New(t)
+	cl := store.New(store.Config{URL: fake.URL})
+	loader := &sample.Loader{Prefix: "signalith", OS: cl, Docs: cl, Server: "siem-a"}
 	ts, _ := newTestServerWith(t, func(s *Server) { s.Sample = loader })
 
-	state, _ := json.Marshal(sample.State{ID: "sample-20261013-120000", Partial: true, Started: time.Now()})
-	if err := os.WriteFile(filepath.Join(stateDir, "sample.json"), state, 0o640); err != nil {
-		t.Fatal(err)
-	}
 	code, out := do(t, ts, "GET", "/api/sample", "", true)
+	if code != 200 || out["loaded"] != false || out["partial"] == true || out["running"] != false {
+		t.Fatalf("status with nothing loaded: %d %v", code, out)
+	}
+	code, out = do(t, ts, "POST", "/api/sample/remove", "", true)
+	if code != http.StatusConflict || out["code"] != "not_loaded" {
+		t.Errorf("remove with nothing loaded: %d %v", code, out)
+	}
+
+	record := func(job *sample.Activity) {
+		t.Helper()
+		body := map[string]any{"state": sample.State{ID: "sample-20261013-120000", Partial: true, Started: time.Now()}}
+		if job != nil {
+			body["job"] = job
+		}
+		doc := map[string]any{"kind": "sample_data", "body": body}
+		b, _ := json.Marshal(doc)
+		var src map[string]any
+		_ = json.Unmarshal(b, &src)
+		fake.Put("signalith_runtime", "sample:data", src)
+	}
+	record(nil)
+	code, out = do(t, ts, "GET", "/api/sample", "", true)
 	if code != 200 || out["partial"] != true || out["loaded"] != false || out["running"] != false {
 		t.Fatalf("status %d %v", code, out)
 	}
@@ -67,16 +88,19 @@ func TestSampleStatusPartialAndElsewhere(t *testing.T) {
 		t.Errorf("load over a partial set: %d %v", code, out)
 	}
 
-	act, _ := json.Marshal(sample.Activity{Op: "remove", Phase: "Deleting events and risk", Percent: 40, PID: 1, Started: time.Now(), Beat: time.Now()})
-	if err := os.WriteFile(filepath.Join(stateDir, "sample.lock"), act, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	record(&sample.Activity{Op: "remove", Phase: "Deleting events and risk", Percent: 40, Server: "siem-b", PID: 1, Started: time.Now(), Beat: time.Now()})
 	code, out = do(t, ts, "GET", "/api/sample", "", true)
-	if code != 200 || out["running"] != true || out["op"] != "remove" || out["percent"] != float64(40) || out["partial"] == true {
+	if code != 200 || out["running"] != true || out["op"] != "remove" || out["percent"] != float64(40) || out["partial"] == true ||
+		out["where"] != "Started on the server siem-b." {
 		t.Errorf("status with a job elsewhere: %d %v", code, out)
 	}
 	code, out = do(t, ts, "POST", "/api/sample/remove", "", true)
 	if code != http.StatusConflict || out["code"] != "busy" {
 		t.Errorf("remove while a job runs elsewhere: %d %v", code, out)
+	}
+
+	record(&sample.Activity{Op: "load", Phase: "Writing events", Percent: 9, Server: "build-host", Command: true, Beat: time.Now()})
+	if _, out = do(t, ts, "GET", "/api/sample", "", true); out["where"] != "Started with the signalith sample-data command on build-host." {
+		t.Errorf("status with the command line loading: %v", out)
 	}
 }

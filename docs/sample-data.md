@@ -45,8 +45,13 @@ docker compose -f deploy/docker/docker-compose.yml exec signalith signalith samp
 
 Loading twice is refused: remove the set first, then load again. Loading and
 removing are logged as admin actions and run in the background. Only one runs
-at a time, across the web page and the command line: a load started from the
-shell shows its progress on the card.
+at a time, across the web page, the command line and every server that shares
+your OpenSearch: a load started from the shell, or on another server, shows its
+progress on the card, with where it runs.
+
+`signalith sample-data status` needs to reach OpenSearch, like `load` and
+`remove`: the record of what is loaded is kept there (see
+[Several servers](#several-servers)).
 
 If a load stops part way (an error, a restart, or Ctrl-C), what it wrote so
 far is recorded. The card says **The last load did not finish** and offers
@@ -155,13 +160,38 @@ changed, even where they mention a host or user with the same name as a sample
 one. If retention has already made a day that holds sample events read-only,
 removal lifts that for the delete and puts it back.
 
+## Several servers
+
+When several Signalith servers share one OpenSearch (see
+[servers.md](servers.md)), they share one set of sample data:
+
+- **Load or remove it on any of them.** It is not one of the background jobs,
+  so it does not wait for the server that runs those. The detections the load
+  runs over the sample's week run on the server you loaded from, and only over
+  the sample's own events. The scheduled detections, on the server that runs
+  the jobs, leave the sample out as always.
+- **Every server shows the same thing.** The record of what is loaded, and of
+  a load or removal that is running, is kept in OpenSearch, in the
+  `<prefix>_runtime` index where the servers find each other. So the card shows
+  the same set on every server, a second load is refused wherever you try it,
+  and a load running on one server shows its progress on the others.
+- **Asset and identity entries follow within a minute.** Each server keeps the
+  sample's two lookup files in its own lookups folder. The server you load from
+  writes them at once; the others add them within a minute of the load
+  finishing, and take them out within a minute of a removal, wherever it was
+  made.
+
+If a server stops in the middle of a load or removal, the others wait a minute
+for it, then treat the job as stopped: the card offers **Remove what was
+loaded**, on any server.
+
 ## Notes
 
 - All events fall within the last six days, ending a few minutes before you
   load. The load keeps their own times even if your server's maximum event age
   is shorter. If retention keeps a kind of data for fewer days, it deletes the
   older sample days on its usual schedule; nothing else changes.
-- In a cluster, the bookkeeping file that records what is loaded, and the
-  sample's asset and identity entries, live on the server you load from, so
-  load, check status and remove from the same server. The events, findings and
-  intel are in OpenSearch and visible everywhere.
+- After an upgrade, the findings and investigations indices learn the sample's
+  marker field from the server that runs the background jobs. Loading sample
+  data adds that one field itself if it is not there yet, so the load works
+  straight away on any server.

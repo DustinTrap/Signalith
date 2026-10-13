@@ -20,6 +20,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/sample"
+	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
 const sampleUsage = `usage:
@@ -28,7 +29,8 @@ const sampleUsage = `usage:
   signalith sample-data status [-c file]                          show whether sample data is loaded
 
 Everything is fictional and kept apart from your own data. Remove takes out
-all of it and nothing else. In Docker:
+all of it and nothing else. Servers that share one OpenSearch share one set
+of sample data: load or remove it from any of them. In Docker:
   docker compose -f deploy/docker/docker-compose.yml exec signalith signalith sample-data load
 `
 
@@ -50,13 +52,16 @@ func cmdSampleData(args []string) error {
 		return err
 	}
 
-	// status only reads the small bookkeeping file; it needs no OpenSearch.
-	if sub == "status" {
-		return sampleStatusCmd(&sample.Loader{StateDir: c.StateDir()})
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// status only reads the load's record in OpenSearch; it changes nothing.
+	if sub == "status" {
+		cl, err := sampleClient(ctx, c)
+		if err != nil {
+			return err
+		}
+		return sampleStatusCmd(ctx, &sample.Loader{Prefix: c.OpenSearch.IndexPrefix, OS: cl, Docs: cl})
+	}
 	loader, err := buildSampleLoader(ctx, c, log)
 	if err != nil {
 		return err
@@ -76,17 +81,28 @@ func cmdSampleData(args []string) error {
 	}
 }
 
-// buildSampleLoader wires the loader to OpenSearch and the stores, and makes
-// sure the indices and the index template are in place first, so the sample
-// events get the right field types and the detections can write findings.
-func buildSampleLoader(ctx context.Context, c *config.Config, log *slog.Logger) (*sample.Loader, error) {
+// sampleClient connects to OpenSearch, where the sample data and the
+// record of its load are kept.
+func sampleClient(ctx context.Context, c *config.Config) (*store.Client, error) {
 	cl := newStore(c)
-
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_, herr := cl.Health(hctx)
 	cancel()
 	if herr != nil {
-		return nil, fmt.Errorf("OpenSearch is not reachable, so no sample data can be loaded or removed: %w", herr)
+		return nil, fmt.Errorf("OpenSearch is not reachable, so sample data cannot be loaded, removed or looked up: %w", herr)
+	}
+	return cl, nil
+}
+
+// buildSampleLoader wires the loader to OpenSearch and the stores, and makes
+// sure the indices and the index template are in place first, so the sample
+// events get the right field types and the detections can write findings.
+// The loader itself makes sure the findings and cases indices hold the
+// sample's marker field.
+func buildSampleLoader(ctx context.Context, c *config.Config, log *slog.Logger) (*sample.Loader, error) {
+	cl, err := sampleClient(ctx, c)
+	if err != nil {
+		return nil, err
 	}
 	tctx, tcancel := context.WithTimeout(ctx, 30*time.Second)
 	terr := cl.PutIndexTemplate(tctx, c.OpenSearch.IndexPrefix, ingest.IndexTemplate(c.OpenSearch.IndexPrefix, c.OpenSearch.Replicas))
@@ -113,17 +129,8 @@ func buildSampleLoader(ctx context.Context, c *config.Config, log *slog.Logger) 
 
 	ectx, ecancel := context.WithTimeout(ctx, time.Minute)
 	defer ecancel()
-	for _, step := range []struct {
-		what string
-		fn   func(context.Context) error
-	}{
-		{"findings", fstore.EnsureIndex},
-		{"cases", cstore.EnsureIndex},
-		{"threat intel", ibackend.EnsureIndex},
-	} {
-		if err := step.fn(ectx); err != nil {
-			return nil, fmt.Errorf("could not prepare the %s index: %w", step.what, err)
-		}
+	if err := ibackend.EnsureIndex(ectx); err != nil {
+		return nil, fmt.Errorf("could not prepare the threat intel index: %w", err)
 	}
 	// The intel store removes sample indicators from its in-memory set, so
 	// load the current indicators first.
@@ -134,6 +141,7 @@ func buildSampleLoader(ctx context.Context, c *config.Config, log *slog.Logger) 
 	eng := newEngine(c, cl)
 	eng.Assets = lists
 	eng.Intel = indicators
+	host, _ := os.Hostname()
 
 	return &sample.Loader{
 		Prefix:   c.OpenSearch.IndexPrefix,
@@ -146,7 +154,9 @@ func buildSampleLoader(ctx context.Context, c *config.Config, log *slog.Logger) 
 		Findings: fstore,
 		Cases:    cstore,
 		Risk:     &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix},
-		StateDir: c.StateDir(),
+		Docs:     cl,
+		Server:   host,
+		Command:  true,
 		Log:      log,
 	}, nil
 }
@@ -181,11 +191,11 @@ func sampleLoadCmd(ctx context.Context, loader *sample.Loader, size sample.Size)
 	case errors.Is(err, sample.ErrPartial):
 		return errors.New("the last load did not finish; run \"signalith sample-data remove\" to take out what it loaded, then load again")
 	case errors.Is(err, sample.ErrBusy):
-		return errors.New("a sample-data load or removal is already running (here or in the web page); wait for it to finish")
+		return errors.New("a sample-data load or removal is already running (here, in the web page, or on another server that shares this OpenSearch); wait for it to finish")
 	case errors.Is(err, context.Canceled):
 		return errors.New("the load was stopped before it finished; run \"signalith sample-data remove\" to take out what it loaded")
 	case err != nil:
-		if cur, _ := loader.Status(); cur != nil && cur.Partial {
+		if cur, _ := loader.Status(context.WithoutCancel(ctx)); cur != nil && cur.Partial {
 			return fmt.Errorf("%w\n\nThe load did not finish. Run \"signalith sample-data remove\" to take out what it loaded", err)
 		}
 		return err
@@ -200,7 +210,7 @@ func sampleLoadCmd(ctx context.Context, loader *sample.Loader, size sample.Size)
 }
 
 func sampleRemoveCmd(ctx context.Context, loader *sample.Loader) error {
-	cur, err := loader.Status()
+	cur, err := loader.Status(ctx)
 	if err != nil {
 		return err
 	}
@@ -215,7 +225,7 @@ func sampleRemoveCmd(ctx context.Context, loader *sample.Loader) error {
 	}
 	st, err := loader.Remove(ctx, progressPrinter(os.Stdout))
 	if errors.Is(err, sample.ErrBusy) {
-		return errors.New("a sample-data load or removal is already running (here or in the web page); wait for it to finish")
+		return errors.New("a sample-data load or removal is already running (here, in the web page, or on another server that shares this OpenSearch); wait for it to finish")
 	}
 	if err != nil {
 		return err
@@ -228,17 +238,24 @@ func sampleRemoveCmd(ctx context.Context, loader *sample.Loader) error {
 	return nil
 }
 
-func sampleStatusCmd(loader *sample.Loader) error {
-	st, err := loader.Status()
+func sampleStatusCmd(ctx context.Context, loader *sample.Loader) error {
+	st, a, err := loader.Current(ctx)
 	if err != nil {
 		return err
 	}
-	if a := loader.Activity(); a != nil {
+	if a != nil {
 		verb := "loading"
 		if a.Op == "remove" {
 			verb = "removing"
 		}
-		fmt.Printf("Sample data is %s: %s (%d%%).\n", verb, a.Phase, a.Percent)
+		where := ""
+		switch {
+		case a.Command && a.Server != "":
+			where = " with the signalith sample-data command on " + a.Server
+		case a.Server != "":
+			where = " on the server " + a.Server
+		}
+		fmt.Printf("Sample data is %s%s: %s (%d%%).\n", verb, where, a.Phase, a.Percent)
 		return nil
 	}
 	if st == nil {
