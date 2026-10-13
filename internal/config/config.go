@@ -46,6 +46,7 @@ type Config struct {
 	Dashboards Dashboards `yaml:"dashboards"`
 	Assistant  Assistant  `yaml:"assistant"`
 	Intel      Intel      `yaml:"intel"`
+	Cluster    Cluster    `yaml:"cluster,omitempty"`
 
 	// path is where the file was loaded from.
 	path string
@@ -110,6 +111,11 @@ type Server struct {
 	// another machine. They are not limited to one client's share of
 	// connections, requests and ingest memory, only by the totals.
 	SharedAddresses []string `yaml:"shared_addresses,omitempty"`
+	// NodeURL is the address other Signalith servers that share this
+	// OpenSearch reach this one at, shown on the Servers page. Empty works
+	// it out from the listen address and this computer's name, except in a
+	// container, which cannot know it. SIGNALITH_NODE_URL overrides it.
+	NodeURL string `yaml:"node_url,omitempty"`
 }
 
 // SharedList returns server.shared_addresses as prefixes; single addresses
@@ -500,6 +506,15 @@ type Detections struct {
 	MaxFindingsPerRun int `yaml:"max_findings_per_run"`
 }
 
+// Cluster is about this server among the Signalith servers that share
+// one OpenSearch.
+type Cluster struct {
+	// NodeName is this server's name on the Servers page and in the log.
+	// Empty uses the name kept in the state folder, else this computer's
+	// name. SIGNALITH_NODE_NAME overrides it.
+	NodeName string `yaml:"node_name,omitempty"`
+}
+
 // Lookups holds the asset and identity lists.
 type Lookups struct {
 	// Dir holds assets.csv and identities.csv. A relative path is relative
@@ -582,6 +597,16 @@ func (c *Config) IntelFeedsFile() string {
 
 // LookupsDir returns the absolute lookups folder.
 func (c *Config) LookupsDir() string { return c.resolve(c.Lookups.Dir) }
+
+// StateDir is where Signalith keeps files it makes for itself, such as its
+// HTTPS certificate: SIGNALITH_STATE_DIR when set, else the folder that
+// holds lookups.dir.
+func (c *Config) StateDir() string {
+	if d := os.Getenv("SIGNALITH_STATE_DIR"); d != "" {
+		return d
+	}
+	return filepath.Dir(c.LookupsDir())
+}
 
 func (c *Config) resolve(d string) string {
 	if d == "" || filepath.IsAbs(d) || c.path == "" {
@@ -883,6 +908,17 @@ func (c *Config) applyEnv() error {
 		c.Server.PublicURL = v
 		c.fromEnv("server.public_url", "SIGNALITH_PUBLIC_URL")
 	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_NODE_URL")); v != "" {
+		if _, err := agents.ParseServerURL(v); err != nil {
+			return fmt.Errorf("SIGNALITH_NODE_URL %q: %v", v, err)
+		}
+		c.Server.NodeURL = v
+		c.fromEnv("server.node_url", "SIGNALITH_NODE_URL")
+	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_NODE_NAME")); v != "" {
+		c.Cluster.NodeName = v
+		c.fromEnv("cluster.node_name", "SIGNALITH_NODE_NAME")
+	}
 	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
 		h, err := envPasswordHash(v)
 		if err != nil {
@@ -997,6 +1033,14 @@ func (c *Config) Validate() error {
 		c.Server.PublicURL, c.publicURLDerived = defaultPublicURL(c.Server), true
 	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
+	}
+	if c.Server.NodeURL != "" {
+		if _, err := agents.ParseServerURL(c.Server.NodeURL); err != nil {
+			p = append(p, fmt.Sprintf("server.node_url %q: %v", c.Server.NodeURL, err))
+		}
+	}
+	if n := c.Cluster.NodeName; n != "" && !ValidNodeName(n) {
+		p = append(p, fmt.Sprintf("cluster.node_name %q must be 1 to 63 letters, digits, dots, dashes or underscores, starting with a letter or digit", n))
 	}
 	c.OpenSearch.moveURLCredentials()
 	p = append(p, c.OpenSearch.problems(c.resolve)...)
@@ -1143,6 +1187,24 @@ func (c *Config) OpenSearchTLSFiles() (ca, cert, key string) {
 	return c.resolve(c.OpenSearch.CAFile), c.resolve(c.OpenSearch.CertFile), c.resolve(c.OpenSearch.KeyFile)
 }
 
+// ValidNodeName reports whether name can be a server's name: 1 to 63
+// letters, digits, dots, dashes or underscores, starting with a letter or
+// digit, as a host name would be.
+func ValidNodeName(name string) bool {
+	if name == "" || len(name) > 63 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case i > 0 && (r == '.' || r == '-' || r == '_'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func defaultPublicURL(s Server) string {
 	host, port, err := net.SplitHostPort(s.Listen)
 	if err != nil {
@@ -1260,6 +1322,8 @@ const header = `# Signalith configuration.
 # syslog.allow       sender IPs or CIDRs allowed to send syslog (empty = any sender)
 # syslog.public_port port devices send to, if forwarded to another (Docker: 514 -> 5514)
 # detections.dir     folder for custom detections (relative to this file)
+# detections.scheduler  lets this server run detections, threat intel downloads and
+#                    retention; servers that share one OpenSearch take turns
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
 # dashboards.dir     folder for custom dashboards, one YAML file each (relative to this file)
 # dashboards.stale_after  how long a host can go quiet before the posture dashboard flags it
@@ -1271,5 +1335,9 @@ const header = `# Signalith configuration.
 #                      - name: feodo-tracker
 #                        url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
 #                    format: lines, csv (with column:), stix or auto; see docs/threat-intel.md
+# cluster.node_name  this server's name on the Servers page (default: this computer's
+#                    name; SIGNALITH_NODE_NAME overrides it)
+# server.node_url    the address other Signalith servers reach this one at (default:
+#                    worked out from server.listen; SIGNALITH_NODE_URL overrides it)
 
 `

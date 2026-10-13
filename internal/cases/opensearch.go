@@ -27,12 +27,11 @@ func NewOpenSearch(c Doer, prefix string) *OpenSearch {
 	return &OpenSearch{Client: c, Index: prefix + "_cases"}
 }
 
-// EnsureIndex creates the cases index, or adds fields introduced since it
-// was created.
-func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
+// properties are the cases index's fields.
+func properties() map[string]any {
 	kw := map[string]any{"type": "keyword"}
 	off := map[string]any{"type": "object", "enabled": false}
-	props := map[string]any{
+	return map[string]any{
 		"id": kw, "status": kw, "severity": kw, "owner": kw, "findings": kw, "entity_values": kw, "created_by": kw,
 		"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
 		"description": map[string]any{"type": "text"},
@@ -41,17 +40,27 @@ func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
 		"updated":     map[string]any{"type": "date"},
 		"entities":    off, "entries": off, "history": off,
 	}
+}
+
+// EnsureIndex creates the cases index if it does not exist. Any server
+// may, at any time; changes to an index that exists are Upgrade's.
+func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
 	body := map[string]any{
 		"settings": map[string]any{"number_of_shards": 1, "number_of_replicas": 0},
-		"mappings": map[string]any{"dynamic": "false", "properties": props},
+		"mappings": map[string]any{"dynamic": "false", "properties": properties()},
 	}
-	idx := "/" + url.PathEscape(s.Index)
-	err := s.Client.Do(ctx, http.MethodPut, idx, body, nil)
+	err := s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index), body, nil)
 	var oe *store.Error
 	if errors.As(err, &oe) && oe.Status == 400 && strings.Contains(oe.Body, "resource_already_exists_exception") {
-		return s.Client.Do(ctx, http.MethodPut, idx+"/_mapping", map[string]any{"properties": props}, nil)
+		return nil
 	}
 	return err
+}
+
+// Upgrade adds fields introduced since the index was created. Only the
+// server that runs the background jobs does, once it holds them.
+func (s *OpenSearch) Upgrade(ctx context.Context) error {
+	return s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index)+"/_mapping", map[string]any{"properties": properties()}, nil)
 }
 
 type doc struct {

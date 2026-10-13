@@ -102,6 +102,13 @@ type Server struct {
 	// the process started, for the page's uptime.
 	Restarter Restarter
 	Started   time.Time
+	// Pages keeps the settings saved on the Settings page; nil keeps them
+	// in the settings file next to Config (config.PageFile).
+	Pages config.PageStore
+	// Cluster is this server among those that share its OpenSearch: it
+	// says which one runs the background jobs. nil means this server runs
+	// them when detections.scheduler is on, and lists no servers.
+	Cluster Cluster
 
 	authOnce     sync.Once
 	creds        credCache  // recently checked Basic credentials
@@ -175,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeUsers(api)
 	s.routeRetention(api)
 	s.routeSettings(api)
+	s.routeCluster(api)
 	if s.UI != nil {
 		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
 	}

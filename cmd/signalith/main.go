@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +26,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/cases"
+	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -257,6 +259,14 @@ func cmdValidate(args []string) error {
 	}
 	for _, w := range c.SettingsWarnings() {
 		fmt.Println("Warning:", w+".")
+	}
+	// The state folder holds this server's identity and its lock.
+	warnings, err := cluster.CheckFolder(c.StateDir())
+	if err != nil {
+		return err
+	}
+	for _, w := range warnings {
+		fmt.Println("Warning:", w)
 	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
@@ -585,7 +595,20 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	return newRunner(path, log).run(ctx, c)
+	// The identity, its lock, the heartbeat and the job lease belong to
+	// the process: an in-process restart keeps them.
+	node, log, err := openNode(c, log)
+	if err != nil {
+		return err
+	}
+	defer node.Close()
+	defer node.Stop()
+	r := newRunner(path, log)
+	r.node = node
+	// The node outlives ctx: stopping gives the job lease up first, which
+	// needs it.
+	node.Start(context.WithoutCancel(ctx))
+	return r.run(ctx, c)
 }
 
 // instance is every component built from one config: what a restart from
@@ -596,16 +619,24 @@ type instance struct {
 	srv      *api.Server
 	handler  http.Handler
 	receiver *syslog.Receiver
-	// retention is the retention manager when this server runs retention.
+	// retention is the retention manager.
 	retention *retention.Manager
-	cancel    context.CancelFunc
-	jobs      sync.WaitGroup // background jobs
-	log       *slog.Logger
+	// jobsList are the background jobs, which run only while this server
+	// holds the job lease, and node the cluster node that runs them.
+	jobsList []cluster.Job
+	node     *cluster.Node
+	cancel   context.CancelFunc
+	jobs     sync.WaitGroup // what runs on every server, such as index creation
+	log      *slog.Logger
 }
 
 // stop ends the background jobs, retention and the syslog receiver, and
-// waits for them, so the next instance does not run them twice.
+// waits for them, so the next instance does not run them twice. The job
+// lease is kept: the next instance runs its jobs under the same epoch.
 func (in *instance) stop() {
+	if in.node != nil {
+		in.node.SetJobs(nil)
+	}
 	in.cancel()
 	in.jobs.Wait()
 	if in.retention != nil {
@@ -770,6 +801,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Log:        log,
 		Version:    version,
 	}
+	// Every server makes the indices it uses when they are missing; the
+	// indicesReady channel is closed once it has tried, and the flags say
+	// which ones are there. Changes to existing indices and the background
+	// jobs are for the one server that runs those.
+	indicesReady := make(chan struct{})
+	var intelOK, casesOK, findingsOK bool
 	in.jobs.Go(func() {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
@@ -778,39 +815,202 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		if err := ibackend.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
+			intelOK = true
 			in.jobs.Go(func() { indicators.Watch(ctx, time.Minute, log) })
-			if c.Detections.Scheduler {
-				// Feeds can be added on the page at any time, so the
-				// downloader runs even with none yet.
-				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
-				in.jobs.Go(func() { feeds.Start(ctx) })
-			}
 		}
 		if err := cstore.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the cases index; investigations will not work", "index", cstore.Index, "err", err)
+		} else {
+			casesOK = true
 		}
 		if err := fstore.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the findings index; detections will not run", "index", fstore.Index, "err", err)
-			return
+		} else {
+			findingsOK = true
 		}
-		if c.Detections.Scheduler {
+		close(indicesReady)
+	})
+	ready := func(ctx context.Context) bool {
+		select {
+		case <-indicesReady:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	// The background jobs run only while this server holds the job lease:
+	// of the servers that share one OpenSearch, one runs them.
+	in.jobsList = []cluster.Job{
+		{Name: "index upgrades", Run: func(ctx context.Context) {
+			if !ready(ctx) {
+				return
+			}
+			upgradeIndices(ctx, log, []indexUpgrade{
+				{intelOK, ibackend.Index, ibackend.Upgrade}, {casesOK, cstore.Index, cstore.Upgrade}, {findingsOK, fstore.Index, fstore.Upgrade},
+			})
+		}},
+		{Name: "detections", Run: func(ctx context.Context) {
+			if !ready(ctx) || !findingsOK {
+				return
+			}
 			log.Info("detection scheduler started", "detections", len(lib.List()))
 			sched.Start(ctx)
-		} else {
-			log.Info("detection scheduler is off (detections.scheduler: false)")
-		}
-	})
-	if c.Detections.Scheduler {
-		// Like detections, retention runs on one server only.
-		in.retention = ret
-		in.jobs.Go(func() { ret.Start(ctx) })
-	} else {
-		log.Warn("retention does not run on this server: it runs on the server with detections.scheduler: true, " +
-			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
+			log.Info("detection scheduler stopped")
+		}},
+		{Name: "threat intel feeds", Run: func(ctx context.Context) {
+			if !ready(ctx) || !intelOK {
+				return
+			}
+			// Feeds can be added on the page at any time, so the
+			// downloader runs even with none yet.
+			log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
+			feeds.Start(ctx)
+		}},
+		// Retention keeps running while OpenSearch refuses writes (its
+		// disk is full): its disk guard is what frees space.
+		{Name: "retention", Emergency: true, Run: func(ctx context.Context) {
+			ret.Start(ctx)
+			ret.Wait()
+		}},
+	}
+	in.retention = ret
+	if !c.Detections.Scheduler {
+		log.Warn("detections.scheduler is off, so this server never runs detections, threat intel downloads or retention; " +
+			"another server that shares its OpenSearch does. The Data retention and feed settings are read-only here")
+	}
+	if r.node != nil {
+		ret.Leader = func() (bool, string) { return r.node.RunsJobs(), r.node.JobHolder() }
+		ret.Fence = r.node.Check
+		srv.Cluster = r.node
+		in.node = r.node
 	}
 	in.srv, in.handler = srv, srv.Handler()
+	if r.node != nil {
+		// Last, once everything started: the node points at this
+		// OpenSearch, and runs these jobs while it holds the job lease.
+		r.node.Use(cl, c.OpenSearch.IndexPrefix, cluster.Settings{
+			Eligible: c.Detections.Scheduler, NodeURL: nodeURL(c), Listen: c.Server.Listen,
+			Syslog:       cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
+			Fingerprints: func() cluster.Fingerprints { return filesFingerprints(c, ret, feeds) },
+		})
+		r.node.SetJobs(in.jobsList)
+	}
 	started = true
 	return in, nil
+}
+
+// indexUpgrade is an index whose fields the job holder brings up to date.
+type indexUpgrade struct {
+	ok      bool // the index is there
+	name    string
+	upgrade func(context.Context) error
+}
+
+// upgradeIndices adds fields introduced since the indices were made. Only
+// the server that runs the background jobs does, when it starts running
+// them, rather than every server at every start.
+func upgradeIndices(ctx context.Context, log *slog.Logger, list []indexUpgrade) {
+	for _, u := range list {
+		if !u.ok || ctx.Err() != nil {
+			continue
+		}
+		if err := u.upgrade(ctx); err != nil && ctx.Err() == nil {
+			log.Warn("could not bring an index up to date; it is tried again when this server next starts running the background jobs", "index", u.name, "err", err)
+		}
+	}
+}
+
+// filesFingerprints hashes this server's own files that the background
+// jobs use: retention policies, feeds, custom detections and, while a
+// policy archives, the archives. A server whose files differ from those of
+// the server that runs the jobs does not take them over by itself.
+func filesFingerprints(c *config.Config, ret *retention.Manager, feeds *intel.Feeds) cluster.Fingerprints {
+	fp := cluster.Fingerprints{Feeds: feeds.Fingerprint(), Detections: detectionsFingerprint(c.DetectionsDir())}
+	fp.Retention, fp.Archives = ret.Fingerprint()
+	return fp
+}
+
+// detectionsFingerprint hashes the names and contents of the custom
+// detection files in dir.
+func detectionsFingerprint(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
+	if err != nil {
+		return cluster.Hash([]byte(err.Error()))
+	}
+	sort.Strings(files)
+	var parts [][]byte
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			b = []byte("unreadable: " + err.Error())
+		}
+		parts = append(parts, []byte(filepath.Base(f)), b)
+	}
+	return cluster.Hash(parts...)
+}
+
+// nodeURL is the address other Signalith servers reach this one at, shown
+// on the Servers page: server.node_url, else the web address with this
+// computer's name when it listens on every address. A container cannot
+// know it.
+func nodeURL(c *config.Config) string {
+	if c.Server.NodeURL != "" {
+		return c.Server.NodeURL
+	}
+	if cluster.InContainer() {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(c.Server.Listen)
+	if err != nil {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		if host, err = os.Hostname(); err != nil || host == "" {
+			return ""
+		}
+	}
+	scheme := "http"
+	if httpsOn(c) {
+		scheme = "https"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
+}
+
+// asService is true when Windows runs Signalith as a service.
+var asService bool
+
+// deployment says how this server runs, for the Servers page.
+func deployment() string {
+	switch {
+	case cluster.InContainer():
+		return "docker"
+	case asService:
+		return "windows-service"
+	case os.Getenv("INVOCATION_ID") != "":
+		return "systemd"
+	}
+	return ""
+}
+
+// openNode opens this server's state folder (its identity and lock) and
+// returns the cluster node and the log, which names this server on every
+// record from then on.
+func openNode(c *config.Config, log *slog.Logger) (*cluster.Node, *slog.Logger, error) {
+	inContainer := cluster.InContainer()
+	local, err := cluster.OpenLocal(c.StateDir(), cluster.LocalOptions{Name: c.Cluster.NodeName, InContainer: inContainer})
+	if err != nil {
+		return nil, nil, err
+	}
+	log = log.With("node", local.Identity.Name)
+	for _, w := range local.Warnings {
+		log.Warn(w)
+	}
+	log.Info("this server's identity", "node_id", local.Identity.NodeID, "state_dir", local.Dir)
+	node := cluster.New(cluster.Options{Local: local, Version: version, Deployment: deployment(), Log: log})
+	return node, log, nil
 }
 
 // openUsers opens the user store once and keeps it across restarts, so
@@ -851,7 +1051,9 @@ func newRetention(c *config.Config, cl *store.Client, log *slog.Logger) *retenti
 		HistoryFile: filepath.Join(c.LookupsDir(), "retention_history.json"),
 		Interval:    c.RetentionInterval(),
 		Log:         log,
-		ReadOnly:    !c.Detections.Scheduler,
+		// Retention runs on one of the servers that share an OpenSearch,
+		// never on one with detections.scheduler off.
+		ReadOnly: !c.Detections.Scheduler,
 	}
 }
 

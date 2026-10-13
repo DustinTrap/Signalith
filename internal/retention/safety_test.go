@@ -509,3 +509,50 @@ func TestArchiveChecksFreeSpace(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// TestFenceStopsEveryStep checks that a server that no longer holds the
+// background jobs changes nothing, even in a run it already started.
+func TestFenceStopsEveryStep(t *testing.T) {
+	f := newFixture(t, Config{Days: 30})
+	name := f.add("endpoint", 40, GB, 2)
+	ctx := context.Background()
+	f.m.Fence = func(context.Context) error { return errors.New("another server took the jobs") }
+	run, err := f.m.Run(ctx, TriggerManual, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.exists(name) || run.Deleted != 0 || len(run.Errors) == 0 || !strings.Contains(run.Errors[0], "no longer runs retention") {
+		t.Fatalf("run %+v calls %v", run, f.mem.Calls)
+	}
+	checked := 0
+	f.m.Fence = func(context.Context) error { checked++; return nil }
+	if run, err = f.m.Run(ctx, TriggerManual, "admin"); err != nil || run.Deleted != 1 || f.exists(name) || checked == 0 {
+		t.Fatalf("run %+v err %v checked %d", run, err, checked)
+	}
+}
+
+// TestStandbyServerIsReadOnly checks a server that may run retention but
+// does not now, because another server holds the background jobs.
+func TestStandbyServerIsReadOnly(t *testing.T) {
+	f := newFixture(t, Config{Days: 30})
+	runs := false
+	f.m.Leader = func() (bool, string) { return runs, "siem-a" }
+	err := f.m.SetPolicy("endpoint", &Policy{KeepDays: 5})
+	if !errors.Is(err, ErrReadOnly) || !strings.Contains(err.Error(), "siem-a runs it") {
+		t.Fatalf("set policy: %v", err)
+	}
+	if err := f.m.RunAsync(TriggerManual, "admin"); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("run: %v", err)
+	}
+	ov := f.m.Overview(context.Background())
+	if !ov.Schedule.ReadOnly || !strings.HasPrefix(ov.Schedule.ReadOnlyWhy, "This server doesn't run retention right now: siem-a") || ov.Default.Editable {
+		t.Errorf("overview %+v", ov.Schedule)
+	}
+	runs = true
+	if err := f.m.SetPolicy("endpoint", &Policy{KeepDays: 5}); err != nil {
+		t.Errorf("as the job holder: %v", err)
+	}
+	if ov := f.m.Overview(context.Background()); ov.Schedule.ReadOnly || ov.Schedule.ReadOnlyWhy != "" {
+		t.Errorf("overview %+v", ov.Schedule)
+	}
+}

@@ -127,7 +127,11 @@ itself inside the same process: it stops its components (web handlers, OpenSearc
 client, syslog receiver, detection scheduler, feed downloader and the rest) and
 builds them again from the saved settings. This works the same under Docker,
 systemd, a Windows service or a terminal. People stay signed in, and requests that
-arrive during the few milliseconds of the switch wait for it.
+arrive during the few milliseconds of the switch wait for it. The server keeps its
+identity, and, when it runs the background jobs, keeps running them: they finish
+their current step and start again with the new settings. If the restart turns
+**Run detections on schedule** off, or moves to another OpenSearch, it hands them to
+another server that shares the OpenSearch, if there is one.
 
 ### Protection against locking yourself out
 

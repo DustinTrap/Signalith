@@ -13,56 +13,16 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/api"
+	"github.com/jrsamsanchez/signalith/internal/cluster/ostest"
 	"github.com/jrsamsanchez/signalith/internal/config"
 )
-
-// fakeOpenSearch answers what Signalith asks OpenSearch at startup and
-// records the index templates it installs.
-type fakeOpenSearch struct {
-	*httptest.Server
-	mu        sync.Mutex
-	templates []string
-}
-
-func newFakeOpenSearch(t *testing.T) *fakeOpenSearch {
-	t.Helper()
-	f := &fakeOpenSearch{}
-	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		p := r.URL.Path
-		switch {
-		case p == "/" && r.Method == http.MethodGet:
-			io.WriteString(w, `{"name":"node-1","cluster_name":"test","version":{"number":"2.15.0","distribution":"opensearch"}}`)
-		case p == "/_cluster/health":
-			io.WriteString(w, `{"cluster_name":"test","status":"green"}`)
-		case strings.HasPrefix(p, "/_index_template/") && r.Method == http.MethodPut:
-			f.mu.Lock()
-			f.templates = append(f.templates, strings.TrimPrefix(p, "/_index_template/"))
-			f.mu.Unlock()
-			io.WriteString(w, `{"acknowledged":true}`)
-		case strings.HasPrefix(p, "/_cat/"):
-			io.WriteString(w, `[]`)
-		case strings.HasSuffix(p, "/_search"):
-			io.WriteString(w, `{"took":1,"hits":{"total":{"value":0,"relation":"eq"},"hits":[]}}`)
-		default:
-			io.WriteString(w, `{"acknowledged":true}`)
-		}
-	}))
-	t.Cleanup(f.Close)
-	return f
-}
-
-func (f *fakeOpenSearch) installed() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.templates...)
-}
 
 // syncBuffer collects log lines written from several goroutines.
 type syncBuffer struct {
@@ -100,9 +60,12 @@ type running struct {
 	t      *testing.T
 	r      *runner
 	addr   string
-	os     *fakeOpenSearch
+	os     *ostest.Server
 	logs   *syncBuffer
 	cookie string
+
+	// stop stops the server as an interrupt does.
+	stop func()
 
 	mu      sync.Mutex
 	started []string // index prefix of each set of components started
@@ -120,15 +83,33 @@ func (rs *running) starts() string {
 // fail, when set, makes starting with a config fail.
 func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]any) *running {
 	t.Helper()
+	return startRunnerWith(t, runOptions{fail: fail, page: page})
+}
+
+// runOptions change how startRunnerWith starts the server.
+type runOptions struct {
+	fail func(*config.Config) error
+	page map[string]any
+	// scheduler turns detections.scheduler on, so the server runs the
+	// background jobs.
+	scheduler bool
+}
+
+// startRunnerWith starts the server as serve does, with its cluster node.
+func startRunnerWith(t *testing.T, o runOptions) *running {
+	t.Helper()
+	fail, page := o.fail, o.page
 	for _, name := range []string{"SIGNALITH_LISTEN", "SIGNALITH_PUBLIC_URL", "SIGNALITH_OPENSEARCH_URL", "SIGNALITH_OPENSEARCH_USERNAME",
 		"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_SETTINGS_FILE", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_ASSISTANT_API_KEY",
-		"SIGNALITH_SYSLOG_UDP", "SIGNALITH_SYSLOG_TCP", "SIGNALITH_LOOKUPS_DIR", "SIGNALITH_USERS_FILE"} {
+		"SIGNALITH_SYSLOG_UDP", "SIGNALITH_SYSLOG_TCP", "SIGNALITH_LOOKUPS_DIR", "SIGNALITH_USERS_FILE",
+		"SIGNALITH_STATE_DIR", "SIGNALITH_NODE_URL"} {
 		t.Setenv(name, "")
 	}
+	t.Setenv("SIGNALITH_NODE_NAME", "siem-test")
 	restartDelay, drainWait, oldAddressGrace = 10*time.Millisecond, time.Second, 300*time.Millisecond
 	t.Cleanup(func() { restartDelay, drainWait, oldAddressGrace = 200*time.Millisecond, 5*time.Second, 30*time.Second })
 
-	fos := newFakeOpenSearch(t)
+	fos := ostest.New(t)
 	dir := t.TempDir()
 	h, err := config.HashPassword("s3cret-pass")
 	if err != nil {
@@ -137,7 +118,7 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 	addr := freeAddr(t)
 	path := filepath.Join(dir, "signalith.yaml")
 	body := "server:\n  listen: " + addr + "\nopensearch:\n  url: " + fos.URL + "\nauth:\n  admin_password_hash: " + h +
-		"\ndetections:\n  scheduler: false\n"
+		"\ndetections:\n  scheduler: " + strconv.FormatBool(o.scheduler) + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +136,13 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 		t.Fatal(err)
 	}
 	logs := &syncBuffer{}
-	r := newRunner(path, slog.New(slog.NewTextHandler(logs, nil)))
+	node, log, err := openNode(c, slog.New(slog.NewTextHandler(logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(path, log)
+	r.node = node
+	node.Start(context.Background())
 	rs := &running{t: t, r: r, addr: addr, os: fos, logs: logs}
 	r.failStart = func(c *config.Config) error {
 		rs.mu.Lock()
@@ -169,14 +156,20 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.run(ctx, c) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-			t.Error("the server did not stop")
-		}
-	})
+	var stopOnce sync.Once
+	rs.stop = func() {
+		stopOnce.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Error("the server did not stop")
+			}
+			node.Stop()
+			node.Close()
+		})
+	}
+	t.Cleanup(rs.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if resp, err := http.Get("http://" + addr + "/api/me"); err == nil {
@@ -286,9 +279,9 @@ func TestRestartRebuildsComponentsAndKeepsSessions(t *testing.T) {
 	}
 	// The new components installed the new index template.
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(strings.Join(rs.os.installed(), ","), "siem2") {
+	for !strings.Contains(strings.Join(rs.os.Templates(), ","), "siem2") {
 		if time.Now().After(deadline) {
-			t.Fatalf("templates %v", rs.os.installed())
+			t.Fatalf("templates %v", rs.os.Templates())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -303,7 +296,7 @@ func TestRestartRebuildsComponentsAndKeepsSessions(t *testing.T) {
 	if last["ok"] != true || last["by"] != "admin" {
 		t.Errorf("restart status on the page %v", last)
 	}
-	if l := rs.logs.String(); !strings.Contains(l, `msg="restarted with the saved settings" audit=true by=admin`) || !strings.Contains(l, "settings=opensearch.index_prefix") {
+	if l := rs.logs.String(); !strings.Contains(l, `msg="restarted with the saved settings" node=siem-test audit=true by=admin`) || !strings.Contains(l, "settings=opensearch.index_prefix") {
 		t.Errorf("audit log:\n%s", l)
 	}
 	// A second restart with nothing changed works too.
@@ -330,7 +323,7 @@ func TestRestartKeepsRunningWhenTheNewAddressIsTaken(t *testing.T) {
 	if !rs.signedIn("") {
 		t.Error("the old address stopped answering")
 	}
-	if l := rs.logs.String(); !strings.Contains(l, `msg="restart failed" audit=true by=admin`) {
+	if l := rs.logs.String(); !strings.Contains(l, `msg="restart failed" node=siem-test audit=true by=admin`) {
 		t.Errorf("audit log:\n%s", l)
 	}
 }
@@ -483,7 +476,7 @@ func capture(t *testing.T, fn func() error) (string, error) {
 func TestSettingsCommand(t *testing.T) {
 	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
 	t.Setenv("SIGNALITH_OPENSEARCH_PASSWORD", "")
-	fos := newFakeOpenSearch(t)
+	fos := ostest.New(t)
 	dir := t.TempDir()
 	h, _ := config.HashPassword("s3cret-pass")
 	path := filepath.Join(dir, "signalith.yaml")
@@ -552,7 +545,7 @@ func TestSettingsCommand(t *testing.T) {
 func TestSettingsCommandWithTheServiceLayout(t *testing.T) {
 	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
 	t.Setenv("SIGNALITH_LOOKUPS_DIR", "")
-	fos := newFakeOpenSearch(t)
+	fos := ostest.New(t)
 	dir := t.TempDir()
 	h, _ := config.HashPassword("s3cret-pass")
 	os.MkdirAll(filepath.Join(dir, "etc"), 0o750)

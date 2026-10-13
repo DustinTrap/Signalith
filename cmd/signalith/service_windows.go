@@ -22,6 +22,7 @@ func init() {
 	// When Windows starts us as a service, run the service handler instead
 	// of the CLI.
 	if isSvc, err := svc.IsWindowsService(); err == nil && isSvc {
+		asService = true
 		path := defaultConfigPath()
 		if len(os.Args) > 2 && os.Args[1] == "-c" {
 			path = os.Args[2]

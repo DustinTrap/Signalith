@@ -90,7 +90,7 @@ function rtPolicyText(p) {
   ].join(' · ');
 }
 function rtNextRun(sch) {
-  if (sch.read_only) return 'Runs on the scheduler server';
+  if (sch.read_only) return 'Runs on the server that runs the background jobs';
   if (!sch.automatic) return 'Not scheduled on this server';
   if (!sch.next_run) return `Every ${sch.interval}`;
   const u = until(sch.next_run);
@@ -352,7 +352,7 @@ function rtAlerts(ov) {
   }
   if (ov.schedule.read_only) {
     out.push(riAlert('info', 'This server only shows retention.',
-      p('Retention runs on the server with the detection scheduler (detections.scheduler: true), with the settings saved there. Make changes and restores on that server.')));
+      p(ov.schedule.read_only_why || 'Retention runs on the server that runs the background jobs, with the settings saved there. Make changes and restores on that server.')));
   } else if (!ov.schedule.automatic) {
     out.push(riAlert('info', 'Retention doesn’t run on a schedule yet.', p('It starts once the server has finished starting up.')));
   }
@@ -377,7 +377,7 @@ const rtCanEdit = (c) => c.editable && !rtState.ov.settings_error;
 // rtLock is the badge for settings the page can't change, saying why.
 function rtLock(ov, source) {
   if (ov.settings_error) return el('span', { class: 'badge badge--outline', title: 'Fix the settings file first' }, icon('lock', 'icon--xs'), 'Settings file error');
-  if (ov.schedule.read_only) return el('span', { class: 'badge badge--outline', title: 'Change it on the server that runs the detection scheduler' }, icon('lock', 'icon--xs'), 'Read-only here');
+  if (ov.schedule.read_only) return el('span', { class: 'badge badge--outline', title: 'Change it on the server that runs the background jobs' }, icon('lock', 'icon--xs'), 'Read-only here');
   return el('span', { class: 'badge badge--outline', title: source === 'config' ? 'From signalith.yaml; change it there' : '' }, icon('lock', 'icon--xs'), 'signalith.yaml');
 }
 
@@ -539,7 +539,7 @@ function rtActivity(ov) {
   const head = (sub) => el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Last run'), sub ? el('p', { class: 'card__sub' }, sub) : null));
   if (!run) {
     box.replaceChildren(head(rtNextRun(sch)), riEmpty({ icon: 'clock', title: sch.running ? 'Running now' : 'No runs yet',
-      text: sch.read_only ? 'Retention runs on the server with the detection scheduler, not on this one.'
+      text: sch.read_only ? 'Retention runs on the server that runs the background jobs, not on this one.'
         : 'The first scheduled run starts 2 minutes after the server starts. Run now runs it sooner.' }));
   } else {
     const secs = Math.max(0, Math.round((new Date(run.finished) - new Date(run.started)) / 1000));

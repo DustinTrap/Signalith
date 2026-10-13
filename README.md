@@ -245,6 +245,7 @@ the sign-in cookie is marked for HTTPS only.
 | `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
 | `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
 | `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
+| `server.node_url` | from `listen` and this computer's name | The address other Signalith servers that share this OpenSearch reach this one at, shown in the list of servers. Set in signalith.yaml or `SIGNALITH_NODE_URL` only; in Docker set it, since a container cannot know it |
 | `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials. Sent only over https, or plain http to this machine, unless `allow_insecure_http` is on |
@@ -271,7 +272,7 @@ the sign-in cookie is marked for HTTPS only.
 | `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |
 | `syslog.public_port` | the listen port | Port devices send UDP and TCP syslog to, when it is forwarded to the listen port; shown on Add data |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
-| `detections.scheduler` | `true` | Run detections on schedule; turn off on extra servers sharing one OpenSearch |
+| `detections.scheduler` | `true` | Lets this server run detections, threat intel downloads and retention. Servers that share one OpenSearch take turns automatically; turn it off only on a server that should never run them. See [More than one server](#more-than-one-server) |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
 | `intel.feeds` | none | Threat intel feeds kept in this file (read-only on the page); most people add feeds on the **Threat intel** page instead. See [Threat intel](#threat-intel). Nothing is fetched until a feed is added |
@@ -285,6 +286,7 @@ the sign-in cookie is marked for HTTPS only.
 | `intel.feeds[].tags`, `.description`, `.enabled` | none, `true` | Labels added to every indicator, and on/off |
 | `intel.feeds_file` | `<lookups.dir>/intel_feeds.yaml` | Where feeds added on the page are saved, with their API keys (file mode 0600) |
 | `intel.allow_loopback_feeds` | `false` | Allow feed downloads from this machine (`127.0.0.1`, `::1`), for a feed server on the same host |
+| `cluster.node_name` | the name kept in the state folder, else this computer's name | This server's name in the list of servers and on every log line (`node=`). 1 to 63 letters, digits, dots, dashes or underscores. In Docker, set it (or `SIGNALITH_NODE_NAME`), since a container's name is random. Set in signalith.yaml or the environment only |
 | `dashboards.dir` | `dashboards` | Folder for custom dashboards, one YAML file each, relative to the config file |
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
 | `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
@@ -296,9 +298,43 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_USERNAME`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`,
 `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
 `SIGNALITH_USERS_FILE`, `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and
-`SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). A setting set by an
+`SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off, `SIGNALITH_NODE_NAME` and
+`SIGNALITH_NODE_URL`). A setting set by an
 environment variable is shown locked on the Settings page. `SIGNALITH_SETTINGS_FILE`
 sets where the Settings page keeps its changes (default `settings.yaml` in `lookups.dir`).
+`SIGNALITH_STATE_DIR` sets the state folder (default: the folder that holds `lookups.dir`).
+
+### More than one server
+
+Several Signalith servers can share one OpenSearch, for example behind a load
+balancer. They find each other through OpenSearch: each writes a heartbeat to the
+`<prefix>_runtime` index every 10 seconds, and `GET /api/cluster` lists them. One of
+them runs the background jobs (detections, threat intel downloads, retention and
+index upgrades); the others take over within about 40 seconds if it stops, or within
+seconds when it is stopped on purpose. Two servers never run them at once: the one
+that runs them stops by itself when it cannot confirm, within 20 seconds, that it
+still may. Only servers with `detections.scheduler: true` take part.
+
+Until shared settings arrive, retention policies, feeds and custom detections are
+still kept in files on each server. A server whose files differ from those of the
+server that runs the jobs does not take them over by itself, and the list of servers
+says why. Copy the files across to fix it. The Data retention and feed settings can
+be changed only on the server that runs the jobs.
+
+Each server keeps its identity in its state folder (`node.id`, and `cluster/lock`
+while it runs). The folder must be on a local disk: a network share is refused.
+Never copy it to another server: two servers with one identity are found out, at
+start or within seconds while running, and one of them stops running jobs and says
+why. To give a server a new identity, stop it, delete `node.id` and start it again.
+
+Load balancers and container platforms can ask `GET /readyz` (200
+`{"ready":true}`, or 503 with a one-word `reason`: `starting`, `restarting`, `down`,
+`opensearch`, `identity` or `stopping`) and `GET /livez` (200 while the process
+runs). Both answer without signing in and say nothing else.
+
+**Upgrading a pair of servers:** older versions ignore the shared job lease, so
+upgrade both servers together, or first set `detections.scheduler: false` on the
+server you upgrade last.
 
 ## Detections and findings
 
@@ -404,7 +440,7 @@ file hashes and email addresses.
   feed downloads at once. Feeds can also be listed under `intel.feeds` in
   signalith.yaml; those show on the page as read-only. Nothing is fetched until you
   add one.
-- **Downloads** run on the server with the detection scheduler, every feed on its
+- **Downloads** run on the server that runs the background jobs, every feed on its
   own interval. The server needs outbound HTTPS to each feed; proxy settings come
   from `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (OpenSearch traffic never uses
   them; see `opensearch.proxy`). An indicator that disappears from
@@ -525,8 +561,8 @@ helps: if other files fill the disk, it keeps your history and the page says to 
 space. A server upgraded while its OpenSearch disk is already above 85% trims old
 days at its first run. To avoid that, set `retention.guard` in signalith.yaml first.
 
-Retention runs every hour on the server with the detection scheduler; other servers
-show the page read-only. It never deletes today's data or indices that are not
+Retention runs every hour on the server that runs the background jobs (see
+[More than one server](#more-than-one-server)); other servers show the page read-only. It never deletes today's data or indices that are not
 Signalith daily indices. The page keeps the last 200 actions with the reason for each.
 
 Page settings are saved in `retention.yaml` in `lookups.dir`. Anything set under
@@ -618,6 +654,7 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/risk` | Risk event store |
 | `internal/intel` | Threat intel indicators, feed parsing (lines, CSV, STIX, format detection), the feed catalog, TAXII 2.1, guarded downloads and feeds managed on the page |
 | `internal/retention` | Retention policies, planner, disk guard, archives and restores |
+| `internal/cluster` | Servers that share one OpenSearch: identity, heartbeats and the job lease |
 | `internal/dashboards` | Security posture metrics, custom dashboard files, parallel panel runner |
 | `internal/nlq` | Plain-English question to query translator |
 | `internal/assistant` | Optional AI model client (Anthropic, OpenAI-compatible) |

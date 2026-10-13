@@ -33,21 +33,24 @@ func NewOpenSearch(c Doer, prefix string) *OpenSearch {
 // bulkSize is how many indicators go in one bulk request.
 const bulkSize = 5000
 
-// EnsureIndex creates the index if it does not exist.
-func (o *OpenSearch) EnsureIndex(ctx context.Context) error {
+// properties are the intel index's fields.
+func properties() map[string]any {
 	kw := map[string]any{"type": "keyword"}
 	date := map[string]any{"type": "date"}
+	return map[string]any{
+		"id": kw, "type": kw, "value": kw, "source": kw, "tags": kw,
+		"description": map[string]any{"type": "text"},
+		"weight":      map[string]any{"type": "double"},
+		"first_seen":  date, "last_seen": date, "expires": date, "updated": date,
+	}
+}
+
+// EnsureIndex creates the index if it does not exist. Any server may, at
+// any time; changes to an index that exists are Upgrade's.
+func (o *OpenSearch) EnsureIndex(ctx context.Context) error {
 	body := map[string]any{
 		"settings": map[string]any{"number_of_shards": 1, "number_of_replicas": 0},
-		"mappings": map[string]any{
-			"dynamic": "false",
-			"properties": map[string]any{
-				"id": kw, "type": kw, "value": kw, "source": kw, "tags": kw,
-				"description": map[string]any{"type": "text"},
-				"weight":      map[string]any{"type": "double"},
-				"first_seen":  date, "last_seen": date, "expires": date, "updated": date,
-			},
-		},
+		"mappings": map[string]any{"dynamic": "false", "properties": properties()},
 	}
 	err := o.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(o.Index), body, nil)
 	var oe *store.Error
@@ -55,6 +58,12 @@ func (o *OpenSearch) EnsureIndex(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// Upgrade adds fields introduced since the index was created. Only the
+// server that runs the background jobs does, once it holds them.
+func (o *OpenSearch) Upgrade(ctx context.Context) error {
+	return o.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(o.Index)+"/_mapping", map[string]any{"properties": properties()}, nil)
 }
 
 func (o *OpenSearch) bulk(ctx context.Context, body []byte, n int) error {

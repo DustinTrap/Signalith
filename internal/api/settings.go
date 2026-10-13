@@ -711,7 +711,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
-	res, err := config.CheckEdit(s.Config.Path(), config.Edit{Values: req.Values, Clear: req.Clear, Reset: req.Reset,
+	pages := s.pages()
+	res, err := pages.CheckEdit(config.Edit{Values: req.Values, Clear: req.Clear, Reset: req.Reset,
 		Retry: req.Retry, ResetAll: req.ResetAll, By: userOf(r)})
 	switch {
 	case errors.Is(err, config.ErrPageFile):
@@ -742,18 +743,18 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	if req.ResetAll {
 		// A file that cannot be read is kept next to the new one, so what
 		// it held can still be looked at.
-		if _, err := config.ReadPageSettings(file); err != nil {
-			if backup, err = config.BackUpPageFile(file); err != nil {
+		if _, err := pages.Read(); err != nil {
+			if backup, err = pages.Backup(); err != nil {
 				writeError(w, http.StatusInternalServerError, fmt.Errorf("could not keep a copy of the settings file before starting a new one: %w", err))
 				return
 			}
 		}
 	}
-	if err := config.WritePageSettings(file, res.Page); err != nil {
+	if err := pages.Write(res.Page); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("could not save the settings file %s: %w", file, err))
 		return
 	}
-	applied := s.applyLive(res)
+	applied := s.applyLive(res.Before, res.Config)
 	// Changes that wait for a restart; one back to the value in use, such
 	// as a reset of a change not applied yet, needs none.
 	var restart []string
@@ -809,19 +810,33 @@ func describeChanges(res *config.EditResult) string {
 	return strings.Join(parts, " ")
 }
 
-// applyLive puts the saved settings that apply at once into use, and
-// returns their keys. A setting worked out from one that waits for a
-// restart waits too.
+// pages returns where the Settings page's settings are kept.
+func (s *Server) pages() config.PageStore {
+	if s.Pages != nil {
+		return s.Pages
+	}
+	return config.PageFile{Config: s.Config.Path()}
+}
+
+// applyLive puts the settings that changed from old to saved, and that
+// apply at once, into use, and returns their keys. A setting worked out
+// from one that waits for a restart waits too.
 //
 // A secret goes into use together with the settings that say where it is
 // sent (its SentWith), all as saved, and only when it is then sent to the
 // address it was saved for. Nothing applies at once while the server runs
 // without the page's settings (SettingsProblem): mixing some of them into
 // signalith.yaml's could send a secret somewhere else.
-func (s *Server) applyLive(res *config.EditResult) []string {
+func (s *Server) applyLive(old, saved *config.Config) []string {
 	cur := s.conf()
 	if cur.SettingsProblem() != "" {
 		return nil
+	}
+	var changedKeys []string
+	for i := range config.Registry {
+		if k := config.Registry[i].Key; !config.SameValue(old, saved, k) {
+			changedKeys = append(changedKeys, k)
+		}
 	}
 	next := *cur
 	live := func(key string) bool {
@@ -830,14 +845,14 @@ func (s *Server) applyLive(res *config.EditResult) []string {
 			return false
 		}
 		for _, k := range set.WaitsFor {
-			if !config.SameValue(cur, res.Config, k) {
+			if !config.SameValue(cur, saved, k) {
 				return false
 			}
 		}
 		return true
 	}
 	copyKeys := map[string]bool{}
-	for _, key := range res.Changed {
+	for _, key := range changedKeys {
 		if live(key) {
 			copyKeys[key] = true
 		}
@@ -850,7 +865,7 @@ func (s *Server) applyLive(res *config.EditResult) []string {
 			continue
 		}
 		group := append([]string{set.Key}, set.SentWith...)
-		if !slices.ContainsFunc(group, func(k string) bool { return copyKeys[k] || slices.Contains(res.Changed, k) }) {
+		if !slices.ContainsFunc(group, func(k string) bool { return copyKeys[k] || slices.Contains(changedKeys, k) }) {
 			continue
 		}
 		if slices.ContainsFunc(group, func(k string) bool { return !live(k) }) {
@@ -865,14 +880,14 @@ func (s *Server) applyLive(res *config.EditResult) []string {
 		groups = append(groups, group)
 	}
 	for k := range copyKeys {
-		if err := next.CopyValue(k, res.Config); err != nil {
+		if err := next.CopyValue(k, saved); err != nil {
 			delete(copyKeys, k)
 		}
 	}
 	for _, group := range groups {
 		set, _ := config.Lookup(group[0])
 		secret, _ := next.Value(set.Key).(string)
-		if secret == "" || set.SentTo(&next) == set.SentTo(res.Config) {
+		if secret == "" || set.SentTo(&next) == set.SentTo(saved) {
 			continue
 		}
 		// It would go somewhere else: it waits for the restart.
@@ -1278,13 +1293,20 @@ func (s *Server) handleExportSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"yaml": text, "filename": name})
 }
 
-// serverOwn are settings that belong to one server, marked in the export.
-var serverOwn = map[string]string{
-	"server.listen":      "this server's own address",
-	"server.public_url":  "this server's own address",
-	"server.tls_cert":    "a file on this server",
-	"server.tls_key":     "a file on this server",
-	"opensearch.ca_file": "a file on this server", "opensearch.cert_file": "a file on this server", "opensearch.key_file": "a file on this server",
+// serverOwn says why a setting in the export may not suit another
+// server, or returns "" for one every server can share: a file path is a
+// file on this server, and a setting of ScopeServer belongs to this server
+// alone, such as whether it may run the background jobs.
+func serverOwn(set *config.Setting) string {
+	switch {
+	case set.File:
+		return "a file on this server"
+	case set.Scope != config.ScopeServer:
+		return ""
+	case set.Type == config.TypeAddress:
+		return "this server's own address"
+	}
+	return "this server only"
 }
 
 // exportSettings writes the page's settings of c as signalith.yaml
@@ -1344,7 +1366,7 @@ func exportSection(b *strings.Builder, c *config.Config, settings []*config.Sett
 			return err
 		}
 		line := fmt.Sprintf("  %s: %s", name, strings.TrimSpace(string(out)))
-		if note := serverOwn[set.Key]; note != "" {
+		if note := serverOwn(set); note != "" {
 			line += "  # " + note
 		}
 		b.WriteString(line + "\n")

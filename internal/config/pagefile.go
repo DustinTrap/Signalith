@@ -193,6 +193,62 @@ func (c *Config) PageChecked(key string) bool {
 	return e != nil && !e.CheckedAt.IsZero()
 }
 
+// PageStore keeps the settings changed on the Settings page. PageFile,
+// the settings file next to the lookups folder's lists, is the only one
+// today; the Settings page uses the interface so servers that share one
+// OpenSearch can keep them there instead.
+type PageStore interface {
+	// Read returns the saved settings; none saved is an empty set.
+	Read() (*PageSettings, error)
+	// Write replaces the saved settings with p.
+	Write(p *PageSettings) error
+	// Backup moves saved settings that cannot be read out of the way,
+	// before new ones are started, and says where they went.
+	Backup() (string, error)
+	// CheckEdit applies an edit to the saved settings and checks the whole
+	// configuration it gives, as Validate does at startup, without saving
+	// anything.
+	CheckEdit(e Edit) (*EditResult, error)
+}
+
+// PageFile is the PageStore of the config file at Config: its settings
+// file (SettingsFile).
+type PageFile struct {
+	Config string // the path of signalith.yaml
+}
+
+func (f PageFile) file() (string, error) { return SettingsFileFor(f.Config) }
+
+// Read reads the settings file.
+func (f PageFile) Read() (*PageSettings, error) {
+	file, err := f.file()
+	if err != nil {
+		return nil, err
+	}
+	return ReadPageSettings(file)
+}
+
+// Write replaces the settings file.
+func (f PageFile) Write(p *PageSettings) error {
+	file, err := f.file()
+	if err != nil {
+		return err
+	}
+	return WritePageSettings(file, p)
+}
+
+// Backup moves the settings file aside (BackUpPageFile).
+func (f PageFile) Backup() (string, error) {
+	file, err := f.file()
+	if err != nil {
+		return "", err
+	}
+	return BackUpPageFile(file)
+}
+
+// CheckEdit is CheckEdit for the config file.
+func (f PageFile) CheckEdit(e Edit) (*EditResult, error) { return CheckEdit(f.Config, e) }
+
 // BackUpPageFile moves a settings file that cannot be read out of the way,
 // to settings.yaml.broken next to it, before a new one is started, so
 // what it held can still be looked at. It returns the backup's path.

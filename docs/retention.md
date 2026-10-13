@@ -269,10 +269,10 @@ days. Open cases are never deleted.
 ## Runs and history
 
 Retention runs every hour (`retention.interval`) on the server that runs the
-detection scheduler. It also runs when settings are saved, when **Run now** is
-pressed, and when the disk guard trips. The first scheduled run is 2 minutes after
-the server starts. A server without the scheduler logs a warning at startup that
-retention does not run there.
+background jobs. It also runs when settings are saved, when **Run now** is pressed,
+and when the disk guard trips. The first scheduled run is 2 minutes after the server
+starts running the jobs. A server with `detections.scheduler: false` logs a warning
+at startup that it never runs retention.
 
 Each run plans first and then acts. The preview in the page's dialogs uses the same
 planner, so what it shows is what the next run does. Deletions run oldest day first,
@@ -342,12 +342,25 @@ retention:
 
 ## More than one server
 
-When several Signalith servers share one OpenSearch, only the one with
-`detections.scheduler: true` runs retention, with the settings saved on that server
-(page settings live in its own `lookups.dir`). The other servers show the page
-read-only and refuse changes, **Run now** and restores, so a server with other
-settings can never delete what the scheduler server keeps. Make retention changes on
-the scheduler server.
+When several Signalith servers share one OpenSearch, one of them runs the background
+jobs, retention among them, with the settings saved on that server (page settings
+live in its own `lookups.dir`). Only servers with `detections.scheduler: true` take
+part, and another one takes over if that server stops. The other servers show the
+page read-only, say which server runs retention, and refuse changes, **Run now** and
+restores. Make retention changes on the server that runs it.
+
+A server whose retention settings differ from those of the server that runs
+retention does not take retention over by itself, so it can never delete what the
+other keeps: the list of servers (`GET /api/cluster`) says why. While any policy
+archives, the same goes for a server whose archive folder holds different archives.
+Copy `retention.yaml` (and the archives) across to let it take over.
+
+Before every step that deletes or changes data, retention checks with OpenSearch
+that its server still runs the background jobs, and stops if not. When OpenSearch's
+disk is full, it refuses every write, so no server can confirm that in the usual way.
+The server that runs the jobs then keeps them, as long as it can read that nothing
+changed, and runs only retention, so the disk guard can delete the oldest days and
+free space. Detections and feed downloads wait until OpenSearch accepts writes again.
 
 Archives are written on the server that runs retention, in its archive folder.
 Restore from that server, or with the CLI after copying the files to where you run
@@ -355,9 +368,11 @@ it.
 
 ### Upgrading
 
-- Retention used to run on every server. It now runs only where
-  `detections.scheduler` is true. A server with the scheduler turned off logs a
-  warning at startup; turn the scheduler on for one server.
+- Retention used to run on every server, then on every server with
+  `detections.scheduler: true`. It now runs on one of those at a time. Upgrade every
+  server that shares an OpenSearch together: an older version ignores which server
+  runs the jobs. Or first set `detections.scheduler: false` on the servers you
+  upgrade last.
 - The disk guard is on by default; see [The disk guard](#the-disk-guard).
 
 ## API
@@ -386,7 +401,9 @@ Errors:
 - An invalid setting returns `400` with `error`, `problems` and `fields` (the
   settings at fault).
 - A setting that comes from signalith.yaml returns `409`.
-- On a server without the detection scheduler, every change, **Run now** and restore
-  returns `409`.
+- On a server that does not run the background jobs (with `detections.scheduler:
+  false`, or while another server runs them), every change, **Run now** and restore
+  returns `409` with an `error` that says which server runs retention; `GET
+  /api/retention` has `schedule.read_only` and `schedule.read_only_why`.
 - An unknown category or archive ID returns `404`.
 - When OpenSearch cannot be reached, previews and restore checks return `503`.

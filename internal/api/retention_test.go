@@ -261,7 +261,7 @@ func TestRetentionAPIReadOnlyServer(t *testing.T) {
 		{"POST", "/api/retention/archive/restore", `{"ids":["x"]}`},
 	} {
 		code, out := call(tc.method, tc.path, tc.body)
-		if code != http.StatusConflict || !strings.Contains(out["error"].(string), "detections.scheduler: true") {
+		if code != http.StatusConflict || !strings.Contains(out["error"].(string), "detections.scheduler is off here") {
 			t.Errorf("%s %s = %d %v", tc.method, tc.path, code, out)
 		}
 	}

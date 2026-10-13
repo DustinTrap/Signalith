@@ -33,39 +33,43 @@ func NewOpenSearch(c Doer, prefix string) *OpenSearch {
 
 var notIndexed = map[string]any{"type": "object", "enabled": false}
 
-// EnsureIndex creates the findings index if it does not exist.
-func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
+// properties are the findings index's fields.
+func properties() map[string]any {
 	kw := map[string]any{"type": "keyword"}
+	return map[string]any{
+		"id": kw, "detection_id": kw, "severity": kw, "urgency": kw, "status": kw, "owner": kw,
+		"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw, "case_id": kw,
+		"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
+		"description": map[string]any{"type": "text"},
+		"created":     map[string]any{"type": "date"},
+		"updated":     map[string]any{"type": "date"},
+		"result":      notIndexed, "entities": notIndexed, "comments": notIndexed, "history": notIndexed,
+		"context": notIndexed,
+		"query":   map[string]any{"type": "keyword", "index": false},
+	}
+}
+
+// EnsureIndex creates the findings index if it does not exist. Any server
+// may, at any time; changes to an index that exists are Upgrade's.
+func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
 	body := map[string]any{
 		"settings": map[string]any{"number_of_shards": 1, "number_of_replicas": 0},
-		"mappings": map[string]any{
-			"dynamic": "false",
-			"properties": map[string]any{
-				"id": kw, "detection_id": kw, "severity": kw, "urgency": kw, "status": kw, "owner": kw,
-				"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw, "case_id": kw,
-				"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
-				"description": map[string]any{"type": "text"},
-				"created":     map[string]any{"type": "date"},
-				"updated":     map[string]any{"type": "date"},
-				"result":      notIndexed, "entities": notIndexed, "comments": notIndexed, "history": notIndexed,
-				"context": notIndexed,
-				"query":   map[string]any{"type": "keyword", "index": false},
-			},
-		},
+		"mappings": map[string]any{"dynamic": "false", "properties": properties()},
 	}
 	err := s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index), body, nil)
 	var oe *store.Error
 	if errors.As(err, &oe) && oe.Status == 400 && strings.Contains(oe.Body, "resource_already_exists_exception") {
-		return s.upgrade(ctx, body["mappings"].(map[string]any)["properties"])
+		return nil
 	}
 	return err
 }
 
-// upgrade adds fields introduced since the index was created and fills
-// urgency on findings raised before it existed.
-func (s *OpenSearch) upgrade(ctx context.Context, props any) error {
+// Upgrade adds fields introduced since the index was created and fills
+// urgency on findings raised before it existed. Only the server that runs
+// the background jobs does, once it holds them.
+func (s *OpenSearch) Upgrade(ctx context.Context) error {
 	idx := "/" + url.PathEscape(s.Index)
-	if err := s.Client.Do(ctx, http.MethodPut, idx+"/_mapping", map[string]any{"properties": props}, nil); err != nil {
+	if err := s.Client.Do(ctx, http.MethodPut, idx+"/_mapping", map[string]any{"properties": properties()}, nil); err != nil {
 		return err
 	}
 	return s.Client.Do(ctx, http.MethodPost, idx+"/_update_by_query?conflicts=proceed&refresh=true", map[string]any{

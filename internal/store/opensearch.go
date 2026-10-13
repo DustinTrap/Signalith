@@ -105,6 +105,10 @@ func New(cfg Config) *Client {
 	return c
 }
 
+// Endpoint is the OpenSearch address, as errors show it: without any
+// password.
+func (c *Client) Endpoint() string { return c.shown }
+
 // Transport returns the HTTP transport for cfg: TLS 1.2 or newer, the
 // system's certificate authorities plus cfg.CAFile, the client
 // certificate if set, and no proxy unless cfg.Proxy is set. On an error

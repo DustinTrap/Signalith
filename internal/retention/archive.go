@@ -324,6 +324,30 @@ func (a *Archive) List() ([]Manifest, []string, error) {
 	return out, problems, nil
 }
 
+// IDs lists the archives by the file names of their manifests, without
+// reading them, sorted.
+func (a *Archive) IDs() ([]string, error) {
+	if a.Dir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(a.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, manifestExt) {
+			out = append(out, strings.TrimSuffix(name, manifestExt))
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // Get returns one archive's manifest.
 func (a *Archive) Get(id string) (Manifest, error) {
 	if !archiveID.MatchString(id) {
