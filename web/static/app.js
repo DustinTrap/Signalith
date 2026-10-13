@@ -519,13 +519,17 @@ $('sign-out').addEventListener('click', async () => {
 // About Signalith: who made it and where its code lives. The version
 // comes from api/health (renderHealthCard). Esc, the close button and a
 // click on the backdrop close it, and focus goes back to the account menu.
+// The click must also start on the backdrop: a text selection dragged
+// out past the card's edge ends with a click on the dialog itself.
 const aboutBox = $('about');
+let aboutPressedBackdrop = false;
 $('about-open').addEventListener('click', () => {
   $('user-menu').removeAttribute('open');
   aboutBox.showModal();
 });
 aboutBox.querySelector('[data-close]').addEventListener('click', () => aboutBox.close());
-aboutBox.addEventListener('click', (ev) => { if (ev.target === aboutBox) aboutBox.close(); });
+aboutBox.addEventListener('pointerdown', (ev) => { aboutPressedBackdrop = ev.target === aboutBox; });
+aboutBox.addEventListener('click', (ev) => { if (aboutPressedBackdrop && ev.target === aboutBox) aboutBox.close(); });
 aboutBox.addEventListener('close', () => $('user-menu').querySelector('summary').focus());
 
 // ---------- app shell: sidebar health ----------
