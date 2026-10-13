@@ -596,8 +596,10 @@ level=WARN msg="sign-in failed" audit=true user=admin client=203.0.113.9 peer=10
 ## API
 
 All routes need a signed-in user (session cookie or HTTP Basic auth) except
-`POST /api/login`, `POST /api/logout`, `GET /api/tls/ca.pem`, and `POST /api/ingest` and
-`POST /api/otlp/v1/logs` (which take an ingest token). Requests from a browser that change something must come from the Signalith
+`POST /api/login`, `POST /api/logout`, `GET /api/tls/ca.pem`, `POST /api/ingest` and
+`POST /api/otlp/v1/logs` (which take an ingest token), and osquery's routes under `/api/osquery/`
+(`POST /api/osquery/enroll` takes an ingest token; the others take the node key a host got when it
+enrolled; see [endpoints.md](endpoints.md)). Requests from a browser that change something must come from the Signalith
 page itself.
 
 ### Roles of every route
@@ -623,7 +625,8 @@ page itself.
 `POST /api/cases/{id}/entries`, `DELETE /api/cases/{id}/entries/{entry}`,
 `POST /api/cases/{id}/entities`, `POST /api/dashboards`, `PUT /api/dashboards/{id}`,
 `DELETE /api/dashboards/{id}`, `POST /api/dashboards/{id}/panels`,
-`POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`,
+`POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`, `GET /api/endpoints`,
+`GET /api/endpoints/{id}`, `GET /api/endpoints/settings`, `GET /api/endpoints/checks`,
 `GET /api/respond/actions`, `GET /api/respond/runs`, `POST /api/respond/run` (running
 [response actions](response-actions.md)), `GET /api/playbooks/runs`,
 `POST /api/playbooks/runs/{id}/approve`, `POST /api/playbooks/runs/{id}/reject`
@@ -641,7 +644,9 @@ page itself.
 (setting up [response actions](response-actions.md)),
 `GET /api/playbooks`, `PUT /api/playbooks` (the Playbooks page; see [playbooks.md](playbooks.md)),
 `GET /api/sample`, `POST /api/sample/load`, `POST /api/sample/remove`
-(the one-click [sample data](sample-data.md)),
+(the one-click [sample data](sample-data.md)), `PUT /api/endpoints/settings`,
+`DELETE /api/endpoints/{id}`, `GET /api/endpoints/blocked`, `DELETE /api/endpoints/blocked/{host}`,
+`POST /api/endpoints/queries`, `GET /api/endpoints/queries/{id}` (the [Endpoints page](endpoints.md)),
 `GET /api/cluster` (the Servers page; see [servers.md](servers.md)), every
 `/api/notify` route (the Notifications page; see [notifications.md](notifications.md)), every
 `/api/retention` route (see [retention.md](retention.md)), every
