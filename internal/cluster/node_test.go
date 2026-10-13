@@ -937,7 +937,17 @@ func TestRefusalsAreWordedByKind(t *testing.T) {
 			fos := ostest.New(t)
 			fos.SetFault(c.fault)
 			n := testNode(t, t.TempDir(), store.New(store.Config{URL: fos.URL}), true)
-			st, w := redWarning(t, n)
+			redWarning(t, n)
+			// The warning can show before the heartbeat records how
+			// OpenSearch turned it away; wait for that too.
+			var st Status
+			var w Warning
+			until(t, 5*time.Second, "the heartbeat to say how OpenSearch refused it", func() bool {
+				st, w = redWarning(t, n)
+				self := selfOf(st)
+				return self.Detail != nil && self.Detail.OpenSearch.Problem == c.problem &&
+					(c.why == "" || self.Detail.NotEligible == c.why)
+			})
 			for _, want := range c.text {
 				if !strings.Contains(w.Text, want) {
 					t.Errorf("the warning lacks %q:\n%s", want, w.Text)
