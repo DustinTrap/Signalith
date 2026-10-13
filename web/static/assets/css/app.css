@@ -23,7 +23,7 @@
     4 App shell      8 Cards & KPI tiles     13 Pattern: search
     5 Buttons        9 Ranked lists, charts  14 Pattern: dashboard
                     10 Tables                15 Sign-in page   16 Responsive
-   17 Shell behaviour (pages, jump box, drawer, user menu)
+   17 Shell behaviour (pages, jump box, drawer, user menu, About)
    18 Shared helpers (charts drawn by app.js, toast, utilities)
    19 Pages: one block per page, in nav order
    ========================================================================== */
@@ -1117,8 +1117,22 @@ a.health:hover { background: var(--active); text-decoration: none; }
 .menu__header b { overflow-wrap: anywhere; }
 .menu__note { max-width: 240px; padding: 4px 10px 8px; color: var(--text-3); font-size: var(--fs-sm); }
 .menu__item:disabled { opacity: .45; pointer-events: none; }
-.menu__version:empty { display: none; }
-.menu__version { padding-top: 0; font-size: var(--fs-xs); }
+/* a quiet value at the end of a menu item: the version on About Signalith */
+.menu__hint { margin-left: auto; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font: var(--fs-xs)/1 var(--font-mono); }
+.menu__hint:empty { display: none; }
+/* About Signalith (account menu): a small centred card */
+dialog.about { width: min(360px, calc(100vw - 32px)); text-align: center; }
+.about__close { position: absolute; top: 12px; right: 12px; }
+.about__body { display: grid; justify-items: center; padding: 36px 28px 24px; }
+.about__mark { display: block; margin-bottom: 14px; color: var(--text); }
+.about__name { font-size: var(--fs-xl); }
+.about__version { margin-top: 2px; color: var(--text-3); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.about__desc { margin-top: 12px; color: var(--text-2); line-height: 1.5; text-wrap: balance; }
+.about__credit { margin-top: 20px; color: var(--text-2); }
+.about__credit b { font-weight: 600; color: var(--text); }
+.about__link { margin-top: 14px; }
+.about__link .about__ext { color: var(--text-3); }
+.about__license { padding: 12px 20px; color: var(--text-3); font-size: var(--fs-xs); box-shadow: inset 0 1px 0 var(--line-subtle); }
 /* roles: controls a role cannot use carry data-min-role="analyst" or "admin";
    <body data-role> is the signed-in user's role (app.js). Until it is known,
    every such control stays hidden. */

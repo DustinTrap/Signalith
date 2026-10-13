@@ -516,6 +516,18 @@ $('sign-out').addEventListener('click', async () => {
   location.replace('login?signedout');
 });
 
+// About Signalith: who made it and where its code lives. The version
+// comes from api/health (renderHealthCard). Esc, the close button and a
+// click on the backdrop close it, and focus goes back to the account menu.
+const aboutBox = $('about');
+$('about-open').addEventListener('click', () => {
+  $('user-menu').removeAttribute('open');
+  aboutBox.showModal();
+});
+aboutBox.querySelector('[data-close]').addEventListener('click', () => aboutBox.close());
+aboutBox.addEventListener('click', (ev) => { if (ev.target === aboutBox) aboutBox.close(); });
+aboutBox.addEventListener('close', () => $('user-menu').querySelector('summary').focus());
+
 // ---------- app shell: sidebar health ----------
 // One calm line about OpenSearch and when the last event arrived; the
 // dot turns amber or red when something needs a look on the Health page.
@@ -553,7 +565,11 @@ function renderHealthCard(h) {
   card.title = visibleText(['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n'));
   card.setAttribute('aria-label', `Health: ${title}, OpenSearch ${os.status || 'unknown'}, ${meta.join(', ')}`);
   card.classList.remove('hidden');
-  if (h.version) $('user-menu-version').textContent = 'Signalith ' + h.version;
+  if (h.version) {
+    $('user-menu-version').textContent = h.version;
+    $('about-version').textContent = 'Version ' + h.version;
+    $('about-version').classList.remove('hidden');
+  }
 }
 refreshHealthCard();
 setInterval(refreshHealthCard, 30000);
