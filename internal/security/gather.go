@@ -234,6 +234,7 @@ func fileFacts(h Host) (FileFacts, bool) {
 	for _, p := range []string{"ca.key", "server.key", "next/ca.key", "previous/ca.key", "previous/server.key"} {
 		items = append(items, item{filepath.Join(tls, filepath.FromSlash(p)), "key"})
 	}
+	items = append(items, item{c.SignInKeyFile(), "key"})
 	if c.Server.TLSMode() == config.TLSFiles {
 		_, key := c.TLSFiles()
 		items = append(items, item{key, "key"})

@@ -28,6 +28,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
+	"github.com/jrsamsanchez/signalith/internal/auth"
 	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/config"
@@ -822,6 +823,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	r := newRunner(path, log)
 	r.node = node
+	r.browsers = loadBrowserKey(c, log)
 	// The node outlives ctx: stopping gives the job lease up first, which
 	// needs it.
 	node.Start(context.WithoutCancel(ctx))
@@ -1094,6 +1096,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Log:        log,
 		Version:    version,
 	}
+	srv.KnownBrowsers = r.browsers
 	// Every server makes the indices it uses when they are missing; the
 	// indicesReady channel is closed once it has tried, and the flags say
 	// which ones are there. Changes to existing indices and the background
@@ -1366,6 +1369,23 @@ func openNode(c *config.Config, log *slog.Logger) (*cluster.Node, *slog.Logger, 
 	log.Info("this server's identity", "node_id", local.Identity.NodeID, "state_dir", local.Dir)
 	node := cluster.New(cluster.Options{Local: local, Version: version, Deployment: deployment(), Log: log})
 	return node, log, nil
+}
+
+// loadBrowserKey reads the key that signs the known-browser cookie from
+// the state folder, making it on first start (see auth.Limiter). Without
+// it the server uses a key kept in memory: browsers are then recognized
+// only until the process stops.
+func loadBrowserKey(c *config.Config, log *slog.Logger) *auth.BrowserKey {
+	path := c.SignInKeyFile()
+	key, created, err := auth.LoadBrowserKey(path)
+	if err != nil {
+		log.Warn("could not use the sign-in key, so browsers that signed in before are recognized only until Signalith stops", "path", path, "err", err)
+		return auth.NewBrowserKey()
+	}
+	if created {
+		log.Info("made the sign-in key", "path", path)
+	}
+	return key
 }
 
 // openUsers opens the user store once and keeps it across restarts, so
