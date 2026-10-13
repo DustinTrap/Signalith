@@ -766,8 +766,16 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		// so they keep sending after the switch.
 		opts.CA = string(certs.AgentCAPEM())
 		opts.CAUnknown = opts.CA == "" && !certs.PublicCA()
+		opts.OwnCA = certs.LocalCA()
+		if leaf := certs.Leaf(); leaf != nil {
+			opts.CertNames = leaf.DNSNames
+		}
 	}
 	a, err := agents.Generate(opts)
+	if errors.Is(err, agents.ErrNoNameToCheck) {
+		fieldError(err)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

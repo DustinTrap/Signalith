@@ -183,6 +183,10 @@ type LeafFacts struct {
 	// RSABits is the RSA key size, 0 for other keys.
 	RSABits int
 	SHA1    bool
+	// NoName means it covers IP addresses only, so agents can't check a
+	// certificate from a CA that vouches for other computers belongs to
+	// this server.
+	NoName bool
 }
 
 // RuntimeFacts are what only the running server sees.
