@@ -73,6 +73,9 @@ var knownFields = func() map[string]string {
 		"file_hash": kw, "file_size": long, "category": kw,
 		"cef_version": kw, "cef_vendor": kw, "cef_product": kw, "cef_device_version": kw,
 
+		// OpenTelemetry log records (OTLP).
+		"service": kw, "trace_id": kw, "span_id": kw, "otel_scope": kw,
+
 		// Risk events.
 		"group_key": kw, "risk_score": double, "risk_base_score": double,
 	}

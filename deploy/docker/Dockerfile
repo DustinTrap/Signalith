@@ -1,4 +1,4 @@
-FROM golang:1.26.9 AS build
+FROM golang:1.26.9@sha256:d7722066f0b60ceccb6c0643cbed1f5f9e15506ac237146c95333504d7805d89 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -7,7 +7,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/signalith ./cmd/signalith
 RUN mkdir -p /out/data/detections /out/data/lookups /out/data/dashboards /out/data/archive && chmod 700 /out/data/archive
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/signalith /usr/local/bin/signalith
 # Writable folders for custom detections, lookups, dashboards and archived
 # days, owned by the nonroot user.

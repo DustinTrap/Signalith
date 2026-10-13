@@ -530,8 +530,8 @@ level=WARN msg="sign-in failed" audit=true user=dave client=10.0.0.40 method=ses
 ## API
 
 All routes need a signed-in user (session cookie or HTTP Basic auth) except
-`POST /api/login`, `POST /api/logout` and `POST /api/ingest` (which takes an ingest
-token). Requests from a browser that change something must come from the Signalith
+`POST /api/login`, `POST /api/logout`, `GET /api/tls/ca.pem`, and `POST /api/ingest` and
+`POST /api/otlp/v1/logs` (which take an ingest token). Requests from a browser that change something must come from the Signalith
 page itself.
 
 ### Roles of every route

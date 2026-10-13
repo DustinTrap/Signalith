@@ -450,20 +450,7 @@ func (m *Manager) makeCA() error {
 	}
 	now := m.now()
 	dns, excluded, ips := constraints(m.candidateNames(), normScope(m.opts.Scope) == ScopeStrict)
-	tmpl := &x509.Certificate{
-		SerialNumber:                serial(),
-		Subject:                     pkix.Name{CommonName: "Signalith Local CA (" + host + ")", Organization: []string{"Signalith"}},
-		NotBefore:                   now.Add(-time.Hour),
-		NotAfter:                    now.AddDate(CAYears, 0, 0),
-		IsCA:                        true,
-		BasicConstraintsValid:       true,
-		MaxPathLenZero:              true,
-		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
-		PermittedDNSDomainsCritical: true,
-		PermittedDNSDomains:         dns,
-		ExcludedDNSDomains:          excluded,
-		PermittedIPRanges:           ips,
-	}
+	tmpl := caTemplate("Signalith Local CA ("+host+")", now, dns, excluded, ips)
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
 		return err
@@ -478,6 +465,47 @@ func (m *Manager) makeCA() error {
 	m.ca, m.caKey = ca, key
 	m.log().Info("made Signalith's own certificate authority for HTTPS", "ca_file", m.path(CAFile), "ca_sha256", Fingerprint(der))
 	return nil
+}
+
+// caTemplate is a new CA, valid from an hour before now (for clocks a
+// little behind) for CAYears, with the name constraints from constraints.
+//
+// Name constraints bound only the names in a certificate, not what it is
+// for, so the CA is also limited to web servers: its extended key usage
+// is server authentication only, which Windows, macOS, OpenSSL, browsers
+// and Go all apply to the certificates under it. A stolen ca.key then
+// can't make one that signs code or email, or that signs in as a client.
+// Email addresses and URIs are permitted only under "invalid", a name
+// reserved never to exist (RFC 2606), so a certificate carrying either is
+// refused too by verifiers that ignore a CA's key usage.
+func caTemplate(cn string, now time.Time, dns, excluded []string, ips []*net.IPNet) *x509.Certificate {
+	return &x509.Certificate{
+		SerialNumber:                serial(),
+		Subject:                     pkix.Name{CommonName: cn, Organization: []string{"Signalith"}},
+		NotBefore:                   now.Add(-time.Hour),
+		NotAfter:                    now.AddDate(CAYears, 0, 0),
+		IsCA:                        true,
+		BasicConstraintsValid:       true,
+		MaxPathLenZero:              true,
+		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:                 []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         dns,
+		ExcludedDNSDomains:          excluded,
+		PermittedIPRanges:           ips,
+		PermittedEmailAddresses:     []string{noSuchName},
+		PermittedURIDomains:         []string{noSuchName},
+	}
+}
+
+// noSuchName is the one name the CA's email and URI constraints permit:
+// a top-level domain reserved never to exist.
+const noSuchName = "invalid"
+
+// ServerOnly reports whether ca is limited to web servers (see
+// caTemplate). CAs made by earlier versions are not.
+func ServerOnly(ca *x509.Certificate) bool {
+	return len(ca.ExtKeyUsage) == 1 && ca.ExtKeyUsage[0] == x509.ExtKeyUsageServerAuth && len(ca.UnknownExtKeyUsage) == 0
 }
 
 // readCAKey reads the CA's private key. Every read of it goes through
