@@ -17,7 +17,7 @@ Each role can do everything the roles above it can.
 | --- | --- | --- |
 | **Viewer** | Managers, auditors, other teams | Run searches and see dashboards, findings, investigations, detections, risk and intel. Cannot change anything. |
 | **Analyst** | SOC analysts | Also triage findings, work investigations, build dashboards, use **Ask** and add or remove intel indicators by hand. |
-| **Admin** | Whoever runs Signalith | Also create and change detections, add and change threat intel feeds and upload intel, edit asset and identity lists, see the agent setup (it holds the ingest token), manage users and set up directory sign-in, and change server settings. |
+| **Admin** | Whoever runs Signalith | Also create and change detections, add and change threat intel feeds and upload intel, edit asset and identity lists, set up agents and create and revoke [agent tokens](agent-tokens.md), manage users and set up directory sign-in, and change server settings. |
 
 By area:
 
@@ -39,7 +39,8 @@ By area:
 | Threat intel: view and look up | Yes | Yes | Yes |
 | Threat intel: add or remove indicators by hand | No | Yes | Yes |
 | Threat intel: add, change, test and refresh feeds, upload files | No | No | Yes |
-| Add data (agent setup and ingest token) | No | No | Yes |
+| Add data (agent setup, agent tokens) | No | No | Yes |
+| Agent tokens: list names and use (API only) | No | Yes | Yes |
 | Users and directory sign-in | No | No | Yes |
 | Server settings (Settings page, restart) | No | No | Yes |
 | Change your own password (local users) | Yes | Yes | Yes |
@@ -595,9 +596,10 @@ level=WARN msg="sign-in failed" audit=true user=admin client=203.0.113.9 peer=10
 
 All routes need a signed-in user (session cookie or HTTP Basic auth) except
 `POST /api/login`, `POST /api/logout`, `GET /api/tls/ca.pem`, `POST /api/ingest` and
-`POST /api/otlp/v1/logs` (which take an ingest token), and osquery's routes under `/api/osquery/`
-(`POST /api/osquery/enroll` takes an ingest token; the others take the node key a host got when it
-enrolled; see [endpoints.md](endpoints.md)). Requests from a browser that change something must come from the Signalith
+`POST /api/otlp/v1/logs` (which take an [agent token](agent-tokens.md), never a session or
+password), and osquery's routes under `/api/osquery/` (`POST /api/osquery/enroll` takes an agent
+token; the others take the node key a host got when it enrolled; see
+[endpoints.md](endpoints.md)). Requests from a browser that change something must come from the Signalith
 page itself.
 
 ### Roles of every route
@@ -626,9 +628,13 @@ page itself.
 `POST /api/intel/indicators`, `DELETE /api/intel/indicators/{id}`, `GET /api/endpoints`,
 `GET /api/endpoints/{id}`, `GET /api/endpoints/settings`, `GET /api/endpoints/checks`,
 `GET /api/respond/actions`, `GET /api/respond/runs`, `POST /api/respond/run` (running
-[response actions](response-actions.md)).
+[response actions](response-actions.md)), `GET /api/agent-tokens` (the names, status
+and use of the [agent tokens](agent-tokens.md), never a secret).
 
-**Admin:** `GET /api/agents/config`, `POST /api/tls/names`, `GET /api/security`,
+**Admin:** `GET /api/agents/config`, `POST /api/agent-tokens`,
+`PATCH /api/agent-tokens/{id}`, `POST /api/agent-tokens/{id}/revoke`,
+`POST /api/agent-tokens/legacy/{id}/refuse`, `POST /api/agent-tokens/legacy/{id}/accept`
+(see [agent-tokens.md](agent-tokens.md#commands)), `POST /api/tls/names`, `GET /api/security`,
 `POST /api/security/ca`, `POST /api/detections`,
 `POST /api/detections/test`, `POST /api/detections/sigma`,
 `PUT /api/detections/{id}`, `DELETE /api/detections/{id}`,

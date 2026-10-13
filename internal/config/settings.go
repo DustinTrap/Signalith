@@ -338,7 +338,7 @@ var Excluded = map[string]Exclusion{
 	"auth.admin_password_hash": {ScopeCluster, "The built-in admin's password is changed on the server with signalith passwd."},
 	"auth.users_file":          {ScopeBootstrap, "The Users page keeps its users there, and a page cannot move a file it depends on. Shown under About this server."},
 	"auth.ldap":                {ScopeCluster, "Directory sign-in is set up on the Users page."},
-	"ingest.tokens":            {ScopeCluster, "Agent tokens are set in signalith.yaml (ingest.tokens) or with SIGNALITH_INGEST_TOKEN; Add data shows the agent setup that uses them. The page shows how many there are."},
+	"ingest.tokens":            {ScopeCluster, "Shared agent tokens from older setups and the Docker quick start: signalith.yaml (ingest.tokens) or SIGNALITH_INGEST_TOKEN(_FILE). New agents get their own token on Add data."},
 	"detections.dir":           {ScopeBootstrap, "Pages save detections there, and a page cannot move a folder it saves into. Shown under About this server."},
 	"lookups.dir":              {ScopeBootstrap, "It holds this page's own settings file, users and lists, so it cannot move from a page. Shown under About this server."},
 	"dashboards.dir":           {ScopeBootstrap, "Pages save dashboards there, and a page cannot move a folder it saves into. Shown under About this server."},

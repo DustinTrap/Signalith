@@ -14,11 +14,17 @@ import (
 	"unicode"
 )
 
+// TokenPlaceholder stands for the agent token in a configuration made for
+// the Add data page, which puts a new token in its place when the
+// configuration is copied or downloaded (see internal/agenttokens). It
+// needs no quoting in any of the configurations or scripts.
+const TokenPlaceholder = "@@AGENT_TOKEN@@"
+
 // Options select what an agent collects.
 type Options struct {
 	OS        string // "linux", "windows", "otel" (an OpenTelemetry Collector) or "osquery"
 	ServerURL string // Signalith public URL
-	Token     string // ingest token
+	Token     string // agent token (TokenPlaceholder for the Add data page)
 	// LinuxSource is "file" (tail /var/log/auth.log and /var/log/secure)
 	// or "journal" (systemd journal, for distros without rsyslog).
 	LinuxSource string
@@ -176,7 +182,7 @@ func Generate(o Options) (*Agent, error) {
 		return nil, fmt.Errorf("server address %q: %w", o.ServerURL, err)
 	}
 	if o.Token == "" {
-		return nil, fmt.Errorf("no ingest token configured; add one under ingest.tokens")
+		return nil, errors.New("no agent token given")
 	}
 	host := u.Hostname()
 	port := u.Port()
@@ -269,7 +275,7 @@ func Generate(o Options) (*Agent, error) {
 				{"Exclude", "log SelfCheck"},
 			}))
 		}
-		// Only root may read the config: it holds the ingest token.
+		// Only root may read the config: it holds the agent token.
 		a.Steps = []string{"Install Fluent Bit (3.1 or later): curl https://raw.githubusercontent.com/fluent/fluent-bit/master/install.sh | sh"}
 		if useCA {
 			a.CAPath = LinuxCAPath
@@ -278,10 +284,10 @@ func Generate(o Options) (*Agent, error) {
 		a.Steps = append(a.Steps, "Save the configuration below as fluent-bit.conf.")
 		a.ConfigStep = len(a.Steps)
 		if useCA {
-			a.Steps = append(a.Steps, "From the folder you saved both files in, put them in place. Only root can read the configuration, since it holds the ingest token: "+
+			a.Steps = append(a.Steps, "From the folder you saved both files in, put them in place. Only root can read the configuration, since it holds the agent token: "+
 				"sudo install -m 644 -o root -g root signalith-ca.pem "+LinuxCAPath+" && sudo install -m 600 -o root -g root fluent-bit.conf "+a.ConfigPath)
 		} else {
-			a.Steps = append(a.Steps, "From the folder you saved it in, put it in place. Only root can read it, since it holds the ingest token: "+
+			a.Steps = append(a.Steps, "From the folder you saved it in, put it in place. Only root can read it, since it holds the agent token: "+
 				"sudo install -m 600 -o root -g root fluent-bit.conf "+a.ConfigPath)
 		}
 		a.Steps = append(a.Steps,
@@ -325,13 +331,13 @@ func Generate(o Options) (*Agent, error) {
 		a.ConfigStep = len(a.Steps)
 		// A browser cannot save into Program Files, so the files are
 		// copied there. Only SYSTEM and Administrators may then read the
-		// config, which holds the ingest token (Program Files lets every
+		// config, which holds the agent token (Program Files lets every
 		// user read), and the buffer, which holds Security log events
 		// (ProgramData does too). The accounts are given by their SIDs,
 		// whose names differ in other languages.
 		a.Steps = append(a.Steps,
 			"In an elevated PowerShell, put them in place from your Downloads folder, and let only SYSTEM and Administrators read the configuration and the agent's buffer, "+
-				"since they hold the ingest token and Security log events: "+
+				"since they hold the agent token and Security log events: "+
 				`cd "$env:USERPROFILE\Downloads"`+"\n"+
 				"Copy-Item "+files+` 'C:\Program Files\fluent-bit\conf\' -Force`+"\n"+
 				`icacls '`+a.ConfigPath+`' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F'`+"\n"+

@@ -33,7 +33,7 @@ docker compose -f deploy/docker/docker-compose.yml exec signalith signalith init
 ```
 
 The first command starts OpenSearch and Signalith. On first start a setup step makes the
-admin password, the agents' ingest token and the certificates OpenSearch and Signalith use
+admin password, a shared agent token and the certificates OpenSearch and Signalith use
 with each other, and keeps them in Docker volumes; no password is written in the compose
 files. Once OpenSearch is up, a second step loads OpenSearch's security settings (who may
 sign in, and what each may do), and Signalith starts after it. If the first command ends
@@ -44,9 +44,19 @@ in as `admin` with it. Signalith serves HTTPS with a certificate it makes for it
 the browser warns until you trust it; the sign-in page has a **Download the server
 certificate** link, and [docs/https.md](docs/https.md) says how to trust it.
 
-Agents get their configuration from the **Add data** page: they send over HTTPS, with the
-ingest token this install made. A new install refuses events sent over plain `http://`,
-and refuses `change-this-ingest-token`, the example token older versions gave every agent.
+Agents get their configuration from the **Add data** page: they send over HTTPS, and each
+group of agents gets its own token when you copy or download its configuration. A new
+install refuses events sent over plain `http://`, and refuses `change-this-ingest-token`,
+the example token older versions gave every agent.
+
+The token the setup step made (`ingest-token` in the `signalith-secrets` volume, passed in
+as `SIGNALITH_INGEST_TOKEN_FILE`) is a **legacy shared token**: every agent set up with it
+uses the same secret. It is kept so agents set up before per-agent tokens keep working.
+To switch, give those agents a new configuration from **Add data**, then, under **Agent
+tokens**, choose **Stop accepting** on the shared token. That's all: you don't need to
+edit `docker-compose.yml`, and the Security page counts the token as retired. On a new
+install no agent has it, so you can choose **Stop accepting** straight away. See
+[Replace a shared token](docs/agent-tokens.md#replace-a-shared-token).
 Coming from an older version? See
 [Upgrading the Docker quick start](#upgrading-the-docker-quick-start).
 
@@ -125,10 +135,10 @@ same):
    such as sample data, never change it.) The **Health** page lists each agent still
    sending over plain `http://` (behind Docker Desktop they share one address, so it names
    them by the computer names in their events). On each of them, install the configuration
-   from the **Add data** page again; it has this server's own token and moves the agent to
+   from the **Add data** page again; it gives the agent a token of its own and moves it to
    HTTPS. Syslog devices need no change. If you had set a token of your own in
    `SIGNALITH_INGEST_TOKEN`, add that line back under `environment:` of the `signalith`
-   service in `docker-compose.yml` and run step 2 again; new agents still get the new
+   service in `docker-compose.yml` and run step 2 again; new agents still get their own
    token.
 6. If you had changed other things, such as ports or `SIGNALITH_PUBLIC_URL`, make the same
    changes in the new files (`SIGNALITH_PUBLIC_URL` now starts with `https://`).
@@ -224,7 +234,8 @@ read encrypted values: before going back to one, run `sudo signalith secrets dec
 
 Open **Add data** in the UI, pick Linux or Windows, and follow the steps: install
 Fluent Bit, save Signalith's CA certificate and the generated configuration, restart it.
-The configuration already contains the server address and ingest token, and sends over
+The configuration already contains the server address and a token of its own for this group
+of agents (made when you copy or download it; see [docs/agent-tokens.md](docs/agent-tokens.md)), and sends over
 HTTPS, checking the server's certificate with that CA. For firewalls, switches and other network
 devices, pick **Syslog** (see [Syslog](#syslog)). Hosts that run an OpenTelemetry Collector, and
 apps with an OpenTelemetry SDK, can send logs over OTLP instead: pick **OpenTelemetry** (see
@@ -440,6 +451,13 @@ them. All of this, with the commands to trust the CA on Windows, macOS and Linux
   in `opensearch.proxy` or a key in a feed's address cannot be, and is reported. Passwords and
   keys in configured URLs are hidden (`***`) everywhere a URL is shown or logged, and agents get a
   generic error rather than OpenSearch details.
+- **Agent tokens**: each agent group sends with its own token (`sgl_` and 52 more
+  characters), shown once and kept only as a SHA-256 hash in OpenSearch. Revoking one on
+  **Add data** or with `signalith tokens revoke` turns its agents away within seconds on every
+  server. Every event records the token's name and the sender's address
+  (`signalith_token`, `signalith_sender`), and senders can't set those fields. To have a
+  secret scanner find leaked tokens, give it `\bsgl_[a-z2-7]{52}\b`. See
+  [docs/agent-tokens.md](docs/agent-tokens.md).
 - **Memory**: on Linux the server turns off core dumps and keeps other programs from reading its
   memory; the systemd unit also turns off swap for it, hides other processes and limits it to the
   files and system calls it needs. On Windows the service runs as its own account rather than
@@ -513,7 +531,7 @@ are counted for each person's own address, not the proxy's. See
 | `auth.session_timeout` | `12h` | Sign the web UI out after this long without activity ("Keep me signed in" lasts up to 7 days) |
 | `auth.users_file` | `users.json` in `lookups.dir` | Where users added on the Users page are kept; directory settings go in `directory.json` next to it |
 | `auth.ldap` | none | Active Directory or LDAP sign-in, when you would rather not set it up on the Users page; see [docs/users.md](docs/users.md#setting-it-in-signalithyaml) |
-| `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
+| `ingest.tokens` | none | Shared tokens (legacy) agents send as `Authorization: Bearer`; still accepted. New agents get their own token on **Add data** (see [docs/agent-tokens.md](docs/agent-tokens.md)) |
 | `ingest.max_event_age` | `7d` (or the shortest retention period if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
 | `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
 | `syslog.tls` | off (`init` sets `0.0.0.0:6514`) | Address for syslog over TLS, such as `0.0.0.0:6514`; uses the web UI's certificate |
@@ -552,7 +570,7 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 from a file, as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PASSWORD_FILE`,
 `SIGNALITH_ADMIN_PASSWORD_FILE`, `SIGNALITH_INGEST_TOKEN_FILE`, `SIGNALITH_LDAP_BIND_PASSWORD_FILE` or
 `SIGNALITH_ASSISTANT_API_KEY_FILE` to the file's path. Setting both forms of one is an error, except for the
-ingest token, where both tokens are accepted (agents set up on Add data get the file's). A setting set by an
+ingest token, where both are accepted as shared tokens (agents set up on Add data get a token of their own). A setting set by an
 environment variable, or by a file one names, is shown locked on the Settings page. When the admin password
 comes from `SIGNALITH_ADMIN_PASSWORD_FILE`, or from `SIGNALITH_ADMIN_PASSWORD` given to the systemd or Windows
 service, `signalith passwd` keeps the new one in `admin-password-hash` in the state folder, where it replaces
@@ -646,7 +664,7 @@ field itself says so).
 sudo signalith secrets status                       # where the key is; how each value is stored
 sudo signalith secrets encrypt                      # encrypt plain values, keeping comments and layout
 sudo signalith secrets set opensearch.password      # asks twice without showing it, or reads a pipe
-sudo signalith secrets set ingest.tokens            # adds a token; press Enter to have one made
+sudo signalith secrets set ingest.tokens            # adds a shared agent token (per-agent ones: signalith tokens create)
 sudo signalith secrets rotate-master                # new master key; everything encrypted again
 sudo signalith secrets rotate-master -prune         # remove the previous key once nothing needs it
 sudo signalith secrets decrypt                      # plain text again, before going back to an older version

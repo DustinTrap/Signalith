@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/agenttokens"
 	"github.com/jrsamsanchez/signalith/internal/api"
 	"github.com/jrsamsanchez/signalith/internal/assets"
 	"github.com/jrsamsanchez/signalith/internal/assistant"
@@ -75,6 +76,7 @@ Usage:
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith sample-data load|remove|status [-c file] [-size ...]  load or remove a week of sample data to try
+  signalith tokens    list|create|rename|revoke|legacy [-c file] ...  the tokens agents send with
   signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith security  [-c file] [-json]   print the security report (exit 2 when something is at risk)
   signalith service   install|uninstall|start|stop     manage the Windows service
@@ -139,6 +141,8 @@ func main() {
 		err = cmdArchive(args)
 	case "sample-data":
 		err = cmdSampleData(args)
+	case "tokens":
+		err = cmdTokens(args)
 	case "secrets":
 		err = cmdSecrets(args)
 	case "security":
@@ -206,7 +210,8 @@ func cmdInit(args []string) error {
 		return err
 	}
 	c.Auth.AdminPasswordHash = h
-	c.Ingest.Tokens = []string{config.RandomToken(24)}
+	// No shared agent token: Add data gives each agent its own (see
+	// internal/agenttokens).
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -224,7 +229,11 @@ func cmdInit(args []string) error {
 	if s := syslogSummary(c); s != "" {
 		fmt.Printf("  Syslog:      %s\n", s)
 	}
-	// Save encrypted the ingest token, so there is a master key now.
+	// Make the master key now (sealing a value makes one when there is
+	// none), so init can say where it is and to back it up.
+	if _, err := c.Keyring().Seal("init", "make the master key"); err != nil {
+		return fmt.Errorf("making the master key: %w", err)
+	}
 	if src, err := c.Keyring().Source(); err == nil {
 		fmt.Printf("  Master key:  %s\n", src)
 		if src.Created {
@@ -1116,8 +1125,23 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	ensureScriptsDir(c.ResponseScriptsDir(), log)
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
+	// Agent tokens: one per agent or group, kept in the runtime index so
+	// every server that shares this OpenSearch accepts the same ones and
+	// refuses a revoked one within seconds. Revoking one removes the
+	// osquery hosts enrolled with it.
+	tokens := &agenttokens.Registry{Client: cl, Prefix: c.OpenSearch.IndexPrefix, Log: log, Node: func() string { return sampleNode }}
+	tokens.OnRevoke(estore.RevokeToken)
+	{
+		lctx, lcancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := tokens.Load(lctx); err != nil {
+			log.Warn("agent tokens could not be read from OpenSearch yet; agents that send with one are asked to send again until they are", "err", err)
+		}
+		lcancel()
+	}
+	in.jobs.Go(func() { tokens.Run(ctx) })
 	srv := &api.Server{
 		Config:     c,
+		Tokens:     tokens,
 		Engine:     eng,
 		Pipeline:   pipeline,
 		Syslog:     receiver,
