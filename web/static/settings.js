@@ -628,9 +628,11 @@
     const tls = S.view.tls || {};
     if (key === 'server.tls.ca_scope' && tls.own_ca && tls.ca_scope) {
       const chosen = current(key) || 'standard';
-      out.push(el('p', { class: 'st-hint' }, ...(chosen === tls.ca_scope
-        ? ['In use now. The ', securityLink('Security page'), ' makes a new certificate authority and switches to it.']
-        : [`The one in use is ${CA_SCOPE[tls.ca_scope] || tls.ca_scope}. Nothing changes until you make the new one and switch to it on the `, securityLink('Security page'), '.'])));
+      let hint;
+      if (tls.next_ca_sha256) hint = ['A new one is made. Switch to it on the ', securityLink('Security page'), '.'];
+      else if (chosen === tls.ca_scope) hint = ['In use now. The ', securityLink('Security page'), ' makes a new certificate authority and switches to it.'];
+      else hint = [`The one in use is ${CA_SCOPE[tls.ca_scope] || tls.ca_scope}. Nothing changes until you make the new one and switch to it on the `, securityLink('Security page'), '.'];
+      out.push(el('p', { class: 'st-hint' }, ...hint));
     }
     if (PORTS.has(key) && (S.view.about || {}).container && (d || f.pending)) {
       out.push(el('p', { class: 'st-hint' }, 'In Docker, also publish the new port under ports: in docker-compose.yml.'));

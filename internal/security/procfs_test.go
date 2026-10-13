@@ -264,3 +264,56 @@ func TestDefaultGateway(t *testing.T) {
 		t.Error("a gateway without the file")
 	}
 }
+
+// Windows Error Reporting: signalith.exe's own key sets only the values it
+// has; the others come from the global key.
+func TestMergeDumps(t *testing.T) {
+	base := `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps`
+	app := base + `\signalith.exe`
+	for _, tc := range []struct {
+		name        string
+		global, own dumpValues
+		ownOK       bool
+		full        bool
+		folder, key string
+	}{
+		{name: "nothing set"},
+		{name: "global mini", global: dumpValues{Type: 1, HasType: true}},
+		{name: "global full", global: dumpValues{Type: 2, HasType: true, Folder: `C:\Dumps`, HasFolder: true}, full: true, folder: `C:\Dumps`, key: base},
+		{name: "own mini over global full", global: dumpValues{Type: 2, HasType: true}, own: dumpValues{Type: 1, HasType: true}, ownOK: true},
+		{name: "own full", own: dumpValues{Type: 2, HasType: true}, ownOK: true, full: true, key: app},
+		// The program's key has only a folder: the global type holds.
+		{name: "own folder, global full", global: dumpValues{Type: 2, HasType: true}, own: dumpValues{Folder: `D:\x`, HasFolder: true}, ownOK: true,
+			full: true, folder: `D:\x`, key: base},
+		{name: "custom with full memory", global: dumpValues{Type: 0, HasType: true}, own: dumpValues{Flags: 0x2 | 0x4, HasFlags: true}, ownOK: true,
+			full: true, key: app},
+		{name: "custom without full memory", global: dumpValues{Type: 0, HasType: true, Flags: 0x4, HasFlags: true}},
+		{name: "own key unreadable", own: dumpValues{Type: 2, HasType: true}},
+	} {
+		m := mergeDumps(tc.global, tc.own, tc.ownOK, base)
+		if !m.Known || m.FullDumps != tc.full || m.DumpFolder != tc.folder || m.DumpsRegistry != tc.key {
+			t.Errorf("%s: %+v", tc.name, m)
+		}
+	}
+}
+
+func TestReleaseAtLeast(t *testing.T) {
+	for _, tc := range []struct {
+		release string
+		want    bool
+	}{
+		{"5.8.0", true},
+		{"5.10.0-28-amd64", true},
+		{"6.1.0", true},
+		{"5.4.0-150-generic", false},
+		{"4.18.0-553.el8.x86_64", false},
+		{"5.8-rc1", true},
+		{"5.7-rc1", false},
+		{"", true},
+		{"odd", true},
+	} {
+		if got := releaseAtLeast(tc.release, 5, 8); got != tc.want {
+			t.Errorf("%q: %v", tc.release, got)
+		}
+	}
+}

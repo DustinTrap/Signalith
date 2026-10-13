@@ -58,7 +58,9 @@ func runSecurity(path string, asJSON bool, out, note io.Writer) (int, error) {
 		info = note
 	}
 	useServiceEnv(path, info)
-	rep, err := securityReport(context.Background(), path, info)
+	// What saving BitLocker's answer says goes to note, so the output is
+	// the report alone.
+	rep, err := securityReport(context.Background(), path, note)
 	if err != nil {
 		return 1, err
 	}
@@ -78,7 +80,8 @@ func runSecurity(path string, asJSON bool, out, note io.Writer) (int, error) {
 	return exitNothingAtRisk, nil
 }
 
-// securityReport gathers the facts on this computer and checks them.
+// securityReport gathers the facts on this computer and checks them;
+// notes go to info.
 func securityReport(ctx context.Context, path string, info io.Writer) (*security.Report, error) {
 	c, err := config.Load(path)
 	if err != nil {

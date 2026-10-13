@@ -47,7 +47,8 @@ func (h Host) getenv(name string) string {
 
 // NewFacts starts the facts with what the configuration says.
 func NewFacts(h Host, now time.Time, server ServerInfo) *Facts {
-	f := &Facts{Now: now, Server: server, Config: h.Config, InContainer: h.InContainer, SettingEnv: map[string]string{}}
+	f := &Facts{Now: now, Server: server, Config: h.Config, InContainer: h.InContainer, Docker: h.Docker, SettingEnv: map[string]string{}}
+	f.PublicTokenAccepted = h.InContainer && h.Config.Server.HTTPS() && h.Config.Server.PlaintextIngest()
 	if f.Server.OS == "" {
 		f.Server.OS = h.GOOS
 	}
@@ -175,7 +176,7 @@ const archiveMaxFiles = 100000
 func archiveFacts(h Host, archiving bool) (*ArchiveFacts, bool) {
 	dir := h.Config.ArchiveDir()
 	a := &ArchiveFacts{Dir: dir, Policies: archiving}
-	if inVolume(dir) != "" && h.InContainer {
+	if inVolume(dir) != "" && h.Docker {
 		a.Volume = dockerVolume
 	}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -255,7 +256,7 @@ func fileFacts(h Host) (FileFacts, bool) {
 		items = append(items, item{c.Path(), "config"}, item{filepath.Dir(c.Path()), "config"})
 	}
 	ff := FileFacts{Known: true, Admins: h.GOOS == "windows"}
-	if h.InContainer {
+	if h.Docker {
 		ff.Volume = dockerVolume
 	}
 	seen := map[string]bool{}
@@ -315,7 +316,9 @@ func adminFacts(h Host) AdminFacts {
 	changed := c.AdminPasswordChanged() != ""
 	a := AdminFacts{Public: c.PublicAdminPassword()}
 	a.FromEnv = !changed && h.getenv("SIGNALITH_ADMIN_PASSWORD") != ""
-	a.DockerFirst = !changed && h.getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" && h.getenv("SIGNALITH_ADMIN_PASSWORD") == ""
+	fromFile := !changed && h.getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" && h.getenv("SIGNALITH_ADMIN_PASSWORD") == ""
+	a.DockerFirst = fromFile && h.Docker
+	a.FromFile = fromFile && !h.Docker
 	if hash := c.Auth.AdminPasswordHash; hash != "" {
 		if cost, err := bcrypt.Cost([]byte(hash)); err == nil && cost < bcrypt.DefaultCost {
 			a.WeakHash = true

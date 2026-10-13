@@ -32,8 +32,8 @@ const (
 	securityAfterReload = 3 * time.Second
 	securityEvery       = time.Hour
 	recheckEvery        = 10 * time.Second
-	// maxPlainSignIns caps the addresses that signed in over plain HTTP
-	// the checker remembers.
+	// maxPlainSignIns caps the addresses that signed in, and the agents
+	// that sent events, over plain HTTP the checker remembers.
 	maxPlainSignIns = 50
 )
 
@@ -57,7 +57,10 @@ type SecurityChecker struct {
 	// logged are the ids at risk that were logged last; nil before the
 	// first run.
 	logged []string
-	plain  addrSeen
+	// plain are the computers that signed in, and plainAgents the agents
+	// that sent events, over plain HTTP, not through a trusted reverse
+	// proxy.
+	plain, plainAgents addrSeen
 }
 
 // NewSecurityChecker returns a checker that logs to log.
@@ -65,7 +68,7 @@ func NewSecurityChecker(log *slog.Logger) *SecurityChecker {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &SecurityChecker{log: log, Started: time.Now(), plain: addrSeen{max: maxPlainSignIns}}
+	return &SecurityChecker{log: log, Started: time.Now(), plain: addrSeen{max: maxPlainSignIns}, plainAgents: addrSeen{max: maxPlainSignIns}}
 }
 
 // Report is the last report, or nil before the first run ends.
@@ -217,7 +220,7 @@ func (s *Server) gatherSecurity(ctx context.Context) *security.Report {
 	}
 	if f.TLS = security.TLSFactsFrom(s.TLS, c); f.TLS != nil {
 		f.TLS.Refusals = s.TLS.Refusals()
-		f.TLS.Seen = security.SeenFrom(s.TLS)
+		f.TLS.Seen = security.SeenFrom(ctx, s.TLS)
 	}
 	f.Runtime = s.runtimeFacts(now, h.InContainer)
 	f.Users = security.UserFactsFrom(s.userStore(), c.Auth.AdminUser, now)
@@ -300,7 +303,13 @@ func (s *Server) runtimeFacts(now time.Time, inContainer bool) *security.Runtime
 	since := now.Add(-24 * time.Hour)
 	rt := &security.RuntimeFacts{SyslogSenders: map[string]int{}}
 	rt.DirectPlain = s.security().plain.since(since)
+	rt.DirectPlainAgents = s.security().plainAgents.since(since)
 	for _, x := range s.Pipeline.PlaintextSenders(since) {
+		// Agents on this computer: their events don't cross the network.
+		if a, err := netip.ParseAddr(x.Address); err == nil && a.Unmap().IsLoopback() {
+			rt.LocalPlainSenders += max(1, len(x.Hosts))
+			continue
+		}
 		rt.PlainSenderCount += max(1, len(x.Hosts))
 		if len(x.Hosts) == 0 {
 			rt.PlainSenders = append(rt.PlainSenders, x.Address)
@@ -394,6 +403,16 @@ var caActions = map[string]string{
 	"prune":    "previous certificate authority removed",
 }
 
+// caDoing names each step for a message that it failed, in the page's
+// words.
+var caDoing = map[string]string{
+	"prepare":  "Making the new certificate authority",
+	"switch":   "Switching to the new certificate authority",
+	"rollback": "Switching back",
+	"discard":  "Cancelling the new certificate authority",
+	"prune":    "Removing the old certificate authority",
+}
+
 // handleSecurityCA answers POST api/security/ca: a step in changing
 // Signalith's own certificate authority. The answer is the new report.
 func (s *Server) handleSecurityCA(w http.ResponseWriter, r *http.Request) {
@@ -473,7 +492,7 @@ func (s *Server) handleSecurityCA(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		s.Log.Error("could not change the certificate authority", "action", req.Action, "err", err)
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("%s failed: %w", req.Action, err))
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("%s didn't work: %w", caDoing[req.Action], err))
 		return
 	}
 	s.audit(r, msg, args...)
@@ -556,16 +575,29 @@ func (s *Server) notePlainSignIn(r *http.Request) {
 	s.security().notePlain(from)
 }
 
-// noteNames records the name each HTTPS request asked for, so the
-// Security page can tell which names a strict certificate authority
-// would have to cover.
-func (s *Server) noteNames(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS != nil && s.TLS != nil && validHostHeader(r.Host) {
-			s.TLS.NoteName(r.Host)
-		}
-		next.ServeHTTP(w, r)
-	})
+// noteName records the name an HTTPS request asked for, so the Security
+// page can tell which names a strict certificate authority would have to
+// cover. Only requests from someone signed in, or an agent with a token,
+// count: anyone who can reach the port could send any name.
+func (s *Server) noteName(r *http.Request) {
+	if r.TLS != nil && s.TLS != nil && validHostHeader(r.Host) {
+		s.TLS.NoteName(r.Host)
+	}
+}
+
+// notePlainAgent records an agent that sent events over plain HTTP to a
+// server that doesn't serve HTTPS itself, not through a trusted reverse
+// proxy, from another computer. Agents on plain HTTP to the HTTPS port
+// are noted by the pipeline instead (see PlainHandler).
+func (s *Server) notePlainAgent(r *http.Request) {
+	if r.TLS != nil || plaintextIngest(r) || s.viaTrustedProxy(r) {
+		return
+	}
+	from := clientaddr.Parse(r.RemoteAddr)
+	if !from.IsValid() || from.Unmap().IsLoopback() {
+		return
+	}
+	s.security().plainAgents.note(from)
 }
 
 // securityHealth is the Security page's count for the menu, in

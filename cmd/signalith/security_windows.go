@@ -11,8 +11,9 @@ import (
 
 // saveBitLocker asks BitLocker about every drive, when run as
 // Administrator, and saves the answer in the state folder: the service's
-// account can't ask, so the Security page shows this answer.
-func saveBitLocker(ctx context.Context, stateDir string, out io.Writer) {
+// account can't ask, so the Security page shows this answer. Tests
+// replace it.
+var saveBitLocker = func(ctx context.Context, stateDir string, out io.Writer) {
 	if !security.Elevated() {
 		return
 	}
@@ -28,5 +29,4 @@ func saveBitLocker(ctx context.Context, stateDir string, out io.Writer) {
 		return
 	}
 	fmt.Fprintln(out, "Saved the disk encryption result for the Security page.")
-	fmt.Fprintln(out)
 }

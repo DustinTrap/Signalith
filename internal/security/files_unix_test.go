@@ -54,3 +54,30 @@ func TestProbePermUnix(t *testing.T) {
 		t.Errorf("missing file: %v", err)
 	}
 }
+
+// A link's own mode is always 0777: what counts is the file it points to.
+func TestProbePermFollowsLinks(t *testing.T) {
+	dir := t.TempDir()
+	me := Account{UID: os.Getuid(), GID: os.Getgid()}
+	target := filepath.Join(dir, "master.key")
+	link := filepath.Join(dir, "link.key")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	p, err := probePerm(link, me)
+	if err != nil || p.OtherRead || p.OtherWrite || p.GroupRead || p.GroupWrite {
+		t.Errorf("private file behind a link: %+v %v", p, err)
+	}
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := probePerm(link, me); err != nil || !p.OtherRead {
+		t.Errorf("readable file behind a link: %+v %v", p, err)
+	}
+}

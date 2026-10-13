@@ -2,7 +2,7 @@ Signalith security report for siem-1
 Checked 2026-10-13 14:02 UTC. Signalith v0.9.0 (go1.26.9). Linux, systemd
 service.
 
-Summary: 1 at risk, 3 need attention, 14 good, 1 Signalith can't check from
+Summary: 1 at risk, 3 need attention, 13 good, 2 Signalith can't check from
 here.
 
 Fix first
@@ -21,7 +21,7 @@ Fix first
    How to fix:
    - Set a password of its own for the built-in admin, then restart Signalith.
    Run:
-     sudo signalith passwd -c /etc/signalith/signalith.yaml && sudo systemctl restart signalith
+     sudo signalith passwd && sudo systemctl restart signalith
    Docs: https://github.com/jrsamsanchez/signalith/blob/v0.9.0/docs/users.md#the-built-in-admin
 3. Needs attention: Certificate authority
    A new certificate authority is ready. Switch to it once browsers and agents
@@ -68,6 +68,15 @@ At rest
                 - Check the disk's settings in Amazon EC2's console, or ask
                   whoever runs the host.
                 Docs: https://github.com/jrsamsanchez/signalith/blob/v0.9.0/docs/security.md#disk-encryption
+  [can't tell]  Where OpenSearch keeps events
+                OpenSearch runs on another computer (10.0.0.20), so Signalith
+                can't see its disk.
+                How to check:
+                - On the computer OpenSearch runs on, check the disk that
+                  holds its data folder (path.data in opensearch.yml).
+                Run:
+                  lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS
+                Docs: https://github.com/jrsamsanchez/signalith/blob/v0.9.0/docs/security.md#where-opensearch-keeps-events
   [good]        Who can read OpenSearch
                 OpenSearch turns away anyone who doesn't sign in.
   [good]        Master key
@@ -81,9 +90,6 @@ At rest
                 Signalith's HTTPS keys and the Docker setup's generated
                 secrets are protected by file permissions, not by the master
                 key (see File permissions).
-  [good]        Where OpenSearch keeps events
-                OpenSearch keeps events in /var/lib/opensearch, on an
-                encrypted disk.
 
 In use
   [good]        Memory
@@ -107,8 +113,9 @@ Accounts and sign-in
                 page and keep the built-in admin for emergencies. The audit
                 log then shows who did what.
   [good]        Sign-in sessions
-                People are signed out after 12 hours without use, and after 7
-                days at most.
+                People are signed out after 12 hours without use, unless they
+                choose Keep me signed in, which keeps them signed in for up to
+                7 days.
 
 This server
   [good]        File permissions

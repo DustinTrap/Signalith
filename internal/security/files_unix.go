@@ -17,9 +17,10 @@ type Account struct {
 
 // probePerm reads who other than acct may use path, from its mode bits
 // and owner. Its own group counts only when that group is not the
-// account's own.
+// account's own. A link is followed: what counts is the file it points
+// to (Let's Encrypt's live/ folder and Kubernetes secrets are links).
 func probePerm(path string, acct Account) (*Perm, error) {
-	st, err := os.Lstat(path)
+	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}

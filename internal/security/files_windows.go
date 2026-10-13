@@ -8,6 +8,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 )
 
 // Account is the account Signalith runs as, whose files are its own.
@@ -32,13 +34,18 @@ var everyoneSIDs = map[string]bool{
 	"S-1-2-0":      true, // Local
 }
 
+// trustedInstaller is NT SERVICE\TrustedInstaller, which owns Windows'
+// own files.
+const trustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+
 // trustedSID reports whether sid may use Signalith's files: SYSTEM,
-// Administrators, a service account (Signalith's, TrustedInstaller's),
-// the file's owner, or acct.
+// Administrators, Signalith's and TrustedInstaller's service accounts,
+// the file's owner, or acct. Any other service's account is another
+// account.
 func trustedSID(sid, owner string, acct Account) bool {
 	switch {
-	case sid == "S-1-5-18", sid == "S-1-5-32-544", sid == "S-1-3-0",
-		strings.HasPrefix(sid, "S-1-5-80-"),
+	case sid == "S-1-5-18", sid == sidAdmins, sid == "S-1-3-0",
+		strings.EqualFold(sid, securefile.ServiceSID(securefile.ServiceName)), sid == trustedInstaller,
 		sid == owner, acct.SID != "" && strings.EqualFold(sid, acct.SID):
 		return true
 	}
@@ -69,6 +76,7 @@ func probePerm(path string, acct Account) (*Perm, error) {
 		p.OtherRead, p.OtherWrite = true, true
 		return p, nil
 	}
+	var admins map[string]bool // members of Administrators, read when needed
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
@@ -86,6 +94,20 @@ func probePerm(path string, acct Account) (*Perm, error) {
 		if everyoneSIDs[sid] {
 			p.OtherRead = p.OtherRead || read
 			p.OtherWrite = p.OtherWrite || write
+			continue
+		}
+		if !read && !write {
+			continue
+		}
+		// An administrator's own entry, which signalith commands run as
+		// Administrator used to add, gives nothing the Administrators
+		// entry doesn't.
+		if admins == nil {
+			if admins = adminMembers(); admins == nil {
+				admins = map[string]bool{}
+			}
+		}
+		if admins[sid] {
 			continue
 		}
 		if read || write {

@@ -67,7 +67,9 @@ func TestStrictConstraintsAreExact(t *testing.T) {
 	}
 	pool := caPool(t, m)
 	for name, ok := range map[string]bool{
-		"siem.corp.local": true, "a.siem.corp.local": true, "ws-test": true, "localhost": true,
+		"siem.corp.local": true, "ws-test": true, "localhost": true,
+		// Exact names only: nothing under them.
+		"a.siem.corp.local": false, "x.ws-test": false, "x.localhost": false,
 		"198.51.100.7": true, "10.1.2.3": true, "127.0.0.1": true, "::1": true,
 		"intranet.corp": false, "nas.home.arpa": false, "other.corp.local": false, "192.168.1.20": false, "10.1.2.4": false,
 		"127.0.0.2": false, "www.bank.example": false, "8.8.8.8": false,
@@ -90,6 +92,100 @@ func TestStrictConstraintsAreExact(t *testing.T) {
 	for _, n := range []string{"siem.corp.local", "198.51.100.7", "ws-test", "10.1.2.3", "localhost", "127.0.0.1", "::1"} {
 		if !slices.Contains(info.Names, n) {
 			t.Errorf("CAInfo names %v lack %s", info.Names, n)
+		}
+	}
+}
+
+// A machine named like a public top-level domain: the CA vouches for the
+// name itself, never for the websites under it.
+func TestHostNamedLikeATopLevelDomain(t *testing.T) {
+	prev := localNames
+	localNames = func() []string { return []string{"localhost", "127.0.0.1", "dev"} }
+	t.Cleanup(func() { localNames = prev })
+	for _, scope := range []string{ScopeStandard, ScopeStrict} {
+		c := &clock{time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)}
+		m := newScoped(t, t.TempDir(), c, scope)
+		if got := m.CAInfo().Scope; got != scope {
+			t.Errorf("%s: classified as %s", scope, got)
+		}
+		if !slices.Contains(m.CAInfo().Names, "dev") || slices.Contains(m.CAInfo().Names, ".dev") {
+			t.Errorf("%s: names %v", scope, m.CAInfo().Names)
+		}
+		pool := caPool(t, m)
+		for name, ok := range map[string]bool{"dev": true, "web.dev": false, "www.google.dev": false} {
+			_, err := forgeWith(t, m, c.t, name).Verify(x509.VerifyOptions{Roots: pool, DNSName: name, CurrentTime: c.t})
+			if (err == nil) != ok {
+				t.Errorf("%s %s: verify error %v, want allowed %v", scope, name, err, ok)
+			}
+			if got := m.CanCover(name) == nil; got != ok {
+				t.Errorf("%s CanCover(%s) = %v", scope, name, got)
+			}
+			if got := m.WouldAllow(scope, name); got != ok {
+				t.Errorf("%s WouldAllow(%s) = %v", scope, name, got)
+			}
+		}
+		// The server's own certificate still verifies for dev.
+		leaf, _ := m.GetCertificate(nil)
+		if err := leaf.Leaf.VerifyHostname("dev"); err != nil {
+			t.Errorf("%s: %v", scope, err)
+		}
+	}
+}
+
+// A CA made before names were kept exact says which of its names also
+// allow the names under them; a new one has none.
+func TestCAInfoSubtrees(t *testing.T) {
+	fakeMachine(t)
+	m := newScoped(t, t.TempDir(), &clock{time.Now()}, ScopeStandard, "siem.example.com")
+	if in := m.CAInfo(); len(in.Subtrees) != 0 {
+		t.Errorf("new CA: %v", in.Subtrees)
+	}
+	old := &x509.Certificate{PermittedDNSDomains: append(slices.Clone(privateDomains), "siem.example.com", "ws-test"),
+		PermittedIPRanges: []*net.IPNet{{IP: net.IPv4(10, 0, 0, 0).To4(), Mask: net.CIDRMask(8, 32)}}}
+	if in := infoOf(old); in.Scope != ScopeStandard || !slices.Equal(in.Subtrees, []string{"siem.example.com", "ws-test"}) {
+		t.Errorf("old CA: %s %v", in.Scope, in.Subtrees)
+	}
+}
+
+func TestExcludedSubtrees(t *testing.T) {
+	// Standard: private names keep their subtree; a name with another
+	// permitted name under it keeps its own.
+	got := excludedSubtrees([]string{"local", "corp", "siem.corp.local", "example.com", "siem.example.com", "dev"}, false)
+	if !slices.Equal(got, []string{".siem.example.com", ".dev"}) {
+		t.Errorf("standard %v", got)
+	}
+	got = excludedSubtrees([]string{"localhost", "siem.corp.local", "invalid"}, true)
+	if !slices.Equal(got, []string{".localhost", ".siem.corp.local"}) {
+		t.Errorf("strict %v", got)
+	}
+}
+
+// A name and one under it, both this server's: both are covered.
+func TestNameUnderAnother(t *testing.T) {
+	fakeMachine(t)
+	for _, scope := range []string{ScopeStandard, ScopeStrict} {
+		c := &clock{time.Now()}
+		m := newScoped(t, t.TempDir(), c, scope, "example.com", "siem.example.com")
+		pool := caPool(t, m)
+		for _, name := range []string{"example.com", "siem.example.com"} {
+			if _, err := forgeWith(t, m, c.t, name).Verify(x509.VerifyOptions{Roots: pool, DNSName: name, CurrentTime: c.t}); err != nil {
+				t.Errorf("%s %s: %v", scope, name, err)
+			}
+		}
+		leaf, _ := m.GetCertificate(nil)
+		if leaf.Leaf.VerifyHostname("siem.example.com") != nil || leaf.Leaf.VerifyHostname("example.com") != nil {
+			t.Errorf("%s: the certificate lacks a name", scope)
+		}
+	}
+}
+
+func TestPrivateName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"siem.corp.local": true, "nas.home.arpa": true, "localhost": true, "10.1.2.3": true, "fd00::5": true, "::ffff:192.168.1.2": true,
+		"paypal.com": false, "dev": false, "8.8.8.8": false, "not a name": false,
+	} {
+		if PrivateName(name) != want {
+			t.Errorf("%s: %v", name, !want)
 		}
 	}
 }
@@ -498,6 +594,7 @@ func TestWouldCoverAndSeenNames(t *testing.T) {
 	m.NoteName("192.168.1.20:8080")
 	m.NoteName("SIEM.example.com")
 	m.NoteName("not a name")
+	// The name asked for in a handshake isn't noted: anyone could send it.
 	m.GetCertificate(&tls.ClientHelloInfo{ServerName: "alias.corp"})
 	seen := m.SeenNames()
 	var names []string
@@ -505,12 +602,27 @@ func TestWouldCoverAndSeenNames(t *testing.T) {
 		names = append(names, s.Name)
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"192.168.1.20", "alias.corp", "siem.example.com"}) {
+	if !slices.Equal(names, []string{"192.168.1.20", "siem.example.com"}) {
 		t.Errorf("seen %v", names)
 	}
 	c.t = c.t.Add(25 * time.Hour)
 	if len(m.SeenNames()) != 0 {
 		t.Error("names older than a day are listed")
+	}
+}
+
+// A computer that refuses over HTTPS and over syslog has an entry for
+// each, so neither hides the other.
+func TestRecorderKeepsEachWayIn(t *testing.T) {
+	var r recorder
+	at := time.Now()
+	r.note("10.0.0.9", "https", at, maxRefusals)
+	r.note("10.0.0.9", "syslog", at.Add(time.Second), maxRefusals)
+	r.note("10.0.0.9", "https", at.Add(2*time.Second), maxRefusals)
+	list := r.list(time.Time{})
+	if len(list) != 2 || list[0].Via != "https" || list[0].Count != 2 || list[1].Via != "syslog" || list[1].Count != 1 ||
+		list[0].Address != "10.0.0.9" || list[1].Address != "10.0.0.9" {
+		t.Errorf("%+v", list)
 	}
 }
 

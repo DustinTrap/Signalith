@@ -11,13 +11,9 @@ import (
 // checkBuiltinPassword: accounts.builtin_password.
 func checkBuiltinPassword(f *Facts) *Check {
 	a := f.Admin
-	cfg := "/etc/signalith/signalith.yaml"
-	if f.Config != nil && f.Config.Path() != "" && f.Server.OS != "windows" && !f.InContainer {
-		cfg = f.Config.Path()
-	}
 	fix := &Fix{Steps: []string{"Set a password of its own for the built-in admin, then restart Signalith."},
-		Commands: cmds("sudo signalith passwd -c "+sh(cfg)+" && sudo systemctl restart signalith",
-			winExe+" passwd; Restart-Service Signalith",
+		Commands: cmds("sudo signalith passwd"+configArg(f, "linux")+" && sudo systemctl restart signalith",
+			winExe+" passwd"+configArg(f, "windows")+"; Restart-Service Signalith",
 			dockerCompose+" exec signalith signalith passwd\n"+dockerCompose+" restart signalith"),
 		Docs: doc(docUsersBuiltin)}
 	removeEnv := "Then remove SIGNALITH_ADMIN_PASSWORD from where Signalith is started."
@@ -27,6 +23,9 @@ func checkBuiltinPassword(f *Facts) *Check {
 		return &Check{State: Risk, Line: "The built-in admin's password is change-me-please, an example anyone can look up.", Fix: fix}
 	case a.DockerFirst:
 		return &Check{State: Attention, Line: "The built-in admin still has the first password the Docker setup made, which is kept as plain text in a Docker volume.", Fix: fix}
+	case a.FromFile:
+		fix.Steps = append(fix.Steps, "Then remove SIGNALITH_ADMIN_PASSWORD_FILE from where Signalith is started, and delete the file.")
+		return &Check{State: Attention, Line: "The built-in admin's password is read from the file in SIGNALITH_ADMIN_PASSWORD_FILE, as plain text.", Fix: fix}
 	case a.FromEnv:
 		fix.Steps = append(fix.Steps, removeEnv)
 		return &Check{State: Attention, Line: "The built-in admin's password is set in the SIGNALITH_ADMIN_PASSWORD environment variable.", Fix: fix}
@@ -129,13 +128,13 @@ func checkSessions(f *Facts) *Check {
 		return &Check{State: Attention, Line: "People stay signed in for up to " + span(idle) + " without using Signalith.",
 			Fix: &Fix{Steps: []string{"Set Sign out after to 12h or less."}, Setting: "auth.session_timeout"}}
 	}
-	return &Check{State: Good, Line: "People are signed out after " + span(idle) + " without use, and after 7 days at most."}
+	return &Check{State: Good, Line: "People are signed out after " + span(idle) + " without use, unless they choose Keep me signed in, which keeps them signed in for up to 7 days."}
 }
 
 // checkAgentTokens: accounts.agent_tokens.
 func checkAgentTokens(f *Facts) *Check {
 	tokens := f.Config.Ingest.Tokens
-	if len(tokens) == 0 {
+	if len(tokens) == 0 && !f.PublicTokenAccepted {
 		return nil
 	}
 	fix := &Fix{Steps: []string{
@@ -143,7 +142,7 @@ func checkAgentTokens(f *Facts) *Check {
 		"Give each agent a new configuration from Add data.",
 		"Then remove the old token.",
 	}, Page: &PageLink{ID: "data", Label: "Open Add data"}, Docs: doc(docEncCommands),
-		Commands: signalithCommands("secrets set ingest.tokens")}
+		Commands: signalithCommands(f, "secrets set ingest.tokens")}
 	details := []string{"All agents share a token, so one taken from any agent works for all of them until it's replaced."}
 	shortest := 0
 	for _, t := range tokens {
@@ -153,6 +152,14 @@ func checkAgentTokens(f *Facts) *Check {
 		if n := len(t); shortest == 0 || n < shortest {
 			shortest = n
 		}
+	}
+	if f.PublicTokenAccepted {
+		// Accepted for agents an older Docker quick start set up, while
+		// agents on plain HTTP are (see api.retiredTokenAccepted).
+		return &Check{State: Risk, Line: "Agents can still send events over plain HTTP with change-this-ingest-token, an example token anyone can look up.",
+			Details: []string{"Signalith accepts it so agents set up by an older Docker quick start keep working, and only while agents on plain HTTP are accepted."},
+			Fix: &Fix{Steps: []string{"Choose Refuse them under Agents on plain HTTP once every agent has its configuration from Add data. The Health page names any agent still sending that way."},
+				Setting: "server.tls.plaintext_ingest", Page: &PageLink{ID: "data", Label: "Open Add data"}, Docs: doc(docHTTPSUpgrade)}}
 	}
 	if shortest < 24 {
 		return &Check{State: Attention, Line: "An agent token is only " + itoa(shortest) + plural(shortest, " character", " characters") +
@@ -172,8 +179,12 @@ func checkOpenSearchRole(f *Facts) *Check {
 		return &Check{State: Risk, Line: "Signalith signs in to OpenSearch as admin with the password admin, which anyone can look up.", Fix: fix}
 	}
 	if o.AuthErr != "" {
-		return &Check{State: Unknown, Line: "Signalith couldn't ask OpenSearch what its account may do.", Details: []string{"OpenSearch answered: " + short(o.AuthErr) + "."},
+		c := &Check{State: Unknown, Line: "Signalith couldn't ask OpenSearch what its account may do.", Details: []string{osWhy(o.AuthErr)},
 			Fix: &Fix{Steps: []string{"Check the roles mapped to Signalith's account in OpenSearch's security settings."}, Docs: doc(docOSRoles)}}
+		if !osAnswered(o.AuthErr) {
+			c.Fix = reachFix()
+		}
+		return c
 	}
 	user := o.AuthUser
 	if user == "" {

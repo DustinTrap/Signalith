@@ -267,6 +267,49 @@ func TestTLSWithCertificateManager(t *testing.T) {
 	waitFor(t, "the second event", func() bool { return bulk.count() == 2 })
 }
 
+// The name a TLS sender asked for is heard once per connection, and only
+// after it sends syslog: a bare handshake doesn't count.
+func TestTLSNameAfterFirstMessage(t *testing.T) {
+	m, err := tlsauto.New(tlsauto.Options{Dir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.EnsureName("syslog.corp.lan"); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var names []string
+	bulk := &capture{}
+	r, _, _ := start(t, Config{TLS: "127.0.0.1:0", GetCertificate: m.GetCertificate, OnTLSName: func(n string) {
+		mu.Lock()
+		names = append(names, n)
+		mu.Unlock()
+	}}, bulk)
+	heard := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string{}, names...)
+	}
+	c, err := tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{InsecureSkipVerify: true, ServerName: "stranger.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(m.CAPEM())
+	c, err = tls.Dial("tcp", addr(t, r, "tls"), &tls.Config{RootCAs: pool, ServerName: "syslog.corp.lan"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := "<86>1 2026-10-12T13:00:00Z web1 sshd 900 - - Accepted password for bob from 192.0.2.4 port 22 ssh2"
+	fmt.Fprintf(c, "%d %s%d %s", len(msg), msg, len(msg), msg)
+	waitFor(t, "the events", func() bool { return bulk.count() == 2 })
+	c.Close()
+	if got := heard(); len(got) != 1 || got[0] != "syslog.corp.lan" {
+		t.Errorf("%v", got)
+	}
+}
+
 func TestTLSNeedsCertificate(t *testing.T) {
 	r := New(Config{TLS: "127.0.0.1:0", CertFile: "/nonexistent/cert.pem", KeyFile: "/nonexistent/key.pem"}, &ingest.Pipeline{Store: &capture{}}, nil)
 	err := r.Start(context.Background())

@@ -200,10 +200,21 @@ func TestOpenSearchCollectors(t *testing.T) {
 	if o.Anonymous != "closed" || !o.AuthProbed || o.AuthUser != "signalith" || !slices.Contains(o.AuthRoles, "all_access") || o.DemoAdmin {
 		t.Errorf("%+v", o)
 	}
-	if o.DataErr != "" || len(o.DataPaths) != 1 || o.DataPaths[0].Path != "/usr/share/opensearch/data" {
-		t.Errorf("data %+v %q", o.DataPaths, o.DataErr)
+	// The fake says /usr/share/opensearch/data, a container's folder that
+	// isn't on this computer: its disk is not looked for.
+	if o.DataErr != "" || len(o.DataPaths) != 0 || !slices.Equal(o.DataMissing, []string{"/usr/share/opensearch/data"}) {
+		t.Errorf("data %+v %q %q", o.DataPaths, o.DataMissing, o.DataErr)
 	}
 	if len(f.TimedOut) != 0 {
 		t.Errorf("timed out %v", f.TimedOut)
+	}
+
+	// A folder that is here is.
+	here := t.TempDir()
+	fake.SetPaths("/opt/opensearch", here)
+	f = &Facts{Now: now, Config: c}
+	Gather(context.Background(), f, 5*time.Second, OpenSearchCollectors(c, false, t.TempDir()))
+	if o := f.OpenSearch; len(o.DataPaths) != 1 || o.DataPaths[0].Path != here || len(o.DataMissing) != 0 {
+		t.Errorf("data %+v %q", o.DataPaths, o.DataMissing)
 	}
 }

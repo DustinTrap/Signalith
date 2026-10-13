@@ -25,8 +25,13 @@ type Facts struct {
 	// SettingEnv names, for each setting set by an environment variable,
 	// that variable.
 	SettingEnv map[string]string
-	// InContainer is true when Signalith runs in a container.
-	InContainer bool
+	// InContainer is true when Signalith runs in a container, and Docker
+	// when that container is the Docker quick start's.
+	InContainer, Docker bool
+	// PublicTokenAccepted is true when the server accepts the old example
+	// ingest token over plain HTTP: in a container, with HTTPS on and
+	// agents on plain HTTP allowed (see api.retiredTokenAccepted).
+	PublicTokenAccepted bool
 	// Uptime is how long the server has run (zero in the CLI).
 	Uptime time.Duration
 
@@ -123,10 +128,13 @@ type TLSFacts struct {
 }
 
 // SeenName is a name someone used to reach this server, and whether a
-// strict certificate authority made now would cover it.
+// strict certificate authority made now would cover it. Own is whether
+// Signalith can tell the name is this server's: it leads to one of this
+// computer's addresses, or only means something on a private network.
 type SeenName struct {
 	Name          string    `json:"name"`
 	CoveredStrict bool      `json:"covered_strict"`
+	Own           bool      `json:"own"`
 	LastSeen      time.Time `json:"last_seen"`
 }
 
@@ -185,8 +193,15 @@ type RuntimeFacts struct {
 	// PlainSenders are the agents that sent over plain HTTP in the last
 	// day, by name (address and host names).
 	PlainSenders []string
-	// PlainSenderCount counts them as agents.
-	PlainSenderCount int
+	// PlainSenderCount counts them as agents. Agents on this computer are
+	// left out of both, and counted in LocalPlainSenders: what they send
+	// never crosses the network.
+	PlainSenderCount  int
+	LocalPlainSenders int
+	// DirectPlainAgents are the addresses of agents that sent events
+	// straight to Signalith over plain HTTP while HTTPS is off, not from
+	// this computer or through a trusted proxy, in the last day.
+	DirectPlainAgents []string
 	// Syslog senders in the last day, by protocol, and whether every
 	// plain one came from the container's default gateway.
 	SyslogSenders map[string]int
@@ -257,6 +272,10 @@ type OpenSearchFacts struct {
 	// when it runs on this computer; DataErr says why they are unknown.
 	DataPaths []Disk
 	DataErr   string
+	// DataMissing lists the folders OpenSearch named that don't exist on
+	// this computer, as when it runs in a container; DataPaths leaves
+	// them out.
+	DataMissing []string
 	// DemoAdmin is true when Signalith signs in as admin with the
 	// password admin. The password is compared in memory, never shown.
 	DemoAdmin bool
@@ -280,7 +299,8 @@ type UserFacts struct {
 type AdminFacts struct {
 	Public      bool // change-me-please
 	FromEnv     bool // SIGNALITH_ADMIN_PASSWORD, with no hash file
-	DockerFirst bool // SIGNALITH_ADMIN_PASSWORD_FILE, not changed since
+	DockerFirst bool // SIGNALITH_ADMIN_PASSWORD_FILE in the Docker quick start, not changed since
+	FromFile    bool // SIGNALITH_ADMIN_PASSWORD_FILE elsewhere, not changed since
 	WeakHash    bool // bcrypt cost below the default
 	SetAt       *time.Time
 }
@@ -298,10 +318,15 @@ type ProcessFacts struct {
 	Systemd bool
 	// The protections found, under their plain names.
 	NoNewPrivs, Seccomp, NoCaps, NoCapsAtAll, ReadOnlyRoot, HiddenProc, PrivateDev, Umask077 bool
-	// Windows.
-	SID      string
-	Elevated bool
-	Service  bool
+	// NoHiddenProc is true when this Linux is too old to hide other
+	// processes from one service (before 5.8), so the unit can't.
+	NoHiddenProc bool
+	// Windows. Elevated is true when the account is an administrator;
+	// AdminUnknown when that couldn't be found out.
+	SID          string
+	Elevated     bool
+	AdminUnknown bool
+	Service      bool
 }
 
 // MemoryFacts is about whether Signalith's memory can be saved.
@@ -371,8 +396,12 @@ type Disk struct {
 	Source     string `json:"source,omitempty"`
 	Device     string `json:"device,omitempty"`
 	// Kind is encrypted, plain, network, memory, unreadable, virtual,
-	// container, windows (no saved answer) or unknown.
+	// container, windows (no saved answer), denied (this account may not
+	// look) or unknown.
 	Kind string `json:"kind"`
+	// Hidden is a folder above Path that Signalith may not look into:
+	// the disk is that folder's, as no other is mounted inside it.
+	Hidden string `json:"hidden,omitempty"`
 	// Method names the encryption, such as LUKS2 or BitLocker.
 	Method string `json:"method,omitempty"`
 	// Provider names the virtual machine's host, when known.
@@ -394,6 +423,7 @@ const (
 	DiskVirtual    = "virtual"
 	DiskContainer  = "container"
 	DiskWindows    = "windows"
+	DiskDenied     = "denied"
 	DiskUnknown    = "unknown"
 )
 
@@ -435,6 +465,19 @@ func joinAnd(items []string) string {
 		return items[0]
 	}
 	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+}
+
+// orList lists up to n items joined with "or", then "or k more".
+func orList(items []string, n int) string {
+	switch {
+	case len(items) > n:
+		return strings.Join(items[:n], ", ") + " or " + itoa(len(items)-n) + " more"
+	case len(items) > 1:
+		return strings.Join(items[:len(items)-1], ", ") + " or " + items[len(items)-1]
+	case len(items) == 1:
+		return items[0]
+	}
+	return ""
 }
 
 // shorten lists up to n items, then "and k more".

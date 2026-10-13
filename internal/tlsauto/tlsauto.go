@@ -160,12 +160,11 @@ func (m *Manager) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// GetCertificate is for tls.Config.GetCertificate. It notes the name the
-// client asked for (see SeenNames).
-func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if hello != nil && hello.ServerName != "" {
-		m.NoteName(hello.ServerName)
-	}
+// GetCertificate is for tls.Config.GetCertificate. The name a client
+// asks for in the handshake is not noted here: anyone who can reach the
+// port could send any name. The API and the syslog receiver note it once
+// the client has proved it may send (see NoteName).
+func (m *Manager) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	return m.cert.Load(), nil
 }
 
@@ -450,7 +449,7 @@ func (m *Manager) makeCA() error {
 		host = "signalith"
 	}
 	now := m.now()
-	dns, ips := constraints(m.candidateNames(), normScope(m.opts.Scope) == ScopeStrict)
+	dns, excluded, ips := constraints(m.candidateNames(), normScope(m.opts.Scope) == ScopeStrict)
 	tmpl := &x509.Certificate{
 		SerialNumber:                serial(),
 		Subject:                     pkix.Name{CommonName: "Signalith Local CA (" + host + ")", Organization: []string{"Signalith"}},
@@ -462,6 +461,7 @@ func (m *Manager) makeCA() error {
 		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         dns,
+		ExcludedDNSDomains:          excluded,
 		PermittedIPRanges:           ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
@@ -557,12 +557,55 @@ var (
 
 // constraints returns the name constraints for a new CA: privateDomains
 // and privateRanges, plus each of names outside them; or, when strict,
-// exactly names, each address on its own. A DNS name there also allows
-// the names under it.
-func constraints(names []string, strict bool) (dns []string, ips []*net.IPNet) {
+// exactly names, each address on its own. A permitted DNS name would
+// also allow the names under it, so those are excluded (see
+// excludedSubtrees) for each one that isn't a private network name.
+func constraints(names []string, strict bool) (dns, excluded []string, ips []*net.IPNet) {
 	if strict {
-		return strictConstraints(names)
+		dns, ips = strictConstraints(names)
+		return dns, excludedSubtrees(dns, true), ips
 	}
+	dns, ips = standardConstraints(names)
+	return dns, excludedSubtrees(dns, false), ips
+}
+
+// excludedSubtrees keeps each permitted DNS name from allowing the names
+// under it: a CA for siem.example.com would otherwise also vouch for
+// www.siem.example.com, and one for a machine named "dev" for every .dev
+// website. ".name" excludes only the names under name, not name itself.
+// Private network names (in standard) keep theirs, and so does a name
+// with another permitted name under it, which excluding would exclude
+// too.
+func excludedSubtrees(dns []string, strict bool) []string {
+	var out []string
+	for _, d := range dns {
+		switch {
+		case d == "invalid":
+		case !strict && domainAllowed(privateDomains, d):
+		case slices.ContainsFunc(dns, func(o string) bool { return strings.HasSuffix(o, "."+d) }):
+		default:
+			out = append(out, "."+d)
+		}
+	}
+	return out
+}
+
+// PrivateName reports whether name only means something on a private
+// network: a name under one of the private network suffixes, or a
+// private, shared, loopback or link-local address. Any standard
+// certificate authority may vouch for such a name.
+func PrivateName(name string) bool {
+	if a, err := netip.ParseAddr(name); err == nil {
+		a = a.Unmap()
+		return slices.ContainsFunc(privateRanges, func(p netip.Prefix) bool { return p.Contains(a) })
+	}
+	n, ok := normalizeName(name)
+	return ok && domainAllowed(privateDomains, n)
+}
+
+// standardConstraints are the constraints of a standard CA: the private
+// network names and ranges, and each of names outside them.
+func standardConstraints(names []string) (dns []string, ips []*net.IPNet) {
 	dns = slices.Clone(privateDomains)
 	ranges := slices.Clone(privateRanges)
 	for _, n := range names {
@@ -570,7 +613,9 @@ func constraints(names []string, strict bool) (dns []string, ips []*net.IPNet) {
 			if !slices.ContainsFunc(ranges, func(p netip.Prefix) bool { return p.Contains(a) }) {
 				ranges = append(ranges, netip.PrefixFrom(a, a.BitLen()))
 			}
-		} else if !domainAllowed(dns, n) {
+		} else if !domainAllowed(privateDomains, n) && !slices.Contains(dns, n) {
+			// Each name on its own, even one under another: the names
+			// under a name are excluded (see excludedSubtrees).
 			dns = append(dns, n)
 		}
 	}
@@ -620,7 +665,21 @@ func caAllows(ca *x509.Certificate, name string) bool {
 		}
 		return slices.ContainsFunc(ca.PermittedIPRanges, func(r *net.IPNet) bool { return r.Contains(a.AsSlice()) })
 	}
+	if slices.ContainsFunc(ca.ExcludedDNSDomains, func(d string) bool { return domainExcluded(d, name) }) {
+		return false
+	}
 	return len(ca.PermittedDNSDomains) == 0 || domainAllowed(ca.PermittedDNSDomains, name)
+}
+
+// domainExcluded reports whether an excluded DNS constraint covers name:
+// ".example.com" only the names under example.com, "example.com" that
+// name too.
+func domainExcluded(constraint, name string) bool {
+	c := strings.ToLower(constraint)
+	if strings.HasPrefix(c, ".") {
+		return strings.HasSuffix(name, c)
+	}
+	return name == c || strings.HasSuffix(name, "."+c)
 }
 
 // domainAllowed reports whether name is one of domains or under one, the

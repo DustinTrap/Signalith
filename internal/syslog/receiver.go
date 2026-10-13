@@ -74,6 +74,10 @@ type Config struct {
 	// OnRefusal, when set, hears of each sender that refused the
 	// certificate during the TLS handshake, by its address.
 	OnRefusal func(addr string)
+	// OnTLSName, when set, hears the name a TLS sender asked for in the
+	// handshake, once per connection, after its first message: only
+	// senders syslog.allow lets in, and that send syslog, count.
+	OnTLSName func(name string)
 	// Allow lists the senders that may send; empty allows any sender.
 	Allow []netip.Prefix
 	// PublicPort is the port senders use for UDP and TCP when something
@@ -643,6 +647,10 @@ func (r *Receiver) serveConn(ctx context.Context, c net.Conn, cs *connState, pro
 		}
 		conn = tc
 	}
+	var tlsName string
+	if tc, ok := conn.(*tls.Conn); ok && r.cfg.OnTLSName != nil {
+		tlsName = tc.ConnectionState().ServerName
+	}
 	fr := newFramer(connReader{c: conn, cs: cs, idle: r.cfg.IdleTimeout, msg: r.cfg.MessageTimeout}, r.cfg.MaxMessageSize)
 	fr.mark = func(inMessage bool) {
 		if inMessage {
@@ -656,6 +664,10 @@ func (r *Receiver) serveConn(ctx context.Context, c net.Conn, cs *connState, pro
 		switch {
 		case err == nil:
 			r.handle(ctx, msg, from, proto, true)
+			if tlsName != "" {
+				r.cfg.OnTLSName(tlsName)
+				tlsName = ""
+			}
 		case errors.Is(err, errTooLarge):
 			r.tooLarge.Add(1)
 		case errors.Is(err, errFraming):

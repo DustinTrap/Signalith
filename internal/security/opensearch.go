@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -301,9 +303,11 @@ func OpenSearchCollectors(c *config.Config, inContainer bool, stateDir string) [
 			}
 		},
 	}, {
-		Name:    "OpenSearch account",
-		Checks:  []string{"accounts.opensearch_role"},
-		Timeout: OpenSearchTimeout,
+		Name:   "OpenSearch account",
+		Checks: []string{"accounts.opensearch_role"},
+		// Room for the probe's own time limit, so a silent OpenSearch is
+		// reported as such rather than as a check that ran out of time.
+		Timeout: OpenSearchTimeout + DialTimeout,
 		Run: func(ctx context.Context) func(*Facts) {
 			info, noPlugin, why := probeAuthInfo(ctx, conn)
 			return func(f *Facts) {
@@ -322,21 +326,27 @@ func OpenSearchCollectors(c *config.Config, inContainer bool, stateDir string) [
 			Run: func(ctx context.Context) func(*Facts) {
 				paths, err := probeDataPaths(ctx, conn)
 				var disks []Disk
+				var missing []string
 				if err == nil {
-					disks = probeDisks(paths, false, stateDir)
-					// Keep each path as OpenSearch named it.
-					for i := range disks {
-						if i < len(paths) && disks[i].Path == "" {
-							disks[i].Path = paths[i]
+					// A folder that isn't here, such as a container's
+					// /usr/share/opensearch/data, says nothing about this
+					// computer's disks.
+					var here []string
+					for _, p := range paths {
+						if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+							missing = append(missing, p)
+						} else {
+							here = append(here, p)
 						}
 					}
+					disks = probeDisks(here, false, stateDir)
 				}
 				return func(f *Facts) {
 					if err != nil {
 						f.OpenSearch.DataErr = err.Error()
 						return
 					}
-					f.OpenSearch.DataPaths = disks
+					f.OpenSearch.DataPaths, f.OpenSearch.DataMissing = disks, missing
 				}
 			},
 		})

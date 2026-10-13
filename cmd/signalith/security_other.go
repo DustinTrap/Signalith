@@ -8,4 +8,4 @@ import (
 )
 
 // saveBitLocker is for Windows, where the service can't ask BitLocker.
-func saveBitLocker(context.Context, string, io.Writer) {}
+var saveBitLocker = func(context.Context, string, io.Writer) {}

@@ -466,6 +466,82 @@ func readProcess(fs sysFS, pid string, p *ProcessFacts) error {
 	return nil
 }
 
+// dumpValues are the values of a LocalDumps registry key, and which of
+// them are set.
+type dumpValues struct {
+	Type, Flags                  uint64
+	Folder                       string
+	HasType, HasFlags, HasFolder bool
+}
+
+// miniDumpWithFullMemory is the CustomDumpFlags bit for all of memory.
+const miniDumpWithFullMemory = 0x2
+
+// mergeDumps works out what Windows Error Reporting does for
+// signalith.exe from the global LocalDumps key at base and its own key
+// under it (when appOK). The program's key sets only the values it has;
+// the others come from the global key, or default to a mini dump.
+func mergeDumps(global, app dumpValues, appOK bool, base string) MemoryFacts {
+	m := MemoryFacts{Known: true}
+	t, flags, folder := uint64(1), uint64(0), ""
+	typeAt, flagsAt := base, base
+	if global.HasType {
+		t = global.Type
+	}
+	if global.HasFlags {
+		flags = global.Flags
+	}
+	if global.HasFolder {
+		folder = global.Folder
+	}
+	if appOK {
+		at := base + `\signalith.exe`
+		if app.HasType {
+			t, typeAt = app.Type, at
+		}
+		if app.HasFlags {
+			flags, flagsAt = app.Flags, at
+		}
+		if app.HasFolder {
+			folder = app.Folder
+		}
+	}
+	switch {
+	case t == 2:
+		m.FullDumps, m.DumpsRegistry = true, typeAt
+	case t == 0 && flags&miniDumpWithFullMemory != 0:
+		// A custom dump that holds all of memory.
+		m.FullDumps, m.DumpsRegistry = true, flagsAt
+	}
+	if m.FullDumps {
+		m.DumpFolder = folder
+	}
+	return m
+}
+
+// releaseAtLeast reports whether a Linux release, such as
+// "4.18.0-553.el8.x86_64", is major.minor or newer; true when it can't be
+// read.
+func releaseAtLeast(release string, major, minor int) bool {
+	parts := strings.SplitN(release, ".", 3)
+	if len(parts) < 2 {
+		return true
+	}
+	// The minor number may run into what follows, as in 5.8-rc1.
+	digits := func(s string) string {
+		if i := strings.IndexFunc(s, func(r rune) bool { return r < '0' || r > '9' }); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	ma, err1 := strconv.Atoi(parts[0])
+	mi, err2 := strconv.Atoi(digits(parts[1]))
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	return ma > major || ma == major && mi >= minor
+}
+
 // coreLimit reads "Max core file size" from /proc/<pid>/limits: whether
 // its soft limit is 0.
 func coreLimitOff(fs sysFS, pid string) (off, known bool) {

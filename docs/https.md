@@ -224,7 +224,9 @@ Entering another name under **Agents send to** says so, and Health lists any nam
 Every computer that trusts Signalith's CA accepts any certificate it signs. The
 `server.tls.ca_scope` setting (**Certificate authority reaches** on the Settings page)
 chooses how far a CA that Signalith makes may vouch. Neither choice lets it vouch for
-public websites.
+other public websites: beyond private network names, it may vouch only for this
+server's own names, each exactly, never the names under them. So a server named `dev`
+gets a CA for `dev`, not for every `.dev` website.
 
 - **Standard** (the default). It can vouch for this server and for private network
   names and addresses, as listed in
@@ -235,10 +237,11 @@ public websites.
 - **Strict**. It can vouch only for this server's names and addresses as they are when
   the CA is made: its host name and full DNS name, its IP addresses, `localhost`,
   `127.0.0.1` and `::1`, the `server.public_url` host, `server.tls.names`, and the
-  addresses entered under **Agents send to** on Add data. Each address is allowed on
-  its own, not its whole network. A stolen `ca.key` is then no more use than the
-  server's own certificate. But a new name or address later means a new CA, which
-  every browser and agent must trust again.
+  addresses entered under **Agents send to** on Add data. Each name and address is
+  allowed on its own: not the names under it, nor its whole network. A stolen `ca.key`
+  then lets someone pose only as this server, to computers that trust the CA. But a
+  new name or address later means a new CA, which every browser and agent must trust
+  again.
 
 Strict suits a server whose name and address won't change, especially when:
 
@@ -252,8 +255,14 @@ not the address agents use, such as `192.168.1.20`. With standard, entering that
 address under **Agents send to** just works. With strict, put it under
 `server.tls.names` before the CA is made, or make a new CA later.
 
-A strict CA has one limit that comes from the X.509 rules: a name such as
-`siem.corp.local` also allows names under it, such as `a.siem.corp.local`.
+Both keep a name from covering the names under it, such as `a.siem.example.com` under
+`siem.example.com`, with the X.509 rule for excluded names. Current browsers, Go and
+OpenSSL (which Fluent Bit and curl use on Linux) apply it; a program that ignores name
+limits altogether ignores this one too. One exception: when two of the server's names are one
+under the other, such as `example.com` and `siem.example.com`, the names under the
+shorter one stay allowed, since excluding them would exclude the longer name too.
+A CA made by an earlier version of Signalith doesn't have this rule; make a new one to
+get it.
 
 The setting is used only when a CA is made: on the first start, and when you make a new
 one (see [below](#switching-to-a-new-certificate-authority)). Changing it never replaces
@@ -275,7 +284,8 @@ Make a new CA when:
 - the CA was made by an older version without limits, or its 10 years are nearly up.
 
 Browsers and agents must trust a new CA before Signalith uses it. So the change takes a
-few steps, and both CAs are trusted in between. Nothing stops working at any step.
+few steps, and both CAs are trusted in between. Nothing stops working as long as every
+computer trusts the new one before you switch.
 
 Each step is on the Security page (**Configure > Security**), for the server that
 serves the page. A script can take the same steps with `POST /api/security/ca`, as an
@@ -316,6 +326,25 @@ that refused the new certificate, so you can see who still needs it.
 **4. Switch back, if you need to.** If something you missed refuses the new
 certificate, switch back. The old CA serves again, and the new one waits, still
 shared, until you switch again.
+
+Trust the new CA in your own browser before you switch. Signalith tells browsers to
+use HTTPS only for its name, so a browser that doesn't trust the new CA can't open the
+Security page at that name, and offers no way past the warning. To switch back
+without it, either:
+
+- open the page by the server's IP address, such as `https://192.168.1.20:8080`, where
+  the browser lets you continue past the warning; or
+- run this on the server, which trusts the new CA from the state folder and asks for
+  the admin's password (use your port if it isn't 8080):
+
+  ```sh
+  curl --cacert /var/lib/signalith/tls/ca.pem -u admin -H 'Content-Type: application/json' \
+    -d '{"action":"rollback"}' https://localhost:8080/api/security/ca
+  ```
+
+  On Windows, in PowerShell, use `curl.exe` and
+  `C:\ProgramData\Signalith\tls\ca.pem`. In Docker, run it on the computer that runs
+  Docker with the `ca.pem` from `docker compose cp signalith:/var/lib/signalith/tls/ca.pem .`.
 
 **5. Remove the old one.** Once nothing refuses the new certificate, remove the
 previous CA. You can't switch back after that. Then take it out of the computers that

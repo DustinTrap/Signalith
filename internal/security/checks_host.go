@@ -20,6 +20,10 @@ func checkAccount(f *Facts) *Check {
 			return &Check{State: Good, Line: "Signalith runs as its own service account (NT SERVICE\\Signalith)."}
 		case p.Elevated:
 			return &Check{State: Attention, Line: "Signalith runs as " + p.UserName + ", an administrator.", Fix: fix}
+		case p.AdminUnknown:
+			return &Check{State: Unknown, Line: "Signalith runs as " + p.UserName + ". Signalith couldn't tell whether that account is an administrator.",
+				Fix: &Fix{Steps: []string{"Check whether " + p.UserName + " is in the Administrators group. If it is, run install.ps1 from this version again, in an elevated PowerShell. It moves the service to its own account."},
+					Commands: cmds("", "net localgroup Administrators", ""), Docs: doc(docReadmeWindows)}}
 		}
 		return &Check{State: Good, Line: "Signalith runs as " + p.UserName + ", without administrator rights."}
 	}
@@ -99,18 +103,26 @@ func checkService(f *Facts) *Check {
 	add(p.Seccomp, "a system-call filter")
 	add(p.NoCaps, "no extra capabilities")
 	add(p.ReadOnlyRoot, "a read-only system")
-	add(p.HiddenProc, "hidden processes")
+	// systemd hides other processes (ProtectProc=invisible) only on Linux
+	// 5.8 or newer; on older ones the unit can't, so it isn't missing.
+	var details []string
+	if p.NoHiddenProc && !p.HiddenProc {
+		details = append(details, "Hidden processes: not available on this Linux version.")
+	} else {
+		add(p.HiddenProc, "hidden processes")
+	}
 	add(p.PrivateDev, "private /dev")
 	add(p.Umask077, "private new files")
 	if len(missing) > 0 {
-		return &Check{State: Attention, Line: "Signalith's service is missing protections its current systemd unit sets up: " + joinAnd(missing) + ".", Fix: unitFix}
+		return &Check{State: Attention, Line: "Signalith's service is missing protections its current systemd unit sets up: " + joinAnd(missing) + ".", Details: details, Fix: unitFix}
 	}
-	return &Check{State: Good, Line: "Signalith's service runs with all the protections its systemd unit sets up."}
+	return &Check{State: Good, Line: "Signalith's service runs with all the protections its systemd unit sets up.", Details: details}
 }
 
 // filePermCommands make files and folders Signalith's own: one command
-// per problem, or one for the whole state folder.
-func filePermCommands(probs []FileProblem, stateDir string) map[string]string {
+// per problem, or one for the whole state folder. They name this
+// server's paths, so only its own system's are kept.
+func filePermCommands(f *Facts, probs []FileProblem, stateDir string) map[string]string {
 	var linux, windows, docker []string
 	for _, p := range probs {
 		dir := p.Kind == "folder"
@@ -129,14 +141,14 @@ func filePermCommands(probs []FileProblem, stateDir string) map[string]string {
 		} else {
 			windows = append(windows, icaclsFile(p.Path, svc))
 		}
-		if inVolume(p.Path) != "" && len(docker) == 0 {
+		if inVolume(p.Path) != "" && f.Docker && len(docker) == 0 {
 			docker = append(docker, busybox("chmod -R go-rwx /data"))
 		}
 	}
 	if len(linux) > 3 && stateDir != "" {
 		linux = []string{"sudo chmod -R go-rwx " + sh(stateDir)}
 	}
-	return cmds(strings.Join(linux, "\n"), strings.Join(windows, "\n"), strings.Join(docker, "\n"))
+	return ownOnly(f, cmds(strings.Join(linux, "\n"), strings.Join(windows, "\n"), strings.Join(docker, "\n")))
 }
 
 // checkFiles: host.files.
@@ -164,10 +176,10 @@ func checkFiles(f *Facts) *Check {
 		steps := []string{"Make them readable and writable only by Signalith's account."}
 		if f.Server.OS == "windows" {
 			steps = append(steps, "For everything in C:\\ProgramData\\Signalith, run install.ps1 from this version again; it resets access there.")
-		} else if f.InContainer {
+		} else if f.Docker {
 			steps = append(steps, "docker volume ls shows the volume's name.")
 		}
-		return &Fix{Steps: steps, Commands: filePermCommands(list, stateDir), Docs: doc(docSecFiles)}
+		return &Fix{Steps: steps, Commands: filePermCommands(f, list, stateDir), Docs: doc(docSecFiles)}
 	}
 	var details []string
 	if len(risk) > 0 {

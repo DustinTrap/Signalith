@@ -64,14 +64,18 @@ Whether data is encrypted as it crosses the network.
 
 **Looks at:** the **HTTPS** setting (`server.tls.mode`), the listen address
 (`server.listen`) and **Trusted reverse proxies** (`server.trusted_proxies`). While HTTPS
-is off behind a proxy, the server also notes computers that signed in directly over
-plain HTTP in the last day, not through the proxy. It keeps up to 50 addresses, in
-memory only.
+is off behind a proxy, the server also notes computers that signed in, and agents that
+sent events, directly over plain HTTP in the last day, not through the proxy. It keeps
+up to 50 addresses of each, in memory only. Computers and agents on the server itself
+aren't counted: what they send doesn't cross the network.
 
 - Good: HTTPS is on; or HTTPS is off but Signalith answers only on this computer
   (such as `127.0.0.1:8080`); or a trusted reverse proxy serves HTTPS.
-- Needs attention: a proxy serves HTTPS, but people signed in to Signalith directly
-  over plain HTTP.
+- Needs attention: a proxy serves HTTPS, but people signed in, or agents sent events,
+  to Signalith directly over plain HTTP; or HTTPS is left to a reverse proxy that
+  Signalith believes only because `signalith.yaml` was written before HTTPS was the
+  default (an `https://` public address and no `server.tls` section). List that proxy
+  under **Trusted reverse proxies**.
 - At risk: HTTPS is off, and Signalith answers other computers directly.
 
 **To fix:** turn on HTTPS, as in
@@ -120,7 +124,9 @@ that refused the new certificate (from failed TLS handshakes, over HTTPS and sys
 
 - Good: a standard or a strict certificate authority, whichever you chose. Neither is
   better for everyone; see
-  [Standard or strict certificate authority](#standard-or-strict-certificate-authority).
+  [Standard or strict certificate authority](#standard-or-strict-certificate-authority). One made by an earlier version
+  also vouches for the names under this server's names, such as `x.siem-1`; the line
+  says so, and a new one covers each name exactly.
 - Needs attention: a new certificate authority is ready but not switched to yet; the
   previous one is still kept after a switch; the one in use was made by an older version
   and can vouch for any website; or the one in use isn't the kind you chose.
@@ -135,19 +141,22 @@ sudo openssl x509 -in /var/lib/signalith/tls/ca.pem -noout -subject -enddate -ex
 ```
 
 A standard one lists private names such as `.local` and `.corp` and private ranges. A
-strict one lists only this server's names and addresses. No name constraints at all
-means it was made by an older version.
+strict one lists only this server's names and addresses. Under **Excluded**, the
+server's names with a dot in front keep the names under them out. No name constraints at
+all means it was made by an older version.
 
 ### Agents on plain HTTP
 
 Shown while HTTPS is on.
 
 **Looks at:** **Agents on plain HTTP** (`server.tls.plaintext_ingest`), and which agents
-sent events over plain HTTP in the last day.
+sent events over plain HTTP in the last day. An agent on the server itself is counted
+apart: its events don't cross the network.
 
 - Good: agents can only send over HTTPS.
-- At risk: agents still send over plain HTTP.
-- Needs attention: plain HTTP is still accepted, though no agent uses it.
+- At risk: agents on other computers still send over plain HTTP.
+- Needs attention: plain HTTP is still accepted, though only agents on this computer,
+  or none, use it.
 
 **To fix:** give each agent a new configuration from **Add data**, then choose
 **Refuse them**. An agent that was missed keeps its events, and the **Health** page
@@ -160,7 +169,9 @@ names it. See [Upgrading from plain HTTP](https.md#upgrading-from-plain-http).
 Shown when a syslog listener is on (`syslog.udp`, `syslog.tcp` or `syslog.tls`).
 
 **Looks at:** which listeners are on and the addresses they listen on, `syslog.allow`,
-and how many devices sent over each protocol in the last day.
+and how many devices sent over each protocol in the last day. A listener on a loopback
+address, such as `127.0.0.1:5514`, takes syslog only from this computer, so only the
+others count.
 
 - Good: syslog arrives only over TLS; or plain syslog is accepted only from this
   computer, or only from the addresses in `syslog.allow`. Plain syslog isn't encrypted,
@@ -188,10 +199,11 @@ OpenSearch ships with is issued by **Example Com Inc. Root CA**; its key is publ
 
 - Good: HTTPS with the certificate checked; or plain HTTP to OpenSearch on this
   computer.
-- Needs attention: plain HTTP to OpenSearch on the same Docker network; or the demo
-  certificate, on this computer.
-- At risk: certificate checks are off; events or the password cross the network over
-  plain HTTP; or OpenSearch on another computer uses the demo certificate.
+- Needs attention: plain HTTP to OpenSearch on the same Docker network; or, for
+  OpenSearch on this computer, the demo certificate or certificate checks turned off.
+- At risk: certificate checks are off for OpenSearch on another computer; events or the
+  password cross the network over plain HTTP; or OpenSearch on another computer uses
+  the demo certificate.
 
 **To fix:** see
 [Point Signalith at it](opensearch-security.md#4-point-signalith-at-it) and
@@ -339,12 +351,16 @@ as where you put them.
 
 **Looks at:** when OpenSearch runs on this computer and Signalith isn't in a container,
 it asks OpenSearch for its data folder (`path.data`), with Signalith's own account, and
-checks the disk under it, as for [Disk encryption](#disk-encryption).
+checks the disk under it, as for [Disk encryption](#disk-encryption). A folder that
+doesn't exist here (OpenSearch in a container of its own reports the container's
+folder) isn't checked.
 
-- Good: an encrypted disk.
+- Good: an encrypted disk, or a folder kept in memory only.
 - Needs attention: a disk that isn't encrypted, as far as the system can tell.
-- Can't tell: OpenSearch runs on another computer or in its own container, or it didn't
-  answer.
+- Can't tell: OpenSearch runs on another computer or in its own container; its folder
+  isn't on this computer's disks as Signalith sees them; Signalith's account may not
+  look inside a folder on the way (such as `/home` under the systemd unit); or OpenSearch
+  didn't answer.
 
 **How to check by hand:** on the computer OpenSearch runs on, find `path.data` in
 `opensearch.yml` and check the disk that holds it, with the commands under
@@ -418,12 +434,14 @@ Who can sign in, and how well passwords and tokens are kept.
 ### Built-in admin's password
 
 **Looks at:** whether the built-in admin still has the public example password, the
-first password the Docker setup made, or a password set in the
-`SIGNALITH_ADMIN_PASSWORD` environment variable; and how strongly it is hashed.
+first password the Docker setup made, a password set in the `SIGNALITH_ADMIN_PASSWORD`
+environment variable, or one read from the file in `SIGNALITH_ADMIN_PASSWORD_FILE`; and
+how strongly it is hashed.
 
 - Good: it has a password of its own.
 - Needs attention: the Docker setup's first password, which is kept as plain text in a
-  Docker volume; a password in an environment variable; or an older, weaker hash.
+  Docker volume; a password in an environment variable, or in a file named by one; or
+  an older, weaker hash.
 - At risk: the example password `change-me-please`, which anyone can look up.
 
 **To fix:** `sudo signalith passwd`, then restart Signalith; see
@@ -472,8 +490,9 @@ certificate, and turn off **Skip certificate check**
 
 ### Sign-in sessions
 
-**Looks at:** **Sign out after** (`auth.session_timeout`, 12 hours by default). Every
-sign-in also ends after 7 days at most.
+**Looks at:** **Sign out after** (`auth.session_timeout`, 12 hours by default): how
+long a sign-in lasts without use. Someone who ticks **Keep me signed in** isn't signed
+out for being idle; every sign-in ends after 7 days at most.
 
 - Good: 24 hours or less.
 - Needs attention: longer than 24 hours.
@@ -490,7 +509,11 @@ replaced.
 
 - Good: every token has 24 characters or more. Tokens Signalith makes have 48.
 - Needs attention: a token is shorter than 24 characters.
-- At risk: the example token `change-this-ingest-token`, which anyone can look up.
+- At risk: the example token `change-this-ingest-token`, which anyone can look up. In a
+  container, an older Docker quick start's agents may still send it over plain HTTP,
+  and Signalith accepts it that way while **Agents on plain HTTP** accepts them, even
+  when it isn't in `ingest.tokens`. Choose **Refuse them** once every agent has its
+  configuration from **Add data**.
 
 **To fix:** add a new token with `sudo signalith secrets set ingest.tokens` (press Enter
 to have one made), give each agent a new configuration from **Add data**, then remove the
@@ -508,7 +531,7 @@ password `admin`. The password is compared in memory and never shown.
 - Needs attention: an account that can do anything in OpenSearch (`all_access`,
   `security_manager` or the `admin` backend role).
 - At risk: `admin` with the password `admin`.
-- Can't tell: OpenSearch didn't answer.
+- Can't tell: OpenSearch couldn't be reached, or didn't say.
 
 **To fix:** give Signalith its own account with the `signalith_server` role, ideally
 signing in with a certificate
@@ -534,6 +557,8 @@ service account.
   or an unprivileged account in a container.
 - Needs attention: root, Local System or an administrator, so a flaw in Signalith could
   reach the whole computer.
+- Can't tell: on Windows, the service runs as an account Windows couldn't say is an
+  administrator or not, such as a domain account while the domain can't be reached.
 
 **To fix:** on Linux, install the systemd unit from [Linux](../README.md#linux); on
 Windows, run `install.ps1` from this version again ([Windows](../README.md#windows)). In
@@ -555,7 +580,8 @@ process sees them: no new privileges, a system-call filter, no extra capabilitie
 read-only system, hidden processes, a private `/dev` and private new files. In a
 container: no new privileges, no capabilities, a read-only system and no core dumps.
 
-- Good: all of them are in place.
+- Good: all of them are in place. Linux before 5.8 can't hide processes, so there it
+  isn't counted as missing.
 - Needs attention: some are missing, or Signalith doesn't run as a systemd service.
 
 **To fix:** install the current unit and restart, as in [Linux](../README.md#linux). If
@@ -574,7 +600,10 @@ password hash), its folders, and `signalith.yaml` with its folder. The master ke
 left to [Master key](#master-key). On Windows it reads each file's access list; on Linux
 and macOS, the owner and mode.
 
-- Good: only Signalith's account (and administrators) can read them.
+- Good: only Signalith's account (and administrators) can change them, and only they
+  can read the keys and private files. For `signalith.yaml` and the folders, it looks
+  only at who can change them. Whether others can read plain passwords in
+  `signalith.yaml` is part of [Stored passwords and keys](#stored-passwords-and-keys).
 - Needs attention: a group or other accounts can read private files, or a group can
   change a folder; or the state folder is on a network share, so keys cross the network
   each time they are read.
@@ -594,13 +623,14 @@ the state folder on a local disk ([Identity](servers.md#identity)).
 
 With Signalith's own certificate, computers that trust its certificate authority accept
 any certificate it makes. **Certificate authority reaches** (`server.tls.ca_scope`)
-chooses how far that goes. Neither choice lets it vouch for public websites.
+chooses how far that goes. Neither choice lets it vouch for other public websites: of
+public names, only this server's own, each exactly.
 
 - **Standard**, the default, can also vouch for private network names and addresses,
   such as `intranet.corp` or `192.168.1.5`. A new address for this server works right
   away.
-- **Strict** can vouch only for this server's own names and addresses. A stolen key is
-  no more use than the server's own certificate, but a new name or address later means a
+- **Strict** can vouch only for this server's own names and addresses. A stolen key
+  then lets someone pose only as this server, but a new name or address later means a
   new certificate authority, which every browser and agent must trust again.
 
 Strict suits a server whose name and address won't change, especially when many
@@ -671,7 +701,8 @@ kind of install, then every check by group. Docs links are printed in full.
   running service for the config file (it is stopped, or was started another way), the
   checks of the process say so. The Security page checks them either way.
 - On Windows, run as Administrator, it also asks whether BitLocker is on and saves the
-  answer for the page ("Saved the disk encryption result for the Security page.").
+  answer for the page. It says so on standard error, so the report itself stays the
+  same.
 - It can't see what only the running server sees: agents and devices that sent in the
   last day, sign-ins over plain HTTP, and computers that refused a new certificate. The
   checks that need those say so, rather than claiming "none". The page has them.

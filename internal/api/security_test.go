@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -331,22 +332,101 @@ func TestPlainSignInsAreNoted(t *testing.T) {
 	}
 }
 
+// Names are noted only from people signed in and agents with a token:
+// anyone who can reach the port could send any name.
 func TestHTTPSNamesAreNoted(t *testing.T) {
-	m := newCertManager(t)
-	srv := &Server{TLS: m}
-	ts := httptest.NewUnstartedServer(srv.noteNames(http.NotFoundHandler()))
+	_, srv, _ := newSecurityServer(t, nil)
+	ts := httptest.NewUnstartedServer(srv.Handler())
+	ts.TLS = &tls.Config{GetCertificate: srv.TLS.GetCertificate}
 	ts.StartTLS()
 	defer ts.Close()
-	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
-	req.Host = "192.168.1.20:8080"
-	resp, err := ts.Client().Do(req)
+	send := func(method, path, host string, auth func(*http.Request)) {
+		t.Helper()
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader("[]"))
+		req.Host = host
+		if auth != nil {
+			auth(req)
+		}
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	admin := func(r *http.Request) { r.SetBasicAuth("admin", "s3cret-pass") }
+	wrongPassword := func(r *http.Request) { r.SetBasicAuth("admin", "wrong") }
+	token := func(tok string) func(*http.Request) {
+		return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok) }
+	}
+	send("GET", "/api/health", "stranger-1.example.com", nil)
+	send("GET", "/", "stranger-2.example.com", nil)
+	send("GET", "/api/health", "stranger-3.example.com", wrongPassword)
+	send("POST", "/api/ingest", "stranger-4.example.com", token("not-the-token"))
+	// A bare handshake asking for any name.
+	conn, err := tls.Dial("tcp", ts.Listener.Addr().String(), &tls.Config{InsecureSkipVerify: true, ServerName: "stranger-5.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	seen := m.SeenNames()
-	if len(seen) != 1 || seen[0].Name != "192.168.1.20" {
-		t.Errorf("%+v", seen)
+	conn.Close()
+	if seen := srv.TLS.SeenNames(); len(seen) != 0 {
+		t.Fatalf("names from strangers: %+v", seen)
+	}
+	send("GET", "/api/health", "192.168.1.20:8080", admin)
+	send("POST", "/api/ingest", "siem.corp.local", token("tok-0123456789abcdef"))
+	var names []string
+	for _, n := range srv.TLS.SeenNames() {
+		names = append(names, n.Name)
+	}
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"192.168.1.20", "siem.corp.local"}) {
+		t.Errorf("%v", names)
+	}
+}
+
+// Agents that reach a server without HTTPS directly, not through its
+// reverse proxy, are noted; those on this computer, through the proxy or
+// over HTTPS are not.
+func TestPlainAgentsAreNoted(t *testing.T) {
+	_, srv, _ := newSecurityServer(t, nil)
+	srv.Config.Server.TrustedProxies = []string{"10.0.0.5"}
+	for _, tc := range []struct {
+		from  string
+		proto string
+		tls   bool
+	}{
+		{from: "10.0.0.4:5555"},
+		{from: "127.0.0.1:5555"},
+		{from: "10.0.0.5:5555", proto: "https"},
+		{from: "10.0.0.6:5555", tls: true},
+	} {
+		r := httptest.NewRequest("POST", "/api/ingest", nil)
+		r.RemoteAddr = tc.from
+		if tc.proto != "" {
+			r.Header.Set("X-Forwarded-Proto", tc.proto)
+		}
+		if tc.tls {
+			r.TLS = &tls.ConnectionState{}
+		}
+		srv.notePlainAgent(r)
+	}
+	if got := srv.security().plainAgents.since(time.Now().Add(-time.Hour)); !slices.Equal(got, []string{"10.0.0.4"}) {
+		t.Errorf("%v", got)
+	}
+	if rt := srv.runtimeFacts(time.Now(), false); !slices.Equal(rt.DirectPlainAgents, []string{"10.0.0.4"}) {
+		t.Errorf("%+v", rt)
+	}
+}
+
+// Agents on this computer that send over plain HTTP are counted apart:
+// their events don't cross the network.
+func TestLocalPlainSenders(t *testing.T) {
+	_, srv, _ := newSecurityServer(t, nil)
+	srv.Pipeline.NotePlaintext(netip.MustParseAddr("127.0.0.1"), []string{"siem-1"})
+	srv.Pipeline.NotePlaintext(netip.MustParseAddr("::1"), nil)
+	srv.Pipeline.NotePlaintext(netip.MustParseAddr("10.0.0.4"), []string{"web-1"})
+	rt := srv.runtimeFacts(time.Now(), false)
+	if rt.LocalPlainSenders != 2 || rt.PlainSenderCount != 1 || !slices.Equal(rt.PlainSenders, []string{"web-1 (10.0.0.4)"}) {
+		t.Errorf("%+v", rt)
 	}
 }
 
@@ -356,5 +436,14 @@ func TestSecurityDelay(t *testing.T) {
 	}
 	if d := SecurityDelay(time.Now().Add(-time.Hour)); d != securityAfterReload {
 		t.Errorf("after a restart in place: %v", d)
+	}
+}
+
+// Each step has words for a message that it failed.
+func TestCADoingCoversActions(t *testing.T) {
+	for action := range caActions {
+		if caDoing[action] == "" {
+			t.Errorf("no words for %s", action)
+		}
 	}
 }

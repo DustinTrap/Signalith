@@ -10,13 +10,14 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
-// keyPermCommands make a key file Signalith's own.
-func keyPermCommands(p string) map[string]string {
+// keyPermCommands make a key file Signalith's own, on this server's
+// system only.
+func keyPermCommands(f *Facts, p string) map[string]string {
 	docker := ""
-	if v := inVolume(p); v != "" {
+	if v := inVolume(p); v != "" && f.Docker {
 		docker = busybox("chmod 600 " + sh(v))
 	}
-	return cmds("sudo chown signalith "+sh(p)+" && sudo chmod 600 "+sh(p), icaclsFile(p, "R"), docker)
+	return ownOnly(f, cmds("sudo chown signalith "+sh(p)+" && sudo chmod 600 "+sh(p), icaclsFile(p, "R"), docker))
 }
 
 // checkMasterKey: rest.master_key.
@@ -34,10 +35,10 @@ func checkMasterKey(f *Facts) *Check {
 		return &Check{State: Unknown, Line: "Signalith couldn't read the master key (" + short(k.SourceErr.Error()) + ").",
 			Fix: &Fix{Steps: []string{"signalith secrets status says where the master key is and why it can't be read."}, Docs: doc(docEncKey)}}
 	}
-	permFix := &Fix{Steps: []string{"Make the key file readable only by Signalith's account."}, Commands: keyPermCommands(src.Path), Docs: doc(docEncKey)}
+	permFix := &Fix{Steps: []string{"Make the key file readable only by Signalith's account."}, Commands: keyPermCommands(f, src.Path), Docs: doc(docEncKey)}
 	if f.Server.OS == "windows" {
 		permFix.Steps = append(permFix.Steps, "Running install.ps1 from this version again also resets access to everything in C:\\ProgramData\\Signalith.")
-	} else if inVolume(src.Path) != "" {
+	} else if inVolume(src.Path) != "" && f.Docker {
 		permFix.Steps = append(permFix.Steps, "docker volume ls shows the volume's name.")
 	}
 	var probs []problem
@@ -63,10 +64,9 @@ func checkMasterKey(f *Facts) *Check {
 	}
 	if src.OldPath != "" {
 		probs = append(probs, problem{Attention, "The previous master key is still kept, in " + src.OldPath + ".", &Fix{
-			Steps: []string{"Back up the current key, then remove the previous one."},
-			Commands: cmds("sudo signalith secrets rotate-master -prune", winExe+" secrets rotate-master -prune",
-				dockerRun+" secrets rotate-master -prune -c /work/signalith.yaml"),
-			Docs: doc(docEncChange)}})
+			Steps:    []string{"Back up the current key, then remove the previous one."},
+			Commands: signalithCommands(f, "secrets rotate-master -prune"),
+			Docs:     doc(docEncChange)}})
 	}
 	for _, u := range k.Unused {
 		probs = append(probs, problem{Attention, "There's an unused copy of a master key in " + u + ".", &Fix{
@@ -84,7 +84,7 @@ func checkMasterKey(f *Facts) *Check {
 		return &Check{State: Good, Line: "The master key comes from a systemd credential, so only the Signalith service can read it."}
 	case src.Kind == secrets.FromDefault && f.Server.OS == "windows":
 		return &Check{State: Good, Line: "The master key is protected by Windows and works only on this computer."}
-	case src.Kind == secrets.FromDefault && f.InContainer:
+	case src.Kind == secrets.FromDefault && f.Docker:
 		return &Check{State: Good, Line: "The master key is in the signalith-data volume, readable only by Signalith's account.",
 			Tip: &Fix{Steps: []string{"Keep the key out of the volume as a Docker secret, so a backup of the volume doesn't hold the key next to what it protects."},
 				Docs: doc(docEncDocker)}}
@@ -92,15 +92,15 @@ func checkMasterKey(f *Facts) *Check {
 		return &Check{State: Good, Line: "The master key comes from a file given to the container (" + src.Path + ")."}
 	}
 	c := &Check{State: Good, Line: "The master key is in " + src.Path + ", and only " + owner + " can read it."}
-	if f.Server.OS == "linux" && src.Kind == secrets.FromDefault {
+	if f.Server.OS == "linux" && src.Kind == secrets.FromDefault && !f.InContainer {
 		c.Tip = &Fix{Steps: []string{"Give the key to the service as a systemd credential, so it can live outside Signalith's folders."}, Docs: doc(docEncElsewhere)}
 	}
 	return c
 }
 
 // encryptCommands encrypt the plain values in Signalith's files.
-func encryptCommands() map[string]string {
-	c := signalithCommands("secrets encrypt")
+func encryptCommands(f *Facts) map[string]string {
+	c := signalithCommands(f, "secrets encrypt")
 	c["docker"] += "\n" + "docker compose restart signalith"
 	return c
 }
@@ -126,7 +126,7 @@ func checkStoredSecrets(f *Facts) *Check {
 			unreadable = append(unreadable, name)
 		}
 	}
-	encrypt := &Fix{Steps: []string{"Encrypt them with the master key."}, Commands: encryptCommands(), Docs: doc(docEncWhat)}
+	encrypt := &Fix{Steps: []string{"Encrypt them with the master key."}, Commands: encryptCommands(f), Docs: doc(docEncWhat)}
 	var probs []problem
 	for _, file := range s.Exposed {
 		n := byFile[file]
@@ -135,8 +135,8 @@ func checkStoredSecrets(f *Facts) *Check {
 		}
 		fix := *encrypt
 		fix.Steps = []string{"Encrypt them with the master key, and make the file readable only by Signalith's account."}
-		fix.Commands = encryptCommands()
-		for k, v := range filePermCommands([]FileProblem{{Path: file, Kind: "private", Read: true}}, "") {
+		fix.Commands = encryptCommands(f)
+		for k, v := range filePermCommands(f, []FileProblem{{Path: file, Kind: "private", Read: true}}, "") {
 			fix.Commands[k] += "\n" + v
 		}
 		probs = append(probs, problem{Risk, filepath.Base(file) + " holds " + itoa(n) + plural(n, " password or key", " passwords or keys") +
@@ -249,19 +249,14 @@ func diskLine(d Disk, what string) string {
 		return what + " are on " + d.FSType + ", whose encryption Signalith can't read."
 	case DiskWindows:
 		return "Windows tells only administrators whether BitLocker is on."
+	case DiskDenied:
+		where := d.Hidden
+		if where == "" {
+			where = d.Path
+		}
+		return "Signalith's account isn't allowed to look inside " + where + ", so it can't tell which disk holds " + what + "."
 	}
-	return "Signalith can't tell whether the disk under " + lower(what) + " is encrypted."
-}
-
-func lower(s string) string {
-	if s == "" {
-		return s
-	}
-	b := []byte(s)
-	if b[0] >= 'A' && b[0] <= 'Z' && (len(b) < 2 || b[1] < 'A' || b[1] > 'Z') {
-		b[0] += 'a' - 'A'
-	}
-	return string(b)
+	return "Signalith can't tell whether the disk under " + what + " is encrypted."
 }
 
 // diskState is how a disk counts: worst first.
@@ -344,12 +339,12 @@ func checkArchives(f *Facts) *Check {
 	details := []string{"Copies of archives you move elsewhere are only as safe as where you put them."}
 	if p := a.Perm; p != nil && (p.OtherRead || p.GroupRead || p.SomeRead) {
 		docker := ""
-		if v := inVolume(a.Dir); v != "" {
+		if v := inVolume(a.Dir); v != "" && f.Docker {
 			docker = busybox("chmod -R go-rwx " + sh(v))
 		}
 		return &Check{State: Attention, Line: "Other accounts on this computer can read the archived days in " + a.Dir + ".", Details: details,
 			Fix: &Fix{Steps: []string{"Make the archive folder readable only by Signalith's account."},
-				Commands: cmds("sudo chmod -R go-rwx "+sh(a.Dir), icaclsDir(a.Dir, "M"), docker), Docs: doc(docRetArchives)}}
+				Commands: ownOnly(f, cmds("sudo chmod -R go-rwx "+sh(a.Dir), icaclsDir(a.Dir, "M"), docker)), Docs: doc(docRetArchives)}}
 	}
 	moveFix := &Fix{Steps: []string{"Keep the archive folder on an encrypted disk: point retention.archive_dir at one."},
 		Page: &PageLink{ID: "retention", Label: "Open Data retention"}, Docs: doc(docRetArchives)}
@@ -388,12 +383,17 @@ func checkOpenSearchDisk(f *Facts) *Check {
 	howTo := &Fix{Steps: []string{"On the computer OpenSearch runs on, check the disk that holds its data folder (path.data in opensearch.yml)."},
 		Commands: cmds("lsblk -o NAME,TYPE,FSTYPE,MOUNTPOINTS", "manage-bde -status C:", ""), Docs: doc(docSecOSDisk)}
 	switch {
-	case f.InContainer && host == "opensearch":
+	case f.Docker && host == "opensearch":
 		return &Check{State: Unknown, Line: "OpenSearch runs in its own container. Its events are in the opensearch-data volume on this computer's disk, which Signalith can't see from its container.", Fix: howTo}
-	case !isLoopback(host) || f.InContainer:
+	case f.InContainer:
+		return &Check{State: Unknown, Line: "Signalith runs in a container, so it can't see the disk where OpenSearch (" + host + ") keeps events.", Fix: howTo}
+	case !isLoopback(host):
 		return &Check{State: Unknown, Line: "OpenSearch runs on another computer (" + host + "), so Signalith can't see its disk.", Fix: howTo}
 	case o.DataErr != "":
 		return &Check{State: Unknown, Line: "Signalith couldn't ask OpenSearch where it keeps events (" + short(o.DataErr) + ").", Fix: howTo}
+	case len(o.DataPaths) == 0 && len(o.DataMissing) > 0:
+		return &Check{State: Unknown, Line: "OpenSearch says it keeps events in " + shorten(o.DataMissing, 3) +
+			", which isn't on this computer's disks as Signalith sees them. It may run in a container.", Fix: howTo}
 	case len(o.DataPaths) == 0:
 		return &Check{State: Unknown, Line: "Signalith couldn't ask OpenSearch where it keeps events.", Fix: howTo}
 	}
@@ -402,13 +402,36 @@ func checkOpenSearchDisk(f *Facts) *Check {
 	d := disks[0]
 	switch diskState(d) {
 	case Attention:
-		return &Check{State: Attention, Line: "OpenSearch keeps events in " + d.Path + ", on a disk that isn't encrypted, as far as Linux can tell.",
-			Fix: &Fix{Steps: []string{"Encrypt the disk that holds OpenSearch's data folder, or move the folder (path.data in opensearch.yml) to an encrypted one."}, Docs: doc(docEncDisk)}}
+		line := "OpenSearch keeps events in " + d.Path + ", on a disk that isn't encrypted, as far as Linux can tell."
+		switch {
+		case d.Suspended:
+			line = "OpenSearch keeps events in " + d.Path + ", on drive " + d.Drive + ", where BitLocker is suspended (checked " + day(d.CheckedAt) + ")."
+		case d.Drive != "":
+			line = "OpenSearch keeps events in " + d.Path + ", on drive " + d.Drive + ", which BitLocker doesn't protect (checked " + day(d.CheckedAt) + ")."
+		}
+		fix := &Fix{Steps: []string{"Encrypt the disk that holds OpenSearch's data folder, or move the folder (path.data in opensearch.yml) to an encrypted one."}, Docs: doc(docEncDisk)}
+		if d.Suspended {
+			fix = diskFix(d)
+		}
+		return &Check{State: Attention, Line: line, Fix: fix}
 	case Unknown:
 		fix := diskCheckFix(d, docSecOSDisk)
 		return &Check{State: Unknown, Line: diskLine(d, "OpenSearch's data files"), Fix: fix}
 	}
-	return &Check{State: Good, Line: "OpenSearch keeps events in " + d.Path + ", on an encrypted disk."}
+	c := &Check{State: Good, Line: "OpenSearch keeps events in " + d.Path + ", in memory only."}
+	for _, x := range disks {
+		if x.Kind != DiskMemory {
+			c.Line = "OpenSearch keeps events in " + x.Path + ", on an encrypted disk."
+			break
+		}
+	}
+	for _, x := range disks {
+		if x.Hidden != "" {
+			c.Details = append(c.Details, "Signalith's account can't look inside "+x.Hidden+", so this is the disk that holds that folder.")
+			break
+		}
+	}
+	return c
 }
 
 // checkOpenSearchAccess: rest.opensearch_access.
@@ -430,12 +453,32 @@ func checkOpenSearchAccess(f *Facts) *Check {
 	case "closed":
 		return &Check{State: Good, Line: "OpenSearch turns away anyone who doesn't sign in."}
 	}
-	c := &Check{State: Unknown, Line: "Signalith couldn't reach OpenSearch just now, so it can't tell who else can.",
-		Fix: &Fix{Steps: []string{"Re-check once OpenSearch is back; the Health page shows why it can't be reached."}}}
+	c := &Check{State: Unknown, Line: "Signalith couldn't reach OpenSearch just now, so it can't tell who else can.", Fix: reachFix()}
 	if o.AnonymousErr != "" {
-		c.Details = []string{"OpenSearch answered: " + short(o.AnonymousErr) + "."}
+		c.Details = []string{osWhy(o.AnonymousErr)}
+		if osAnswered(o.AnonymousErr) {
+			c.Line = "Signalith couldn't tell whether OpenSearch lets anyone read events without signing in."
+			c.Fix = &Fix{Steps: []string{"Re-check in a few minutes. If OpenSearch keeps answering this way, its log may say why."}, Docs: doc(docs)}
+		}
 	}
 	return c
+}
+
+// osAnswered reports whether a probe's why is OpenSearch's own answer
+// ("status N"), rather than a reason it couldn't be reached.
+func osAnswered(why string) bool { return strings.HasPrefix(why, "status ") }
+
+// osWhy says why a probe of OpenSearch failed, in a sentence.
+func osWhy(why string) string {
+	if osAnswered(why) {
+		return "OpenSearch answered: " + short(why) + "."
+	}
+	return "Signalith couldn't reach OpenSearch: " + short(why) + "."
+}
+
+// reachFix is the step when OpenSearch couldn't be reached.
+func reachFix() *Fix {
+	return &Fix{Steps: []string{"Re-check once OpenSearch is reachable; the Health page shows why it can't be reached."}}
 }
 
 // short keeps an error message to one short line.

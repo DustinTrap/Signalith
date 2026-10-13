@@ -139,7 +139,10 @@
     }
   }
 
-  async function load() {
+  // load fetches the last report. With retried (Try again on the error
+  // box, which loading replaces), focus goes to the result or to the new
+  // Try again button, rather than being lost.
+  async function load(retried) {
     const seq = ++S.seq;
     if (!S.rep) skeleton();
     let rep;
@@ -154,12 +157,21 @@
       }
       S.tries = 0;
       if (S.rep) toastError('Couldn’t refresh the security report', e);
-      else failed(e);
+      else failed(e, retried);
       return;
     }
     if (seq !== S.seq) return;
     S.tries = 0;
     show(rep);
+    if (retried) focusHeadline();
+  }
+
+  // focusHeadline puts focus on the overall result.
+  function focusHeadline() {
+    const h = $('sc-headline');
+    if (!h) return;
+    h.setAttribute('tabindex', '-1');
+    h.focus();
   }
 
   function show(rep) {
@@ -252,8 +264,7 @@
       ...rep.groups.map((g) => renderGroup(rep, g)),
       renderAlways(rep),
       renderNotChecked(rep),
-      el('p', { class: 'sc-foot' }, `Checked ${fullTime(rep.checked_at)} on ${rep.server.name} · Signalith ${rep.server.version}`),
-      el('p', { class: 'sr-only', id: 'sc-status', role: 'status' }));
+      el('p', { class: 'sc-foot' }, `Checked ${fullTime(rep.checked_at)} on ${rep.server.name} · Signalith ${rep.server.version}`));
     for (const d of box.querySelectorAll('details[data-key]')) if (open.has(d.dataset.key)) d.open = true;
     if (focus) {
       const n = box.querySelector(`[data-focus="${CSS.escape(focus)}"]`);
@@ -493,7 +504,8 @@
       const refused = ca.refusals || [];
       step4 = [el('p', {}, 'Switched ', timeEl(ca.previous.at || rep.checked_at), '.')];
       if (refused.length) {
-        step4.push(el('p', {}, `${plural(refused.length, 'computer', 'computers')} refused the new certificate since:`),
+        const computers = new Set(refused.map((r) => r.address)).size;
+        step4.push(el('p', {}, `${plural(computers, 'computer', 'computers')} refused the new certificate since:`),
           el('ul', { class: 'sc-refused', role: 'list' }, ...refused.map((r) => el('li', {},
             el('code', {}, r.address), ` · ${r.via === 'syslog' ? 'syslog over TLS' : 'HTTPS'} · ${plural(r.count, 'time', 'times')} · last `, timeEl(r.last_seen)))));
       } else {
@@ -532,7 +544,9 @@
   // browsers, agents and syslog devices before the switch.
   function shareSteps() {
     const host = agentAddress();
-    const linux = `curl -fsS --cacert /etc/fluent-bit/signalith-ca.pem -o /tmp/signalith-ca.pem "https://${host}/api/tls/ca.pem?which=both" && sudo install -m 644 /tmp/signalith-ca.pem /etc/fluent-bit/signalith-ca.pem && sudo systemctl restart fluent-bit`;
+    // A private temporary file: another account can't swap what's
+    // installed.
+    const linux = `t=$(mktemp) && curl -fsS --cacert /etc/fluent-bit/signalith-ca.pem -o "$t" "https://${host}/api/tls/ca.pem?which=both" && sudo install -m 644 "$t" /etc/fluent-bit/signalith-ca.pem && rm -f "$t" && sudo systemctl restart fluent-bit`;
     const windows = 'Copy-Item "$env:USERPROFILE\\Downloads\\signalith-ca.pem" \'C:\\Program Files\\fluent-bit\\conf\\signalith-ca.pem\' -Force; Restart-Service fluent-bit';
     const dl = (href, name, label) => el('a', { class: 'btn btn--secondary btn--sm', href, download: name }, icon('download'), label);
     return [
@@ -546,10 +560,11 @@
         el('div', { class: 'sc-share__part' },
           el('h4', { class: 'sc-share__title' }, 'Agents'),
           el('p', {}, 'New agents from Add data already get both. For the others, replace their CA file and restart them.'),
+          el('p', { class: 'sc-muted' }, 'On each Linux agent:'),
           cmdBlock('Linux agents', linux, 'copy:ca:linux'),
           el('p', { class: 'sc-muted' }, `The download is checked against the certificate authority the agent already trusts. Change ${host} if agents reach Signalith at another address.`),
-          el('div', { class: 'sc-actions' }, dl('api/tls/ca.pem?which=both', 'signalith-ca.pem', 'Download both'),
-            el('span', { class: 'sc-muted' }, 'for Windows agents, then in PowerShell as Administrator:')),
+          el('p', { class: 'sc-muted' }, 'On each Windows agent, download the file with both, then in PowerShell as Administrator:'),
+          el('div', { class: 'sc-actions' }, dl('api/tls/ca.pem?which=both', 'signalith-ca.pem', 'Download both')),
           cmdBlock('Windows agents', windows, 'copy:ca:windows')),
         el('div', { class: 'sc-share__part' },
           el('h4', { class: 'sc-share__title' }, 'Syslog over TLS devices'),
@@ -612,8 +627,12 @@
         d.close();
       } catch (e) {
         back();
-        showAlert(err, 'Nothing changed', sentence(e.message));
+        // Refused before anything was done; otherwise something may have
+        // changed, so the page shows what is true now.
+        const refused = e.status === 400 || e.status === 404 || e.status === 409;
+        showAlert(err, refused ? 'Nothing changed' : 'That didn’t work', sentence(e.message));
         ok.focus();
+        if (e.status !== 400) load();
       }
     });
     fill(d, modalHead('sc-dialog', title, null, () => d.close()),
@@ -629,7 +648,12 @@
   function prepareDialog(scope) {
     const ca = S.rep.ca;
     const names = (ca.would_cover || {})[scope] || [];
-    const missed = scope === 'strict' ? (ca.seen_names || []).filter((s) => !s.covered_strict).map((s) => s.name) : [];
+    // Names used in the last day that a strict one wouldn't cover:
+    // Signalith's own (private, or leading to this computer), and others
+    // it can't tell apart from a name someone made up.
+    const notCovered = scope === 'strict' ? (ca.seen_names || []).filter((s) => !s.covered_strict) : [];
+    const missed = notCovered.filter((s) => s.own).map((s) => s.name);
+    const unknown = notCovered.filter((s) => !s.own).map((s) => s.name);
     const toNames = (d) => () => { d.close(); openSetting('server.tls.names'); };
     const extra = [el('div', { class: 'sc-cover' },
       el('p', { class: 'label' }, 'It will cover:'),
@@ -645,6 +669,10 @@
       extra.push(el('div', { class: 'alert', 'data-tone': 'warning' }, icon('triangle-alert'), el('div', { class: 'sc-callout__body' },
         el('p', {}, `Also used to reach this server in the last day: ${listWords(missed)}. Add them under Extra certificate names first, or they won’t work after the switch.`),
         btn('secondary', 'Open setting', () => toNames(d)()))));
+    }
+    if (unknown.length) {
+      extra.push(el('div', { class: 'callout' }, icon('info'), el('div', { class: 'sc-callout__body' },
+        el('p', {}, `Also seen in the last day, but Signalith can’t tell they belong to this server: ${listWords(unknown)}. Add them only if people or agents use them to reach it.`))));
     }
     d = dialog({
       title: `Make a ${scope} certificate authority`,
@@ -674,7 +702,9 @@
   function confirmSwitch() {
     dialog({
       title: 'Switch to the new certificate authority?',
-      text: 'Signalith starts using it right away. Browsers and agents that don’t trust it yet can’t connect until they do, or until you switch back. Agents keep their events meanwhile.',
+      text: ['Signalith starts using it right away. Browsers and agents that don’t trust it yet can’t connect until they do, or until you switch back. Agents keep their events meanwhile.',
+        'Trust it in this browser first. After the switch, a browser that doesn’t trust it can’t open this page, so you couldn’t switch back from here.',
+        el('p', {}, docLink(docsURL('https.md', 'switching-to-a-new-certificate-authority'), 'How to switch back without this page'))],
       confirm: 'Switch now', busyLabel: 'Switching…',
       run: async () => {
         await caAction('switch');
@@ -725,12 +755,14 @@
         el('ul', { class: 'sc-rows', role: 'list' }, row(w), row('60'), row('45')))));
   }
 
-  function failed(e) {
+  function failed(e, retried) {
     const box = $('sc-root');
     box.removeAttribute('aria-busy');
+    const again = el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: () => load(true) }, icon('refresh-cw'), 'Try again');
     fill(box, el('div', { class: 'alert', 'data-tone': 'danger', role: 'alert' }, icon('circle-alert'),
       el('div', { class: 'sc-error' },
         el('p', {}, el('b', {}, 'Couldn’t load the security report: '), sentence(e.message)),
-        el('div', {}, el('button', { type: 'button', class: 'btn btn--secondary btn--sm', onclick: () => load() }, icon('refresh-cw'), 'Try again')))));
+        el('div', {}, again))));
+    if (retried) again.focus();
   }
 })();

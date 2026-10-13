@@ -17,16 +17,38 @@ const (
 
 // trustees returns who may use Signalith's private files: SYSTEM,
 // Administrators, the service account and the account running now (the
-// service itself, or the admin running the CLI or a test).
+// service itself, or whoever runs the CLI or a test). An administrator
+// running as Administrator is left out: the Administrators entry already
+// covers them, and an entry of their own would show on the Security page
+// as another account that can read the file.
 func trustees() []string {
 	out := []string{sidSystem, sidAdmins, ServiceSID(ServiceName)}
-	if u, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil {
+	tok := windows.GetCurrentProcessToken()
+	if u, err := tok.GetTokenUser(); err == nil {
 		self := u.User.Sid.String()
-		if self != "" && !contains(out, self) {
+		if self != "" && !contains(out, self) && !elevatedAdmin(tok) {
 			out = append(out, self)
 		}
 	}
 	return out
+}
+
+// elevatedAdmin reports whether tok runs as Administrator: elevated, with
+// the Administrators group enabled in it.
+func elevatedAdmin(tok windows.Token) bool {
+	if !tok.IsElevated() {
+		return false
+	}
+	groups, err := tok.GetTokenGroups()
+	if err != nil {
+		return false
+	}
+	for _, g := range groups.AllGroups() {
+		if g.Attributes&windows.SE_GROUP_ENABLED != 0 && g.Sid.String() == sidAdmins {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(list []string, s string) bool {

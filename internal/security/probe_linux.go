@@ -3,11 +3,15 @@
 package security
 
 import (
+	"errors"
+	"io/fs"
 	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -39,6 +43,7 @@ func probeProcess(pid string, self, systemd bool) (ProcessFacts, MemoryFacts, st
 		return p, m, cvm
 	}
 	p.Systemd = systemd
+	p.NoHiddenProc = !kernelAtLeast(5, 8)
 	if u, err := user.LookupId(strconv.Itoa(p.UID)); err == nil {
 		p.UserName = u.Username
 	}
@@ -61,9 +66,10 @@ func probeProcess(pid string, self, systemd bool) (ProcessFacts, MemoryFacts, st
 	return p, m, cvm
 }
 
-// probeDisks finds the filesystems that hold paths, each once.
+// probeDisks finds the filesystems that hold paths, each disk once.
 func probeDisks(paths []string, inContainer bool, _ string) []Disk {
 	mountinfo := readText(hostFS, "/proc/self/mountinfo")
+	mounts := parseMountinfo(mountinfo)
 	vm := detectVM(hostFS)
 	var out []Disk
 	seen := map[string]bool{}
@@ -71,21 +77,31 @@ func probeDisks(paths []string, inContainer bool, _ string) []Disk {
 		if p == "" {
 			continue
 		}
-		real := realPath(p)
+		real, hidden := realPath(p)
 		var d Disk
-		if inContainer {
+		switch {
+		case hidden != "" && !onlyMountAbove(mounts, real, hidden):
+			// A disk may be mounted inside the folder Signalith may not
+			// look into, or the folder above is an empty one standing in
+			// for it (as /home is under the systemd unit's ProtectHome).
+			d = Disk{Kind: DiskDenied, Hidden: hidden}
+		case inContainer:
 			d = Disk{Path: p, Kind: DiskContainer}
-			if m, ok := mountOf(parseMountinfo(mountinfo), real); ok {
+			if m, ok := mountOf(mounts, real); ok {
 				d.MountPoint, d.FSType, d.Source = m.Point, m.FSType, m.Source
 			}
 			if found := detectDisk(hostFS, mountinfo, real, vm); found.Kind == DiskNetwork || found.Kind == DiskMemory {
 				d = found
 			}
-		} else {
+		default:
 			d = detectDisk(hostFS, mountinfo, real, vm)
+			d.Hidden = hidden
 		}
 		d.Path = p
-		key := d.MountPoint + "\x00" + d.Source
+		key := "hidden\x00" + p
+		if d.Kind != DiskDenied {
+			key = diskKey(mounts, real)
+		}
 		if seen[key] {
 			continue
 		}
@@ -95,20 +111,68 @@ func probeDisks(paths []string, inContainer bool, _ string) []Disk {
 	return out
 }
 
-// realPath resolves links in p, or in the longest part of it that can
-// be read.
-func realPath(p string) string {
+// onlyMountAbove reports whether the filesystem that holds real can be
+// known although hidden, a folder above it, may not be looked into: no
+// mount point is inside hidden, and the filesystem isn't a memory one
+// standing in for a folder kept from the service.
+func onlyMountAbove(mounts []mount, real, hidden string) bool {
+	for _, m := range mounts {
+		if strings.HasPrefix(m.Point, strings.TrimSuffix(hidden, "/")+"/") {
+			return false
+		}
+	}
+	m, ok := mountOf(mounts, real)
+	return ok && !slices.Contains(memoryFS, m.FSType)
+}
+
+// diskKey names the filesystem that holds p, so two mounts of one disk
+// count once: the systemd unit's ReadOnlyPaths and ReadWritePaths each
+// mount a folder of the same disk again. A real device goes by its
+// major:minor number; one without (btrfs, network shares, tmpfs) by its
+// source.
+func diskKey(mounts []mount, p string) string {
+	m, ok := mountOf(mounts, p)
+	switch {
+	case !ok:
+		return "path\x00" + p
+	case m.Major != 0:
+		return "dev\x00" + strconv.Itoa(m.Major) + ":" + strconv.Itoa(m.Minor)
+	}
+	return "src\x00" + m.FSType + "\x00" + m.Source
+}
+
+// realPath resolves links in p, or in the longest part of it that
+// exists, for a folder not made yet. hidden is set when a folder on the
+// way may not be looked into: that folder, whose contents (links
+// included) Signalith can't see.
+func realPath(p string) (real, hidden string) {
 	p = filepath.Clean(p)
 	rest := ""
+	denied := false
 	for at := p; ; at = filepath.Dir(at) {
-		if r, err := filepath.EvalSymlinks(at); err == nil {
-			return filepath.Join(r, rest)
+		r, err := filepath.EvalSymlinks(at)
+		if err == nil {
+			if denied {
+				hidden = r
+			}
+			return filepath.Join(r, rest), hidden
 		}
+		denied = denied || errors.Is(err, fs.ErrPermission)
 		if filepath.Dir(at) == at {
-			return p
+			return p, ""
 		}
 		rest = filepath.Join(filepath.Base(at), rest)
 	}
+}
+
+// kernelAtLeast reports whether the running Linux is major.minor or
+// newer; true when that can't be read, so nothing is excused by mistake.
+func kernelAtLeast(major, minor int) bool {
+	var u unix.Utsname
+	if err := unix.Uname(&u); err != nil {
+		return true
+	}
+	return releaseAtLeast(unix.ByteSliceToString(u.Release[:]), major, minor)
 }
 
 // DefaultGateway is the IPv4 default route's gateway: in a container,

@@ -927,6 +927,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		if certs != nil {
 			sc.GetCertificate = certs.GetCertificate
 			sc.OnRefusal = func(addr string) { certs.NoteRefusal(addr, "syslog") }
+			// The names senders use, for the Security page's strict
+			// certificate authority.
+			sc.OnTLSName = certs.NoteName
 		}
 		receiver = syslog.New(sc, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {

@@ -149,8 +149,69 @@ func restartCommands() map[string]string {
 		dockerCompose+" restart signalith && "+dockerCompose+" logs --tail 50 signalith")
 }
 
-// signalithCommands run "signalith args" on each deployment, with
-// suffixes for after it (such as a restart).
-func signalithCommands(args string) map[string]string {
-	return cmds("sudo signalith "+args, winExe+" "+args, dockerRun+" "+args+" -c /work/signalith.yaml")
+// signalithCommands run "signalith args" on each deployment. On the
+// server's own system they name its config file when it isn't where
+// signalith looks by default.
+func signalithCommands(f *Facts, args string) map[string]string {
+	return cmds("sudo signalith "+args+configArg(f, "linux"), winExe+" "+args+configArg(f, "windows"),
+		dockerRun+" "+args+" -c /work/signalith.yaml")
+}
+
+// configArg is " -c <path>" for a signalith command run on this server
+// (family linux or windows), when its config file isn't where signalith
+// looks by default; "" otherwise, and for other systems, which have
+// their own paths.
+func configArg(f *Facts, family string) string {
+	if f == nil || f.Config == nil {
+		return ""
+	}
+	return configArgFor(f, family, f.Config.Path())
+}
+
+// configArgFor is configArg for a signalith.yaml at p.
+func configArgFor(f *Facts, family, p string) string {
+	if f.InContainer {
+		return ""
+	}
+	switch {
+	case p == "":
+		return ""
+	case family == "linux" && f.Server.OS != "windows":
+		// A path from this system, as the shell takes it.
+		if p == "/etc/signalith/signalith.yaml" || !path.IsAbs(p) || strings.Contains(p, `\`) {
+			return ""
+		}
+		return " -c " + sh(p)
+	case family == "windows" && f.Server.OS == "windows":
+		if strings.HasSuffix(strings.ToLower(p), `\programdata\signalith\signalith.yaml`) {
+			return ""
+		}
+		return " -c " + ps(p)
+	}
+	return ""
+}
+
+// ownFamily is the key of Fix.Commands for the system this server runs
+// on: linux, windows or docker. macOS takes the Linux commands, which
+// work there too.
+func ownFamily(f *Facts) string {
+	if fam := Family(f.Server.Deployment); fam != "" {
+		return fam
+	}
+	if f.Server.OS == "windows" {
+		return "windows"
+	}
+	return "linux"
+}
+
+// ownOnly keeps only the command for this server's own system, for
+// commands that name its files: on another system those paths mean
+// nothing.
+func ownOnly(f *Facts, m map[string]string) map[string]string {
+	fam := ownFamily(f)
+	out := map[string]string{}
+	if c := m[fam]; c != "" {
+		out[fam] = c
+	}
+	return out
 }

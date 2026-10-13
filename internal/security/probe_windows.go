@@ -78,36 +78,52 @@ func serviceAccount() ProcessFacts {
 			p.SID = securefile.ServiceSID(securefile.ServiceName)
 		}
 	}
+	// A service's token is not filtered, so an account in Administrators
+	// runs with administrator rights.
+	switch {
+	case p.SID == "S-1-5-18", strings.HasPrefix(p.SID, "S-1-5-80-"):
+		// Local System, or a service account: checkAccount says which.
+	case p.SID == "S-1-5-19", p.SID == "S-1-5-20":
+		// Local Service and Network Service are never administrators.
+	case p.SID == "":
+		p.AdminUnknown = true
+	default:
+		admin, known := inAdministrators(p.SID)
+		p.Elevated, p.AdminUnknown = admin, !known
+	}
 	return p
 }
 
 // windowsDumps reads whether Windows Error Reporting keeps full memory
 // dumps of crashing programs, or of signalith.exe.
 func windowsDumps() MemoryFacts {
-	m := MemoryFacts{Known: true}
 	const base = `SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps`
-	read := func(path string) (dumpType uint64, folder string, ok bool) {
+	read := func(path string) (dumpValues, bool) {
 		k, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE)
 		if err != nil {
-			return 0, "", false
+			return dumpValues{}, false
 		}
 		defer k.Close()
-		dumpType = 1 // a mini dump, unless set
-		if v, _, err := k.GetIntegerValue("DumpType"); err == nil {
-			dumpType = v
+		var v dumpValues
+		v.Type, v.HasType = intValue(k, "DumpType")
+		v.Flags, v.HasFlags = intValue(k, "CustomDumpFlags")
+		if f, _, err := k.GetStringValue("DumpFolder"); err == nil {
+			v.Folder, v.HasFolder = f, true
 		}
-		folder, _, _ = k.GetStringValue("DumpFolder")
-		return dumpType, folder, true
+		return v, true
 	}
-	t, folder, ok := read(base)
-	where := `HKLM\` + base
-	if t2, f2, ok2 := read(base + `\signalith.exe`); ok2 {
-		t, folder, ok, where = t2, f2, true, `HKLM\`+base+`\signalith.exe`
+	global, ok := read(base)
+	if !ok {
+		// Without the LocalDumps key, Windows keeps no dumps itself.
+		return MemoryFacts{Known: true}
 	}
-	if ok && t == 2 {
-		m.FullDumps, m.DumpFolder, m.DumpsRegistry = true, folder, where
-	}
-	return m
+	app, appOK := read(base + `\signalith.exe`)
+	return mergeDumps(global, app, appOK, `HKLM\`+base)
+}
+
+func intValue(k registry.Key, name string) (uint64, bool) {
+	v, _, err := k.GetIntegerValue(name)
+	return v, err == nil
 }
 
 // windowsVM reads the BIOS vendor and product.

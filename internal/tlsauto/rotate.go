@@ -93,6 +93,10 @@ type CAInfo struct {
 	// the private network names and ranges a standard one also allows
 	// are left out.
 	Names []string `json:"names"`
+	// Subtrees are the names in Names whose names under them it also
+	// allows: a CA made before Signalith excluded them (see
+	// excludedSubtrees). Private network names are left out.
+	Subtrees []string `json:"subtrees,omitempty"`
 	// At is when a prepared one was made, or when the switch away from a
 	// kept one happened.
 	At time.Time `json:"at,omitzero"`
@@ -143,6 +147,11 @@ func infoOf(ca *x509.Certificate) *CAInfo {
 			continue
 		}
 		in.Names = append(in.Names, d)
+		if scope != ScopeUnconstrained && !domainAllowed(privateDomains, d) && !slices.ContainsFunc(ca.ExcludedDNSDomains, func(e string) bool {
+			return strings.EqualFold(strings.TrimPrefix(e, "."), d)
+		}) && !slices.ContainsFunc(ca.PermittedDNSDomains, func(o string) bool { return strings.HasSuffix(strings.ToLower(o), "."+d) }) {
+			in.Subtrees = append(in.Subtrees, d)
+		}
 	}
 	for _, r := range ca.PermittedIPRanges {
 		ones, bits := r.Mask.Size()
@@ -271,8 +280,8 @@ func (m *Manager) WouldAllow(scope, name string) bool {
 	m.mu.Lock()
 	names := m.candidateNames()
 	m.mu.Unlock()
-	dns, ips := constraints(names, normScope(scope) == ScopeStrict)
-	tmpl := &x509.Certificate{PermittedDNSDomains: dns, PermittedIPRanges: ips}
+	dns, excluded, ips := constraints(names, normScope(scope) == ScopeStrict)
+	tmpl := &x509.Certificate{PermittedDNSDomains: dns, ExcludedDNSDomains: excluded, PermittedIPRanges: ips}
 	return caAllows(tmpl, n)
 }
 
@@ -302,7 +311,7 @@ func (m *Manager) Prepare(scope string) error {
 		host = "signalith"
 	}
 	now := m.now()
-	dns, ips := constraints(m.candidateNames(), scope == ScopeStrict)
+	dns, excluded, ips := constraints(m.candidateNames(), scope == ScopeStrict)
 	tmpl := &x509.Certificate{
 		SerialNumber:                serial(),
 		Subject:                     pkix.Name{CommonName: "Signalith Local CA (" + host + ", " + now.UTC().Format(time.DateOnly) + ")", Organization: []string{"Signalith"}},
@@ -314,6 +323,7 @@ func (m *Manager) Prepare(scope string) error {
 		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		PermittedDNSDomainsCritical: true,
 		PermittedDNSDomains:         dns,
+		ExcludedDNSDomains:          excluded,
 		PermittedIPRanges:           ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
@@ -833,18 +843,22 @@ const (
 	maxSeen     = 50
 )
 
-// recorder keeps a few recent entries by key, dropping the oldest.
+// recorder keeps a few recent entries by address and way in, dropping
+// the oldest.
 type recorder struct {
 	mu sync.Mutex
 	m  map[string]*Refusal
 }
 
-func (r *recorder) note(key, via string, at time.Time, limit int) {
+func (r *recorder) note(addr, via string, at time.Time, limit int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.m == nil {
 		r.m = map[string]*Refusal{}
 	}
+	// One computer may refuse over HTTPS and over syslog: each is its own
+	// entry, so neither hides the other.
+	key := addr + "\x00" + via
 	e := r.m[key]
 	if e == nil {
 		if len(r.m) >= limit {
@@ -856,10 +870,10 @@ func (r *recorder) note(key, via string, at time.Time, limit int) {
 			}
 			delete(r.m, oldest)
 		}
-		e = &Refusal{Address: key}
+		e = &Refusal{Address: addr, Via: via}
 		r.m[key] = e
 	}
-	e.Via, e.LastSeen = via, at.UTC()
+	e.LastSeen = at.UTC()
 	e.Count++
 }
 
@@ -876,7 +890,10 @@ func (r *recorder) list(since time.Time) []Refusal {
 		if !out[i].LastSeen.Equal(out[j].LastSeen) {
 			return out[i].LastSeen.After(out[j].LastSeen)
 		}
-		return out[i].Address < out[j].Address
+		if out[i].Address != out[j].Address {
+			return out[i].Address < out[j].Address
+		}
+		return out[i].Via < out[j].Via
 	})
 	return out
 }
@@ -934,8 +951,10 @@ func (m *Manager) SwitchedAt() time.Time {
 }
 
 // NoteName records a host name or address someone used to reach this
-// server: the name a client asked for in the TLS handshake, or the host
-// of a request.
+// server: the host of a request, or the name a client asked for in the
+// TLS handshake. Callers note only names from clients that proved they
+// may use the server (signed in, sent an agent token, or sent syslog from
+// an allowed address), so a stranger can't fill the list.
 func (m *Manager) NoteName(host string) {
 	if m == nil {
 		return

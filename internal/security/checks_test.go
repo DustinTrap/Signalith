@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -118,6 +119,11 @@ func noSecrets(t *testing.T, r *Report) {
 	}
 }
 
+// tempConfigArg starts the -c the Linux commands add for the test's
+// signalith.yaml, which is in a temporary folder; none on Windows, whose
+// paths a Linux server can't have.
+var tempConfigArg = map[bool]string{true: " -c /", false: ""}[filepath.Separator == '/']
+
 type checkCase struct {
 	name  string
 	extra string // added to the config
@@ -191,6 +197,30 @@ func TestHTTPS(t *testing.T) {
 					t.Errorf("%+v", c.Fix)
 				}
 			}},
+		{name: "proxy, direct agents", set: func(f *Facts) {
+			f.Config.Server.TLS.Mode = "off"
+			f.Config.Server.TrustedProxies = []string{"10.0.0.5"}
+			f.Runtime.DirectPlainAgents = []string{"web-1 (10.0.0.4)"}
+		}, state: Attention,
+			line: "A reverse proxy serves HTTPS, but 1 agent sent events to Signalith directly over plain HTTP in the last day: web-1 (10.0.0.4).",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 0 || len(c.Fix.Steps) != 2 || !strings.Contains(c.Fix.Steps[0], "Add data") {
+					t.Errorf("%q %+v", c.Details, c.Fix)
+				}
+			}},
+		{name: "proxy, direct sign-ins and agents", set: func(f *Facts) {
+			f.Config.Server.TLS.Mode = "off"
+			f.Config.Server.TrustedProxies = []string{"10.0.0.5"}
+			f.Runtime.DirectPlain = []string{"10.0.0.7"}
+			f.Runtime.DirectPlainAgents = []string{"web-1 (10.0.0.4)", "db-1 (10.0.0.5)"}
+		}, state: Attention,
+			line: "A reverse proxy serves HTTPS, but 1 computer signed in to Signalith directly over plain HTTP in the last day: 10.0.0.7.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || c.Details[0] != "2 agents sent events to Signalith directly over plain HTTP in the last day: web-1 (10.0.0.4) and db-1 (10.0.0.5)." ||
+					len(c.Fix.Steps) != 3 {
+					t.Errorf("%q %+v", c.Details, c.Fix)
+				}
+			}},
 		{name: "proxy", set: func(f *Facts) {
 			f.Config.Server.TLS.Mode = "off"
 			f.Config.Server.TrustedProxies = []string{"10.0.0.5"}
@@ -214,6 +244,45 @@ func TestHTTPS(t *testing.T) {
 				}
 			}},
 	})
+}
+
+// A signalith.yaml written before HTTPS was the default, with an https://
+// public_url, leaves HTTPS to a reverse proxy Signalith believes without
+// it being listed: transit.https says so, and transit.proxies stays hidden.
+func TestHTTPSLegacyProxy(t *testing.T) {
+	legacy := "server:\n  listen: 0.0.0.0:18972\n  public_url: https://siem.example.com\n"
+	for _, tc := range []struct {
+		name    string
+		runtime *RuntimeFacts
+		line    string
+		details int
+	}{
+		{name: "not seen yet", runtime: &RuntimeFacts{SyslogSenders: map[string]int{}},
+			line: "HTTPS is left to a reverse proxy, which Signalith trusts only because signalith.yaml was written before HTTPS was the default."},
+		{name: "seen", runtime: &RuntimeFacts{SyslogSenders: map[string]int{}, LegacyProxies: []string{"127.0.0.1"}, DirectPlain: []string{"10.0.0.7"}},
+			line: "HTTPS is left to the reverse proxy at 127.0.0.1, which Signalith trusts only because signalith.yaml was written before HTTPS was the default.", details: 1},
+		{name: "CLI", line: "HTTPS is left to a reverse proxy, which Signalith trusts only because signalith.yaml was written before HTTPS was the default."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := goodFacts(t, "")
+			f.Config = loadConfig(t, legacy)
+			if !f.Config.Server.LegacyProxied() {
+				t.Fatal("not legacy proxied")
+			}
+			f.Runtime = tc.runtime
+			r := Evaluate(f)
+			c := r.Find("transit.https")
+			if c == nil || c.State != Attention || c.Line != tc.line || len(c.Details) != tc.details {
+				t.Fatalf("%+v", c)
+			}
+			if c.Fix == nil || c.Fix.Setting != "server.trusted_proxies" || len(c.Fix.Steps) != 2 {
+				t.Errorf("%+v", c.Fix)
+			}
+			if p := r.Find("transit.proxies"); p != nil {
+				t.Errorf("transit.proxies shown: %+v", p)
+			}
+		})
+	}
 }
 
 func TestCertificate(t *testing.T) {
@@ -301,6 +370,17 @@ func TestCAScope(t *testing.T) {
 					t.Errorf("%+v", c.Fix)
 				}
 			}},
+		// Made before names were kept exact: honest about the names under them.
+		{name: "older subtrees", set: func(f *Facts) { f.TLS.CA.Subtrees = []string{"dev", "siem.example.com"} }, state: Good,
+			line: "Signalith's certificate authority can vouch only for this server, private network names, and names that end in .dev or .siem.example.com.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || !strings.Contains(c.Details[0], "earlier version") {
+					t.Errorf("%q", c.Details)
+				}
+			}},
+		{name: "older subtrees, strict", set: func(f *Facts) {
+			f.TLS.CA.Scope, f.TLS.ScopeSetup, f.TLS.CA.Subtrees = "strict", "strict", []string{"siem-1"}
+		}, state: Good, line: "Signalith's certificate authority can vouch only for this server's own names and addresses, and for names that end in .siem-1."},
 		{name: "cluster", set: func(f *Facts) { f.Runtime.ClusterServer = "siem-1" }, state: Good, fix: func(t *testing.T, c *Check) {
 			if len(c.Details) != 1 || c.Details[0] != "Each server has its own certificate authority. This is siem-1's." {
 				t.Errorf("%q", c.Details)
@@ -325,6 +405,25 @@ func TestAgentsPlain(t *testing.T) {
 				}
 			}},
 		{name: "none for a day", set: allow, state: Attention, line: "Agents on plain HTTP are still accepted, though none has sent that way in the last day."},
+		// Agents on this computer send over loopback: nothing crosses the network.
+		{name: "local only", set: func(f *Facts) { allow(f); f.Runtime.LocalPlainSenders = 1 }, state: Attention,
+			line: "An agent on this computer still sends over plain HTTP. Its events don't cross the network.",
+			fix: func(t *testing.T, c *Check) {
+				if c.Fix.Steps[0] != "Give it a new configuration from Add data." {
+					t.Errorf("%+v", c.Fix)
+				}
+			}},
+		{name: "local and network", set: func(f *Facts) {
+			allow(f)
+			f.Runtime.LocalPlainSenders = 2
+			f.Runtime.PlainSenderCount = 1
+			f.Runtime.PlainSenders = []string{"web-1 (10.0.0.4)"}
+		}, state: Risk, line: "1 agent sends events over plain HTTP, which anyone on the network can read: web-1 (10.0.0.4).",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || c.Details[0] != "2 agents on this computer still send over plain HTTP. Their events don't cross the network." {
+					t.Errorf("%q", c.Details)
+				}
+			}},
 		{name: "just started", set: func(f *Facts) { allow(f); f.Uptime = 3 * time.Hour }, state: Attention,
 			line: "Agents on plain HTTP are still accepted. None has sent that way since Signalith started 3 hours ago."},
 		{name: "CLI", set: func(f *Facts) { allow(f); f.Runtime = nil }, state: Attention,
@@ -337,6 +436,16 @@ func TestSyslog(t *testing.T) {
 		{name: "off", state: ""},
 		{name: "TLS only", extra: "syslog:\n  tls: 0.0.0.0:6514\n", state: Good, line: "Syslog arrives only over TLS, so it's encrypted."},
 		{name: "loopback", extra: "syslog:\n  udp: 127.0.0.1:5514\n", state: Good, line: "Syslog is accepted only from this computer."},
+		{name: "loopback and TLS", extra: "syslog:\n  udp: 127.0.0.1:5514\n  tls: 0.0.0.0:6514\n", state: Good,
+			line: "Syslog over TLS is encrypted, and syslog over UDP is accepted only from this computer."},
+		// Only the listener other computers can reach is named.
+		{name: "loopback UDP, open TCP", extra: "syslog:\n  udp: 127.0.0.1:514\n  tcp: 0.0.0.0:5514\n", state: Attention,
+			line: "Syslog over TCP is accepted from any computer that can reach port 5514, so anyone could send fake events.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 2 || c.Details[0] != "Syslog over UDP is accepted only from this computer." {
+					t.Errorf("%q", c.Details)
+				}
+			}},
 		{name: "allow list", extra: "syslog:\n  udp: 0.0.0.0:5514\n  tcp: 0.0.0.0:5514\n  allow: [10.0.0.0/8, 192.168.1.1, 192.168.2.0/24, 172.16.0.0/12]\n",
 			state: Good, line: "Syslog over UDP and TCP is accepted only from 10.0.0.0/8, 192.168.1.1, 192.168.2.0/24 and 1 more. It isn't encrypted, which is normal for devices that can't use TLS.",
 			fix: func(t *testing.T, c *Check) {
@@ -365,10 +474,21 @@ func TestSyslog(t *testing.T) {
 func TestOpenSearchTransit(t *testing.T) {
 	runCases(t, "transit.opensearch", []checkCase{
 		{name: "https", state: Good, line: "Signalith reaches OpenSearch over HTTPS and checks its certificate."},
-		{name: "skip verify", set: func(f *Facts) { f.Config.OpenSearch.TLSSkipVerify = true }, state: Risk,
+		{name: "skip verify", set: func(f *Facts) {
+			f.Config.OpenSearch.URL = "https://10.0.0.20:9200"
+			f.Config.OpenSearch.TLSSkipVerify = true
+		}, state: Risk,
 			line: "Signalith doesn't check OpenSearch's certificate, so someone on the network could pose as OpenSearch and read events and its password.",
 			fix: func(t *testing.T, c *Check) {
 				if c.Fix.Setting != "opensearch.tls_skip_verify" || c.Fix.Docs.Anchor != "4-point-signalith-at-it" {
+					t.Errorf("%+v", c.Fix)
+				}
+			}},
+		// Traffic to OpenSearch on this computer never crosses the network.
+		{name: "skip verify local", set: func(f *Facts) { f.Config.OpenSearch.TLSSkipVerify = true }, state: Attention,
+			line: "Signalith doesn't check OpenSearch's certificate. OpenSearch runs on this computer, so only a program here could pose as it.",
+			fix: func(t *testing.T, c *Check) {
+				if c.Fix.Setting != "opensearch.tls_skip_verify" {
 					t.Errorf("%+v", c.Fix)
 				}
 			}},
@@ -390,7 +510,7 @@ func TestOpenSearchTransit(t *testing.T) {
 		{name: "locked by env", set: func(f *Facts) {
 			f.Config.OpenSearch.TLSSkipVerify = true
 			f.SettingEnv["opensearch.tls_skip_verify"] = "SIGNALITH_OPENSEARCH_TLS_SKIP_VERIFY"
-		}, state: Risk, fix: func(t *testing.T, c *Check) {
+		}, state: Attention, fix: func(t *testing.T, c *Check) {
 			if c.Fix.LockedBy != "SIGNALITH_OPENSEARCH_TLS_SKIP_VERIFY" {
 				t.Errorf("locked by %q", c.Fix.LockedBy)
 			}
@@ -452,12 +572,34 @@ func TestMasterKey(t *testing.T) {
 					t.Errorf("tip %+v", c.Tip)
 				}
 			}},
+		// Commands that name this server's files are for its own system
+		// only: elsewhere those paths mean nothing.
 		{name: "readable by all", set: func(f *Facts) { f.Key.Perm.OtherRead = true }, state: Risk,
 			line: "Any account on this computer can read the master key (" + path + ").",
 			fix: func(t *testing.T, c *Check) {
 				want := "sudo chown signalith " + path + " && sudo chmod 600 " + path
-				if c.Fix.Commands["linux"] != want || !strings.Contains(c.Fix.Commands["docker"], "chmod 600 /data/keys/master.key") ||
-					!strings.HasPrefix(c.Fix.Commands["windows"], "icacls '"+path+"'") {
+				if c.Fix.Commands["linux"] != want || len(c.Fix.Commands) != 1 {
+					t.Errorf("%q", c.Fix.Commands)
+				}
+			}},
+		{name: "readable by all, docker", set: func(f *Facts) {
+			f.Key.Perm.OtherRead = true
+			f.InContainer, f.Docker, f.Server.Deployment = true, true, DeployDocker
+		}, state: Risk, fix: func(t *testing.T, c *Check) {
+			if !strings.Contains(c.Fix.Commands["docker"], "chmod 600 /data/keys/master.key") || len(c.Fix.Commands) != 1 {
+				t.Errorf("%q", c.Fix.Commands)
+			}
+			if !slices.Contains(c.Fix.Steps, "docker volume ls shows the volume's name.") {
+				t.Errorf("%q", c.Fix.Steps)
+			}
+		}},
+		{name: "readable by all, windows", set: func(f *Facts) {
+			f.Key.Perm.SomeRead = true
+			f.Key.Source.Path = `C:\ProgramData\Signalith\keys\master.key.dpapi`
+			f.Server.OS, f.Server.Deployment = "windows", DeployWindowsService
+		}, state: Risk, line: `Other accounts on this computer can read the master key (C:\ProgramData\Signalith\keys\master.key.dpapi).`,
+			fix: func(t *testing.T, c *Check) {
+				if !strings.HasPrefix(c.Fix.Commands["windows"], `icacls 'C:\ProgramData\Signalith\keys\master.key.dpapi'`) || len(c.Fix.Commands) != 1 {
 					t.Errorf("%q", c.Fix.Commands)
 				}
 			}},
@@ -470,7 +612,10 @@ func TestMasterKey(t *testing.T) {
 		{name: "previous", set: func(f *Facts) { f.Key.Source.OldPath = path + ".old" }, state: Attention,
 			line: "The previous master key is still kept, in " + path + ".old.",
 			fix: func(t *testing.T, c *Check) {
-				if c.Fix.Commands["linux"] != "sudo signalith secrets rotate-master -prune" {
+				// The config file isn't where signalith looks by default.
+				if !strings.HasPrefix(c.Fix.Commands["linux"], "sudo signalith secrets rotate-master -prune"+tempConfigArg) ||
+					c.Fix.Commands["windows"] != winExe+" secrets rotate-master -prune" ||
+					!strings.HasSuffix(c.Fix.Commands["docker"], " secrets rotate-master -prune -c /work/signalith.yaml") {
 					t.Errorf("%q", c.Fix.Commands)
 				}
 			}},
@@ -479,10 +624,19 @@ func TestMasterKey(t *testing.T) {
 		{name: "credential", set: func(f *Facts) { f.Key.Source.Kind = secrets.FromCredential }, state: Good,
 			line: "The master key comes from a systemd credential, so only the Signalith service can read it."},
 		{name: "windows", set: func(f *Facts) { f.Server.OS = "windows" }, state: Good, line: "The master key is protected by Windows and works only on this computer."},
-		{name: "docker", set: func(f *Facts) { f.InContainer = true }, state: Good,
+		{name: "docker", set: func(f *Facts) { f.InContainer, f.Docker = true, true }, state: Good,
 			line: "The master key is in the signalith-data volume, readable only by Signalith's account.",
 			fix: func(t *testing.T, c *Check) {
 				if c.Tip == nil || c.Tip.Docs.Anchor != "docker" {
+					t.Errorf("tip %+v", c.Tip)
+				}
+			}},
+		// Another container, such as Kubernetes: no Docker volume, and no
+		// systemd credential either.
+		{name: "other container", set: func(f *Facts) { f.InContainer = true }, state: Good,
+			line: "The master key is in " + path + ", and only signalith can read it.",
+			fix: func(t *testing.T, c *Check) {
+				if c.Tip != nil {
 					t.Errorf("tip %+v", c.Tip)
 				}
 			}},
@@ -614,10 +768,19 @@ func TestArchives(t *testing.T) {
 		{name: "readable", set: func(f *Facts) { arch(f); f.Archive.Perm.OtherRead = true }, state: Attention,
 			line: "Other accounts on this computer can read the archived days in /var/lib/signalith/archive.",
 			fix: func(t *testing.T, c *Check) {
-				if c.Fix.Commands["linux"] != "sudo chmod -R go-rwx /var/lib/signalith/archive" || c.Fix.Commands["docker"] != "docker run --rm -v docker_signalith-data:/data busybox chmod -R go-rwx /data/archive" {
+				if c.Fix.Commands["linux"] != "sudo chmod -R go-rwx /var/lib/signalith/archive" || len(c.Fix.Commands) != 1 {
 					t.Errorf("%q", c.Fix.Commands)
 				}
 			}},
+		{name: "readable, docker", set: func(f *Facts) {
+			arch(f)
+			f.Archive.Perm.OtherRead = true
+			f.InContainer, f.Docker, f.Server.Deployment = true, true, DeployDocker
+		}, state: Attention, fix: func(t *testing.T, c *Check) {
+			if c.Fix.Commands["docker"] != "docker run --rm -v docker_signalith-data:/data busybox chmod -R go-rwx /data/archive" || len(c.Fix.Commands) != 1 {
+				t.Errorf("%q", c.Fix.Commands)
+			}
+		}},
 		{name: "plain disk", set: func(f *Facts) { arch(f); f.Archive.Disk.Kind = DiskPlain }, state: Attention,
 			line: "120 archived days (3 GB) are kept as plain files in /var/lib/signalith/archive, on a disk that isn't encrypted. Signalith doesn't encrypt archives itself."},
 		{name: "share", set: func(f *Facts) { arch(f); f.Archive.Disk = Disk{Kind: DiskNetwork, Source: "nas:/a"} }, state: Unknown,
@@ -639,13 +802,49 @@ func TestOpenSearchDisk(t *testing.T) {
 			line: "OpenSearch keeps events in /var/lib/opensearch, on a disk that isn't encrypted, as far as Linux can tell."},
 		{name: "remote", set: func(f *Facts) { f.Config.OpenSearch.URL = "https://os.corp.local:9200" }, state: Unknown,
 			line: "OpenSearch runs on another computer (os.corp.local), so Signalith can't see its disk."},
-		{name: "docker", set: func(f *Facts) { f.Config.OpenSearch.URL = "https://opensearch:9200"; f.InContainer = true }, state: Unknown,
+		{name: "docker", set: func(f *Facts) {
+			f.Config.OpenSearch.URL = "https://opensearch:9200"
+			f.InContainer, f.Docker = true, true
+		}, state: Unknown,
 			line: "OpenSearch runs in its own container. Its events are in the opensearch-data volume on this computer's disk, which Signalith can't see from its container."},
+		{name: "other container", set: func(f *Facts) { f.Config.OpenSearch.URL = "https://opensearch:9200"; f.InContainer = true }, state: Unknown,
+			line: "Signalith runs in a container, so it can't see the disk where OpenSearch (opensearch) keeps events."},
 		{name: "failed", set: func(f *Facts) { f.OpenSearch.DataErr = "status 403"; f.OpenSearch.DataPaths = nil }, state: Unknown,
 			line: "Signalith couldn't ask OpenSearch where it keeps events (status 403)."},
 		{name: "virtual", set: func(f *Facts) { f.OpenSearch.DataPaths = []Disk{{Kind: DiskVirtual}} }, state: Unknown,
 			line: "OpenSearch's data files are on a virtual disk. Its host may encrypt it, but Signalith can't see that from inside."},
+		// OpenSearch in Docker, Signalith on the computer itself: the
+		// container's folder isn't here, and the disk of / says nothing.
+		{name: "folder not here", set: func(f *Facts) {
+			f.OpenSearch.DataPaths, f.OpenSearch.DataMissing = nil, []string{"/usr/share/opensearch/data"}
+		}, state: Unknown,
+			line: "OpenSearch says it keeps events in /usr/share/opensearch/data, which isn't on this computer's disks as Signalith sees them. It may run in a container."},
+		// The systemd unit hides /home (ProtectHome): an empty folder in
+		// memory stands in for it, which is no answer.
+		{name: "hidden", set: func(f *Facts) {
+			f.OpenSearch.DataPaths = []Disk{{Path: "/home/me/opensearch/data", Kind: DiskDenied, Hidden: "/home"}}
+		}, state: Unknown,
+			line: "Signalith's account isn't allowed to look inside /home, so it can't tell which disk holds OpenSearch's data files."},
+		{name: "in memory", set: func(f *Facts) { f.OpenSearch.DataPaths = []Disk{{Path: "/dev/shm/os", Kind: DiskMemory}} }, state: Good,
+			line: "OpenSearch keeps events in /dev/shm/os, in memory only."},
+		{name: "seen through a closed folder", set: func(f *Facts) {
+			f.OpenSearch.DataPaths = []Disk{{Path: "/var/lib/opensearch/data", Kind: DiskEncrypted, Hidden: "/var/lib/opensearch"}}
+		}, state: Good, line: "OpenSearch keeps events in /var/lib/opensearch/data, on an encrypted disk.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || !strings.Contains(c.Details[0], "can't look inside /var/lib/opensearch") {
+					t.Errorf("%q", c.Details)
+				}
+			}},
+		// Proper names keep their capital letters.
+		{name: "can't tell", set: func(f *Facts) { f.OpenSearch.DataPaths = []Disk{{Kind: DiskUnknown}} }, state: Unknown,
+			line: "Signalith can't tell whether the disk under OpenSearch's data files is encrypted."},
 	})
+}
+
+func TestDiskLineKeepsNames(t *testing.T) {
+	if got := diskLine(Disk{Kind: DiskUnknown}, "Signalith's files"); got != "Signalith can't tell whether the disk under Signalith's files is encrypted." {
+		t.Error(got)
+	}
 }
 
 func TestOpenSearchAccess(t *testing.T) {
@@ -663,6 +862,21 @@ func TestOpenSearchAccess(t *testing.T) {
 			}},
 		{name: "unknown", set: func(f *Facts) { f.OpenSearch.Anonymous = "unknown" }, state: Unknown,
 			line: "Signalith couldn't reach OpenSearch just now, so it can't tell who else can."},
+		{name: "unreachable", set: func(f *Facts) { f.OpenSearch.Anonymous, f.OpenSearch.AnonymousErr = "unknown", "connection refused" }, state: Unknown,
+			line: "Signalith couldn't reach OpenSearch just now, so it can't tell who else can.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || c.Details[0] != "Signalith couldn't reach OpenSearch: connection refused." || !strings.Contains(c.Fix.Steps[0], "Health page") {
+					t.Errorf("%q %+v", c.Details, c.Fix)
+				}
+			}},
+		// OpenSearch answered, but not in a way that tells.
+		{name: "odd answer", set: func(f *Facts) { f.OpenSearch.Anonymous, f.OpenSearch.AnonymousErr = "unknown", "status 503" }, state: Unknown,
+			line: "Signalith couldn't tell whether OpenSearch lets anyone read events without signing in.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || c.Details[0] != "OpenSearch answered: status 503." {
+					t.Errorf("%q", c.Details)
+				}
+			}},
 		{name: "timed out", set: func(f *Facts) { f.TimedOut = map[string]bool{"rest.opensearch_access": true} }, state: Unknown, line: TimedOutLine},
 	})
 }
@@ -687,6 +901,13 @@ func TestMemory(t *testing.T) {
 				}
 			}},
 		{name: "dumps", set: func(f *Facts) { f.Memory.CoreOff = false }, state: Attention, line: "Signalith's memory could be saved in a crash dump, with passwords in it."},
+		// The systemd unit's MemorySwapMax doesn't apply in a container.
+		{name: "swap in a container", set: func(f *Facts) { f.Memory.SwapOn = true; f.InContainer = true; f.ConfidentialVM = "AMD SEV-SNP" }, state: Good,
+			fix: func(t *testing.T, c *Check) {
+				if c.Tip == nil || len(c.Tip.Steps) != 1 || !strings.Contains(c.Tip.Steps[0], "memswap_limit") || strings.Contains(c.Tip.Steps[0], "systemd") {
+					t.Errorf("%+v", c.Tip)
+				}
+			}},
 		{name: "windows dumps", set: func(f *Facts) {
 			f.Server.OS = "windows"
 			f.Memory = MemoryFacts{Known: true, FullDumps: true, DumpFolder: `C:\Dumps`, DumpsRegistry: `HKLM\SOFTWARE\x`}
@@ -715,7 +936,7 @@ func TestBuiltinPassword(t *testing.T) {
 		{name: "public", set: func(f *Facts) { f.Admin.Public, f.Admin.FromEnv = true, true }, state: Risk,
 			line: "The built-in admin's password is change-me-please, an example anyone can look up.",
 			fix: func(t *testing.T, c *Check) {
-				if len(c.Fix.Steps) != 2 || !strings.HasPrefix(c.Fix.Commands["linux"], "sudo signalith passwd -c ") {
+				if len(c.Fix.Steps) != 2 || !strings.HasPrefix(c.Fix.Commands["linux"], "sudo signalith passwd"+tempConfigArg) {
 					t.Errorf("%+v", c.Fix)
 				}
 			}},
@@ -723,6 +944,13 @@ func TestBuiltinPassword(t *testing.T) {
 			line: "The built-in admin still has the first password the Docker setup made, which is kept as plain text in a Docker volume."},
 		{name: "env", set: func(f *Facts) { f.Admin.FromEnv = true }, state: Attention,
 			line: "The built-in admin's password is set in the SIGNALITH_ADMIN_PASSWORD environment variable."},
+		{name: "file", set: func(f *Facts) { f.Admin.FromFile = true }, state: Attention,
+			line: "The built-in admin's password is read from the file in SIGNALITH_ADMIN_PASSWORD_FILE, as plain text.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Fix.Steps) != 2 || !strings.Contains(c.Fix.Steps[1], "delete the file") {
+					t.Errorf("%+v", c.Fix)
+				}
+			}},
 		{name: "weak", set: func(f *Facts) { f.Admin.WeakHash = true }, state: Attention},
 	})
 }
@@ -806,7 +1034,8 @@ func TestDirectory(t *testing.T) {
 
 func TestSessions(t *testing.T) {
 	runCases(t, "accounts.sessions", []checkCase{
-		{name: "default", state: Good, line: "People are signed out after 12 hours without use, and after 7 days at most."},
+		// Keep me signed in skips the idle limit (see auth.Sessions).
+		{name: "default", state: Good, line: "People are signed out after 12 hours without use, unless they choose Keep me signed in, which keeps them signed in for up to 7 days."},
 		{name: "long", set: func(f *Facts) { f.Config.Auth.SessionTimeout = "3d" }, state: Attention, line: "People stay signed in for up to 3 days without using Signalith.",
 			fix: func(t *testing.T, c *Check) {
 				if c.Fix.Setting != "auth.session_timeout" {
@@ -828,10 +1057,22 @@ func TestAgentTokens(t *testing.T) {
 		{name: "public", extra: "ingest:\n  tokens: [change-this-ingest-token]\n", state: Risk,
 			line: "Agents can send events with change-this-ingest-token, an example token anyone can look up.",
 			fix: func(t *testing.T, c *Check) {
-				if c.Fix.Commands["linux"] != "sudo signalith secrets set ingest.tokens" {
+				if !strings.HasPrefix(c.Fix.Commands["linux"], "sudo signalith secrets set ingest.tokens"+tempConfigArg) {
 					t.Errorf("%q", c.Fix.Commands)
 				}
 			}},
+		// The Docker quick start still accepts the old example token over
+		// plain HTTP while agents on plain HTTP are (see
+		// api.retiredTokenAccepted), whatever tokens are set.
+		{name: "public token accepted", extra: "ingest:\n  tokens: [" + sentinelToken + "]\n", set: func(f *Facts) {
+			f.InContainer, f.Docker, f.PublicTokenAccepted = true, true, true
+		}, state: Risk, line: "Agents can still send events over plain HTTP with change-this-ingest-token, an example token anyone can look up.",
+			fix: func(t *testing.T, c *Check) {
+				if c.Fix.Setting != "server.tls.plaintext_ingest" || c.Fix.Page == nil || c.Fix.Page.ID != "data" {
+					t.Errorf("%+v", c.Fix)
+				}
+			}},
+		{name: "public token accepted, no tokens", set: func(f *Facts) { f.PublicTokenAccepted = true }, state: Risk},
 		{name: "short", extra: "ingest:\n  tokens: [SENTINEL-short-tok20]\n", state: Attention,
 			line: "An agent token is only 20 characters long, so it's easier to guess. Tokens Signalith makes have 48."},
 	})
@@ -852,6 +1093,18 @@ func TestOpenSearchRole(t *testing.T) {
 		{name: "admin backend role", set: func(f *Facts) { f.OpenSearch.AuthBackend = []string{"admin"} }, state: Attention},
 		{name: "failed", set: func(f *Facts) { f.OpenSearch.AuthErr = "no answer in time" }, state: Unknown,
 			line: "Signalith couldn't ask OpenSearch what its account may do."},
+		{name: "unreachable", set: func(f *Facts) { f.OpenSearch.AuthErr = "connection refused" }, state: Unknown,
+			fix: func(t *testing.T, c *Check) {
+				if c.Details[0] != "Signalith couldn't reach OpenSearch: connection refused." || !strings.Contains(c.Fix.Steps[0], "Health page") {
+					t.Errorf("%q %+v", c.Details, c.Fix)
+				}
+			}},
+		{name: "refused", set: func(f *Facts) { f.OpenSearch.AuthErr = "status 403" }, state: Unknown,
+			fix: func(t *testing.T, c *Check) {
+				if c.Details[0] != "OpenSearch answered: status 403." || !strings.Contains(c.Fix.Steps[0], "roles mapped") {
+					t.Errorf("%q %+v", c.Details, c.Fix)
+				}
+			}},
 	})
 }
 
@@ -874,6 +1127,19 @@ func TestAccount(t *testing.T) {
 			f.Server.OS = "windows"
 			f.Process = ProcessFacts{Known: true, SID: "S-1-5-21-1-2-3-1001", UserName: `PC\alice`, Elevated: true}
 		}, state: Attention, line: `Signalith runs as PC\alice, an administrator.`},
+		{name: "admin unknown", set: func(f *Facts) {
+			f.Server.OS = "windows"
+			f.Process = ProcessFacts{Known: true, SID: "S-1-5-21-1-2-3-1001", UserName: `CORP\svc-siem`, AdminUnknown: true}
+		}, state: Unknown, line: `Signalith runs as CORP\svc-siem. Signalith couldn't tell whether that account is an administrator.`,
+			fix: func(t *testing.T, c *Check) {
+				if c.Fix.Commands["windows"] != "net localgroup Administrators" {
+					t.Errorf("%+v", c.Fix)
+				}
+			}},
+		{name: "not admin", set: func(f *Facts) {
+			f.Server.OS = "windows"
+			f.Process = ProcessFacts{Known: true, SID: "S-1-5-21-1-2-3-1001", UserName: `PC\svc`}
+		}, state: Good, line: `Signalith runs as PC\svc, without administrator rights.`},
 		{name: "service sid", set: func(f *Facts) {
 			f.Server.OS = "windows"
 			f.Process = ProcessFacts{Known: true, SID: "S-1-5-80-1-2-3-4-5", Service: true}
@@ -898,6 +1164,17 @@ func TestService(t *testing.T) {
 					t.Errorf("%q", c.Fix.Commands)
 				}
 			}},
+
+		// Linux before 5.8 can't hide other processes: not a missing protection.
+		{name: "old kernel", set: func(f *Facts) { f.Process.HiddenProc, f.Process.NoHiddenProc = false, true }, state: Good,
+			line: "Signalith's service runs with all the protections its systemd unit sets up.",
+			fix: func(t *testing.T, c *Check) {
+				if len(c.Details) != 1 || c.Details[0] != "Hidden processes: not available on this Linux version." {
+					t.Errorf("%q", c.Details)
+				}
+			}},
+		{name: "old kernel, missing", set: func(f *Facts) { f.Process.HiddenProc, f.Process.NoHiddenProc, f.Process.Seccomp = false, true, false }, state: Attention,
+			line: "Signalith's service is missing protections its current systemd unit sets up: a system-call filter."},
 		{name: "container", set: func(f *Facts) { f.InContainer = true; f.Process.NoCapsAtAll = true }, state: Good,
 			line: "Signalith's container runs read-only, without extra privileges or capabilities."},
 		{name: "container missing", set: func(f *Facts) { f.InContainer = true; f.Process.ReadOnlyRoot = false }, state: Attention,
@@ -943,11 +1220,17 @@ func TestFiles(t *testing.T) {
 		{name: "path with a quote", set: func(f *Facts) {
 			f.Files.Problems = []FileProblem{{Path: "/srv/it's here/ca.key", Kind: "key", Read: true, Everyone: true}}
 		}, state: Risk, fix: func(t *testing.T, c *Check) {
-			if c.Fix.Commands["linux"] != `sudo chmod go-rwx '/srv/it'\''s here/ca.key'` {
-				t.Errorf("%q", c.Fix.Commands["linux"])
+			// This server's paths: no Windows command for a Linux one.
+			if c.Fix.Commands["linux"] != `sudo chmod go-rwx '/srv/it'\''s here/ca.key'` || len(c.Fix.Commands) != 1 {
+				t.Errorf("%q", c.Fix.Commands)
 			}
-			if !strings.HasPrefix(c.Fix.Commands["windows"], `icacls '/srv/it''s here/ca.key'`) {
-				t.Errorf("%q", c.Fix.Commands["windows"])
+		}},
+		{name: "windows path with a quote", set: func(f *Facts) {
+			f.Server.OS, f.Server.Deployment = "windows", DeployWindowsService
+			f.Files.Problems = []FileProblem{{Path: `C:\Signalith's\tls\ca.key`, Kind: "key", Read: true, Everyone: true}}
+		}, state: Risk, fix: func(t *testing.T, c *Check) {
+			if !strings.HasPrefix(c.Fix.Commands["windows"], `icacls 'C:\Signalith''s\tls\ca.key'`) || len(c.Fix.Commands) != 1 {
+				t.Errorf("%q", c.Fix.Commands)
 			}
 		}},
 	})

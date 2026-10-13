@@ -16,6 +16,7 @@ var update = flag.Bool("update", false, "rewrite the golden files")
 // mixedFacts have something in every state.
 func mixedFacts(t *testing.T) *Facts {
 	f := goodFacts(t, "syslog:\n  udp: 0.0.0.0:5514\n  public_port: 514\n")
+	f.Config.OpenSearch.URL = "https://10.0.0.20:9200"
 	f.Config.OpenSearch.TLSSkipVerify = true
 	f.Admin.DockerFirst = true
 	f.Disks = []Disk{{Kind: DiskVirtual, Provider: "Amazon EC2"}}
@@ -27,8 +28,11 @@ func mixedFacts(t *testing.T) *Facts {
 func TestTextGolden(t *testing.T) {
 	f := mixedFacts(t)
 	r := Evaluate(f)
-	// The config file is in a folder of the test's own.
-	got := strings.ReplaceAll(Text(r), filepath.Dir(f.Config.Path()), "/etc/signalith")
+	// The config file is in a folder of the test's own. Commands name it
+	// only when it is a Linux path (TestConfigArg checks that), so it is
+	// taken out of them; on Windows it isn't in them at all.
+	got := strings.ReplaceAll(Text(r), " -c "+sh(f.Config.Path()), "")
+	got = strings.ReplaceAll(got, filepath.Dir(f.Config.Path()), "/etc/signalith")
 	file := filepath.Join("testdata", "report.txt")
 	if *update {
 		if err := os.WriteFile(file, []byte(got), 0o644); err != nil {

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,9 +20,12 @@ import (
 // fake, with its folders in a temporary one, and returns its path.
 func securityConfig(t *testing.T, extra string) string {
 	t.Helper()
-	saved := readServiceSettings
-	t.Cleanup(func() { readServiceSettings = saved })
+	saved, savedBL := readServiceSettings, saveBitLocker
+	t.Cleanup(func() { readServiceSettings, saveBitLocker = saved, savedBL })
 	readServiceSettings = func() *serviceSettings { return nil }
+	// A test run as Administrator on Windows would otherwise ask BitLocker
+	// and save its answer in the test's state folder.
+	saveBitLocker = func(context.Context, string, io.Writer) {}
 	for _, k := range []string{"SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_INGEST_TOKEN_FILE", "SIGNALITH_NODE_NAME"} {
 		t.Setenv(k, "")
 	}

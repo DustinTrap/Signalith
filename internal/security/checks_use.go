@@ -50,7 +50,11 @@ func checkMemory(f *Facts) *Check {
 	}
 	var tip []string
 	if m.SwapOn && !m.SwapEncrypted && !m.SwapOffForUs {
-		tip = append(tip, "Swap is on and not encrypted. The systemd unit turns swap off for Signalith (MemorySwapMax=0); install the current unit, or encrypt swap.")
+		if f.InContainer {
+			tip = append(tip, "Swap is on and not encrypted. Set memswap_limit equal to mem_limit for the signalith service, or encrypt swap on the computer that runs Docker.")
+		} else {
+			tip = append(tip, "Swap is on and not encrypted. The systemd unit turns swap off for Signalith (MemorySwapMax=0); install the current unit, or encrypt swap.")
+		}
 	}
 	if f.ConfidentialVM == "" {
 		tip = append(tip, "For more protection, run Signalith in a confidential virtual machine (AMD SEV-SNP or Intel TDX), which is built to keep even its host from reading its memory.")

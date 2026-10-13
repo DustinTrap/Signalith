@@ -326,6 +326,14 @@ func (s Server) LegacyProxy(a netip.Addr) bool {
 	return a.IsLoopback() || a.IsPrivate()
 }
 
+// LegacyProxied reports whether HTTPS is left to a reverse proxy that
+// Signalith believes only because the config was written before HTTPS
+// was the default (see LegacyProxy): HTTPS is off, and no
+// server.trusted_proxies are listed.
+func (s Server) LegacyProxied() bool {
+	return s.TLSMode() == TLSOff && (s.legacyHTTP() || s.legacyFile) && len(s.TrustedProxies) == 0
+}
+
 // TrustsProxy reports whether a is in server.trusted_proxies.
 func (s Server) TrustsProxy(a netip.Addr) bool {
 	a = a.Unmap().WithZone("")

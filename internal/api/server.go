@@ -210,7 +210,7 @@ func (s *Server) Handler() http.Handler {
 	s.routes = api.routes
 	s.routeLogin(mux)
 	mux.Handle("/", s.requireUser(api.mux))
-	return limitBodies(s.noteNames(s.securityHeaders(s.guardAPI(mux))))
+	return limitBodies(s.securityHeaders(s.guardAPI(mux)))
 }
 
 // guardAPI makes sure no /api/ route escapes sign-in: a route registered
@@ -285,6 +285,9 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 	if !s.validToken(r) && !s.retiredTokenAccepted(w, r) {
 		return
 	}
+	// Only agents that hold a token count: anyone can send a request.
+	s.noteName(r)
+	s.notePlainAgent(r)
 	var res *ingest.Result
 	if plaintextIngest(r) {
 		// Noted once the batch is in, with the host names in its events:

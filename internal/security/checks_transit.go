@@ -44,17 +44,46 @@ func checkHTTPS(f *Facts) *Check {
 	if host != "" && isLoopback(host) {
 		return &Check{State: Good, Line: "HTTPS is off, but Signalith only answers on this computer (" + c.Server.Listen + "), so nothing it sends crosses the network."}
 	}
-	if proxies := c.Server.TrustedProxyList(); len(proxies) > 0 {
-		if f.Runtime != nil && len(f.Runtime.DirectPlain) > 0 {
-			n := len(f.Runtime.DirectPlain)
-			line := "A reverse proxy serves HTTPS, but " + itoa(n) + plural(n, " computer", " computers") +
-				" signed in to Signalith directly over plain HTTP in the last day: " + shorten(f.Runtime.DirectPlain, 5) + "."
-			return &Check{State: Attention, Line: line, Fix: &Fix{
+	// What reached Signalith over plain HTTP, not through the proxy, in
+	// the last day: sign-ins and agents.
+	var direct []string
+	var signIns, agents []string
+	if f.Runtime != nil {
+		signIns, agents = f.Runtime.DirectPlain, f.Runtime.DirectPlainAgents
+		if n := len(signIns); n > 0 {
+			direct = append(direct, itoa(n)+plural(n, " computer", " computers")+" signed in to Signalith directly over plain HTTP in the last day: "+shorten(signIns, 5)+".")
+		}
+		if n := len(agents); n > 0 {
+			direct = append(direct, itoa(n)+plural(n, " agent", " agents")+" sent events to Signalith directly over plain HTTP in the last day: "+shorten(agents, 5)+".")
+		}
+	}
+	directFix := func() *Fix {
+		var steps []string
+		if len(signIns) > 0 {
+			steps = append(steps, "Tell people to use the proxy's https:// address.")
+		}
+		if len(agents) > 0 {
+			steps = append(steps, "Give those agents a new configuration from Add data, with Public address set to the proxy's https:// address.")
+		}
+		steps = append(steps, "Set Listen address so only the proxy can reach Signalith, such as 127.0.0.1:"+port+" when the proxy runs on this computer.")
+		return &Fix{Steps: steps, Setting: "server.listen", Docs: doc(docHTTPSProxy)}
+	}
+	if c.Server.LegacyProxied() {
+		where := "a reverse proxy"
+		if f.Runtime != nil && len(f.Runtime.LegacyProxies) > 0 {
+			where = "the reverse proxy at " + shorten(f.Runtime.LegacyProxies, 3)
+		}
+		return &Check{State: Attention, Line: "HTTPS is left to " + where + ", which Signalith trusts only because signalith.yaml was written before HTTPS was the default.",
+			Details: direct, Fix: &Fix{
 				Steps: []string{
-					"Tell people to use the proxy's https:// address.",
-					"Set Listen address so only the proxy can reach Signalith, such as 127.0.0.1:" + port + " when the proxy runs on this computer.",
+					"List the proxy's address under Trusted reverse proxies.",
+					"If no reverse proxy serves HTTPS for Signalith, turn HTTPS on with Automatic instead.",
 				},
-				Setting: "server.listen", Docs: doc(docHTTPSProxy)}}
+				Setting: "server.trusted_proxies", Docs: doc(docHTTPSProxy)}}
+	}
+	if proxies := c.Server.TrustedProxyList(); len(proxies) > 0 {
+		if len(direct) > 0 {
+			return &Check{State: Attention, Line: "A reverse proxy serves HTTPS, but " + direct[0], Details: direct[1:], Fix: directFix()}
 		}
 		return &Check{State: Good, Line: "A reverse proxy at " + shorten(prefixList(proxies), 3) + " serves HTTPS for Signalith.",
 			Tip: &Fix{Steps: []string{"Signalith also answers plain HTTP from any computer that can reach port " + port +
@@ -121,7 +150,7 @@ func checkCertificate(f *Facts) *Check {
 	var replace *Fix
 	if !auto {
 		replace = &Fix{Steps: []string{"Put the new certificate and key in " + t.CertFile + " and " + t.KeyFile + ". Signalith loads them by itself."},
-			Commands: cmds("openssl x509 -in "+sh(t.CertFile)+" -noout -enddate", "", ""),
+			Commands: ownOnly(f, cmds("openssl x509 -in "+sh(t.CertFile)+" -noout -enddate", "", "")),
 			Docs:     doc(docHTTPSOwn)}
 	}
 	var probs []problem
@@ -215,8 +244,11 @@ func checkCAScope(f *Facts) *Check {
 		if n := len(t.Refusals); n > 0 {
 			var addrs []string
 			for _, r := range t.Refusals {
-				addrs = append(addrs, r.Address)
+				if !slices.Contains(addrs, r.Address) {
+					addrs = append(addrs, r.Address)
+				}
 			}
+			n = len(addrs)
 			c.Details = append(c.Details, itoa(n)+plural(n, " computer", " computers")+" refused the new certificate since the switch: "+shorten(addrs, 5)+".")
 		}
 	case t.CA.Scope == tlsauto.ScopeUnconstrained:
@@ -228,6 +260,20 @@ func checkCAScope(f *Facts) *Check {
 		c = &Check{State: Good, Line: "Signalith's certificate authority can vouch only for this server's own names and addresses.", Tip: scopeTip(f, tlsauto.ScopeStrict)}
 	default:
 		c = &Check{State: Good, Line: "Signalith's certificate authority can vouch only for this server and for private network names, never for public websites.", Tip: scopeTip(f, tlsauto.ScopeStandard)}
+	}
+	if c.State == Good && len(t.CA.Subtrees) > 0 {
+		// Made by an earlier version: its names cover the names under
+		// them too. Honest about it, without an alarm.
+		ends := make([]string, len(t.CA.Subtrees))
+		for i, n := range t.CA.Subtrees {
+			ends[i] = "." + n
+		}
+		if t.CA.Scope == tlsauto.ScopeStrict {
+			c.Line = "Signalith's certificate authority can vouch only for this server's own names and addresses, and for names that end in " + orList(ends, 3) + "."
+		} else {
+			c.Line = "Signalith's certificate authority can vouch only for this server, private network names, and names that end in " + orList(ends, 3) + "."
+		}
+		c.Details = append(c.Details, "It was made by an earlier version. A new one covers each of this server's names exactly.")
 	}
 	if f.Runtime != nil && f.Runtime.ClusterServer != "" {
 		c.Details = append(c.Details, "Each server has its own certificate authority. This is "+f.Runtime.ClusterServer+"'s.")
@@ -291,6 +337,16 @@ func checkAgentsPlain(f *Facts) *Check {
 	}
 	fix := &Fix{Steps: []string{"Choose Refuse them under Agents on plain HTTP. An agent that was missed keeps its events, and the Health page names it."},
 		Setting: "server.tls.plaintext_ingest", Page: &PageLink{ID: "data", Label: "Open Add data"}, Docs: doc(docHTTPSUpgrade)}
+	// Agents on this computer: what they send never crosses the network.
+	var local []string
+	if !f.CLI() {
+		switch n := f.Runtime.LocalPlainSenders; {
+		case n == 1:
+			local = []string{"An agent on this computer still sends over plain HTTP. Its events don't cross the network."}
+		case n > 1:
+			local = []string{itoa(n) + " agents on this computer still send over plain HTTP. Their events don't cross the network."}
+		}
+	}
 	switch {
 	case f.CLI():
 		return &Check{State: Attention, Line: "Agents on plain HTTP are still accepted. The Security page shows whether any still send that way.", Fix: fix}
@@ -299,7 +355,13 @@ func checkAgentsPlain(f *Facts) *Check {
 		fix.Steps = []string{"Give each agent listed a new configuration from Add data.", "Then choose Refuse them under Agents on plain HTTP."}
 		line := itoa(n) + plural(n, " agent sends", " agents send") + " events over plain HTTP, which anyone on the network can read: " +
 			shorten(f.Runtime.PlainSenders, 5) + "."
-		return &Check{State: Risk, Line: line, Fix: fix}
+		return &Check{State: Risk, Line: line, Details: local, Fix: fix}
+	case len(local) > 0:
+		fix.Steps = []string{"Give it a new configuration from Add data.", "Then choose Refuse them under Agents on plain HTTP."}
+		if f.Runtime.LocalPlainSenders > 1 {
+			fix.Steps[0] = "Give them a new configuration from Add data."
+		}
+		return &Check{State: Attention, Line: local[0], Fix: fix}
 	case f.Uptime >= 24*time.Hour:
 		return &Check{State: Attention, Line: "Agents on plain HTTP are still accepted, though none has sent that way in the last day.", Fix: fix}
 	}
@@ -313,17 +375,19 @@ func checkSyslog(f *Facts) *Check {
 	if !s.Enabled() {
 		return nil
 	}
-	var plain, ports []string
-	loopback := true
+	// The plain listeners other computers can reach, and their ports; a
+	// listener on a loopback address takes syslog only from this computer.
+	var plain, ports, local []string
 	for _, l := range []struct{ name, addr string }{{"UDP", s.UDP}, {"TCP", s.TCP}} {
 		if l.addr == "" {
 			continue
 		}
-		plain = append(plain, l.name)
 		host, port := listenHost(l.addr)
-		if host == "" || !isLoopback(host) {
-			loopback = false
+		if host != "" && isLoopback(host) {
+			local = append(local, l.name)
+			continue
 		}
+		plain = append(plain, l.name)
 		if s.PublicPort > 0 {
 			port = strconv.Itoa(s.PublicPort)
 		}
@@ -337,10 +401,13 @@ func checkSyslog(f *Facts) *Check {
 	if len(ports) > 1 {
 		portText = "ports " + joinAnd(ports)
 	}
+	localLine := "Syslog over " + joinAnd(local) + " is accepted only from this computer."
 	switch {
-	case len(plain) == 0:
+	case len(plain) == 0 && len(local) == 0:
 		c = &Check{State: Good, Line: "Syslog arrives only over TLS, so it's encrypted."}
-	case loopback:
+	case len(plain) == 0 && s.TLS != "":
+		c = &Check{State: Good, Line: "Syslog over TLS is encrypted, and syslog over " + joinAnd(local) + " is accepted only from this computer."}
+	case len(plain) == 0:
 		c = &Check{State: Good, Line: "Syslog is accepted only from this computer."}
 	case len(allow) > 0:
 		c = &Check{State: Good, Line: "Syslog over " + joinAnd(plain) + " is accepted only from " + shorten(allow, 3) +
@@ -359,6 +426,9 @@ func checkSyslog(f *Facts) *Check {
 			", so anyone could send fake events.", Fix: &Fix{
 			Steps:   []string{"List the addresses or ranges of the devices that send syslog, such as 10.0.0.0/8."},
 			Setting: "syslog.allow", Docs: doc(docSecSyslog)}}
+	}
+	if len(plain) > 0 && len(local) > 0 {
+		c.Details = append(c.Details, localLine)
 	}
 	if f.Runtime != nil && f.Runtime.SyslogSenders != nil {
 		var parts []string
@@ -395,9 +465,12 @@ func checkOpenSearchTransit(f *Facts) *Check {
 	httpFix := &Fix{Steps: []string{"Turn on HTTPS in OpenSearch, then change the address to https://."}, Setting: "opensearch.url", Docs: doc(docOSLinux)}
 	switch {
 	case scheme == "https" && o.TLSSkipVerify:
-		return &Check{State: Risk, Line: "Signalith doesn't check OpenSearch's certificate, so someone on the network could pose as OpenSearch and read events and its password.",
-			Fix: &Fix{Steps: []string{"Set CA certificate file to the certificate of the authority that signed OpenSearch's.",
-				"Then turn off Skip certificate check, and restart when asked."}, Setting: "opensearch.tls_skip_verify", Docs: doc(docOSPoint)}}
+		fix := &Fix{Steps: []string{"Set CA certificate file to the certificate of the authority that signed OpenSearch's.",
+			"Then turn off Skip certificate check, and restart when asked."}, Setting: "opensearch.tls_skip_verify", Docs: doc(docOSPoint)}
+		if local {
+			return &Check{State: Attention, Line: "Signalith doesn't check OpenSearch's certificate. OpenSearch runs on this computer, so only a program here could pose as it.", Fix: fix}
+		}
+		return &Check{State: Risk, Line: "Signalith doesn't check OpenSearch's certificate, so someone on the network could pose as OpenSearch and read events and its password.", Fix: fix}
 	case scheme != "https" && !local && f.InContainer && f.OpenSearch.SameNetwork:
 		return &Check{State: Attention, Line: "Events cross to OpenSearch at " + host + " unencrypted. It's on the same Docker network, so they likely stay on this computer.", Fix: httpFix}
 	case scheme != "https" && !local:
@@ -491,6 +564,10 @@ func checkProxies(f *Facts) *Check {
 		legacy = f.Runtime.LegacyProxies
 	}
 	if len(f.Config.Server.TrustedProxies) == 0 && len(legacy) == 0 {
+		return nil
+	}
+	if f.Config.Server.LegacyProxied() {
+		// HTTPS is left to that proxy: transit.https says so.
 		return nil
 	}
 	fix := &Fix{Setting: "server.trusted_proxies", Docs: doc(docHTTPSProxy)}

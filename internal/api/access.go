@@ -152,6 +152,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, errors.New("cross-site request refused"))
 			return
 		}
+		s.noteName(r)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, p)))
 	})
 }
@@ -309,6 +310,7 @@ func (s *Server) signIn(r *http.Request, name, password, method string) (*princi
 	}
 	attempt.Succeed()
 	s.notePlainSignIn(r)
+	s.noteName(r)
 	s.Log.Info("signed in", "audit", true, "user", p.Username, "role", p.Role, "source", p.Source, "client", client, "method", method)
 	return p, nil
 }

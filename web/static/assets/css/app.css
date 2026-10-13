@@ -3364,7 +3364,11 @@ body:has(#page-settings.active .st-savebar:not([hidden])) #toast { bottom: 88px;
 #page-security [data-state="good"] { --sc: var(--success); --sc-soft: var(--success-soft); }
 
 /* Export: a menu under its button */
+/* the actions stay on the right when the head wraps, so the menu opens on screen */
+#page-security .page-head__actions { margin-left: auto; }
 #page-security .sc-export .menu__panel { min-width: 220px; }
+/* a panel brought into view stops below the sticky top bar */
+#page-security .sc-ca { scroll-margin-top: calc(var(--topbar-h) + 16px); }
 #page-security .sc-export > summary { gap: 6px; }
 #page-security .sc-export__chev { color: var(--text-3); margin-left: -2px; }
 #page-security .sc-export[open] > summary { box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-xs); }
