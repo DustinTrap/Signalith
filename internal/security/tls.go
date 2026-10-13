@@ -48,7 +48,10 @@ func TLSFactsFrom(m *tlsauto.Manager, c *config.Config) *TLSFacts {
 
 // leafFacts reads a certificate's end date and how strong it is.
 func leafFacts(c *x509.Certificate) *LeafFacts {
-	l := &LeafFacts{NotAfter: c.NotAfter}
+	l := &LeafFacts{NotAfter: c.NotAfter, NoName: !slices.ContainsFunc(c.DNSNames, func(n string) bool {
+		n = strings.ToLower(n)
+		return n != "localhost" && !strings.HasSuffix(n, ".localhost") && !strings.HasPrefix(n, "*.")
+	})}
 	if k, ok := c.PublicKey.(*rsa.PublicKey); ok {
 		l.RSABits = k.N.BitLen()
 	}

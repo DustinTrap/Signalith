@@ -98,7 +98,9 @@ looks at when the certificate authority expires.
 - At risk: the certificate has expired.
 - Needs attention: it expires soon (30 days for your own files; 21 days for Signalith's
   own, which means renewal failed), it leaves out names people or agents use, it uses a
-  key or signature that is too weak (RSA under 2048 bits, or SHA-1), or Signalith's
+  key or signature that is too weak (RSA under 2048 bits, or SHA-1), your own
+  certificate covers only IP addresses (so agents have no host name to check it
+  against, see [Agents and syslog](https.md#agents-and-syslog)), or Signalith's
   certificate authority expires within 180 days.
 
 **To fix:** see [Use your own certificate](https.md#use-your-own-certificate), or
@@ -129,7 +131,9 @@ that refused the new certificate (from failed TLS handshakes, over HTTPS and sys
   says so, and a new one covers each name exactly.
 - Needs attention: a new certificate authority is ready but not switched to yet; the
   previous one is still kept after a switch; the one in use was made by an older version
-  and can vouch for any website; or the one in use isn't the kind you chose.
+  and can vouch for any website; the one in use was made by an older version and isn't
+  limited to websites, so a stolen key could sign programs or email that computers
+  trusting it accept; or the one in use isn't the kind you chose.
 
 **To fix:** follow
 [Switching to a new certificate authority](https.md#switching-to-a-new-certificate-authority).
@@ -137,13 +141,15 @@ that refused the new certificate (from failed TLS handshakes, over HTTPS and sys
 **How to check by hand:**
 
 ```sh
-sudo openssl x509 -in /var/lib/signalith/tls/ca.pem -noout -subject -enddate -ext nameConstraints
+sudo openssl x509 -in /var/lib/signalith/tls/ca.pem -noout -subject -enddate -ext nameConstraints,extendedKeyUsage
 ```
 
 A standard one lists private names such as `.local` and `.corp` and private ranges. A
 strict one lists only this server's names and addresses. Under **Excluded**, the
 server's names with a dot in front keep the names under them out. No name constraints at
-all means it was made by an older version.
+all means it was made by an older version. **X509v3 Extended Key Usage** should read
+`TLS Web Server Authentication` alone; without it, it was made before the website-only
+limit.
 
 ### Agents on plain HTTP
 
@@ -630,7 +636,7 @@ public names, only this server's own, each exactly.
   such as `intranet.corp` or `192.168.1.5`. A new address for this server works right
   away.
 - **Strict** can vouch only for this server's own names and addresses. A stolen key
-  then lets someone pose only as this server, but a new name or address later means a
+  then lets someone pose only as this server's website, but a new name or address later means a
   new certificate authority, which every browser and agent must trust again.
 
 Strict suits a server whose name and address won't change, especially when many
