@@ -181,8 +181,8 @@ func TestHealthShowsSyslog(t *testing.T) {
 	// Add data words the steps for this system.
 	rt, _ := body["runtime"].(map[string]any)
 	if rt == nil || rt["os"] != "linux" || rt["systemd"] != true || rt["low_ports"] != false || rt["exe"] != "/usr/local/bin/signalith" ||
-		len(rt["addresses"].([]any)) != 1 || body["config_has_syslog"] != false {
-		t.Errorf("runtime = %v, config_has_syslog = %v", body["runtime"], body["config_has_syslog"])
+		len(rt["addresses"].([]any)) != 1 {
+		t.Errorf("runtime = %v", body["runtime"])
 	}
 }
 

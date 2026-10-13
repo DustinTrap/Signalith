@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/agents"
@@ -27,6 +28,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
+	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
@@ -67,8 +69,45 @@ type Config struct {
 	unreadable []string
 	locked     map[string]bool
 	feedLocked map[string][]string
+	// pageUnreadable lists the passwords and keys saved on the Settings
+	// page that cannot be decrypted, with what to do, and pageLocked their
+	// settings, with what the page says about each. See applyPage.
+	pageUnreadable []string
+	pageLocked     map[string]string
 	// keys holds the master key; see Keyring.
 	keys *secrets.Keyring
+	// layers records where each setting's value came from.
+	layers *layers
+	// publicURLDerived is true when server.public_url was empty and
+	// Validate worked it out from the listen address.
+	publicURLDerived bool
+}
+
+// PublicURLDerived reports whether server.public_url was worked out from
+// the listen address, because it was empty.
+func (c *Config) PublicURLDerived() bool { return c.publicURLDerived }
+
+// layers records where the settings of a loaded config came from: the
+// environment, the Settings page (see pagefile.go), signalith.yaml or the
+// defaults.
+type layers struct {
+	file     map[string]bool       // keys set in signalith.yaml, such as "server.listen"
+	env      map[string]string     // keys set by an environment variable, and its name
+	page     map[string]*PageEntry // settings applied from the Settings page
+	refused  map[string]*PageEntry // settings from the page a restart set aside
+	pageFile string                // the Settings page's file
+	// pageFileEnv is true when SIGNALITH_SETTINGS_FILE named it.
+	pageFileEnv bool
+	// base is the config without the page's settings.
+	base     *Config
+	mismatch []secretMismatch
+	warnings []string
+	// problem says why the page's settings are not in use, problemKeys
+	// which of them were to blame (when known), and pageFileErr whether
+	// it was that their file could not be read.
+	problem     string
+	problemKeys []string
+	pageFileErr bool
 }
 
 // Server controls the web UI and API listener.
@@ -610,16 +649,97 @@ func (c *Config) Path() string { return c.path }
 // are added at the end of the file; a second "syslog:" would not load.
 func (c *Config) HasSection(name string) bool { return c.sections[name] }
 
-// Load reads a config file, applies defaults and environment overrides,
-// decrypts the passwords and keys stored encrypted, and validates it. A
-// value that cannot be decrypted is left out and reported by Warnings
-// rather than failing (see Unreadable).
+// Load reads a config file, applies the settings changed on the Settings
+// page, defaults and environment overrides, decrypts the passwords and keys
+// stored encrypted, and validates the result. Settings from the page that
+// cannot be used never stop Signalith: it starts with signalith.yaml
+// alone, and SettingsProblem says why. A password or key that cannot be
+// decrypted is left out and reported by Warnings rather than failing (see
+// Unreadable and PageUnreadable).
 func Load(path string) (*Config, error) {
-	c, err := LoadUnchecked(path)
+	return loadWith(path, nil)
+}
+
+// LoadSetAside is Load with the settings keys, changed on the Settings
+// page, set aside for reason: they are not used, as after MarkRefused,
+// whether or not that could be saved.
+func LoadSetAside(path string, keys []string, reason string) (*Config, error) {
+	now := time.Now()
+	return loadWith(path, func(p *PageSettings) { p.refuse(keys, reason, now) })
+}
+
+func loadWith(path string, adjust func(*PageSettings)) (*Config, error) {
+	s, err := loadSaved(path, adjust)
 	if err != nil {
 		return nil, err
 	}
-	c.openSecrets()
+	if s.PageErr == nil && s.Problems == nil {
+		return s.Config, nil
+	}
+	if s.PageErr == nil && len(s.Config.PageKeys()) == 0 {
+		// Nothing came from the page: the problems are the file's own.
+		return nil, fmt.Errorf("%s: %w", path, &ValidationError{Problems: s.Problems})
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c.layers.pageFileErr = s.PageErr != nil
+	if s.PageErr != nil {
+		c.layers.problem = fmt.Sprintf("The settings saved on the Settings page were not used, because %v. Signalith started with signalith.yaml alone. Fix the file, or remove it with: signalith settings reset", s.PageErr)
+	} else {
+		c.layers.problem = "The settings saved on the Settings page were not used, because with them: " + strings.Join(s.Problems, "; ") +
+			". Signalith started with signalith.yaml alone. Fix these settings on the Settings page, or remove them with: signalith settings reset"
+		for _, p := range s.Problems {
+			for _, k := range ProblemKeys(p) {
+				if s.Config.Source(k).Kind == FromPage && !slices.Contains(c.layers.problemKeys, k) {
+					c.layers.problemKeys = append(c.layers.problemKeys, k)
+				}
+			}
+		}
+	}
+	return c, nil
+}
+
+// LoadWithoutPage is LoadFile for a server that could not start with the
+// settings saved on the Settings page; reason says why, and SettingsProblem
+// reports it. keys are the settings to blame, when known.
+func LoadWithoutPage(path, reason string, keys []string) (*Config, error) {
+	c, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c.layers.problem = "The settings saved on the Settings page were not used, because " + reason +
+		". Signalith started with signalith.yaml alone. Fix these settings on the Settings page, or remove them with: signalith settings reset"
+	c.layers.problemKeys = keys
+	return c, nil
+}
+
+// SettingsProblemKeys lists the settings from the Settings page that kept
+// Signalith from starting with them, when SettingsProblem is set and it
+// is known which.
+func (c *Config) SettingsProblemKeys() []string {
+	if c.layers == nil || c.layers.problemKeys == nil {
+		return []string{}
+	}
+	return c.layers.problemKeys
+}
+
+// SettingsFileProblem reports whether SettingsProblem is that the
+// Settings page's file could not be read.
+func (c *Config) SettingsFileProblem() bool {
+	return c.layers != nil && c.layers.pageFileErr
+}
+
+// LoadFile is Load without the settings changed on the Settings page:
+// signalith.yaml, defaults and the environment. Commands that write
+// signalith.yaml back load it this way, so the page's settings stay in
+// their own file.
+func LoadFile(path string) (*Config, error) {
+	c, err := build(path, nil)
+	if err != nil {
+		return nil, err
+	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
@@ -627,9 +747,106 @@ func Load(path string) (*Config, error) {
 }
 
 // LoadUnchecked reads a config file with defaults and environment
-// overrides, but neither decrypts nor checks it: for commands that look
-// at, or repair, a file that may not load.
+// overrides, but neither decrypts nor checks it, and leaves out the
+// settings changed on the Settings page: for commands that look at, or
+// repair, a file that may not load.
 func LoadUnchecked(path string) (*Config, error) {
+	return readAndEnv(path)
+}
+
+// Saved is the configuration as saved, whether or not it is valid:
+// signalith.yaml, the settings changed on the Settings page, and the
+// environment. The Settings page shows it.
+type Saved struct {
+	*Config
+	// Page is the Settings page's file as read; nil when it cannot be.
+	Page *PageSettings
+	// Problems lists what is wrong, as Validate words it; nil when valid.
+	Problems []string
+	// PageErr is set when the page's file cannot be read or used; Config
+	// is then without it.
+	PageErr error
+}
+
+// LoadSaved reads the configuration as saved, valid or not.
+func LoadSaved(path string) (*Saved, error) {
+	return loadSaved(path, nil)
+}
+
+func loadSaved(path string, adjust func(*PageSettings)) (*Saved, error) {
+	c, err := readAndEnv(path)
+	if err != nil {
+		return nil, err
+	}
+	s := &Saved{}
+	page, perr := ReadPageSettings(c.SettingsFile())
+	if perr == nil {
+		if adjust != nil {
+			page = page.Clone()
+			adjust(page)
+		}
+		s.Page = page
+	}
+	cfg, err := build(path, page)
+	var pe *PageFileError
+	if errors.As(err, &pe) {
+		perr = pe
+		cfg, err = build(path, nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.Config, s.PageErr = cfg, perr
+	s.Problems = problemsOf(cfg)
+	return s, nil
+}
+
+// problemsOf validates c and returns its problems, or nil.
+func problemsOf(c *Config) []string {
+	err := c.Validate()
+	if err == nil {
+		return nil
+	}
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return ve.Problems
+	}
+	return []string{err.Error()}
+}
+
+// build reads signalith.yaml and applies the environment, then the
+// settings changed on the page, without validating. A page setting that
+// cannot be used is a *PageFileError.
+func build(path string, page *PageSettings) (*Config, error) {
+	c, err := readAndEnv(path)
+	if err != nil {
+		return nil, err
+	}
+	base, err := readAndEnv(path)
+	if err != nil {
+		return nil, err
+	}
+	// Both use the same master key.
+	base.keys = c.Keyring()
+	base.openSecrets()
+	// Validating fills in worked-out values, such as the public address.
+	_ = base.Validate()
+	c.layers.base = base
+	if !page.Empty() {
+		if err := c.applyPage(page, base); err != nil {
+			return nil, &PageFileError{Path: c.layers.pageFile, Err: err}
+		}
+	}
+	// The passwords and keys in signalith.yaml are decrypted once the
+	// page's settings are in: one the page replaces is not needed, as one
+	// an environment variable replaces is not.
+	c.openSecrets()
+	return c, nil
+}
+
+// readAndEnv reads signalith.yaml with defaults and the environment,
+// without decrypting it.
+func readAndEnv(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -642,12 +859,14 @@ func LoadUnchecked(path string) (*Config, error) {
 		return nil, err
 	}
 	c.path = path
+	c.layers = &layers{file: map[string]bool{}, env: map[string]string{}, page: map[string]*PageEntry{}, refused: map[string]*PageEntry{}}
 	var top map[string]any
 	if yaml.Unmarshal(data, &top) == nil {
 		c.sections = make(map[string]bool, len(top))
 		for k := range top {
 			c.sections[k] = true
 		}
+		fileKeys(top, "", c.layers.file)
 	}
 	// Keep the file's own view, before the environment changes anything.
 	if c.file, err = decodeFile(path, data); err != nil {
@@ -659,6 +878,8 @@ func LoadUnchecked(path string) (*Config, error) {
 	if err := c.applyEnv(); err != nil {
 		return nil, err
 	}
+	c.layers.pageFileEnv = strings.TrimSpace(os.Getenv("SIGNALITH_SETTINGS_FILE")) != ""
+	c.layers.pageFile = c.SettingsFile()
 	return c, nil
 }
 
@@ -673,72 +894,127 @@ func decodeFile(path string, data []byte) (*Config, error) {
 	return c, nil
 }
 
+// fileKeys records every key set in the file, nested ones as "a.b".
+func fileKeys(m map[string]any, prefix string, out map[string]bool) {
+	for k, v := range m {
+		out[prefix+k] = true
+		if sub, ok := v.(map[string]any); ok {
+			fileKeys(sub, prefix+k+".", out)
+		}
+	}
+}
+
+// fromEnv notes that an environment variable set a setting.
+func (c *Config) fromEnv(key, name string) {
+	if c.layers != nil {
+		c.layers.env[key] = name
+	}
+}
+
 // applyEnv lets secrets come from the environment instead of the file.
 func (c *Config) applyEnv() error {
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_URL"); v != "" {
 		c.OpenSearch.URL = v
+		c.fromEnv("opensearch.url", "SIGNALITH_OPENSEARCH_URL")
 	}
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_USERNAME"); v != "" {
 		c.OpenSearch.Username = v
+		c.fromEnv("opensearch.username", "SIGNALITH_OPENSEARCH_USERNAME")
 	}
 	if v := os.Getenv("SIGNALITH_OPENSEARCH_PASSWORD"); v != "" {
 		c.OpenSearch.Password = v
+		c.fromEnv("opensearch.password", "SIGNALITH_OPENSEARCH_PASSWORD")
 	}
 	if v := strings.TrimSpace(os.Getenv("SIGNALITH_OPENSEARCH_PROXY")); v != "" {
 		c.OpenSearch.Proxy = v
+		c.fromEnv("opensearch.proxy", "SIGNALITH_OPENSEARCH_PROXY")
 	}
 	if v := os.Getenv("SIGNALITH_LISTEN"); v != "" {
 		c.Server.Listen = v
+		c.fromEnv("server.listen", "SIGNALITH_LISTEN")
 	}
 	if v := strings.TrimSpace(os.Getenv("SIGNALITH_PUBLIC_URL")); v != "" {
 		if _, err := agents.ParseServerURL(v); err != nil {
 			return fmt.Errorf("SIGNALITH_PUBLIC_URL %q: %v", v, err)
 		}
 		c.Server.PublicURL = v
+		c.fromEnv("server.public_url", "SIGNALITH_PUBLIC_URL")
 	}
 	if v := os.Getenv("SIGNALITH_ADMIN_PASSWORD"); v != "" {
-		h, err := HashPassword(v)
+		h, err := envPasswordHash(v)
 		if err != nil {
 			return err
 		}
 		c.Auth.AdminPasswordHash = h
+		c.fromEnv("auth.admin_password_hash", "SIGNALITH_ADMIN_PASSWORD")
 	}
 	if v := os.Getenv("SIGNALITH_USERS_FILE"); v != "" {
 		c.Auth.UsersFile = v
+		c.fromEnv("auth.users_file", "SIGNALITH_USERS_FILE")
 	}
 	if v := os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD"); v != "" {
 		c.ldapBindPassword = v
 	}
 	if v := os.Getenv("SIGNALITH_DETECTIONS_DIR"); v != "" {
 		c.Detections.Dir = v
+		c.fromEnv("detections.dir", "SIGNALITH_DETECTIONS_DIR")
 	}
 	if v := os.Getenv("SIGNALITH_LOOKUPS_DIR"); v != "" {
 		c.Lookups.Dir = v
+		c.fromEnv("lookups.dir", "SIGNALITH_LOOKUPS_DIR")
 	}
 	if v := os.Getenv("SIGNALITH_DASHBOARDS_DIR"); v != "" {
 		c.Dashboards.Dir = v
+		c.fromEnv("dashboards.dir", "SIGNALITH_DASHBOARDS_DIR")
 	}
 	if v := os.Getenv("SIGNALITH_INTEL_FEEDS_FILE"); v != "" {
 		c.Intel.FeedsFile = v
+		c.fromEnv("intel.feeds_file", "SIGNALITH_INTEL_FEEDS_FILE")
 	}
 	if v := os.Getenv("SIGNALITH_ARCHIVE_DIR"); v != "" {
 		c.Retention.ArchiveDir = v
+		c.fromEnv("retention.archive_dir", "SIGNALITH_ARCHIVE_DIR")
 	}
 	if v := os.Getenv("SIGNALITH_ASSISTANT_API_KEY"); v != "" {
 		c.Assistant.APIKey = v
+		c.fromEnv("assistant.api_key", "SIGNALITH_ASSISTANT_API_KEY")
 	}
 	if v := os.Getenv("SIGNALITH_INGEST_TOKEN"); v != "" {
 		c.Ingest.Tokens = append(c.Ingest.Tokens, v)
+		c.fromEnv("ingest.tokens", "SIGNALITH_INGEST_TOKEN")
 	}
 	// "off" turns a syslog listener off, since an empty variable is
 	// indistinguishable from an unset one.
 	if v := os.Getenv("SIGNALITH_SYSLOG_UDP"); v != "" {
 		c.Syslog.UDP = offToEmpty(v)
+		c.fromEnv("syslog.udp", "SIGNALITH_SYSLOG_UDP")
 	}
 	if v := os.Getenv("SIGNALITH_SYSLOG_TCP"); v != "" {
 		c.Syslog.TCP = offToEmpty(v)
+		c.fromEnv("syslog.tcp", "SIGNALITH_SYSLOG_TCP")
 	}
 	return nil
+}
+
+// envHash remembers the hash of SIGNALITH_ADMIN_PASSWORD, which every
+// load of the config needs and which is slow to compute on purpose.
+var envHash struct {
+	sync.Mutex
+	password, hash string
+}
+
+func envPasswordHash(pw string) (string, error) {
+	envHash.Lock()
+	defer envHash.Unlock()
+	if envHash.hash != "" && envHash.password == pw {
+		return envHash.hash, nil
+	}
+	h, err := HashPassword(pw)
+	if err != nil {
+		return "", err
+	}
+	envHash.password, envHash.hash = pw, h
+	return h, nil
 }
 
 func offToEmpty(v string) string {
@@ -774,8 +1050,8 @@ func (c *Config) Validate() error {
 	if (c.Server.TLSCert == "") != (c.Server.TLSKey == "") {
 		p = append(p, "server.tls_cert and server.tls_key must be set together")
 	}
-	if c.Server.PublicURL == "" {
-		c.Server.PublicURL = defaultPublicURL(c.Server)
+	if c.Server.PublicURL == "" || c.publicURLDerived {
+		c.Server.PublicURL, c.publicURLDerived = defaultPublicURL(c.Server), true
 	} else if _, err := agents.ParseServerURL(c.Server.PublicURL); err != nil {
 		p = append(p, fmt.Sprintf("server.public_url %q: %v", c.Server.PublicURL, err))
 	}
@@ -850,7 +1126,7 @@ func (c *Config) Validate() error {
 	case "":
 	case "anthropic":
 		// A key that cannot be decrypted is reported by Warnings instead.
-		if c.Assistant.APIKey == "" && !c.locked["assistant.api_key"] {
+		if c.Assistant.APIKey == "" && !c.locked["assistant.api_key"] && c.pageLocked["assistant.api_key"] == "" {
 			p = append(p, "assistant.api_key is required for anthropic; set it or SIGNALITH_ASSISTANT_API_KEY")
 		}
 	case "openai":
@@ -903,6 +1179,25 @@ func (c *Config) Warnings() []string {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
 	}
 	return append(w, c.secretWarnings()...)
+}
+
+// OpenSearchConnection returns the settings Signalith connects to
+// OpenSearch with.
+func (c *Config) OpenSearchConnection() store.Config {
+	ca, cert, key := c.OpenSearchTLSFiles()
+	return store.Config{
+		URL: c.OpenSearch.URL, Username: c.OpenSearch.Username, Password: secrets.New("opensearch.password", c.OpenSearch.Password),
+		CAFile: ca, CertFile: cert, KeyFile: key,
+		TLSSkipVerify: c.OpenSearch.TLSSkipVerify, Proxy: c.OpenSearch.Proxy,
+	}
+}
+
+// OpenSearchProblems lists what is wrong with the OpenSearch connection
+// settings, as Validate words it.
+func (c *Config) OpenSearchProblems() []string {
+	o := c.OpenSearch
+	o.moveURLCredentials()
+	return o.problems(c.resolve)
 }
 
 // OpenSearchTLSFiles returns opensearch.ca_file, cert_file and key_file,
@@ -958,8 +1253,13 @@ func RandomToken(nBytes int) string {
 // with its passwords and keys encrypted. A config from Load is written as
 // its file had it: settings from environment variables are never written
 // out, and neither are changes made after loading (use SetSecret or
-// SetAdminPasswordHash to change one setting in a file).
+// SetAdminPasswordHash to change one setting in a file). A config with
+// settings from the Settings page is refused, so they stay in their own
+// file; load it with LoadFile to change signalith.yaml.
 func (c *Config) Save(path string) error {
+	if len(c.PageKeys()) > 0 {
+		return errors.New("this configuration includes settings from the Settings page; load signalith.yaml with LoadFile to save it")
+	}
 	src := c
 	if c.file != nil {
 		src = c.file

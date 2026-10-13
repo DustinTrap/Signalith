@@ -256,6 +256,20 @@ func NewStore(dir string) (*Store, error) {
 	return s, nil
 }
 
+// OpenStore is NewStore for the server, which must run even when a list
+// is damaged: it always returns a store, with empty lists in place of
+// ones that cannot be read, and the error. Reload picks the files up once
+// they are fixed.
+func OpenStore(dir string) (*Store, error) {
+	s := &Store{Dir: dir}
+	s.index(nil, nil)
+	if dir == "" {
+		return s, nil
+	}
+	_, err := s.Reload()
+	return s, err
+}
+
 // Reload rereads the files if they changed. It reports whether it did.
 func (s *Store) Reload() (bool, error) {
 	if s.Dir == "" {

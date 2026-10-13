@@ -35,7 +35,9 @@ import (
 //
 // A value that cannot be decrypted (the master key was lost or replaced,
 // or the value was changed) does not stop the server: it runs without it,
-// and Warnings say which values to enter again.
+// and Warnings say which values to enter again. The same goes for the
+// passwords and keys saved on the Settings page (see pagefile.go), which
+// settings.yaml keeps encrypted with the same master key.
 
 // systemdStateDir is the state folder of the systemd unit. Commands run by
 // hand do not see the unit's SIGNALITH_STATE_DIR, so on Linux the master
@@ -203,6 +205,41 @@ func (c *Config) openSecrets() {
 // them; Warnings include them.
 func (c *Config) Unreadable() []string { return c.unreadable }
 
+// pageCannotOpen records that the secret saved on the Settings page for
+// key cannot be decrypted (err), so it is left out.
+func (c *Config) pageCannotOpen(key string, err error) {
+	what := strings.Replace(err.Error(), pageField(key), key, 1)
+	c.pageUnreadable = append(c.pageUnreadable, what+". Enter it again on the Settings page, or remove it there or with: signalith settings reset "+key)
+	field := "It cannot be decrypted with this server's master key, so it is not used. Enter it again, or reset it."
+	var oe *secrets.OpenError
+	if errors.As(err, &oe) {
+		switch {
+		case oe.Reason != "":
+			field = "It cannot be decrypted (" + oe.Reason + "), so it is not used. Enter it again, or reset it."
+		case oe.Have == "":
+			field = "It was saved encrypted with master key " + oe.KeyID + ", and this server has no master key, so it is not used. " +
+				"Restore the master key it was saved with, or enter it again."
+		default:
+			field = "It was saved encrypted with master key " + oe.KeyID + ", but this server's master key is " + oe.Have + ", so it is not used. " +
+				"Restore the master key it was saved with, or enter it again."
+		}
+	}
+	if c.pageLocked == nil {
+		c.pageLocked = map[string]string{}
+	}
+	c.pageLocked[key] = field
+}
+
+// PageUnreadable lists the passwords and keys saved on the Settings page
+// that cannot be decrypted, each with what to do about it. The server runs
+// without them; Warnings include them.
+func (c *Config) PageUnreadable() []string { return c.pageUnreadable }
+
+// PageSecretProblem says, for the Settings page's field of key, why the
+// secret saved there cannot be used: it cannot be decrypted. "" when it
+// can.
+func (c *Config) PageSecretProblem(key string) string { return c.pageLocked[key] }
+
 // FeedProblem says why a feed in signalith.yaml cannot be downloaded: its
 // password or a header cannot be decrypted. "" when it can.
 func (c *Config) FeedProblem(name string) string {
@@ -248,6 +285,9 @@ func (c *Config) secretWarnings() []string {
 	var w []string
 	for _, u := range c.unreadable {
 		w = append(w, "In signalith.yaml, "+u+". Signalith runs without it until then.")
+	}
+	for _, u := range c.pageUnreadable {
+		w = append(w, "On the Settings page ("+c.SettingsFile()+"), "+u+". Signalith runs without it until then.")
 	}
 	if n := len(c.plain); n > 0 {
 		what := "passwords or keys in signalith.yaml are"

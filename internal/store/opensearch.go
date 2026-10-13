@@ -54,7 +54,14 @@ type Config struct {
 	// OpenSearch password.
 	Proxy   string
 	Timeout time.Duration
+	// MaxResponseBytes caps the size of one answer read into memory; 0
+	// means no cap. A connection test sets a small one, since it may be
+	// pointed at any address.
+	MaxResponseBytes int64
 }
+
+// ErrResponseTooLarge is an answer larger than Config.MaxResponseBytes.
+var ErrResponseTooLarge = errors.New("the answer is larger than OpenSearch sends here")
 
 // Client is an OpenSearch REST client.
 type Client struct {
@@ -328,9 +335,16 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, out any)
 		return fmt.Errorf("opensearch unreachable at %s: %w%s", c.shown, err, c.proxyHint)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	var rd2 io.Reader = resp.Body
+	if limit := c.cfg.MaxResponseBytes; limit > 0 {
+		rd2 = io.LimitReader(resp.Body, limit+1)
+	}
+	data, err := io.ReadAll(rd2)
 	if err != nil {
 		return err
+	}
+	if limit := c.cfg.MaxResponseBytes; limit > 0 && int64(len(data)) > limit {
+		return fmt.Errorf("%s at %s: %w", path, c.shown, ErrResponseTooLarge)
 	}
 	if resp.StatusCode/100 == 3 {
 		return fmt.Errorf("opensearch at %s answered with a redirect (%d) to %q; Signalith does not follow redirects, so set opensearch.url to the address OpenSearch is really at",

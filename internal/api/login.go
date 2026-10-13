@@ -40,7 +40,7 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 func (s *Server) sessions() *auth.Sessions {
 	s.authOnce.Do(func() {
 		if s.Sessions == nil {
-			s.Sessions = auth.NewSessions(s.Config.SessionIdle())
+			s.Sessions = auth.NewSessions(s.conf().SessionIdle())
 		}
 		if s.Limiter == nil {
 			s.Limiter = auth.NewLimiter()
@@ -49,7 +49,7 @@ func (s *Server) sessions() *auth.Sessions {
 			s.Users = users.NewMemory()
 		}
 		if s.Users.BuiltinAdmin == "" {
-			s.Users.BuiltinAdmin = s.Config.Auth.AdminUser
+			s.Users.BuiltinAdmin = s.conf().Auth.AdminUser
 		}
 		if s.Directory == nil {
 			s.Directory, _ = users.OpenDirectory("", nil)
@@ -118,9 +118,14 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// secureCookie reports whether the session cookie is marked Secure (sent
+// over HTTPS only): when the browser reached Signalith over HTTPS, itself
+// or through a proxy that says so with X-Forwarded-Proto. It does not go
+// by server.public_url, which can say https:// while this very request
+// came over plain HTTP; a Secure cookie would then never come back, and
+// nobody could sign in.
 func (s *Server) secureCookie(r *http.Request) bool {
-	return r.TLS != nil || strings.HasPrefix(s.Config.Server.PublicURL, "https://") ||
-		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	return r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 // handleLogin signs in from the sign-in page. A user who must change

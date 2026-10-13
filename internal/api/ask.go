@@ -34,9 +34,10 @@ func (s *Server) routeAsk(api *router) {
 }
 
 func (s *Server) handleAskInfo(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{"ai_available": s.Assistant != nil, "examples": askExamples}
-	if s.Assistant != nil {
-		resp["ai_model"] = s.Assistant.Name()
+	ai := s.model()
+	resp := map[string]any{"ai_available": ai != nil, "examples": askExamples}
+	if ai != nil {
+		resp["ai_model"] = ai.Name()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -67,8 +68,9 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("mode must be auto, rules or ai"))
 		return
 	}
-	if req.Mode == "ai" && s.Assistant == nil {
-		writeError(w, http.StatusBadRequest, errors.New("no AI model is configured; set assistant.provider in signalith.yaml"))
+	ai := s.model()
+	if req.Mode == "ai" && ai == nil {
+		writeError(w, http.StatusBadRequest, errors.New("no AI model is configured; set one up on the Settings page"))
 		return
 	}
 	var hints nlq.Hints
@@ -82,18 +84,18 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"query": res.Query, "source": "rules", "steps": res.Steps, "unknown": res.Unknown,
-		"confidence": res.Confidence, "ai_available": s.Assistant != nil,
+		"confidence": res.Confidence, "ai_available": ai != nil,
 	}
-	useAI := s.Assistant != nil && (req.Mode == "ai" || (req.Mode != "rules" && res.Confidence < aiThreshold))
+	useAI := ai != nil && (req.Mode == "ai" || (req.Mode != "rules" && res.Confidence < aiThreshold))
 	if useAI {
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
-		q, err := s.Assistant.Translate(ctx, req.Question, res.Query)
+		q, err := ai.Translate(ctx, req.Question, res.Query)
 		if err != nil {
 			s.Log.Warn("AI query translation failed", "err", err)
 			resp["ai_error"] = err.Error()
 		} else {
-			resp["query"], resp["source"], resp["ai_model"] = q, "ai", s.Assistant.Name()
+			resp["query"], resp["source"], resp["ai_model"] = q, "ai", ai.Name()
 		}
 	}
 	if q, err := query.Parse(resp["query"].(string)); err == nil {

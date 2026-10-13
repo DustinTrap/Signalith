@@ -178,17 +178,29 @@ type secretFile struct {
 	// server is true for the files the server writes. It also encrypts
 	// their plain values when it starts.
 	server bool
+	// replace is true for a file a link in place of is replaced rather
+	// than followed, as the server does (see securefile.Replace).
+	replace bool
 }
 
 // secretFiles lists the files with passwords or keys: signalith.yaml,
 // which only these commands and "signalith init" write, then the files
-// the server keeps.
+// the server keeps, the Settings page's settings.yaml among them.
 func secretFiles(c *config.Config) []secretFile {
 	return []secretFile{
 		{path: c.Path(), reseal: config.ResealFile},
 		{path: c.DirectoryFile(), reseal: users.ResealDirectoryFile, server: true},
 		{path: c.IntelFeedsFile(), reseal: intel.ResealFeedsFile, server: true},
+		{path: c.SettingsFile(), reseal: config.ResealSettingsFile, server: true, replace: true},
 	}
+}
+
+// writeFile replaces the file f with data, as the server writes it.
+func (f secretFile) writeFile(data []byte) error {
+	if f.replace {
+		return securefile.Replace(f.path, data)
+	}
+	return securefile.WriteFile(f.path, data)
 }
 
 // listSecrets returns the values stored in a file's text.
@@ -383,6 +395,8 @@ type rewrite struct {
 	old, new []byte
 	n        int
 	pending  *securefile.Pending
+	// replace is true when a link at path is replaced, not followed.
+	replace bool
 }
 
 // changed reports whether the file's text changes.
@@ -390,8 +404,9 @@ func (r *rewrite) changed() bool { return !bytes.Equal(r.old, r.new) }
 
 // Seams for tests that make a write fail.
 var (
-	prepareFile = securefile.Prepare
-	commitFile  = (*securefile.Pending).Commit
+	prepareFile    = securefile.Prepare
+	prepareReplace = securefile.PrepareReplace
+	commitFile     = (*securefile.Pending).Commit
 )
 
 // writeAll writes every changed file, or none. Each is first written next
@@ -414,7 +429,11 @@ func writeAll(list []*rewrite, key, undo func() error) error {
 		}
 	}
 	for _, r := range todo {
-		p, err := prepareFile(r.path, r.new)
+		prepare := prepareFile
+		if r.replace {
+			prepare = prepareReplace
+		}
+		p, err := prepare(r.path, r.new)
 		if err != nil {
 			discard(todo)
 			return fmt.Errorf("could not write %s: %w. Nothing was changed", r.path, err)
@@ -441,7 +460,7 @@ func writeAll(list []*rewrite, key, undo func() error) error {
 		discard(todo[i+1:])
 		var stuck []string
 		for _, done := range todo[:i] {
-			if werr := securefile.WriteFile(done.path, done.old); werr != nil {
+			if werr := (secretFile{path: done.path, replace: done.replace}).writeFile(done.old); werr != nil {
 				stuck = append(stuck, fmt.Sprintf("%s (%v)", done.path, werr))
 			}
 		}
@@ -512,7 +531,7 @@ func secretsEncrypt(c *config.Config, newKey bool, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
-		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n})
+		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n, replace: f.replace})
 	}
 	var key, undo func() error
 	// A new key is kept only when something was encrypted with it.
@@ -711,7 +730,7 @@ func secretsRotate(c *config.Config, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
-		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n})
+		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n, replace: f.replace})
 	}
 	notes := linkNotes(changedPaths(list)...)
 	err = writeAll(list, func() error {
@@ -855,7 +874,7 @@ func secretsDecrypt(c *config.Config, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
-		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n})
+		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n, replace: f.replace})
 	}
 	if err := writeAll(list, nil, nil); err != nil {
 		return err
@@ -915,7 +934,7 @@ func encryptStores(c *config.Config, log *slog.Logger) {
 		if n == 0 {
 			continue
 		}
-		if err := securefile.WriteFile(f.path, next); err != nil {
+		if err := f.writeFile(next); err != nil {
 			log.Warn("could not encrypt the passwords and keys in a file; they stay as they are until it can be written", "file", f.path, "err", err)
 			continue
 		}

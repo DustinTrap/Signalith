@@ -156,6 +156,57 @@ func TestWriteFileFollowsLinks(t *testing.T) {
 	}
 }
 
+// Replace puts a new file in place of a link and leaves the file the link
+// points to alone; a file it replaces keeps its permissions.
+func TestReplaceReplacesLinks(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other.yaml")
+	os.WriteFile(other, []byte("not ours"), 0o644)
+	p := filepath.Join(dir, "lookups", "settings.yaml")
+	os.MkdirAll(filepath.Dir(p), 0o750)
+	if err := os.Symlink(other, p); err != nil {
+		t.Skip("cannot make links here:", err)
+	}
+	if err := Replace(p, []byte("secret: enc:v1:...")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(p); err != nil || fi.Mode()&fs.ModeSymlink != 0 {
+		t.Fatalf("the link is still there: %v %v", fi.Mode(), err)
+	}
+	if b, _ := os.ReadFile(other); string(b) != "not ours" {
+		t.Errorf("the file the link pointed to holds %q", b)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "secret: enc:v1:..." {
+		t.Errorf("content %q", b)
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+			t.Errorf("new file mode %v, want 0600", st.Mode().Perm())
+		}
+		os.Chmod(p, 0o640)
+		if err := Replace(p, []byte("two")); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := os.Stat(p); st.Mode().Perm() != 0o640 {
+			t.Errorf("replaced file mode %v, want 0640", st.Mode().Perm())
+		}
+	}
+	// Nothing is written until Commit.
+	pend, err := PrepareReplace(p, []byte("three"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) == "three" {
+		t.Error("PrepareReplace replaced the file")
+	}
+	if err := pend.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "three" {
+		t.Errorf("content after Commit %q", b)
+	}
+}
+
 func TestPreparePrivate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("file modes do not apply on Windows; see access_windows_test.go")

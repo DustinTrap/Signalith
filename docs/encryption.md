@@ -7,7 +7,7 @@ they and your events are protected:
 
 | | What protects it | What you do |
 | --- | --- | --- |
-| **In transit** (on the network) | HTTPS and TLS | Turn on HTTPS: [docs/https.md](https.md) |
+| **In transit** (on the network) | HTTPS and TLS | Turn on HTTPS (`server.tls_cert` and `server.tls_key`) |
 | **At rest** (on disk) | Signalith encrypts the passwords and keys it stores; disk encryption protects everything else | Back up the master key; turn on disk encryption |
 | **In use** (in memory) | The service is locked down so other programs cannot read its memory | Nothing, or a confidential VM for more |
 
@@ -15,8 +15,7 @@ they and your events are protected:
 
 Use HTTPS for the web UI and the API (agents send events over it, with the ingest
 token), TLS for syslog where devices support it, `https://` for OpenSearch, and
-`ldaps://` or StartTLS for directory sign-in. [docs/https.md](https.md) sets this
-up. Signalith refuses to send the OpenSearch password over plain http to another
+`ldaps://` or StartTLS for directory sign-in. Signalith refuses to send the OpenSearch password over plain http to another
 machine unless you allow it, and warns while certificate checks are off.
 
 ## At rest
@@ -28,6 +27,7 @@ Every password and key Signalith stores in a file is encrypted:
 | File | Encrypted values | Written by |
 | --- | --- | --- |
 | `signalith.yaml` | `opensearch.password`, `assistant.api_key`, `auth.ldap.bind_password`, each of `ingest.tokens`, and `intel.feeds[].password` and header values | You, `signalith init` and `signalith secrets`. The server never changes this file |
+| `settings.yaml` (lookups folder, or `SIGNALITH_SETTINGS_FILE`) | The OpenSearch password and the AI model's API key saved on the **Settings** page | The server, and `signalith settings reset` |
 | `directory.json` (lookups folder) | The service account password of directory sign-in set up on the **Users** page | The server |
 | `intel_feeds.yaml` (lookups folder) | Passwords and header values (API keys) of feeds added on the **Threat intel** page | The server |
 
@@ -55,7 +55,9 @@ and layout:
 ```
 
 The server encrypts the plain values in the files it writes itself (left by an
-older version) when it starts, and logs it once:
+older version, which kept the passwords saved on the **Settings** page as plain
+text in `settings.yaml`, or written there by hand) when it starts, and again when
+the Settings page restarts it, and logs it only when it changed something:
 
 ```
 level=INFO msg="encrypted the passwords and keys stored in a file" file=/var/lib/signalith/lookups/intel_feeds.yaml values=1
@@ -156,7 +158,10 @@ Master key:    /var/lib/signalith/keys/master.key, key id 9096cd23
   feeds[otx] password                 encrypted
   feeds[otx] header X-OTX-API-KEY     encrypted
 
-6 encrypted, 0 plain text.
+/var/lib/signalith/lookups/settings.yaml
+  opensearch.password  encrypted
+
+7 encrypted, 0 plain text.
 ```
 
 A command run by hand does not see the settings the service is given, so
@@ -216,7 +221,8 @@ are taken, never other settings).
 ### Docker
 
 In the Docker quick start the key is `/var/lib/signalith/keys/master.key` in the
-`signalith-data` volume, together with `directory.json` and `intel_feeds.yaml`. A
+`signalith-data` volume, together with `directory.json`, `intel_feeds.yaml` and
+`settings.yaml`. A
 backup of the volume therefore holds both the key and the values it decrypts. Copy
 the key out and keep it apart (in a password manager or a vault). From the
 repository folder, in a shell or PowerShell:
@@ -299,6 +305,12 @@ server keeps running. Enter them again:
   than make a new key, since the key may only be elsewhere (such as in a variable
   the service has and your shell does not). When it really is lost, add `-new-key`
   to the first command: `sudo signalith secrets set opensearch.password -new-key`.
+- A password or API key saved on the **Settings** page that cannot be decrypted
+  is left out too, as if it were not set; the other settings saved there are still
+  used. Its field on the Settings page, the server log, `signalith validate` and
+  the **Health** page say so. Enter it again on the Settings page, or take it off
+  the page there (or with `signalith settings reset opensearch.password`) to use
+  the one in `signalith.yaml` again.
 - **Directory sign-in** keeps running but cannot search for users until you enter
   the service account password again on the **Users** page, under **Directory
   sign-in**. The **Health** page and the log say so. Signalith does not try a wrong
@@ -321,6 +333,7 @@ New master key dea48fde in /var/lib/signalith/keys/master.key.
 Encrypted 2 values again in /etc/signalith/signalith.yaml
 Encrypted 1 value again in /var/lib/signalith/lookups/directory.json
 Encrypted 3 values again in /var/lib/signalith/lookups/intel_feeds.yaml
+Encrypted 1 value again in /var/lib/signalith/lookups/settings.yaml
 The previous key (9096cd23) is kept as /var/lib/signalith/keys/master.key.old, so files saved before now can still be read.
 A running server picks up the new key by itself.
 Next: back up the new key, then remove the previous one with: signalith secrets rotate-master -prune

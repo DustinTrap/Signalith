@@ -11,12 +11,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,7 +30,6 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/findings"
-	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/intel"
 	"github.com/jrsamsanchez/signalith/internal/nlq"
@@ -56,6 +57,7 @@ Usage:
   signalith serve     [-c file]           run the server
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
+  signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
@@ -65,6 +67,11 @@ Usage:
 
 The config file defaults to %s
 (override with -c or the SIGNALITH_CONFIG environment variable).
+On Linux, validate, settings and secrets use the folders, files and master
+key the signalith service is given in its unit, when it runs with the same
+config file. If the unit cannot be read, give settings and validate the
+Settings page's file with -file (the service keeps it in
+/var/lib/signalith/lookups/settings.yaml).
 `
 
 func defaultConfigPath() string {
@@ -97,6 +104,8 @@ func main() {
 		err = cmdValidate(args)
 	case "passwd":
 		err = cmdPasswd(args)
+	case "settings":
+		err = cmdSettings(args)
 	case "query":
 		err = cmdQuery(args)
 	case "ask":
@@ -236,7 +245,12 @@ func cmdValidate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	path := configFlag(fs)
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
+	fileFlag := settingsFileFlag(fs)
 	fs.Parse(args)
+	// -file first: the service's settings below do not replace it.
+	if err := useSettingsFile(*fileFlag); err != nil {
+		return err
+	}
 	// The service's folders and master key, so this checks what it uses.
 	// Installers read the -syslog-ports output, so nothing else is
 	// printed then.
@@ -258,11 +272,31 @@ func cmdValidate(args []string) error {
 		fmt.Printf("Warning: %d %s in it cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
 			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
 	}
+	if n := len(c.PageUnreadable()); n > 0 {
+		fmt.Printf("Warning: %d %s saved on the Settings page cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
+			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
+	}
 	switch src, err := c.Keyring().Source(); {
 	case err == nil:
 		fmt.Printf("Master key for stored passwords and keys: %s, key id %s.\n", src, src.KeyID)
 	case !errors.Is(err, secrets.ErrNoKey):
 		fmt.Println("Warning:", err)
+	}
+	if p := c.SettingsProblem(); p != "" {
+		fmt.Println("Warning:", p)
+	} else if keys := c.PageKeys(); len(keys) > 0 {
+		fmt.Printf("Changed on the Settings page (%s): %s.\n", c.SettingsFile(), strings.Join(keys, ", "))
+	}
+	for _, r := range c.Refused() {
+		fmt.Printf("Set aside on the Settings page, not used: %s (%s)\n", r.Key, strings.TrimSuffix(r.Reason, "."))
+	}
+	if *fileFlag == "" {
+		if note := serviceNote(c.SettingsFile(), *path, "validate", nil); strings.HasPrefix(note, "The Signalith service") {
+			fmt.Println("Note:", note)
+		}
+	}
+	for _, w := range c.SettingsWarnings() {
+		fmt.Println("Warning:", w+".")
 	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
@@ -459,17 +493,7 @@ func openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
 }
 
 func newStore(c *config.Config) *store.Client {
-	ca, cert, key := c.OpenSearchTLSFiles()
-	return store.New(store.Config{
-		URL:           c.OpenSearch.URL,
-		Username:      c.OpenSearch.Username,
-		Password:      secrets.New("opensearch.password", c.OpenSearch.Password),
-		CAFile:        ca,
-		CertFile:      cert,
-		KeyFile:       key,
-		TLSSkipVerify: c.OpenSearch.TLSSkipVerify,
-		Proxy:         c.OpenSearch.Proxy,
-	})
+	return store.New(c.OpenSearchConnection())
 }
 
 func newEngine(c *config.Config, s store.Searcher) *search.Engine {
@@ -646,6 +670,32 @@ func logMasterKey(c *config.Config, log *slog.Logger) {
 	}
 }
 
+// useKeys makes c's master key the one the files the server writes are
+// encrypted with, says where it comes from when that is new (at the first
+// start, or after a restart in place that changed it), and encrypts the
+// plain values in those files. Each start of the components, a restart in
+// place included, goes through here, so a config loaded again brings its
+// own master key.
+func (r *runner) useKeys(c *config.Config) {
+	useKeys(c, r.log)
+	if state := keyState(c); state != r.keysLogged {
+		r.keysLogged = state
+		logMasterKey(c, r.log)
+	}
+	encryptStores(c, r.log)
+}
+
+// keyState sums up where c's master key comes from, to log it only when
+// it changes.
+func keyState(c *config.Config) string {
+	keys := c.Keyring()
+	src, err := keys.Source()
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return fmt.Sprint(src.String(), "|", src.KeyID, "|", src.OldPath, "|", src.OldKeyID, "|", keys.Unused())
+}
+
 func serve(ctx context.Context, path string, log *slog.Logger) error {
 	hardenProcess(log)
 	// A crash prints only the goroutine that failed, not every one with
@@ -657,13 +707,72 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	return newRunner(path, log).run(ctx, c)
+}
+
+// instance is every component built from one config: what a restart from
+// the Settings page stops and builds again. The web listener, sign-in
+// sessions and the user store belong to the runner and carry over.
+type instance struct {
+	cfg      *config.Config
+	srv      *api.Server
+	handler  http.Handler
+	receiver *syslog.Receiver
+	// retention is the retention manager when this server runs retention.
+	retention *retention.Manager
+	cancel    context.CancelFunc
+	jobs      sync.WaitGroup // background jobs
+	log       *slog.Logger
+}
+
+// stop ends the background jobs, retention and the syslog receiver, and
+// waits for them, so the next instance does not run them twice.
+func (in *instance) stop() {
+	in.cancel()
+	in.jobs.Wait()
+	if in.retention != nil {
+		in.retention.Wait()
+	}
+	if in.receiver != nil {
+		// Stop receiving and write out what is queued.
+		in.receiver.Wait()
+		s := in.receiver.Stats()
+		in.log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
+	}
+}
+
+// start builds every component from c and starts the background jobs.
+// On an error, what had started is stopped again.
+func (r *runner) start(parent context.Context, c *config.Config) (*instance, error) {
+	log := r.log
+	ctx, cancel := context.WithCancel(parent)
+	in := &instance{cfg: c, cancel: cancel, log: log}
+	started := false
+	defer func() {
+		if !started {
+			in.stop()
+		}
+	}()
+	if r.failStart != nil {
+		if err := r.failStart(c); err != nil {
+			return nil, err
+		}
+	}
+	if p := c.SettingsProblem(); p != "" {
+		log.Error("settings from the Settings page are not in use", "file", c.SettingsFile(), "problem", p)
+	}
+	for _, w := range c.SettingsWarnings() {
+		log.Warn("Settings page: " + w)
+	}
+	if keys := c.PageKeys(); len(keys) > 0 {
+		log.Info("settings changed on the Settings page are in use", "settings", strings.Join(keys, ","), "file", c.SettingsFile())
+	}
 	for _, w := range c.Warnings() {
 		log.Warn(w)
 	}
-	logMasterKey(c, log)
-	encryptStores(c, log)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// The master key, again after a restart: the files saved from now on
+	// are encrypted with this config's, and their plain values with it.
+	r.useKeys(c)
 	cl := newStore(c)
 	ret := newRetention(c, cl, log)
 	maxAge := c.MaxEventAge(retentionKeepDays(ret))
@@ -680,15 +789,9 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
 		}, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
-			return err
+			return nil, keyed(err, "syslog.udp", "syslog.tcp", "syslog.tls")
 		}
-		// On the way out: stop receiving and write out what is queued.
-		defer func() {
-			cancel()
-			receiver.Wait()
-			s := receiver.Stats()
-			log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
-		}()
+		in.receiver = receiver
 		var addrs []any
 		for _, l := range receiver.Stats().Listeners {
 			addrs = append(addrs, l.Protocol, l.Address)
@@ -700,13 +803,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		log.Info("syslog receiver listening", append(addrs, "allow", allow)...)
 	}
 	eng := newEngine(c, cl)
-	lists, err := assets.NewStore(c.LookupsDir())
+	// A damaged list must not keep Signalith from starting: it starts with
+	// empty lists, and picks the file up once it is fixed.
+	lists, err := assets.OpenStore(c.LookupsDir())
 	if err != nil {
-		return err
+		log.Error("asset or identity list has errors; using empty lists until it is fixed", "err", err)
 	}
 	log.Info("asset and identity lists loaded", "assets", len(lists.Assets()), "identities", len(lists.Identities()), "dir", c.LookupsDir())
 	eng.Assets = lists
-	go reloadLookups(ctx, lists, log)
+	in.jobs.Go(func() { reloadLookups(ctx, lists, log) })
 	ibackend := intel.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
@@ -716,7 +821,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	lib, problems, err := detect.NewLibrary(c.DetectionsDir())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, p := range problems {
 		// One bad file should not stop the SIEM; it is skipped and reported.
@@ -724,16 +829,16 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	boards, err := dashboards.NewStore(c.DashboardsDir())
 	if err != nil {
-		return fmt.Errorf("dashboards.dir: %w", err)
+		return nil, fmt.Errorf("dashboards.dir: %w", err)
 	}
 	if _, problems, err := boards.List(); err == nil {
 		for _, p := range problems {
 			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
 		}
 	}
-	people, dir, err := openUsers(c)
+	people, dir, err := r.openUsers(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, clash := people.Get(c.Auth.AdminUser); clash {
 		log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
@@ -762,6 +867,8 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
 			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
+	// Sessions and the failed sign-in limits carry over a restart.
+	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{
 		Config:     c,
 		Engine:     eng,
@@ -780,11 +887,15 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
+		Sessions:   r.sessions,
+		Limiter:    r.limiter,
+		Restarter:  r,
+		Started:    r.started,
 		UI:         web.FS(),
 		Log:        log,
 		Version:    version,
 	}
-	go func() {
+	in.jobs.Go(func() {
 		if !ensureTemplate(ctx, cl, c, log) {
 			return
 		}
@@ -792,12 +903,12 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		if err := ibackend.EnsureIndex(ctx); err != nil {
 			log.Error("could not create the threat intel index; threat intel will not work", "index", ibackend.Index, "err", err)
 		} else {
-			go indicators.Watch(ctx, time.Minute, log)
+			in.jobs.Go(func() { indicators.Watch(ctx, time.Minute, log) })
 			if c.Detections.Scheduler {
 				// Feeds can be added on the page at any time, so the
 				// downloader runs even with none yet.
 				log.Info("threat intel feeds will download on their schedules", "feeds", feeds.Len(), "file", c.IntelFeedsFile())
-				go feeds.Start(ctx)
+				in.jobs.Go(func() { feeds.Start(ctx) })
 			}
 		}
 		if err := cstore.EnsureIndex(ctx); err != nil {
@@ -813,35 +924,43 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 		} else {
 			log.Info("detection scheduler is off (detections.scheduler: false)")
 		}
-	}()
+	})
 	if c.Detections.Scheduler {
 		// Like detections, retention runs on one server only.
-		go ret.Start(ctx)
+		in.retention = ret
+		in.jobs.Go(func() { ret.Start(ctx) })
 	} else {
 		log.Warn("retention does not run on this server: it runs on the server with detections.scheduler: true, " +
 			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
 	}
+	in.srv, in.handler = srv, srv.Handler()
+	started = true
+	return in, nil
+}
 
-	lim := httpserver.Limits{Max: c.Server.MaxConnections, Shared: c.Server.SharedList()}
-	hs := httpserver.New(srv.Handler(), lim, log)
-	ln, err := httpserver.Listen(c.Server.Listen, lim, log)
+// openUsers opens the user store once and keeps it across restarts, so
+// sign-in sessions stay valid; the directory sign-in settings are read
+// again each time.
+func (r *runner) openUsers(c *config.Config) (*users.Store, *users.Directory, error) {
+	if r.people == nil || r.people.Path() != c.UsersFile() {
+		people, err := users.Open(c.UsersFile())
+		if err != nil {
+			return nil, nil, err
+		}
+		r.people = people
+	}
+	if r.people.BuiltinAdmin != c.Auth.AdminUser {
+		r.people.BuiltinAdmin = c.Auth.AdminUser
+	}
+	fromFile, err := c.LDAP()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	errc := make(chan error, 1)
-	go func() {
-		log.Info("signalith listening", "addr", c.Server.Listen, "ui", c.Server.PublicURL, "version", version)
-		errc <- httpserver.Serve(hs, ln, c.Server.TLSCert, c.Server.TLSKey)
-	}()
-	select {
-	case err := <-errc:
-		return err
-	case <-ctx.Done():
-		log.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return hs.Shutdown(shutdownCtx)
+	dir, err := users.OpenDirectory(c.DirectoryFile(), fromFile)
+	if err != nil {
+		return nil, nil, err
 	}
+	return r.people, dir, nil
 }
 
 // newRetention returns the retention manager. Policies saved on the Data

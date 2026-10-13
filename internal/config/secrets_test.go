@@ -219,15 +219,6 @@ intel:
 	}
 }
 
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 func TestLoadMixedAndWrongKey(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "signalith.yaml")

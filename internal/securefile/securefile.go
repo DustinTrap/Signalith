@@ -69,11 +69,36 @@ func Prepare(path string, data []byte) (*Pending, error) { return prepare(path, 
 // access list of a new file.
 func PreparePrivate(path string, data []byte) (*Pending, error) { return prepare(path, data, true) }
 
+// Replace is WriteFile for a file Signalith keeps for itself in a folder
+// of its own, such as the Settings page's settings.yaml: a symbolic link
+// at path is replaced by the new file instead of followed, so the file it
+// points to is left as it is, and the new file is made as a new one is
+// (private, and run as root, owned by the folder's owner).
+func Replace(path string, data []byte) error {
+	p, err := PrepareReplace(path, data)
+	if err != nil {
+		return err
+	}
+	return p.Commit()
+}
+
+// PrepareReplace is Prepare for Replace: a symbolic link at path is
+// replaced, not followed.
+func PrepareReplace(path string, data []byte) (*Pending, error) {
+	return prepareAt(path, data, false, false)
+}
+
 func prepare(path string, data []byte, private bool) (*Pending, error) {
 	path, err := resolveLink(path)
 	if err != nil {
 		return nil, err
 	}
+	return prepareAt(path, data, private, true)
+}
+
+// prepareAt writes the temporary file for path. When follow is false, a
+// symbolic link at path counts as no file: the new one replaces the link.
+func prepareAt(path string, data []byte, private, follow bool) (*Pending, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
@@ -93,7 +118,11 @@ func prepare(path string, data []byte, private bool) (*Pending, error) {
 	if err := tmp.Sync(); err != nil {
 		return fail(err)
 	}
-	if st, err := os.Stat(path); err == nil {
+	stat := os.Stat
+	if !follow {
+		stat = os.Lstat
+	}
+	if st, err := stat(path); err == nil && st.Mode()&fs.ModeSymlink == 0 {
 		if err := keepAccess(path, st, tmp); err != nil {
 			return fail(fmt.Errorf("could not give the new %s the same permissions as the old one: %w", path, err))
 		}
@@ -102,7 +131,7 @@ func prepare(path string, data []byte, private bool) (*Pending, error) {
 				return fail(fmt.Errorf("could not make %s private: %w", path, err))
 			}
 		}
-	} else if errors.Is(err, os.ErrNotExist) {
+	} else if err == nil || errors.Is(err, os.ErrNotExist) {
 		if err := newFileAccess(tmp, dir); err != nil {
 			return fail(fmt.Errorf("could not make %s private: %w", path, err))
 		}

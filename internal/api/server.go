@@ -97,6 +97,12 @@ type Server struct {
 	// up again; 0 means every 5 minutes.
 	DirectoryRecheck time.Duration
 
+	// Restarter restarts the server with the settings saved on the
+	// Settings page; nil means the page cannot restart it. Started is when
+	// the process started, for the page's uptime.
+	Restarter Restarter
+	Started   time.Time
+
 	authOnce     sync.Once
 	creds        credCache  // recently checked Basic credentials
 	routes       []route    // every API route and its role, from Handler
@@ -106,6 +112,37 @@ type Server struct {
 	dirSlotsOnce sync.Once
 	dirSlots     chan struct{}  // limits directory connections at once
 	background   sync.WaitGroup // directory checks still running
+	settingsMu   sync.Mutex     // serializes saves on the Settings page
+	testMu       sync.Mutex     // one connection test at a time
+	// live holds Config with the settings saved on the Settings page that
+	// apply at once, and liveAI the assistant they give.
+	live   atomic.Pointer[config.Config]
+	liveAI atomic.Pointer[liveModel]
+}
+
+// liveModel is the assistant after a change on the Settings page; nil
+// when it was turned off.
+type liveModel struct{ c *assistant.Client }
+
+// conf returns the configuration in use: Config, with the settings saved
+// on the Settings page that apply at once.
+func (s *Server) conf() *config.Config {
+	if c := s.live.Load(); c != nil {
+		return c
+	}
+	return s.Config
+}
+
+// Running returns the configuration in use: the one the server started
+// with, plus the settings applied at once from the Settings page since.
+func (s *Server) Running() *config.Config { return s.conf() }
+
+// model returns the AI assistant in use, or nil when it is off.
+func (s *Server) model() *assistant.Client {
+	if m := s.liveAI.Load(); m != nil {
+		return m.c
+	}
+	return s.Assistant
 }
 
 // Handler returns the HTTP handler. Every API route is registered with
@@ -137,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeCases(api)
 	s.routeUsers(api)
 	s.routeRetention(api)
+	s.routeSettings(api)
 	if s.UI != nil {
 		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
 	}
@@ -387,7 +425,7 @@ func (s *Server) validToken(r *http.Request) bool {
 	if tok == "" {
 		return false
 	}
-	for _, t := range s.Config.Ingest.Tokens {
+	for _, t := range s.conf().Ingest.Tokens {
 		if subtle.ConstantTimeCompare([]byte(t), []byte(tok)) == 1 {
 			return true
 		}
@@ -583,7 +621,7 @@ func (s *Server) handleLanguage(w http.ResponseWriter, r *http.Request) {
 // one (often localhost) is not reachable from the hosts being set up.
 func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 	v := r.URL.Query()
-	server := s.Config.Server.PublicURL
+	server := s.conf().Server.PublicURL
 	if o := v.Get("server"); o != "" {
 		if _, err := agents.ParseServerURL(o); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "field": "server"})
@@ -592,8 +630,8 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		server = o
 	}
 	token := ""
-	if len(s.Config.Ingest.Tokens) > 0 {
-		token = s.Config.Ingest.Tokens[0]
+	if len(s.conf().Ingest.Tokens) > 0 {
+		token = s.conf().Ingest.Tokens[0]
 	}
 	a, err := agents.Generate(agents.Options{
 		OS:          v.Get("os"),
@@ -625,18 +663,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
-	out["config_file"] = s.Config.Path()
+	out["config_file"] = s.conf().Path()
 	// For the steps that turn syslog on: edit the section or add one.
 	out["config_has_syslog"] = s.Config.HasSection("syslog")
 	out["runtime"] = s.runtimeInfo()
-	osURL := redact.URL(s.Config.OpenSearch.URL)
+	osURL := redact.URL(s.conf().OpenSearch.URL)
 	if err != nil {
 		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
 	} else {
 		out["opensearch"] = map[string]any{"status": status, "url": osURL}
 	}
-	warnings := s.Config.Warnings()
-	if len(s.Config.Ingest.Tokens) == 0 {
+	warnings := s.conf().Warnings()
+	if len(s.conf().Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
 	}
 	if p := s.dir().Problem(); p != "" {
