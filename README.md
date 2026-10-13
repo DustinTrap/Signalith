@@ -103,6 +103,12 @@ same):
    `deploy/docker/signalith.yaml` and run step 2 again. That also ends the old token. An agent you missed is turned away until it gets a new
    configuration; it keeps its events and sends them then, and Health names it.
 
+This version encrypts the passwords and keys it keeps in the `signalith-data` volume
+(`directory.json`, `intel_feeds.yaml` and `settings.yaml`), which older versions cannot
+read. Before going back to one, run `secrets decrypt` in a container of its own (see
+[docs/encryption.md](docs/encryption.md#going-back-to-an-older-version), which has the
+Docker commands).
+
 ### Linux
 
 1. Install OpenSearch 2.x ([instructions](https://opensearch.org/docs/latest/install-and-configure/install-opensearch/index/)).
@@ -348,8 +354,10 @@ them. All of this, with the commands to trust the CA on Windows, macOS and Linux
   itself, with no default passwords anywhere; `signalith opensearch-certs` makes the same
   files for OpenSearch on Linux or Windows. See
   [docs/opensearch-security.md](docs/opensearch-security.md).
-- **Secrets**: every password and key Signalith stores in a file is encrypted with a master
-  key (`signalith secrets`; see [Encryption](#encryption)). A password written into
+- **Secrets**: every password and API key in Signalith's settings files is encrypted with a
+  master key (`signalith secrets`; see [Encryption](#encryption)); files that hold a key on
+  their own, such as the HTTPS CA key and the Docker quick start's generated secrets, are
+  protected by their permissions instead. A password written into
   `opensearch.url` is moved out of the address and encrypted by `signalith secrets encrypt`; one
   in `opensearch.proxy` or a key in a feed's address cannot be, and is reported. Passwords and
   keys in configured URLs are hidden (`***`) everywhere a URL is shown or logged, and agents get a
@@ -459,8 +467,9 @@ from a file, as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PAS
 `SIGNALITH_ASSISTANT_API_KEY_FILE` to the file's path. Setting both forms of one is an error, except for the
 ingest token, where both tokens are accepted (agents set up on Add data get the file's). A setting set by an
 environment variable, or by a file one names, is shown locked on the Settings page. When the admin password
-comes from `SIGNALITH_ADMIN_PASSWORD_FILE`, `signalith passwd` keeps the new one in `admin-password-hash` in
-the state folder, where it replaces the file's password. `SIGNALITH_STATE_DIR` is the folder
+comes from `SIGNALITH_ADMIN_PASSWORD_FILE`, or from `SIGNALITH_ADMIN_PASSWORD` given to the systemd or Windows
+service, `signalith passwd` keeps the new one in `admin-password-hash` in the state folder, where it replaces
+that password. `SIGNALITH_STATE_DIR` is the folder
 where Signalith keeps files it makes for itself, such as its master key (in `keys`) and its HTTPS
 certificate (in `tls`); it defaults to the folder that holds `lookups.dir`, and the systemd unit
 and Docker image set it to `/var/lib/signalith`. `SIGNALITH_MASTER_KEY_FILE` or
@@ -468,7 +477,7 @@ and Docker image set it to `/var/lib/signalith`. `SIGNALITH_MASTER_KEY_FILE` or
 (default `settings.yaml` in `lookups.dir`).
 ## Encryption
 
-Passwords and API keys are encrypted wherever Signalith stores them: in `signalith.yaml`
+Passwords and API keys are encrypted in the files where Signalith keeps its settings: in `signalith.yaml`
 (`opensearch.password`, `assistant.api_key`, `auth.ldap.bind_password`, `ingest.tokens`, feed
 passwords and headers), in `settings.yaml` (the OpenSearch password and the AI model's API key
 saved on the **Settings** page), in `directory.json` (the directory service account password) and
@@ -498,8 +507,9 @@ first of them.
 
 [docs/encryption.md](docs/encryption.md) covers backing up and changing the key, keeping it in a
 systemd credential or a Docker secret, the commands in Docker, going back to an older version,
-disk encryption (BitLocker, LUKS, Docker Desktop, cloud
-disks), what protects passwords in memory, and confidential VMs.
+the key files the master key does not encrypt (such as the HTTPS CA key), disk encryption
+(BitLocker, LUKS, Docker Desktop, cloud disks), what protects passwords in memory, and
+confidential VMs. HTTPS is in [docs/https.md](docs/https.md).
 
 ## Detections and findings
 

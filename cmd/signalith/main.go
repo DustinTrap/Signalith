@@ -442,6 +442,11 @@ func cmdPasswd(args []string) error {
 	if _, err := os.Stat(*path); err != nil {
 		return fmt.Errorf("config file %s: %w", *path, err)
 	}
+	// The service's state folder, and whether the service is given the
+	// admin password, which replaces the one in signalith.yaml: a shell
+	// has neither.
+	useServiceEnv(*path, os.Stdout)
+	svcPassword := serviceGives(*path, "SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_ADMIN_PASSWORD")
 	pw := os.Getenv("SIGNALITH_NEW_PASSWORD")
 	if pw == "" {
 		var err error
@@ -455,12 +460,18 @@ func cmdPasswd(args []string) error {
 	}
 	// Where the first password was generated and passed in a file (the
 	// Docker quick start, whose signalith.yaml is read-only), the new one
-	// is kept in the state folder and replaces it. So is every later one.
+	// is kept in the state folder and replaces it. So is every later one,
+	// and one for a service given the password in its environment.
 	hashFile := config.AdminHashFileIn(config.StateDirFor(*path))
 	_, statErr := os.Stat(hashFile)
-	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || statErr == nil {
+	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || svcPassword != "" || statErr == nil {
 		if err := writeAdminHash(hashFile, h); err != nil {
 			return err
+		}
+		if svcPassword != "" {
+			fmt.Printf("Password updated. It is kept in %s, since the signalith service is given %s; it replaces that password.\n", hashFile, svcPassword)
+			fmt.Println("Restart the service to apply it.")
+			return nil
 		}
 		fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
 		fmt.Println("Restart the server to apply it. With the Docker quick start, from the Signalith folder: docker compose -f deploy/docker/docker-compose.yml restart signalith")

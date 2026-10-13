@@ -51,11 +51,13 @@ or else the folder that holds `lookups.dir`):
 | Anything else | `tls` next to the `lookups` folder, by default next to `signalith.yaml` |
 
 `ca.pem` is the CA certificate to trust; `server.pem` is the certificate being served.
-The keys (`ca.key`, `server.key`) are readable by Signalith's user only. Treat `ca.key`
-like a password: whoever has it can make certificates that computers trusting the CA
-accept for this server's names. Keep it out of backups that many people can read. If it
-is lost, the next start makes a new CA, and browsers and agents have to trust that one
-instead.
+The keys (`ca.key`, `server.key`) are readable by Signalith's user only (on Windows they
+get the access list of the master key: SYSTEM, Administrators and the service). Treat
+`ca.key` like a password: whoever has it can make certificates that computers trusting
+the CA accept for this server's names. The master key does not encrypt it, so keep it
+out of backups that many people can read, as you keep the master key (see
+[Backing up the key](encryption.md#backing-up-the-key)). If it is lost, the next start
+makes a new CA, and browsers and agents have to trust that one instead.
 
 When Signalith starts it logs the CA file, its SHA-256 fingerprint, the names the
 certificate covers and when it expires:

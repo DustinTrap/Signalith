@@ -31,6 +31,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 )
 
 // Lifetimes. The server certificate lasts 397 days, the most Apple
@@ -47,7 +49,8 @@ const (
 	maxAddedNames = 32
 )
 
-// Files in Options.Dir. The keys are readable by Signalith's user only.
+// Files in Options.Dir, a private folder. The keys are readable by
+// Signalith's user only, on Windows too.
 const (
 	CAFile    = "ca.pem"
 	caKeyFile = "ca.key"
@@ -109,7 +112,10 @@ func New(o Options) (*Manager, error) {
 	if o.Dir == "" {
 		return nil, errors.New("no folder for the HTTPS certificate")
 	}
-	if err := os.MkdirAll(o.Dir, 0o700); err != nil {
+	// Private like the master key's folder: mode 0700, or on Windows an
+	// access list of its own (see securefile), whatever the state folder
+	// above allows.
+	if err := securefile.MkdirPrivate(o.Dir); err != nil {
 		return nil, fmt.Errorf("cannot create %s for the HTTPS certificate: %w. Set SIGNALITH_STATE_DIR to a folder Signalith can write, or use your own certificate (server.tls.mode: files)", o.Dir, err)
 	}
 	// The names first: a new CA is made for them.
@@ -852,12 +858,25 @@ func parseKey(b []byte, path string) (crypto.Signer, error) {
 	return s, nil
 }
 
+// writeKey writes a private key as the master key is written: readable
+// by Signalith's user only (mode 0600, or on Windows the protected access
+// list securefile gives a key), whatever the file it replaces allowed.
 func writeKey(path string, key crypto.Signer) error {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return err
 	}
-	return writeFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
+	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	defer clear(data)
+	clear(der)
+	p, err := securefile.PreparePrivate(path, data)
+	if err != nil {
+		return fmt.Errorf("cannot write %s: %w", path, err)
+	}
+	if err := p.Commit(); err != nil {
+		return fmt.Errorf("cannot write %s: %w", path, err)
+	}
+	return nil
 }
 
 func samePublicKey(a, b crypto.PublicKey) bool {

@@ -80,6 +80,25 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" https://localhost:9200/)" = 401
           test "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" -u admin:admin https://localhost:9200/)" = 401
           if curl -s -o /dev/null http://localhost:9200/; then echo "OpenSearch answers plain HTTP"; exit 1; fi
+      - name: Encrypt a pasted API key the way docs/encryption.md shows
+        working-directory: deploy/docker
+        run: |
+          printf 'assistant:\n  provider: anthropic\n  api_key: sk-ant-ci-pasted-0123456789\n' >> signalith.yaml
+          owner=$(stat -c %u:%a signalith.yaml)
+          docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER -v "${PWD}:/work" signalith secrets encrypt -c /work/signalith.yaml
+          docker compose restart signalith
+          grep -q 'api_key: enc:v1:' signalith.yaml
+          if grep -q 'sk-ant-ci-pasted' signalith.yaml; then echo "the key is still in plain text"; exit 1; fi
+          test "$(stat -c %u:%a signalith.yaml)" = "$owner"
+          # The server's own account reads the master key the command made.
+          docker compose exec -T signalith signalith secrets status | tee "$RUNNER_TEMP/secrets-status.txt"
+          grep -q 'assistant.api_key *encrypted' "$RUNNER_TEMP/secrets-status.txt"
+          grep -q ' 0 plain text' "$RUNNER_TEMP/secrets-status.txt"
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/tls/ca.pem && break
+            sleep 2
+          done
+          curl -sf -o /dev/null --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/tls/ca.pem
       - name: End-to-end tests against the secured OpenSearch
         env:
           SIGNALITH_TEST_OPENSEARCH: https://localhost:9200

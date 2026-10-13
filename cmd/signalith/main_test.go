@@ -98,6 +98,65 @@ func TestPasswdKeepsEnvironmentSecretsOutOfTheFile(t *testing.T) {
 	}
 }
 
+// signalith passwd run from a shell, which does not have the service's
+// environment, changes the password the service uses: when the service is
+// given the admin password (SIGNALITH_ADMIN_PASSWORD_FILE or
+// SIGNALITH_ADMIN_PASSWORD), which replaces the one in signalith.yaml, the
+// new one is kept in the service's state folder, which replaces both.
+func TestPasswdUsesTheServiceEnvironment(t *testing.T) {
+	for _, k := range []string{"SIGNALITH_STATE_DIR", "SIGNALITH_LOOKUPS_DIR", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_ADMIN_PASSWORD_FILE"} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "etc", "signalith.yaml")
+	h, _ := config.HashPassword("password in the file")
+	os.MkdirAll(filepath.Dir(path), 0o750)
+	os.WriteFile(path, []byte("auth:\n  admin_password_hash: "+h+"\n"), 0o600)
+	state := filepath.Join(dir, "var")
+	os.MkdirAll(state, 0o700)
+	first := filepath.Join(dir, "admin-password")
+	os.WriteFile(first, []byte("password from the service\n"), 0o600)
+	hashFile := filepath.Join(state, "admin-password-hash")
+	before, _ := os.ReadFile(path)
+
+	saved := readServiceSettings
+	t.Cleanup(func() { readServiceSettings = saved })
+	for _, env := range []map[string]string{
+		{"SIGNALITH_STATE_DIR": state, "SIGNALITH_ADMIN_PASSWORD_FILE": first},
+		{"SIGNALITH_STATE_DIR": state, "SIGNALITH_ADMIN_PASSWORD": "password from the service"},
+	} {
+		os.Remove(hashFile)
+		os.Setenv("SIGNALITH_STATE_DIR", "")
+		readServiceSettings = func() *serviceSettings {
+			return &serviceSettings{where: "the test unit", args: []string{"serve", "-c", path}, env: env}
+		}
+		name := "SIGNALITH_ADMIN_PASSWORD_FILE"
+		if env[name] == "" {
+			name = "SIGNALITH_ADMIN_PASSWORD"
+		}
+		t.Setenv("SIGNALITH_NEW_PASSWORD", "new admin password")
+		out, err := capture(t, func() error { return cmdPasswd([]string{"-c", path}) })
+		if err != nil || !strings.Contains(out, hashFile) || !strings.Contains(out, "the signalith service is given "+name) || strings.Contains(out, "new admin password") {
+			t.Errorf("%s: passwd: %v\n%s", name, err, out)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Errorf("%s: passwd changed signalith.yaml, whose password the service does not use", name)
+		}
+		// The server, with the service's environment.
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
+		c, err := config.Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !c.CheckPassword("admin", "new admin password") || c.CheckPassword("admin", "password from the service") {
+			t.Errorf("%s: the new password does not work, or the service's still does", name)
+		}
+		t.Setenv(name, "")
+	}
+}
+
 func TestReadNewPasswordFromAPipe(t *testing.T) {
 	r, w, _ := os.Pipe()
 	io.WriteString(w, "a pass phrase with spaces\r\n")

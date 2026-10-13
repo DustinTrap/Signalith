@@ -127,6 +127,33 @@ func TestAutoMakesCAAndCertificate(t *testing.T) {
 	}
 }
 
+// A folder and key left open, by an older version or by hand, are made
+// private again: the folder when the server starts, a key when it is
+// written.
+func TestOpenFolderAndKeyMadePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes; tlsauto_windows_test.go checks the access lists")
+	}
+	fakeMachine(t)
+	dir := filepath.Join(t.TempDir(), "tls")
+	c := &clock{time.Now()}
+	newAuto(t, dir, c)
+	os.Chmod(dir, 0o755)
+	os.Chmod(filepath.Join(dir, "server.key"), 0o644)
+	// A new name: a new server certificate and key.
+	if m := newAuto(t, dir, c, "10.9.8.7"); !m.Covers("10.9.8.7") {
+		t.Fatal("no new certificate")
+	}
+	for name, want := range map[string]os.FileMode{"": 0o700, "server.key": 0o600, "ca.key": 0o600} {
+		if fi, err := os.Stat(filepath.Join(dir, name)); err != nil || fi.Mode().Perm() != want {
+			t.Errorf("%q: %v, want %v", name, err, want)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".*")); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+}
+
 func TestHandshake(t *testing.T) {
 	fakeMachine(t)
 	m := newAuto(t, t.TempDir(), &clock{time.Now()}, "siem.example.com")
