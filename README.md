@@ -22,7 +22,9 @@ service or a systemd unit.
 
 ### Docker (evaluation)
 
-From the folder you cloned Signalith into:
+It needs Docker Compose 2.20 or newer (Docker Desktop has it). Check with
+`docker compose version`; on Linux, update the `docker-compose-plugin` package if it is
+older. Then, from the folder you cloned Signalith into:
 
 ```sh
 docker compose -f deploy/docker/docker-compose.yml up -d
@@ -32,7 +34,11 @@ docker compose -f deploy/docker/docker-compose.yml exec signalith signalith init
 The first command starts OpenSearch and Signalith. On first start a setup step makes the
 admin password, the agents' ingest token and the certificates OpenSearch and Signalith use
 with each other, and keeps them in Docker volumes; no password is written in the compose
-files. The second command shows the admin password. Open https://localhost:8080 and sign
+files. Once OpenSearch is up, a second step loads OpenSearch's security settings (who may
+sign in, and what each may do), and Signalith starts after it. If the first command ends
+with `service "opensearch-security" didn't complete successfully`, see
+[If OpenSearch's security settings aren't loaded](docs/opensearch-security.md#if-opensearchs-security-settings-arent-loaded).
+The second command shows the admin password. Open https://localhost:8080 and sign
 in as `admin` with it. Signalith serves HTTPS with a certificate it makes for itself, so
 the browser warns until you trust it; the sign-in page has a **Download the server
 certificate** link, and [docs/https.md](docs/https.md) says how to trust it.
@@ -71,7 +77,10 @@ If the change you had made there was `plaintext_ingest: deny`, add that line bac
 `mode: auto`, indented the same, before you run the first command; otherwise agents on
 plain `http://` and the old example token may be accepted again. After a reboot
 everything starts again by itself once Docker is running; in Docker Desktop turn on
-Settings > General > "Start Docker Desktop when you sign in".
+Settings > General > "Start Docker Desktop when you sign in". If the computer restarted
+while the first command was still waiting for the step that loads OpenSearch's security
+settings, Signalith had not started yet and does not start by itself: https://localhost:8080
+doesn't answer. Run `docker compose -f deploy/docker/docker-compose.yml up -d` again then.
 
 #### Upgrading the Docker quick start
 
@@ -92,10 +101,15 @@ same):
    ```sh
    docker compose -f deploy/docker/docker-compose.yml up -d
    ```
-   This rebuilds Signalith, runs the setup step once and restarts OpenSearch with its
-   security plugin on; the first start takes a minute or two longer. Events, findings,
-   investigations, users, detections and dashboards are kept: they are in the
-   `opensearch-data` and `signalith-data` volumes, which stay.
+   This rebuilds Signalith, runs the setup step once, restarts OpenSearch with its
+   security plugin on, and then runs the step that loads OpenSearch's security settings;
+   Signalith starts after that. The first start takes a minute or two longer, and up to
+   about 10 minutes on a slow computer, where that step keeps trying while OpenSearch is
+   slow. Events, findings, investigations, users, detections and dashboards are kept: they
+   are in the `opensearch-data` and `signalith-data` volumes, which stay. If the command
+   ends with `service "opensearch-security" didn't complete successfully`, or the
+   **Servers** page later says OpenSearch's security settings aren't loaded, follow
+   [If OpenSearch's security settings aren't loaded](docs/opensearch-security.md#if-opensearchs-security-settings-arent-loaded).
 3. Show the new admin password:
    ```sh
    docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password
@@ -945,7 +959,7 @@ syslog devices ─UDP/TCP/TLS▶ query compiler,
 | `internal/search` | Compiles queries to OpenSearch DSL and runs remaining commands in memory |
 | `internal/ingest` | Fluent Bit and OTLP record parsing for Windows and Linux, index template |
 | `internal/syslog` | Syslog receiver (UDP, TCP, TLS), RFC 5424, RFC 3164 and CEF parsing |
-| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Risk, Other |
+| `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Filesystem, Registry, Network_Resolution, Image_Load, Script, Inventory, Configuration_Check, Alerts, Risk, Other |
 | `internal/agents` | Fluent Bit and OpenTelemetry Collector configuration generator |
 | `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
 | `internal/findings` | Findings model and its OpenSearch store |
