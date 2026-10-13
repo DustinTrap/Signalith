@@ -141,7 +141,7 @@ func TestInitTurnsOnHTTPS(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if !strings.Contains(out, "Web UI:    https://") || !strings.Contains(out, "docs/https.md") {
+	if !strings.Contains(out, "Web UI:      https://") || !strings.Contains(out, "docs/https.md") {
 		t.Errorf("init output does not point to HTTPS:\n%s", out)
 	}
 	raw, _ := os.ReadFile(path)

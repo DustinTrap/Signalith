@@ -154,7 +154,9 @@ func TestPublicExampleSecretsWarn(t *testing.T) {
 	t.Setenv("SIGNALITH_ADMIN_PASSWORD", "something-else")
 	t.Setenv("SIGNALITH_INGEST_TOKEN", "")
 	os.Remove(filepath.Join(dir, "admin-password-hash"))
-	if c, err := Load(path); err != nil || len(c.Warnings()) != 0 {
+	// The token written into the file in plain text is warned about for
+	// that alone.
+	if c, err := Load(path); err != nil || len(c.Warnings()) != 1 || !strings.Contains(c.Warnings()[0], "stored as plain text (ingest.tokens[0])") {
 		t.Errorf("warnings %v %v", c.Warnings(), err)
 	}
 }

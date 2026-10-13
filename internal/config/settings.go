@@ -18,6 +18,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/assistant"
 	"github.com/jrsamsanchez/signalith/internal/redact"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 // The Settings page shows the settings in Registry. Each one names its
@@ -476,7 +477,9 @@ func (c *Config) SetValue(key string, val any) error {
 }
 
 // CopyValue sets a setting in c to its value in from. The live settings
-// saved on the page reach the running server this way.
+// saved on the page reach the running server this way. A secret saved on
+// the page brings whether it could be decrypted with it, so Warnings and
+// the Settings page stop reporting one entered again.
 func (c *Config) CopyValue(key string, from *Config) error {
 	src, ok := field(from, key)
 	if !ok {
@@ -491,6 +494,7 @@ func (c *Config) CopyValue(key string, from *Config) error {
 	if key == "server.public_url" {
 		c.publicURLDerived, c.httpPublicURL = from.publicURLDerived, from.httpPublicURL
 	}
+	c.copyPageProblem(key, from)
 	return nil
 }
 
@@ -519,7 +523,11 @@ func ParseValue(s *Setting, raw any) (any, error) {
 			return nil, fmt.Errorf("enter text")
 		}
 		if s.Type == TypeSecret {
-			// Secrets are taken as typed: spaces can be part of one.
+			// Secrets are taken as typed: spaces can be part of one. One
+			// that looks encrypted would be kept as it is, not encrypted.
+			if secrets.IsSealed(str) {
+				return nil, errors.New("the value cannot start with enc:v and a number and a colon, which is how encrypted values look")
+			}
 			return str, nil
 		}
 		str = strings.TrimSpace(str)

@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +40,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
 	"github.com/jrsamsanchez/signalith/internal/search"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
@@ -62,6 +64,7 @@ Usage:
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
+  signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
   signalith bootstrap-docker -opensearch-dir DIR -signalith-dir DIR   prepare the Docker quick start (its setup service runs this)
@@ -69,9 +72,11 @@ Usage:
 
 The config file defaults to %s
 (override with -c or the SIGNALITH_CONFIG environment variable).
-On Linux the service keeps the Settings page's file in
-/var/lib/signalith/lookups/settings.yaml: give it to settings and
-validate with -file.
+On Linux, validate, settings and secrets use the folders, files and master
+key the signalith service is given in its unit, when it runs with the same
+config file. If the unit cannot be read, give settings and validate the
+Settings page's file with -file (the service keeps it in
+/var/lib/signalith/lookups/settings.yaml).
 `
 
 func defaultConfigPath() string {
@@ -120,6 +125,8 @@ func main() {
 		err = cmdService(args)
 	case "archive":
 		err = cmdArchive(args)
+	case "secrets":
+		err = cmdSecrets(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -156,6 +163,9 @@ func cmdInit(args []string) error {
 	if _, err := os.Stat(*path); err == nil && !*force {
 		return fmt.Errorf("%s already exists; use -force to overwrite it", *path)
 	}
+	// A service set up already (an install run again) keeps its master
+	// key where it has it.
+	useServiceEnv(*path, os.Stdout)
 	c := config.Default()
 	c.Server.Listen = *listen
 	c.Server.PublicURL = *publicURL
@@ -188,15 +198,22 @@ func cmdInit(args []string) error {
 		return err
 	}
 	fmt.Printf("Wrote %s\n\n", *path)
-	fmt.Printf("  Web UI:    %s\n", c.Server.PublicURL)
-	fmt.Printf("  HTTPS:     the server makes its own certificate when it starts; browsers warn\n")
-	fmt.Printf("             until you trust it (see docs/https.md)\n")
-	fmt.Printf("  User:      %s\n", c.Auth.AdminUser)
+	fmt.Printf("  Web UI:      %s\n", c.Server.PublicURL)
+	fmt.Printf("  HTTPS:       the server makes its own certificate when it starts; browsers warn\n")
+	fmt.Printf("               until you trust it (see docs/https.md)\n")
+	fmt.Printf("  User:        %s\n", c.Auth.AdminUser)
 	if generated {
-		fmt.Printf("  Password:  %s   (shown once; change it with: signalith passwd)\n", pw)
+		fmt.Printf("  Password:    %s   (shown once; change it with: signalith passwd)\n", pw)
 	}
 	if s := syslogSummary(c); s != "" {
-		fmt.Printf("  Syslog:    %s\n", s)
+		fmt.Printf("  Syslog:      %s\n", s)
+	}
+	// Save encrypted the ingest token, so there is a master key now.
+	if src, err := c.Keyring().Source(); err == nil {
+		fmt.Printf("  Master key:  %s\n", src)
+		if src.Created {
+			fmt.Println("               It encrypts the passwords and keys Signalith stores. Back it up; see docs/encryption.md.")
+		}
 	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
@@ -270,10 +287,19 @@ func cmdValidate(args []string) error {
 	ports := fs.Bool("syslog-ports", false, "only print the syslog listeners, one per line: protocol, port, and the allowed senders (any, or a comma-separated list); for installers")
 	fileFlag := settingsFileFlag(fs)
 	fs.Parse(args)
+	// -file first: the service's settings below do not replace it.
 	if err := useSettingsFile(*fileFlag); err != nil {
 		return err
 	}
-	c, err := config.Load(*path)
+	// The service's folders and master key, so this checks what it uses.
+	// Installers read the -syslog-ports output, so nothing else is
+	// printed then.
+	if *ports {
+		applyServiceEnv(*path)
+	} else {
+		useServiceEnv(*path, os.Stdout)
+	}
+	c, err := loadConfig(*path, newLogger(os.Stderr))
 	if err != nil {
 		return err
 	}
@@ -283,6 +309,20 @@ func cmdValidate(args []string) error {
 	}
 	fmt.Printf("%s is valid.\n", *path)
 	fmt.Println(httpsSummary(c))
+	if n := len(c.Unreadable()); n > 0 {
+		fmt.Printf("Warning: %d %s in it cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
+			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
+	}
+	if n := len(c.PageUnreadable()); n > 0 {
+		fmt.Printf("Warning: %d %s saved on the Settings page cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
+			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
+	}
+	switch src, err := c.Keyring().Source(); {
+	case err == nil:
+		fmt.Printf("Master key for stored passwords and keys: %s, key id %s.\n", src, src.KeyID)
+	case !errors.Is(err, secrets.ErrNoKey):
+		fmt.Println("Warning:", err)
+	}
 	if p := c.SettingsProblem(); p != "" {
 		fmt.Println("Warning:", p)
 	} else if keys := c.PageKeys(); len(keys) > 0 {
@@ -334,6 +374,9 @@ func cmdValidate(args []string) error {
 		}
 		fmt.Printf("Directory sign-in is on (%s), set up in %s. Test it on the Users page.\n", s.URL, from)
 	}
+	if p := dir.Problem(); p != "" {
+		fmt.Println("Warning:", p)
+	}
 	feeds := newFeeds(c, nil, nil)
 	if err := feeds.Load(); err != nil {
 		fmt.Println("Warning:", err)
@@ -347,7 +390,9 @@ func cmdValidate(args []string) error {
 			if f.Source == intel.SourceUI {
 				page++
 			}
-			if f.Problem != "" {
+			// Problems of feeds in signalith.yaml are among the warnings
+			// below.
+			if f.Problem != "" && f.Source == intel.SourceUI {
 				fmt.Printf("Warning: threat intel feed %s (added on the Threat intel page): %s\n", f.Name, f.Problem)
 			}
 		}
@@ -436,6 +481,15 @@ func cmdPasswd(args []string) error {
 // readNewPassword asks for the new password twice without showing it.
 // When input is not a terminal (a script piping it in), it reads one line.
 func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
+	return readSecret(in, prompt, "New admin password: ", false)
+}
+
+// readSecret asks for a password or key with label, twice, without
+// showing it. When input is not a terminal (a script piping it in), it
+// reads one line. When orEmpty is set, pressing Enter at the first
+// question returns "" (so the caller can make a value); otherwise nothing
+// entered is an error.
+func readSecret(in *os.File, prompt io.Writer, label string, orEmpty bool) (string, error) {
 	fd := int(in.Fd())
 	if !term.IsTerminal(fd) {
 		line, err := bufio.NewReader(in).ReadString('\n')
@@ -444,7 +498,7 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 			if err != nil && !errors.Is(err, io.EOF) {
 				return "", err
 			}
-			return "", errors.New("no password entered")
+			return "", errors.New("nothing entered; nothing was changed")
 		}
 		return line, nil
 	}
@@ -454,21 +508,24 @@ func readNewPassword(in *os.File, prompt io.Writer) (string, error) {
 		fmt.Fprintln(prompt)
 		return string(b), err
 	}
-	pw, err := read("New admin password: ")
+	v, err := read(label)
 	if err != nil {
 		return "", err
 	}
-	if pw == "" {
-		return "", errors.New("no password entered")
+	if v == "" {
+		if orEmpty {
+			return "", nil
+		}
+		return "", errors.New("nothing entered; nothing was changed")
 	}
 	again, err := read("Type it again: ")
 	if err != nil {
 		return "", err
 	}
-	if again != pw {
-		return "", errors.New("the passwords do not match; nothing was changed")
+	if again != v {
+		return "", errors.New("the two entries do not match; nothing was changed")
 	}
-	return pw, nil
+	return v, nil
 }
 
 // openUsers opens the users file and the directory sign-in settings.
@@ -634,8 +691,73 @@ func newLogger(w io.Writer) *slog.Logger {
 	return slog.New(safelog.New(slog.NewTextHandler(w, nil)))
 }
 
-func serve(ctx context.Context, path string, log *slog.Logger) error {
+// loadConfig loads the config file and makes its master key the one the
+// files the server writes are encrypted with; a new master key made later
+// is logged.
+func loadConfig(path string, log *slog.Logger) (*config.Config, error) {
 	c, err := config.Load(path)
+	if err != nil {
+		return nil, err
+	}
+	useKeys(c, log)
+	return c, nil
+}
+
+// logMasterKey says where the master key comes from.
+func logMasterKey(c *config.Config, log *slog.Logger) {
+	keys := c.Keyring()
+	src, err := keys.Source()
+	switch {
+	case errors.Is(err, secrets.ErrNoKey):
+		log.Info("no master key yet; one is made the first time a password or key is stored", "file", keys.DefaultPath())
+		return
+	case err != nil:
+		log.Error("the master key cannot be read, so stored passwords and keys cannot be decrypted or saved", "err", err)
+		return
+	}
+	log.Info("master key for stored passwords and keys", "key", src.String(), "key_id", src.KeyID)
+	if src.OldPath != "" {
+		log.Info("the previous master key is still kept after a rotation; remove it once nothing needs it: signalith secrets rotate-master -prune", "file", src.OldPath)
+	}
+	for _, p := range keys.Unused() {
+		log.Warn("another master key file is not used; values encrypted with it cannot be read", "file", p)
+	}
+}
+
+// useKeys makes c's master key the one the files the server writes are
+// encrypted with, says where it comes from when that is new (at the first
+// start, or after a restart in place that changed it), and encrypts the
+// plain values in those files. Each start of the components, a restart in
+// place included, goes through here, so a config loaded again brings its
+// own master key.
+func (r *runner) useKeys(c *config.Config) {
+	useKeys(c, r.log)
+	if state := keyState(c); state != r.keysLogged {
+		r.keysLogged = state
+		logMasterKey(c, r.log)
+	}
+	encryptStores(c, r.log)
+}
+
+// keyState sums up where c's master key comes from, to log it only when
+// it changes.
+func keyState(c *config.Config) string {
+	keys := c.Keyring()
+	src, err := keys.Source()
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return fmt.Sprint(src.String(), "|", src.KeyID, "|", src.OldPath, "|", src.OldKeyID, "|", keys.Unused())
+}
+
+func serve(ctx context.Context, path string, log *slog.Logger) error {
+	hardenProcess(log)
+	// A crash prints only the goroutine that failed, not every one with
+	// the values on its stack. This is Go's default; it cannot lower a
+	// GOTRACEBACK set in the environment, and on Linux hardenProcess
+	// keeps even GOTRACEBACK=crash from writing a core file.
+	debug.SetTraceback("single")
+	c, err := loadConfig(path, log)
 	if err != nil {
 		return err
 	}
@@ -729,6 +851,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		in.certs, in.certKey = certs, certKey
 		in.jobs.Go(func() { certs.Run(ctx) })
 	}
+	// The master key, again after a restart: the files saved from now on
+	// are encrypted with this config's, and their plain values with it.
+	r.useKeys(c)
 	cl := newStore(c)
 	in.store = cl
 	ret := newRetention(c, cl, log)
@@ -1002,7 +1127,10 @@ func retentionKeepDays(ret *retention.Manager) int {
 func intelFeeds(c *config.Config) []intel.Feed {
 	var out []intel.Feed
 	for _, f := range c.Intel.Feeds {
-		out = append(out, f.Feed(intel.SourceConfig))
+		fd := f.Feed(intel.SourceConfig)
+		// A feed whose key cannot be decrypted is not downloaded.
+		fd.Problem = c.FeedProblem(f.Name)
+		out = append(out, fd)
 	}
 	return out
 }

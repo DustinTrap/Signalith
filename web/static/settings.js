@@ -482,7 +482,8 @@
         S.drafts[f.key] = f.source.kind === 'page' && f.reset_to && !f.reset_to.set ? { kind: 'reset' } : { kind: 'clear' };
         rerenderRow(f.key, '.st-secret__undo');
       });
-      box.append(el('div', { class: 'st-secret__row' }, status('Saved, hidden'), replace, remove));
+      // One saved on this page is kept encrypted in the settings file.
+      box.append(el('div', { class: 'st-secret__row' }, status(f.source.kind === 'page' ? 'Saved encrypted, hidden' : 'Saved, hidden'), replace, remove));
       S.controls[f.key] = replace;
       return box;
     }

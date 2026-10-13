@@ -7,7 +7,13 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
+
+// looksEncrypted is the problem with a typed value that starts like an
+// encrypted one (enc:v1:...): it would be stored as it is, not encrypted.
+const looksEncrypted = "cannot start with enc:v and a number and a colon, which is how encrypted values look"
 
 // FeedInput is a feed as the Threat intel page sends it. Secrets are
 // write-only: they are never sent back, and an empty value keeps the
@@ -140,6 +146,8 @@ func (in FeedInput) spec(old *Feed) (FeedSpec, []FeedProblem) {
 			}
 		case h.Clear:
 			delete(headers, have)
+		case secrets.IsSealed(value):
+			probs = append(probs, FeedProblem{Field: "headers", Msg: fmt.Sprintf("the value of header %s %s", name, looksEncrypted)})
 		case value != "":
 			delete(headers, have)
 			headers[name] = value
@@ -165,6 +173,8 @@ func (in FeedInput) spec(old *Feed) (FeedSpec, []FeedProblem) {
 		s.Headers = headers
 	}
 	switch {
+	case secrets.IsSealed(in.Password):
+		probs = append(probs, FeedProblem{Field: "password", Msg: "the password " + looksEncrypted})
 	case in.Password != "":
 		s.Password = in.Password
 	case in.ClearPassword || s.Username == "" || old == nil || old.Password == "":

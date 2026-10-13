@@ -20,6 +20,7 @@ import (
 
 	ber "github.com/go-asn1-ber/asn1-ber"
 	"github.com/go-ldap/ldap/v3"
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 // DirectoryUser is what the directory says about someone signing in.
@@ -111,15 +112,21 @@ type Directory struct {
 	settings   LDAPSettings
 	rev        uint64
 	saved      bool
+	problem    string
 }
 
 // directoryFile is directory.json. It holds the service account password,
-// so it is written readable only by its owner.
+// encrypted with the master key (package secrets), and is written readable
+// only by Signalith's own account.
 type directoryFile struct {
 	Version      int          `json:"version"`
 	Settings     LDAPSettings `json:"settings"`
 	BindPassword string       `json:"bind_password,omitempty"`
 }
+
+// BindPasswordField is the setting the service account password in
+// directory.json is encrypted for.
+const BindPasswordField = "directory.bind_password"
 
 // OpenDirectory loads directory sign-in settings. When fromConfig is set
 // (auth.ldap in signalith.yaml) it is used as is and cannot be changed
@@ -151,11 +158,50 @@ func OpenDirectory(path string, fromConfig *LDAPSettings) (*Directory, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("directory settings file %s is damaged (%v); fix it or move it away", path, err)
 	}
-	f.Settings.BindPassword = f.BindPassword
+	// A password that cannot be decrypted is left out rather than stopping
+	// the server: directory sign-in then fails without trying a wrong
+	// password on the service account (which could lock it), and Problem
+	// says how to fix it.
+	pw, err := secrets.Open(BindPasswordField, f.BindPassword)
+	if err != nil {
+		d.problem = fmt.Sprintf("Directory sign-in cannot search for users until the service account password is entered again (open Users, then Directory sign-in). In %s, %v", path, err)
+	}
+	f.Settings.BindPassword = pw
 	f.Settings.Normalize()
 	d.settings = f.Settings
 	d.saved = true
 	return d, nil
+}
+
+// Problem says why saved settings cannot be used as they are, such as a
+// service account password that cannot be decrypted; "" when they can.
+func (d *Directory) Problem() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.problem
+}
+
+// ResealDirectoryFile passes the service account password in the
+// directory.json text data through fn and returns the file with what fn
+// returned, and 1 if that changed it (0 otherwise).
+func ResealDirectoryFile(data []byte, fn secrets.Reseal) ([]byte, int, error) {
+	var f directoryFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, 0, fmt.Errorf("not valid JSON: %w", err)
+	}
+	if f.BindPassword == "" {
+		return data, 0, nil
+	}
+	v, err := fn(secrets.Stored{Field: BindPasswordField, Label: "bind_password (service account password)", Value: f.BindPassword})
+	if err != nil || v == f.BindPassword {
+		return data, 0, err
+	}
+	f.BindPassword = v
+	out, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return nil, 0, err
+	}
+	return append(out, '\n'), 1, nil
 }
 
 // Settings returns a copy of the current settings, with the password.
@@ -211,7 +257,11 @@ func (d *Directory) Save(s LDAPSettings) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.path != "" {
-		data, err := json.MarshalIndent(directoryFile{Version: 1, Settings: s, BindPassword: s.BindPassword}, "", "  ")
+		sealed, err := secrets.Seal(BindPasswordField, s.BindPassword)
+		if err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(directoryFile{Version: 1, Settings: s, BindPassword: sealed}, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -222,6 +272,7 @@ func (d *Directory) Save(s LDAPSettings) error {
 	d.settings = s
 	d.rev++
 	d.saved = true
+	d.problem = ""
 	return nil
 }
 

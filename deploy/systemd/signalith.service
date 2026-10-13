@@ -13,19 +13,67 @@ Restart=on-failure
 RestartSec=5
 # Secrets can live here instead of the config file:
 # EnvironmentFile=-/etc/signalith/signalith.env
-NoNewPrivileges=true
+
+# The master key that encrypts the passwords and keys Signalith stores is
+# /var/lib/signalith/keys/master.key, made by "signalith init" or by the
+# server. systemd can hand it to the service instead from a file only root
+# can read, away from the service's own folder and from /etc/signalith:
+# move the key to /etc/credstore/signalith-master.key and uncomment the next
+# line, as docs/encryption.md ("Keeping the key elsewhere") shows step by
+# step. It is off by default because the service does not start while that
+# file is missing. "signalith secrets" commands run by hand use the same file.
+# LoadCredential=master.key:/etc/credstore/signalith-master.key
+
 # Lets the signalith user open the syslog port 514 (ports below 1024 are
 # privileged on Linux) and nothing else.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Keeps passwords and keys in memory off the disk: new files private by
+# default, no core dumps, no swap.
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+
+# What the service can see and change: the system and its config
+# read-only, its state folder writable, no home folders, its own /tmp, no
+# devices, and nothing of the kernel's settings.
 ProtectSystem=strict
+ReadOnlyPaths=/etc/signalith
+ReadWritePaths=/var/lib/signalith
 ProtectHome=true
 PrivateTmp=true
-ReadOnlyPaths=/etc/signalith
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# Other users' processes are hidden. (ProcSubset=pid is left out: it hides
+# /proc/sys too, and Go then gives each listener a backlog of 128 instead
+# of the kernel's somaxconn, which would slow agents reconnecting at once.)
+ProtectProc=invisible
+
+# Only the kinds of network it uses (AF_NETLINK lists this computer's
+# addresses for the Add data page), and only the system calls of an
+# ordinary service.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
 # Custom detections, asset and identity lists, dashboards, retention
-# settings, archived days and the HTTPS certificate Signalith makes for
-# itself (tls/) are saved here.
+# settings, archived days, a master key Signalith makes (keys/) and the
+# HTTPS certificate it makes for itself (tls/) are saved here.
 StateDirectory=signalith
+StateDirectoryMode=0750
 Environment=SIGNALITH_STATE_DIR=/var/lib/signalith
 Environment=SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
 Environment=SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
@@ -35,8 +83,11 @@ Environment=SIGNALITH_ARCHIVE_DIR=/var/lib/signalith/archive
 # ReadWritePaths=/mnt/archive/signalith
 # The archive CLI does not see these variables; give it the folder:
 #   sudo -u signalith signalith archive list -c /etc/signalith/signalith.yaml -dir /var/lib/signalith/archive
-# Nor do the settings and validate commands; give them the Settings
-# page's file, for example to undo a change that locks people out:
+# The settings, validate and secrets commands read the *_DIR, *_FILE and
+# master key settings above from this unit (systemctl show signalith) when
+# the service runs with the same config file. Where systemctl cannot be
+# asked, give settings and validate the Settings page's file, for example
+# to undo a change that locks people out:
 #   sudo signalith settings reset -c /etc/signalith/signalith.yaml -file /var/lib/signalith/lookups/settings.yaml server.listen
 
 [Install]

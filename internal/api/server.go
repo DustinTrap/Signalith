@@ -835,6 +835,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"the names and private network addresses it was made with, so that trusting it can't expose other websites. "+
 			"See \"Names the certificate can cover\" in docs/https.md.")
 	}
+	if p := s.dir().Problem(); p != "" {
+		warnings = append(warnings, p)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}

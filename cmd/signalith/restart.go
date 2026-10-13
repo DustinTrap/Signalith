@@ -107,6 +107,9 @@ type runner struct {
 
 	// failStart, for tests, makes starting with a config fail.
 	failStart func(*config.Config) error
+	// keysLogged is where the master key came from when that was last
+	// logged (see useKeys).
+	keysLogged string
 }
 
 type restartRequest struct {
@@ -308,7 +311,10 @@ func (e *keyedError) Unwrap() error { return e.err }
 func keyed(err error, keys ...string) error { return &keyedError{err: err, keys: keys} }
 
 // blame returns the settings changed on the Settings page that err is
-// about, or every one that a restart applies when that is not known.
+// about, or every one that a restart applies when that is not known. A
+// password saved there that cannot be decrypted is never among them: it
+// is left out, not used, and set aside it would stay unused after the
+// master key it needs is back.
 func blame(err error, c *config.Config) []string {
 	var ke *keyedError
 	var keys []string
@@ -318,7 +324,7 @@ func blame(err error, c *config.Config) []string {
 				keys = append(keys, k)
 			}
 		}
-		if keys != nil {
+		if keys = usable(c, keys); keys != nil {
 			return keys
 		}
 	}
@@ -328,7 +334,33 @@ func blame(err error, c *config.Config) []string {
 			keys = append(keys, k)
 		}
 	}
-	return keys
+	return usable(c, keys)
+}
+
+// undecryptable returns those of keys whose password or key saved on the
+// Settings page cannot be decrypted, and so is left out of c (see
+// config.PageUnreadable).
+func undecryptable(c *config.Config, keys []string) []string {
+	var out []string
+	for _, k := range keys {
+		if c.PageSecretProblem(k) != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// usable returns keys without those undecryptable returns: a check or a
+// start that fails without such a password says nothing about it, and
+// the decryption problem is reported on its own.
+func usable(c *config.Config, keys []string) []string {
+	var out []string
+	for _, k := range keys {
+		if c.PageSecretProblem(k) == "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // openSearchKeys are the settings of the OpenSearch connection.
@@ -351,6 +383,13 @@ func (r *runner) checkPageOpenSearch(ctx context.Context, c *config.Config) *con
 	}
 	base := c.Base()
 	if !unchecked || base.OpenSearchConnection() == c.OpenSearchConnection() {
+		return c
+	}
+	// A password saved on the page that cannot be decrypted is left out,
+	// and the other settings saved there are still used: OpenSearch
+	// refusing Signalith without it says nothing about them, and the
+	// decryption problem is reported (config.PageUnreadable).
+	if len(undecryptable(c, keys)) > 0 {
 		return c
 	}
 	check := func(c *config.Config) store.Report {
@@ -445,7 +484,7 @@ func (r *runner) restart(ctx context.Context, req restartRequest) {
 	if !r.switchTo(ctx, prev, next, res, confirm) || !res.OK {
 		return
 	}
-	if err := config.MarkChecked(next.SettingsFile(), next.PageKeys()); err != nil {
+	if err := config.MarkChecked(next.SettingsFile(), usable(next, next.PageKeys())); err != nil {
 		r.log.Warn("could not note in the settings file that its settings work", "err", err)
 	}
 	if confirm {
@@ -579,8 +618,10 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 		if errors.As(err, &ke) {
 			res.ProblemKeys = ke.keys
 			// Not used at the next start either, until tried again. The
-			// reason is the cause alone: the setting is not in use.
-			res.Refused = r.setAside(next.SettingsFile(), ke.keys, strings.TrimSuffix(res.Error, keptRunning))
+			// reason is the cause alone: the setting is not in use. A
+			// password that cannot be decrypted is not set aside (see
+			// usable).
+			res.Refused = r.setAside(next.SettingsFile(), usable(next, ke.keys), strings.TrimSuffix(res.Error, keptRunning))
 		}
 		return false
 	}
@@ -742,6 +783,13 @@ func (r *runner) check(ctx context.Context, old, next *config.Config) (*plan, er
 			}
 		}
 		if rep := store.Check(ctx, next.OpenSearchConnection()); !rep.OK {
+			// Without a password saved on the Settings page that cannot be
+			// decrypted, OpenSearch may well refuse Signalith: that is what
+			// to fix, and the settings are not set aside for it.
+			if locked := undecryptable(next, openSearchKeys); len(locked) > 0 {
+				return nil, keyed(refuse("OpenSearch did not answer with the new settings: %s But the %s saved on the Settings page cannot be used, which may be why. %s",
+					rep.Message, locked[0], next.PageSecretProblem(locked[0])), locked...)
+			}
 			return nil, keyed(refuse("OpenSearch did not answer with the new settings: %s", rep.Message), keys...)
 		}
 	}

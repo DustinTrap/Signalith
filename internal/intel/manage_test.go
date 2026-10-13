@@ -94,7 +94,8 @@ func TestFeedsFilePersistence(t *testing.T) {
 		len(v.Tags) != 1 || !v.Password.Set || len(v.Headers) != 1 || v.Headers[0] != (HeaderView{Name: "X-Api-Key", Set: true}) {
 		t.Errorf("view = %+v", v)
 	}
-	// Written privately, with the secrets, through a temporary file.
+	// Written privately, with the secrets encrypted, through a temporary
+	// file.
 	info, err := os.Stat(f.File)
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +104,8 @@ func TestFeedsFilePersistence(t *testing.T) {
 		t.Errorf("file mode = %v, want 0600", info.Mode().Perm())
 	}
 	data, _ := os.ReadFile(f.File)
-	if !strings.Contains(string(data), "k3y") || !strings.Contains(string(data), "# Threat intel feeds added on the Threat intel page") {
+	if strings.Contains(string(data), "k3y") || strings.Contains(string(data), "pa55word") || strings.Count(string(data), "enc:v1:") != 2 ||
+		!strings.Contains(string(data), "# Threat intel feeds added on the Threat intel page") {
 		t.Errorf("file = %s", data)
 	}
 	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(f.File), ".*.tmp")); len(left) > 0 {

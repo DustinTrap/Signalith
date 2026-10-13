@@ -426,6 +426,9 @@ func (s *Server) directoryView() map[string]any {
 		presets[typ] = settingsView{LDAPSettings: p}
 	}
 	warnings := cur.Warnings()
+	if p := d.Problem(); p != "" {
+		warnings = append([]string{p}, warnings...)
+	}
 	if warnings == nil {
 		warnings = []string{}
 	}

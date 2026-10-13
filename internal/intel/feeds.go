@@ -312,6 +312,9 @@ func (f *Feeds) all() []Feed {
 		for _, p := range s.Problems(false) {
 			probs = append(probs, p.Msg)
 		}
+		if locked := s.undecrypted(); len(locked) > 0 {
+			probs = append(probs, fmt.Sprintf("The saved %s cannot be decrypted with this server's master key, so the feed is not downloaded; edit the feed and enter the value again, or restore the master key it was saved with", strings.Join(locked, " and ")))
+		}
 		fd := s.Feed(SourceUI)
 		fd.Problem = strings.Join(probs, "; ")
 		out = append(out, fd)

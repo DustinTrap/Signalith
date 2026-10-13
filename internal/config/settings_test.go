@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
 
 // TestRegistryCoversEveryConfigSetting fails when a setting of Config is
@@ -365,8 +367,15 @@ func TestSecretsAreOnlySentWhereTheyWereEntered(t *testing.T) {
 	res = edit(Edit{By: "alice", Values: map[string]any{"opensearch.url": "https://os2.example:9200", "opensearch.password": "new-secret"}})
 	save(res)
 	e := res.Page.Settings["opensearch.password"]
-	if e == nil || e.Secret == nil || *e.Secret != "new-secret" || e.SentTo != "https://os2.example:9200" {
+	if e == nil || e.Secret == nil || e.SentTo != "https://os2.example:9200" {
 		t.Fatalf("entry %+v", e)
+	}
+	// Kept encrypted, for this setting of the page only.
+	if pw, err := secrets.Open("settings.opensearch.password", *e.Secret); !secrets.IsSealed(*e.Secret) || err != nil || pw != "new-secret" {
+		t.Fatalf("saved secret %q: %q %v", *e.Secret, pw, err)
+	}
+	if data, _ := os.ReadFile(res.Config.SettingsFile()); strings.Contains(string(data), "new-secret") {
+		t.Fatalf("the settings file holds the password as it was typed:\n%s", data)
 	}
 	c, err := Load(path)
 	if err != nil || c.OpenSearch.Password != "new-secret" || c.Source("opensearch.password").Kind != FromPage {
@@ -500,6 +509,18 @@ func TestWritePageSettingsIsPrivate(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Dir(file))
 	if len(entries) != 1 {
 		t.Errorf("files: %v", entries)
+	}
+	// One that others can read, such as one copied in by hand, is made
+	// private by the next save.
+	if runtime.GOOS != "windows" {
+		os.Chmod(file, 0o644)
+		p.Set("search.max_events", 20, "alice", time.Now())
+		if err := WritePageSettings(file, p); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("mode after saving over a 0644 file %v %v", fi.Mode(), err)
+		}
 	}
 }
 

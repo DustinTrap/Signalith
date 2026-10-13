@@ -445,8 +445,8 @@ func fmtWait(d time.Duration) string {
 	return fmt.Sprintf("%d minutes", int(d.Minutes()))
 }
 
-// secrets returns a feed's secret values, as sent.
-func secrets(fd Feed) []string {
+// secretValues returns a feed's secret values, as sent.
+func secretValues(fd Feed) []string {
 	var out []string
 	for _, v := range fd.Headers {
 		out = append(out, v, fd.expand(v))
@@ -459,7 +459,7 @@ func secrets(fd Feed) []string {
 
 // scrub hides a feed's secret values in a message.
 func scrub(msg string, fd Feed) string {
-	for _, s := range secrets(fd) {
+	for _, s := range secretValues(fd) {
 		if len(s) >= 4 {
 			msg = strings.ReplaceAll(msg, s, "[hidden]")
 		}

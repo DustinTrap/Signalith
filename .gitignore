@@ -3,3 +3,4 @@
 /signalith.exe
 *.yaml.local
 /cmd/zz-devdemo/
+/deploy/docker/master.key

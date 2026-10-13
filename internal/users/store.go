@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/mail"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -285,51 +285,11 @@ func (s *Store) saveLocked() error {
 	return WriteFileAtomic(s.path, append(data, '\n'))
 }
 
-// WriteFileAtomic writes data readable only by its owner (mode 0600 on
-// Linux; on Windows the folder's permissions apply), through a temporary
-// file in the same folder that is then renamed into place.
+// WriteFileAtomic replaces name with data whole, readable only by
+// Signalith's own account; a file that is replaced keeps its permissions.
+// See package securefile.
 func WriteFileAtomic(name string, data []byte) error {
-	return WriteFileAtomicWith(name, data, nil)
-}
-
-// WriteFileAtomicWith is WriteFileAtomic with prepare called on the new
-// file before it takes name's place, such as to give it an owner by its
-// open handle: unlike a path, the handle cannot be swapped for a link to
-// another file in between.
-func WriteFileAtomicWith(name string, data []byte, prepare func(*os.File) error) error {
-	if err := os.MkdirAll(filepath.Dir(name), 0o750); err != nil {
-		return err
-	}
-	// CreateTemp makes the file with mode 0600.
-	tmp, err := os.CreateTemp(filepath.Dir(name), ".tmp-"+filepath.Base(name)+"-*")
-	if err != nil {
-		return err
-	}
-	fail := func(err error) error {
-		tmp.Close()
-		os.Remove(tmp.Name())
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return fail(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fail(err)
-	}
-	if prepare != nil {
-		if err := prepare(tmp); err != nil {
-			return fail(err)
-		}
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Rename(tmp.Name(), name); err != nil {
-		os.Remove(tmp.Name())
-		return err
-	}
-	return nil
+	return securefile.WriteFile(name, data)
 }
 
 func (s *Store) sortedNamesLocked() []string {

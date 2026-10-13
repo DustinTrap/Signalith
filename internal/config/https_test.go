@@ -154,7 +154,7 @@ func TestTrustedProxies(t *testing.T) {
 	}
 }
 
-func TestStateDir(t *testing.T) {
+func TestTLSDir(t *testing.T) {
 	// t.TempDir is absolute on every system; "/var/..." is not on Windows,
 	// where an absolute path needs a drive letter.
 	root := t.TempDir()
