@@ -24,7 +24,7 @@ const (
 
 // publicRoutes work without signing in. Ingest checks its own token; the
 // CA certificate is public.
-var publicRoutes = []string{"POST /api/ingest", "POST /api/login", "POST /api/logout", "GET /api/tls/ca.pem"}
+var publicRoutes = []string{"POST /api/ingest", otlpLogsRoute, "POST /api/login", "POST /api/logout", "GET /api/tls/ca.pem"}
 
 // routeLogin adds the routes that work without signing in: the sign-in
 // page, its static assets, and sign-in and sign-out.

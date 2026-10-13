@@ -1,5 +1,6 @@
-// Package agents generates Fluent Bit configurations so nobody has to write
-// agent config by hand: pick the OS, copy the file, restart the agent.
+// Package agents generates Fluent Bit (and OpenTelemetry Collector)
+// configurations so nobody has to write agent config by hand: pick the
+// OS, copy the file, restart the agent.
 package agents
 
 import (
@@ -15,7 +16,7 @@ import (
 
 // Options select what an agent collects.
 type Options struct {
-	OS        string // "linux" or "windows"
+	OS        string // "linux", "windows" or "otel" (an OpenTelemetry Collector)
 	ServerURL string // Signalith public URL
 	Token     string // ingest token
 	// LinuxSource is "file" (tail /var/log/auth.log and /var/log/secure)
@@ -23,6 +24,9 @@ type Options struct {
 	LinuxSource string
 	// Sysmon adds the Sysmon operational channel on Windows.
 	Sysmon bool
+	// CollectorOS is where the OpenTelemetry Collector runs, for OS
+	// "otel": "linux" (the default) or "windows".
+	CollectorOS string
 	// CA is the certificate authority, in PEM, that the agent checks the
 	// server's certificate with over https: Signalith's own, or the root
 	// of the admin's certificate. Empty when the agent's system already
@@ -158,6 +162,9 @@ func IsLoopback(u *url.URL) bool {
 
 // Generate returns a Fluent Bit config and install steps.
 func Generate(o Options) (*Agent, error) {
+	if o.OS == "otel" {
+		return generateOTel(o)
+	}
 	u, err := ParseServerURL(o.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("server address %q: %w", o.ServerURL, err)
