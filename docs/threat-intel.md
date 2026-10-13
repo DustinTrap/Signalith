@@ -367,9 +367,10 @@ Only `value` is required; `type` is detected when empty. `expires` is a date, an
 RFC 3339 time or a duration such as `30d`. A plain list with one value per line also
 works. Every bad line is reported and nothing is saved unless the whole file is
 valid. Uploads add to the manual indicators (a value already present is updated).
-Delete manual indicators on the page; feed indicators come back with the next
-download, so turn the feed off instead. Indicators kept from a deleted feed can be
-deleted one by one.
+One file can be up to 16 MB and 2,000,000 indicators; split a larger one. Delete
+manual indicators on the page; feed indicators come back with the next download,
+so turn the feed off instead. Indicators kept from a deleted feed can be deleted
+one by one.
 
 ## Matching
 

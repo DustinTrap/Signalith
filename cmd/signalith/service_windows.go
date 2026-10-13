@@ -223,6 +223,9 @@ func installService(m *mgr.Mgr, path string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkProgramFolder(exe); err != nil {
+		return err
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err

@@ -47,12 +47,18 @@ import (
 // normally.
 type Fault struct {
 	// Status, when set, answers with this status and an error of Type,
-	// without doing the request.
+	// without doing the request; or, when Text is set, with Text as plain
+	// text, as OpenSearch's security plugin answers before its settings
+	// are loaded (see NotInitialized).
 	Status int
 	Type   string
+	Text   string
 	// Drop does the request, then closes the connection without an answer,
 	// as when a connection is reset after the request was sent.
 	Drop bool
+	// Stall takes the request and answers nothing until the client gives
+	// up, as an OpenSearch too slow to answer in time.
+	Stall bool
 }
 
 // Server is the fake OpenSearch.
@@ -135,6 +141,40 @@ func NewHandler() (*Server, http.Handler) {
 	return s, http.HandlerFunc(s.serve)
 }
 
+// Plug is a second address of a fake, for one server's requests, that a
+// test can pull out as when that server crashes.
+type Plug struct {
+	*httptest.Server
+	mu     sync.RWMutex
+	pulled bool
+}
+
+// Plug returns a new address of s. It stops when the test ends.
+func (s *Server) Plug(t interface{ Cleanup(func()) }) *Plug {
+	p := &Plug{}
+	p.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		if p.pulled {
+			drop(w)
+			return
+		}
+		s.serve(w, r)
+	}))
+	t.Cleanup(p.Close)
+	return p
+}
+
+// Pull cuts the address off. It waits for the requests being answered,
+// and drops every later one, so that nothing sent through it before a
+// crash lands after Pull returns: a request a server sent just before it
+// was stopped can otherwise reach the fake later.
+func (p *Plug) Pull() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pulled = true
+}
+
 // Block makes every write refused with a cluster_block_exception (HTTP
 // 429), as when OpenSearch's disk passes the flood-stage watermark, or
 // lifts that. Reads and deleting whole indices still work.
@@ -151,6 +191,11 @@ func (s *Server) SetFault(f func(method, path string) *Fault) {
 	defer s.mu.Unlock()
 	s.fault = f
 }
+
+// NotInitialized is the answer of OpenSearch's security plugin to every
+// request before its security settings are loaded, word for word
+// (OpenSearch 2.17).
+var NotInitialized = Fault{Status: http.StatusServiceUnavailable, Text: "OpenSearch Security not initialized."}
 
 // FailN answers the next n requests that match (method and a path that
 // contains part) with status and an error of typ.
@@ -319,9 +364,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if fault != nil {
 		if f := fault(r.Method, r.URL.RequestURI()); f != nil {
+			if f.Stall {
+				<-r.Context().Done()
+				return
+			}
 			if f.Drop {
 				s.handle(httptest.NewRecorder(), r, p, body)
 				drop(w)
+				return
+			}
+			if f.Text != "" {
+				w.Header().Set("Content-Type", "text/plain; charset=UTF-8")
+				w.WriteHeader(f.Status)
+				_, _ = io.WriteString(w, f.Text)
 				return
 			}
 			writeError(w, f.Status, f.Type, "injected by the test")

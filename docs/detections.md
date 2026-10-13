@@ -54,6 +54,14 @@ Rules of thumb:
   schedule (at least 1 minute, at most 5); the Detections page then shows **Timed out**,
   and the next run starts on schedule. Narrow the query or shorten `lookback` so it
   finishes in time.
+- When every worker is busy, a due detection waits. Its next run then searches on from
+  where its last successful run stopped, not just its `lookback`, so the events in
+  between are still searched; failed and timed-out runs are made up the same way. It
+  catches up at most ten lookbacks back (at least 1 hour, at most 24 hours); anything
+  older is counted as not searched. The Detections page shows late runs, timeouts and
+  time not searched under **Behind schedule**, and the Health page warns while a
+  detection waits longer than its schedule. Where a detection stopped is kept in
+  memory, so after a restart, or once it is turned back on, it searches its `lookback`.
 
 ## Risk
 
@@ -170,6 +178,6 @@ Imported rules start disabled with a 5 minute schedule and 10 minute lookback.
 | `GET /api/cases/summary` | Open cases, and open cases you own |
 | `GET /api/risk?since=24h&type=` | Risk objects by total score, with context |
 | `GET /api/risk/object?object=&type=&since=7d` | Risk events for one object |
-| `GET`, `PUT /api/lookups/assets`, `/api/lookups/identities` | List or replace a list (CSV body; 400 lists every bad line) |
+| `GET`, `PUT /api/lookups/assets`, `/api/lookups/identities` | List or replace a list (CSV body of up to 16 MB and 1,000,000 rows; 400 lists every bad line) |
 | `GET /api/lookups/assets.csv`, `/api/lookups/identities.csv` | Download the current CSV |
 | `GET /api/lookups/context?field=&value=` | Context for one value |

@@ -4,6 +4,10 @@ on:
     branches: [main]
   pull_request:
 
+# Jobs only read the code; none may push, comment or change settings.
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -11,19 +15,29 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
       - run: go build -o dist/ ./cmd/signalith
+      # install.ps1 needs an elevated Windows with OpenSearch to run, so CI
+      # checks the parts it can, with Windows PowerShell and PowerShell 7.
+      - name: Check install.ps1 (Windows PowerShell)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .github/scripts/check-install-ps1.ps1
+      - name: Check install.ps1 (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .github/scripts/check-install-ps1.ps1
 
   race:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       # The same tests with the data race detector on. It needs cgo, which
@@ -34,8 +48,8 @@ jobs:
   vulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       # Fails when a known vulnerability is reachable from Signalith's code,
@@ -46,14 +60,17 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The Docker quick start as users run it, plus an override that also
-      # publishes OpenSearch on this machine for the Go tests.
-      COMPOSE: docker compose -f deploy/docker/docker-compose.yml -f ${{ github.workspace }}/ci-opensearch-port.yml
+      # publishes OpenSearch on this machine for the Go tests, and one that
+      # turns off OpenSearch's own loading of its security settings on first
+      # start, as when that fails on a slow computer: then the
+      # opensearch-security step has to load them.
+      COMPOSE: docker compose -f deploy/docker/docker-compose.yml -f ${{ github.workspace }}/ci-opensearch-port.yml -f ${{ github.workspace }}/ci-no-default-init.yml
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: Start the Docker quick start
+      - name: Start OpenSearch without its security settings loaded
         run: |
           cat > ci-opensearch-port.yml <<'EOF'
           services:
@@ -61,7 +78,46 @@ jobs:
               ports:
                 - "127.0.0.1:9200:9200"
           EOF
+          cat > ci-no-default-init.yml <<'EOF'
+          services:
+            opensearch:
+              environment:
+                - plugins.security.allow_default_init_securityindex=false
+          EOF
+          $COMPOSE up -d --build opensearch
+          # Signalith's OpenSearch certificate, from the setup step's volume.
+          certs="$RUNNER_TEMP/stuck"
+          mkdir -p "$certs"
+          $COMPOSE cp setup:/signalith-secrets/. "$certs/"
+          # Once OpenSearch answers, it refuses Signalith with 503 "OpenSearch
+          # Security not initialized.", as on the slow computer.
+          for i in $(seq 1 60); do
+            code=$(curl -s -o "$certs/answer.txt" -w '%{http_code}' --cacert "$certs/opensearch-ca.pem" \
+              --cert "$certs/opensearch-client.pem" --key "$certs/opensearch-client-key.pem" https://localhost:9200/_cluster/health) && break
+            sleep 3
+          done
+          cat "$certs/answer.txt"; echo
+          test "$code" = 503
+          grep -q 'Security not initialized' "$certs/answer.txt"
+      - name: Start the Docker quick start
+        run: |
           $COMPOSE up -d --build
+          # The step that loads OpenSearch's security settings loaded them,
+          # and Signalith started after it.
+          certs="$RUNNER_TEMP/stuck"
+          $COMPOSE logs --no-color --no-log-prefix opensearch-security > "$certs/step.log"
+          cat "$certs/step.log"
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$($COMPOSE ps -aq opensearch-security)")" = 0
+          grep -q "^Done: OpenSearch's security settings are loaded." "$certs/step.log"
+          # Signalith's certificate now gets its role.
+          curl -sf -o "$certs/authinfo.json" --cacert "$certs/opensearch-ca.pem" --cert "$certs/opensearch-client.pem" \
+            --key "$certs/opensearch-client-key.pem" https://localhost:9200/_plugins/_security/authinfo
+          jq -e '.roles | index("signalith_server")' "$certs/authinfo.json"
+          # Another `up` runs the step again, which finds nothing to do.
+          $COMPOSE up -d
+          $COMPOSE logs --no-color --no-log-prefix opensearch-security > "$certs/step.log"
+          tail -n 1 "$certs/step.log"
+          tail -n 1 "$certs/step.log" | grep -q '^Nothing to do'
       - name: Sign in to Signalith with the generated password
         run: |
           secrets="$RUNNER_TEMP/signalith-secrets"
@@ -79,13 +135,35 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "$(jq -n --arg p "$password" '{username: "admin", password: $p}')" \
             https://localhost:8080/api/login > /dev/null
-          health=$(curl -sf -b "$RUNNER_TEMP/cookies" --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/health)
+          # OpenSearch loads its security settings a moment after it starts
+          # answering, so the health may say "not initialized" at first.
+          for i in $(seq 1 60); do
+            health=$(curl -sf -b "$RUNNER_TEMP/cookies" --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/health) &&
+              echo "$health" | jq -e '.opensearch.status == "green" or .opensearch.status == "yellow"' > /dev/null && break
+            sleep 2
+          done
           echo "$health" | jq -e '.opensearch.status == "green" or .opensearch.status == "yellow"'
           # The public example password from earlier versions is refused.
           code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$RUNNER_TEMP/signalith-ca.pem" \
             -H 'Content-Type: application/json' -d '{"username":"admin","password":"change-me-please"}' \
             https://localhost:8080/api/login)
           test "$code" = 401
+      - name: Check a new install refuses the old example ingest token
+        run: |
+          # Older quick starts gave every agent change-this-ingest-token,
+          # which anyone can look up. Only an upgraded install accepts it;
+          # this one started new, so it is a wrong token, over plain HTTP too.
+          $COMPOSE cp signalith:/var/lib/signalith/docker-upgrade.json "$RUNNER_TEMP/docker-upgrade.json"
+          jq -e '.upgraded == false' "$RUNNER_TEMP/docker-upgrade.json"
+          for url in http://localhost:8080/api/ingest https://localhost:8080/api/ingest; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$RUNNER_TEMP/signalith-ca.pem" \
+              -H 'Authorization: Bearer change-this-ingest-token' -d '[{"log":"forged"}]' "$url")
+            test "$code" = 401
+          done
+          # The install's own token works over HTTPS.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$RUNNER_TEMP/signalith-ca.pem" \
+            -H "Authorization: Bearer $(cat "$RUNNER_TEMP/signalith-secrets/ingest-token")" -d '[{"log":"hello"}]' https://localhost:8080/api/ingest)
+          test "$code" = 200
       - name: Check OpenSearch refuses anyone without Signalith's certificate
         run: |
           ca="$RUNNER_TEMP/signalith-secrets/opensearch-ca.pem"
@@ -135,8 +213,8 @@ jobs:
       # security on.
       COMPOSE: docker compose -f deploy/docker/docker-compose.yml -f ${{ github.workspace }}/ci-opensearch-port.yml
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Start the Docker quick start's OpenSearch
@@ -174,8 +252,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
       - name: Cross-compile
@@ -184,7 +262,7 @@ jobs:
             os=${target%/*}; arch=${target#*/}; ext=""; [ "$os" = windows ] && ext=.exe
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::7}" -o dist/signalith-$os-$arch$ext ./cmd/signalith
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signalith-binaries
           path: dist/

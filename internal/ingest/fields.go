@@ -59,6 +59,9 @@ var knownFields = func() map[string]string {
 
 		// Windows and Linux parsers.
 		"src_host": kw, "logon_type_name": kw, "member": kw,
+		// An sshd line whose client address cannot be told from text the
+		// client sent (see ambiguousSSH).
+		"src_ambiguous": kw,
 
 		// Syslog receiver, including the CIM names CEF keys map to.
 		"facility": kw, "severity": kw, "severity_id": long, "msgid": kw, "sequence": long,
@@ -70,6 +73,9 @@ var knownFields = func() map[string]string {
 		"file_hash": kw, "file_size": long, "category": kw,
 		"cef_version": kw, "cef_vendor": kw, "cef_product": kw, "cef_device_version": kw,
 		"leef_version": kw, "leef_vendor": kw, "leef_product": kw, "leef_device_version": kw,
+
+		// OpenTelemetry log records (OTLP).
+		"service": kw, "trace_id": kw, "span_id": kw, "otel_scope": kw,
 
 		// Risk events.
 		"group_key": kw, "risk_score": double, "risk_base_score": double,

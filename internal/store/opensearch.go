@@ -13,11 +13,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/redact"
@@ -338,12 +340,28 @@ func (c *Client) Do(ctx context.Context, method, path string, body any, out any)
 	if c.cfg.Username != "" {
 		req.SetBasicAuth(c.cfg.Username, c.cfg.Password.Reveal())
 	}
+	// sent tells a request that timed out after it reached OpenSearch
+	// (which is then too slow) from one that never got there. reused
+	// marks one sent on a connection kept from an earlier request, which
+	// may lead nowhere by now: see reachable.
+	var sent, reused atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(i httptrace.GotConnInfo) { reused.Store(i.Reused) },
+		WroteRequest: func(i httptrace.WroteRequestInfo) {
+			if i.Err == nil {
+				sent.Store(true)
+			}
+		},
+	}))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		// Go hides the password in the URL it repeats, but not the rest.
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			ue.URL = redact.URL(ue.URL)
+		}
+		if sent.Load() && timedOut(err) && (!reused.Load() || c.reachable()) {
+			return &noAnswerError{msg: fmt.Sprintf("opensearch at %s did not answer in time: %v%s", c.shown, err, c.proxyHint), err: err}
 		}
 		return fmt.Errorf("opensearch unreachable at %s: %w%s", c.shown, err, c.proxyHint)
 	}
@@ -382,6 +400,38 @@ func (c *Client) Search(ctx context.Context, index string, body map[string]any) 
 	return out, err
 }
 
+// reachable reports whether a new connection to OpenSearch can be made
+// within a few seconds. A request on a kept connection that timed out
+// proves little: when OpenSearch's computer was turned off or its network
+// cut, the request is still written, into a connection that leads nowhere.
+// So the request counts as one OpenSearch took but didn't answer only when
+// OpenSearch still takes connections. It also drops the other kept
+// connections, which may lead nowhere too. Through a proxy it can't tell,
+// and reports true.
+func (c *Client) reachable() bool {
+	c.http.CloseIdleConnections()
+	if c.cfg.Proxy != "" {
+		return true
+	}
+	u, err := url.Parse(c.base)
+	if err != nil || u.Hostname() == "" {
+		return true
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(u.Hostname(), port), 3*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // Health returns cluster health ("green", "yellow", "red").
 func (c *Client) Health(ctx context.Context) (string, error) {
 	var out struct {
@@ -395,10 +445,12 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 type BulkItemError struct {
 	Index  string
 	Reason string
-	// Pos is the document's position in the request, from 0, and Type the
-	// OpenSearch error type, such as mapper_parsing_exception.
-	Pos  int    `json:"-"`
-	Type string `json:"-"`
+	// Pos is the document's position in the request, from 0, Type the
+	// OpenSearch error type, such as mapper_parsing_exception, and Status
+	// the item's HTTP status, such as 429 (0 when unknown).
+	Pos    int    `json:"-"`
+	Type   string `json:"-"`
+	Status int    `json:"-"`
 }
 
 // Bulk indexes documents. docs maps each document to its target index.
@@ -409,7 +461,11 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	for _, d := range docs {
-		if err := enc.Encode(map[string]any{"create": map[string]any{"_index": d.Index}}); err != nil {
+		meta := map[string]any{"_index": d.Index}
+		if d.ID != "" {
+			meta["_id"] = d.ID
+		}
+		if err := enc.Encode(map[string]any{"create": meta}); err != nil {
 			return nil, err
 		}
 		if err := enc.Encode(d.Doc); err != nil {
@@ -435,7 +491,7 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 		for i, item := range out.Items {
 			for _, r := range item {
 				if r.Error != nil {
-					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason, Pos: i, Type: r.Error.Type})
+					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason, Pos: i, Type: r.Error.Type, Status: r.Status})
 				}
 			}
 		}
@@ -446,7 +502,10 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 // IndexedDoc is one document and the index it goes to.
 type IndexedDoc struct {
 	Index string
-	Doc   map[string]any
+	// ID, when set, is the document's _id: writing the same one again is
+	// refused as a conflict (409) instead of storing it twice.
+	ID  string
+	Doc map[string]any
 }
 
 // PutIndexTemplate creates or replaces a composable index template.

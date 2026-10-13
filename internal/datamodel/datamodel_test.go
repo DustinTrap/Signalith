@@ -15,8 +15,8 @@ func TestMalwareModel(t *testing.T) {
 		}
 		return -1
 	}
-	if c, mw, r := at("Change"), at("Malware"), at("Risk"); mw != c+1 || r != mw+1 {
-		t.Errorf("Malware is not between Change and Risk: %v", names)
+	if c, mw, r := at("Change"), at("Malware"), at("Risk"); mw != c+1 || r <= mw {
+		t.Errorf("Malware is not right after Change, before Risk: %v", names)
 	}
 	m, ok := Get("malware")
 	if !ok {

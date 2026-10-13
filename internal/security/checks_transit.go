@@ -188,6 +188,13 @@ func checkCertificate(f *Facts) *Check {
 			Steps: []string{"Add the certificate of the authority that issued yours after it, in the certificate file."},
 			Docs:  doc(docHTTPSOwn)}})
 	}
+	if !auto && leaf.NoName {
+		// Agents set up with an IP address check the certificate against
+		// a host name it carries, since its CA vouches for others too.
+		probs = append(probs, problem{Attention, "Your certificate covers only IP addresses, so agents can't check it belongs to this server, and Add data can't set them up.", &Fix{
+			Steps: []string{"Get a certificate that also includes this server's host name. Agents can keep using its IP address."},
+			Docs:  doc(docHTTPSOwn)}})
+	}
 	if !auto && (leaf.RSABits > 0 && leaf.RSABits < 2048 || leaf.SHA1) {
 		var weak []string
 		if leaf.RSABits > 0 && leaf.RSABits < 2048 {
@@ -253,6 +260,9 @@ func checkCAScope(f *Facts) *Check {
 		}
 	case t.CA.Scope == tlsauto.ScopeUnconstrained:
 		c = &Check{State: Attention, Line: "Signalith's certificate authority was made by an older version and can vouch for any website, to every computer that trusts it.", Fix: prepare}
+	case t.CA.AnyUse:
+		c = &Check{State: Attention, Line: "Signalith's certificate authority was made by an older version and isn't limited to websites. " +
+			"If its key were stolen, it could sign programs or email that computers trusting it would accept.", Fix: prepare}
 	case t.CA.Scope != setting:
 		c = &Check{State: Attention, Line: "You chose a " + setting + " certificate authority, but the one in use is " + t.CA.Scope +
 			". Make the new one and switch when you're ready.", Fix: prepare}
@@ -576,12 +586,22 @@ func checkProxies(f *Facts) *Check {
 		return &Check{State: Attention, Line: "Signalith believes the reverse proxy at " + shorten(legacy, 3) +
 			" only because signalith.yaml was written before HTTPS was the default.", Fix: fix}
 	}
+	header := f.Config.Server.ClientAddressHeader()
 	for _, p := range list {
 		if p.Addr().Is4() && p.Bits() < 16 || !p.Addr().Is4() && p.Bits() < 48 {
 			fix.Steps = []string{"List only the proxies' own addresses."}
-			return &Check{State: Attention, Line: "Trusted reverse proxies includes " + p.String() +
-				", so any computer in it can claim a browser used HTTPS.", Fix: fix}
+			line := "Trusted reverse proxies includes " + p.String() + ", so any computer in it can claim a browser used HTTPS"
+			if header != "" {
+				line += ", and choose the address its sign-ins are counted under"
+			}
+			return &Check{State: Attention, Line: line + ".", Fix: fix}
 		}
 	}
-	return &Check{State: Good, Line: "Signalith believes forwarded HTTPS only from " + shorten(prefixList(list), 3) + "."}
+	if header == "" {
+		return &Check{State: Good, Line: "Signalith believes forwarded HTTPS only from " + shorten(prefixList(list), 3) + ".",
+			Tip: &Fix{Setting: "server.client_header", Docs: doc(docHTTPSProxy), Steps: []string{
+				"Everyone reaching Signalith through these proxies counts as one shared address for the sign-in limits and the log.",
+				"If the proxy sets X-Forwarded-For itself, choose it under Client address header, so each person is counted and logged by their own address."}}}
+	}
+	return &Check{State: Good, Line: "Signalith believes forwarded HTTPS and client addresses (" + header + ") only from " + shorten(prefixList(list), 3) + "."}
 }

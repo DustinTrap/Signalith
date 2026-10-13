@@ -1,5 +1,6 @@
-// Package agents generates Fluent Bit configurations so nobody has to write
-// agent config by hand: pick the OS, copy the file, restart the agent.
+// Package agents generates Fluent Bit (and OpenTelemetry Collector)
+// configurations so nobody has to write agent config by hand: pick the
+// OS, copy the file, restart the agent.
 package agents
 
 import (
@@ -15,7 +16,7 @@ import (
 
 // Options select what an agent collects.
 type Options struct {
-	OS        string // "linux" or "windows"
+	OS        string // "linux", "windows" or "otel" (an OpenTelemetry Collector)
 	ServerURL string // Signalith public URL
 	Token     string // ingest token
 	// LinuxSource is "file" (tail /var/log/auth.log and /var/log/secure)
@@ -23,6 +24,9 @@ type Options struct {
 	LinuxSource string
 	// Sysmon adds the Sysmon operational channel on Windows.
 	Sysmon bool
+	// CollectorOS is where the OpenTelemetry Collector runs, for OS
+	// "otel": "linux" (the default) or "windows".
+	CollectorOS string
 	// CA is the certificate authority, in PEM, that the agent checks the
 	// server's certificate with over https: Signalith's own, or the root
 	// of the admin's certificate. Empty when the agent's system already
@@ -32,7 +36,19 @@ type Options struct {
 	// Signalith does not have (server.tls_cert without its chain): the
 	// agent still reads tls.ca_file, and a step says to put that CA there.
 	CAUnknown bool
+	// OwnCA means the certificate comes from Signalith's own CA, which
+	// vouches only for this server, so checking who issued it is enough
+	// when the agent reaches the server by IP address.
+	OwnCA bool
+	// CertNames are the DNS names the server's certificate covers. With
+	// any other CA, an agent that reaches the server by IP address checks
+	// the certificate against the first one it can use (see VerifyName).
+	CertNames []string
 }
+
+// ErrNoNameToCheck is returned when an agent would reach the server by IP
+// address with nothing to tie the certificate to this server.
+var ErrNoNameToCheck = errors.New("agents can't check that the certificate belongs to this server")
 
 // Where the agent keeps the CA certificate it checks the server with.
 const (
@@ -146,6 +162,9 @@ func IsLoopback(u *url.URL) bool {
 
 // Generate returns a Fluent Bit config and install steps.
 func Generate(o Options) (*Agent, error) {
+	if o.OS == "otel" {
+		return generateOTel(o)
+	}
 	u, err := ParseServerURL(o.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("server address %q: %w", o.ServerURL, err)
@@ -163,6 +182,13 @@ func Generate(o Options) (*Agent, error) {
 		}
 	} else if port == "" {
 		port = "80"
+	}
+
+	// Over loopback nothing sits in between, so only an address that
+	// crosses the network needs the check.
+	if ip := net.ParseIP(host); tls == "On" && ip != nil && !ip.IsLoopback() && !o.OwnCA && verifyName(host, o) == "" {
+		return nil, fmt.Errorf("%w: the certificate at %s comes from a certificate authority that also vouches for other computers, "+
+			"and it has no host name to check. Use a host name the certificate covers as the address, or a certificate that includes one", ErrNoNameToCheck, host)
 	}
 
 	var b strings.Builder
@@ -326,14 +352,40 @@ func Generate(o Options) (*Agent, error) {
 	// certificate is for: tls.verify alone only checks who issued it, so
 	// with a public or company CA any certificate it issued would do.
 	// An IP address is not a valid name for SNI, and Fluent Bit cannot
-	// check one against a certificate, so both are left out then.
-	if tls == "On" && net.ParseIP(host) == nil {
-		out = append(out, [2]string{"tls.vhost", host}, [2]string{"tls.verify_hostname", "On"})
+	// check one against a certificate. That is safe with Signalith's own
+	// CA, which vouches for nothing else; with any other, the agent asks
+	// for and checks a name the certificate carries instead.
+	if tls == "On" {
+		if name := verifyName(host, o); name != "" {
+			out = append(out, [2]string{"tls.vhost", name}, [2]string{"tls.verify_hostname", "On"})
+		}
 	}
 	out = append(out, [2]string{"Retry_Limit", "False"})
 	b.WriteString(section("OUTPUT", out))
 	a.Config = b.String()
 	return a, nil
+}
+
+// verifyName returns the name an agent sending to host checks the
+// server's certificate against: host itself when it is a name; for an IP
+// address, none with Signalith's own CA, else the first of CertNames that
+// is a plain host name (not a wildcard or localhost), or "" when there is
+// none.
+func verifyName(host string, o Options) string {
+	if net.ParseIP(host) == nil {
+		return host
+	}
+	if o.OwnCA {
+		return ""
+	}
+	for _, n := range o.CertNames {
+		n = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(n), "."))
+		if n == "localhost" || strings.HasSuffix(n, ".localhost") || net.ParseIP(n) != nil || !validHost(n, false) {
+			continue
+		}
+		return n
+	}
+	return ""
 }
 
 // caStep is the step that saves the CA certificate as name, and records

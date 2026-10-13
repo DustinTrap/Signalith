@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,7 +23,7 @@ const (
 
 // publicRoutes work without signing in. Ingest checks its own token; the
 // CA certificate is public.
-var publicRoutes = []string{"POST /api/ingest", "POST /api/login", "POST /api/logout", "GET /api/tls/ca.pem"}
+var publicRoutes = []string{"POST /api/ingest", otlpLogsRoute, "POST /api/login", "POST /api/logout", "GET /api/tls/ca.pem"}
 
 // routeLogin adds the routes that work without signing in: the sign-in
 // page, its static assets, and sign-in and sign-out.
@@ -36,7 +35,10 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 		mux.HandleFunc("GET /login", s.handleLoginPage)
 		// Stylesheets, fonts, the logo and the sign-in script are public so
 		// the sign-in page can use them.
-		mux.Handle("GET /assets/", http.FileServerFS(s.UI))
+		// Only the assets folder, never the app's own pages and scripts.
+		if assets, err := fs.Sub(s.UI, "assets"); err == nil {
+			mux.Handle("GET /assets/", http.StripPrefix("/assets", staticFiles(assets, false)))
+		}
 		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/assets/favicon.svg", http.StatusMovedPermanently)
 		})
@@ -53,6 +55,9 @@ func (s *Server) sessions() *auth.Sessions {
 		}
 		if s.Limiter == nil {
 			s.Limiter = auth.NewLimiter()
+		}
+		if s.KnownBrowsers == nil {
+			s.KnownBrowsers = auth.NewBrowserKey()
 		}
 		if s.Users == nil {
 			s.Users = users.NewMemory()
@@ -119,14 +124,6 @@ func sameOrigin(r *http.Request) bool {
 	return true
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 // secureCookie reports whether the session cookie is sent over HTTPS
 // only: when this very request reached Signalith over HTTPS, itself or
 // through a trusted reverse proxy that says so with X-Forwarded-Proto.
@@ -171,12 +168,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := s.sessions().Create(p.Username, req.Remember)
+	if p.Source == users.SourceLocal {
+		s.sessions().SetVersion(token, s.passwordStamp(p.Username))
+	}
 	c := &http.Cookie{Name: s.cookieName(r), Value: token, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, Secure: s.secureCookie(r)}
 	if req.Remember {
 		c.MaxAge = int(s.sessions().MaxAge.Seconds())
 	}
 	http.SetCookie(w, c)
+	// From now on this browser can sign in to the account even while
+	// someone elsewhere is guessing its password.
+	s.rememberBrowser(w, r, req.Username, p.Username)
 	p.Method = "session"
 	writeJSON(w, http.StatusOK, meView(p))
 }
@@ -188,7 +191,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if c, err := r.Cookie(s.cookieName(r)); err == nil {
 		if ss, ok := s.sessions().Lookup(c.Value); ok {
-			s.Log.Info("signed out", "audit", true, "user", ss.User, "client", clientIP(r))
+			s.Log.Info("signed out", append([]any{"audit", true, "user", ss.User}, s.client(r).logAttrs()...)...)
 		}
 		s.sessions().Delete(c.Value)
 	}

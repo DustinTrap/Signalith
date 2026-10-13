@@ -98,7 +98,9 @@ looks at when the certificate authority expires.
 - At risk: the certificate has expired.
 - Needs attention: it expires soon (30 days for your own files; 21 days for Signalith's
   own, which means renewal failed), it leaves out names people or agents use, it uses a
-  key or signature that is too weak (RSA under 2048 bits, or SHA-1), or Signalith's
+  key or signature that is too weak (RSA under 2048 bits, or SHA-1), your own
+  certificate covers only IP addresses (so agents have no host name to check it
+  against, see [Agents and syslog](https.md#agents-and-syslog)), or Signalith's
   certificate authority expires within 180 days.
 
 **To fix:** see [Use your own certificate](https.md#use-your-own-certificate), or
@@ -129,7 +131,9 @@ that refused the new certificate (from failed TLS handshakes, over HTTPS and sys
   says so, and a new one covers each name exactly.
 - Needs attention: a new certificate authority is ready but not switched to yet; the
   previous one is still kept after a switch; the one in use was made by an older version
-  and can vouch for any website; or the one in use isn't the kind you chose.
+  and can vouch for any website; the one in use was made by an older version and isn't
+  limited to websites, so a stolen key could sign programs or email that computers
+  trusting it accept; or the one in use isn't the kind you chose.
 
 **To fix:** follow
 [Switching to a new certificate authority](https.md#switching-to-a-new-certificate-authority).
@@ -137,13 +141,15 @@ that refused the new certificate (from failed TLS handshakes, over HTTPS and sys
 **How to check by hand:**
 
 ```sh
-sudo openssl x509 -in /var/lib/signalith/tls/ca.pem -noout -subject -enddate -ext nameConstraints
+sudo openssl x509 -in /var/lib/signalith/tls/ca.pem -noout -subject -enddate -ext nameConstraints,extendedKeyUsage
 ```
 
 A standard one lists private names such as `.local` and `.corp` and private ranges. A
 strict one lists only this server's names and addresses. Under **Excluded**, the
 server's names with a dot in front keep the names under them out. No name constraints at
-all means it was made by an older version.
+all means it was made by an older version. **X509v3 Extended Key Usage** should read
+`TLS Web Server Authentication` alone; without it, it was made before the website-only
+limit.
 
 ### Agents on plain HTTP
 
@@ -238,10 +244,13 @@ because `signalith.yaml` was written before HTTPS was the default.
 **Looks at:** each entry in `server.trusted_proxies`, and the proxies believed for the
 older reason in the last day.
 
-- Good: only the listed proxies are believed.
+- Good: only the listed proxies are believed. With **Client address header** empty, a
+  tip says that everyone behind them counts as one shared address for the sign-in
+  limits, and how to count each person instead.
 - Needs attention: an entry is wider than a /16 (IPv4) or /48 (IPv6), so any computer in
-  it can claim a browser used HTTPS; or a proxy is believed only because of the older
-  config.
+  it can claim a browser used HTTPS (and, with **Client address header** set, choose the
+  address its failed sign-ins are counted under); or a proxy is believed only because of
+  the older config.
 
 **To fix:** list only the proxies' own addresses. See
 [Behind a reverse proxy](https.md#behind-a-reverse-proxy).
@@ -491,7 +500,9 @@ certificate, and turn off **Skip certificate check**
 ### Sign-in sessions
 
 **Looks at:** **Sign out after** (`auth.session_timeout`, 12 hours by default): how
-long a sign-in lasts without use. Someone who ticks **Keep me signed in** isn't signed
+long a sign-in lasts without use. An open tab's own refreshes (the Health card,
+dashboards and other timers) don't count as use, so a tab left unattended still signs
+out. Someone who ticks **Keep me signed in** isn't signed
 out for being idle; every sign-in ends after 7 days at most.
 
 - Good: 24 hours or less.
@@ -509,11 +520,16 @@ replaced.
 
 - Good: every token has 24 characters or more. Tokens Signalith makes have 48.
 - Needs attention: a token is shorter than 24 characters.
-- At risk: the example token `change-this-ingest-token`, which anyone can look up. In a
-  container, an older Docker quick start's agents may still send it over plain HTTP,
-  and Signalith accepts it that way while **Agents on plain HTTP** accepts them, even
+- At risk: the example token `change-this-ingest-token`, which anyone can look up. On a
+  Docker quick start upgraded from an older version, whose agents all have it, Signalith
+  accepts it from them over plain HTTP while **Agents on plain HTTP** accepts them, even
   when it isn't in `ingest.tokens`. Choose **Refuse them** once every agent has its
-  configuration from **Add data**.
+  configuration from **Add data**; that ends it for good.
+
+On the Docker quick start the check also says why the old example token is refused: the
+install started new, it was upgraded and agents on plain HTTP were refused since a date,
+or Signalith couldn't yet ask OpenSearch which it is. See
+[The Docker quick start's old example token](https.md#the-docker-quick-starts-old-example-token).
 
 **To fix:** add a new token with `sudo signalith secrets set ingest.tokens` (press Enter
 to have one made), give each agent a new configuration from **Add data**, then remove the
@@ -593,8 +609,9 @@ keep `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:tru
 
 ### File permissions
 
-**Looks at:** who may read or change Signalith's keys (the HTTPS keys in `tls/`, a key
-file for OpenSearch, and the files named by `SIGNALITH_*_FILE` variables), its private
+**Looks at:** who may read or change Signalith's keys (the HTTPS keys in `tls/`, the
+sign-in key `signin.key`, a key file for OpenSearch, and the files named by
+`SIGNALITH_*_FILE` variables), its private
 files (`users.json`, `directory.json`, `settings.yaml`, `intel_feeds.yaml`, the admin
 password hash), its folders, and `signalith.yaml` with its folder. The master key is
 left to [Master key](#master-key). On Windows it reads each file's access list; on Linux
@@ -630,7 +647,7 @@ public names, only this server's own, each exactly.
   such as `intranet.corp` or `192.168.1.5`. A new address for this server works right
   away.
 - **Strict** can vouch only for this server's own names and addresses. A stolen key
-  then lets someone pose only as this server, but a new name or address later means a
+  then lets someone pose only as this server's website, but a new name or address later means a
   new certificate authority, which every browser and agent must trust again.
 
 Strict suits a server whose name and address won't change, especially when many

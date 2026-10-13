@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -97,6 +96,9 @@ type CAInfo struct {
 	// allows: a CA made before Signalith excluded them (see
 	// excludedSubtrees). Private network names are left out.
 	Subtrees []string `json:"subtrees,omitempty"`
+	// AnyUse means it is not limited to web servers (see caTemplate): one
+	// made by an earlier version.
+	AnyUse bool `json:"any_use,omitempty"`
 	// At is when a prepared one was made, or when the switch away from a
 	// kept one happened.
 	At time.Time `json:"at,omitzero"`
@@ -140,7 +142,7 @@ func classify(ca *x509.Certificate) string {
 func infoOf(ca *x509.Certificate) *CAInfo {
 	scope := classify(ca)
 	in := &CAInfo{Scope: scope, Fingerprint: Fingerprint(ca.Raw), Subject: ca.Subject.CommonName,
-		NotBefore: ca.NotBefore.UTC(), NotAfter: ca.NotAfter.UTC(), Names: []string{}}
+		NotBefore: ca.NotBefore.UTC(), NotAfter: ca.NotAfter.UTC(), Names: []string{}, AnyUse: !ServerOnly(ca)}
 	for _, d := range ca.PermittedDNSDomains {
 		d = strings.ToLower(strings.TrimPrefix(d, "."))
 		if d == "invalid" || scope == ScopeStandard && slices.Contains(privateDomains, d) {
@@ -312,20 +314,7 @@ func (m *Manager) Prepare(scope string) error {
 	}
 	now := m.now()
 	dns, excluded, ips := constraints(m.candidateNames(), scope == ScopeStrict)
-	tmpl := &x509.Certificate{
-		SerialNumber:                serial(),
-		Subject:                     pkix.Name{CommonName: "Signalith Local CA (" + host + ", " + now.UTC().Format(time.DateOnly) + ")", Organization: []string{"Signalith"}},
-		NotBefore:                   now.Add(-time.Hour),
-		NotAfter:                    now.AddDate(CAYears, 0, 0),
-		IsCA:                        true,
-		BasicConstraintsValid:       true,
-		MaxPathLenZero:              true,
-		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
-		PermittedDNSDomainsCritical: true,
-		PermittedDNSDomains:         dns,
-		ExcludedDNSDomains:          excluded,
-		PermittedIPRanges:           ips,
-	}
+	tmpl := caTemplate("Signalith Local CA ("+host+", "+now.UTC().Format(time.DateOnly)+")", now, dns, excluded, ips)
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
 		return err

@@ -1,10 +1,14 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 )
@@ -69,6 +73,26 @@ func hstsHost(hostport string) bool {
 // copy of a signed-in file, so after signing out the app sends them to the
 // sign-in page instead of showing a stale copy. Pages themselves are not
 // stored at all, so Back after signing out cannot bring one up.
+// staticFiles serves the web UI's files from fsys. It never lists a
+// folder, and it refuses a path with an encoded slash, backslash or dot or
+// a ".." segment, so a path can't reach outside the files a route is meant
+// to serve (/assets/..%2fapp.js is not app.js). With index, / serves
+// index.html.
+func staticFiles(fsys fs.FS, index bool) http.Handler {
+	files := http.FileServerFS(fsys)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := strings.ToLower(r.URL.EscapedPath())
+		p := r.URL.Path
+		if strings.Contains(raw, "%2f") || strings.Contains(raw, "%5c") || strings.Contains(raw, "%2e") ||
+			strings.Contains(p, "\\") || slices.Contains(strings.Split(p, "/"), "..") ||
+			(strings.HasSuffix(p, "/") && !(index && p == "/")) {
+			http.NotFound(w, r)
+			return
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
 func revalidate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p := r.URL.Path; p == "/" || strings.HasSuffix(p, ".html") {
@@ -112,6 +136,27 @@ func limitBodies(next http.Handler) http.Handler {
 // only once the client has proved who it is.
 func allowSlowUpload(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
+}
+
+// maxUploadBytes caps an uploaded file (asset lists, indicators).
+const maxUploadBytes = 16 << 20
+
+// uploadBody gives a signed-in upload uploadTimeout to arrive and caps it
+// at maxUploadBytes; a larger body fails to read with *http.MaxBytesError.
+func uploadBody(w http.ResponseWriter, r *http.Request) io.Reader {
+	allowSlowUpload(w)
+	return http.MaxBytesReader(w, r.Body, maxUploadBytes)
+}
+
+// uploadFailed answers an upload that could not be read: 413 when it is
+// too large, 400 otherwise.
+func uploadFailed(w http.ResponseWriter, err error) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the file is larger than %d MB, the most one upload takes; split it into smaller files", maxUploadBytes>>20))
+		return
+	}
+	writeError(w, http.StatusBadRequest, err)
 }
 
 // deadlineBody lifts the read deadline once the whole body has arrived.

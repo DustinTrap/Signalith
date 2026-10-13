@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -79,6 +80,11 @@ type Pipeline struct {
 	// Log, when set, gets a warning (at most once a minute per kind) when
 	// events are refiled under their arrival time or lose fields.
 	Log *slog.Logger
+	// SampleMark marks every event this pipeline writes as sample data
+	// with this load ID (datamodel.SampleField). Only the sample-data
+	// loader sets it, on a pipeline of its own: every other pipeline
+	// removes the marker from what senders send (see reservedFields).
+	SampleMark string
 
 	stats   Stats
 	names   fieldBudget
@@ -108,7 +114,8 @@ type Stats struct {
 	// so they were filed under the time they arrived.
 	Retimed atomic.Int64
 	// FieldsDropped counts fields left out of events: invalid names, too
-	// many fields, or names over an index's budget.
+	// many fields, names over an index's budget, or names Signalith sets
+	// itself (reservedFields).
 	FieldsDropped atomic.Int64
 }
 
@@ -157,10 +164,16 @@ const maxErrors = 10
 
 // Result reports one ingest call.
 type Result struct {
-	Received int                   `json:"received"`
-	Indexed  int                   `json:"indexed"`
-	Rejected int                   `json:"rejected,omitempty"`
-	Errors   []store.BulkItemError `json:"errors,omitempty"`
+	Received int `json:"received"`
+	Indexed  int `json:"indexed"`
+	Rejected int `json:"rejected,omitempty"`
+	// Duplicates were stored by an earlier send of the same request (a
+	// resend after an error); they count as indexed.
+	Duplicates int `json:"duplicates,omitempty"`
+	// Temporary counts rejected events OpenSearch may take if sent again
+	// later, such as while its disk is full or it is too busy.
+	Temporary int                   `json:"temporary,omitempty"`
+	Errors    []store.BulkItemError `json:"errors,omitempty"`
 	// Retimed and FieldsDropped are as in Stats, for this call.
 	Retimed       int `json:"retimed,omitempty"`
 	FieldsDropped int `json:"fields_dropped,omitempty"`
@@ -189,6 +202,8 @@ func (r *Result) noteHost(ev *Event) {
 func (r *Result) add(o *Result) {
 	r.Indexed += o.Indexed
 	r.Rejected += o.Rejected
+	r.Duplicates += o.Duplicates
+	r.Temporary += o.Temporary
 	r.Retimed += o.Retimed
 	r.FieldsDropped += o.FieldsDropped
 	for _, e := range o.Errors {
@@ -209,7 +224,7 @@ func (p *Pipeline) Ingest(ctx context.Context, tag string, records []map[string]
 		for _, r := range records[start:end] {
 			events = append(events, Normalize(tag, r, p.now()))
 		}
-		res, err := p.write(ctx, events)
+		res, err := p.write(ctx, events, nil)
 		if err != nil {
 			p.stats.Failed.Add(int64(len(records) - end))
 			return nil, err
@@ -226,7 +241,7 @@ func (p *Pipeline) Ingest(ctx context.Context, tag string, records []map[string]
 func (p *Pipeline) IngestEvents(ctx context.Context, events []Event) (*Result, error) {
 	p.stats.Received.Add(int64(len(events)))
 	p.stats.LastSeen.Store(p.now().Unix())
-	res, err := p.write(ctx, events)
+	res, err := p.write(ctx, events, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -240,8 +255,10 @@ func (p *Pipeline) IngestEvents(ctx context.Context, events []Event) (*Result, e
 // through the field budget. When OpenSearch turns an event away because of
 // one of its fields (a clash with how the index maps it, or a full
 // mapping), the event is written again with only its known fields, so junk
-// fields cannot cost a legitimate event.
-func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
+// fields cannot cost a legitimate event. ids, when given, are the events'
+// document IDs, so a resent event already stored counts as a duplicate
+// instead of being stored twice.
+func (p *Pipeline) write(ctx context.Context, events []Event, ids []string) (*Result, error) {
 	prefix := p.Prefix
 	if prefix == "" {
 		prefix = "signalith"
@@ -250,8 +267,13 @@ func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 	oldest := dayOf(recv.Add(-p.maxAge() - 24*time.Hour))
 	res := &Result{Received: len(events)}
 	docs := make([]store.IndexedDoc, 0, len(events))
+	var reserved []string
 	for i := range events {
 		ev := &events[i]
+		if ev.Fields == nil {
+			ev.Fields = map[string]any{}
+		}
+		nReserved := p.dropReserved(ev.Fields, &reserved)
 		if ev.Time.IsZero() {
 			ev.Time = recv
 		} else if !TimeUsable(ev.Time, recv, p.maxAge()) {
@@ -264,16 +286,17 @@ func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 		if ev.Model == "" {
 			ev.Model = "Other"
 		}
-		if ev.Fields == nil {
-			ev.Fields = map[string]any{}
-		}
 		day := dayOf(ev.Time)
 		index := datamodel.IndexName(prefix, ev.Model, day)
-		if n := p.names.limit(index, day, oldest, ev.Fields); n > 0 {
+		if n := nReserved + p.names.limit(index, day, oldest, ev.Fields); n > 0 {
 			ev.Fields["dropped_fields"] = int64(n)
 			res.FieldsDropped += n
 		}
-		docs = append(docs, store.IndexedDoc{Index: index, Doc: ev.Document()})
+		doc := store.IndexedDoc{Index: index, Doc: ev.Document()}
+		if i < len(ids) {
+			doc.ID = ids[i]
+		}
+		docs = append(docs, doc)
 	}
 	errs, err := p.Store.Bulk(ctx, docs)
 	if err != nil {
@@ -286,7 +309,7 @@ func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 		if err != nil {
 			again = make([]store.BulkItemError, len(retry))
 			for i, d := range retry {
-				again[i] = store.BulkItemError{Index: d.Index, Reason: err.Error(), Pos: i}
+				again[i] = store.BulkItemError{Index: d.Index, Reason: err.Error(), Pos: i, Status: http.StatusServiceUnavailable}
 			}
 		}
 		for i := range again {
@@ -296,8 +319,14 @@ func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 		errs = append(errs, again...)
 		res.FieldsDropped += removed
 	}
+	errs, res.Duplicates = withoutDuplicates(errs, docs)
 	res.Rejected = len(errs)
 	res.Indexed = len(docs) - len(errs)
+	for _, e := range errs {
+		if temporary(e) {
+			res.Temporary++
+		}
+	}
 	if len(errs) > maxErrors {
 		errs = errs[:maxErrors]
 	}
@@ -314,7 +343,47 @@ func (p *Pipeline) write(ctx context.Context, events []Event) (*Result, error) {
 		p.warn("fields", "some event fields were not indexed (invalid names, too many fields, or too many new field names for one day); their values stay in the raw event",
 			"fields", res.FieldsDropped)
 	}
+	if len(reserved) > 0 {
+		p.warn("reserved", "some events carried fields that only Signalith sets, such as the sample-data marker; the events were stored without those fields",
+			"fields", strings.Join(reserved, ", "))
+	}
 	return res, nil
+}
+
+// reservedFields are the fields Signalith sets on events itself, which a
+// sender must not choose: the event time and data model (from where the
+// event is filed), device_time and dropped_fields (what ingest did to the
+// event), and the sample-data marker. Live detections leave out every
+// event with the marker, and removing the sample data deletes them, so an
+// event that could carry one would hide from detections and then be
+// deleted. Ingest drops these from what senders send rather than refuse
+// the event: the event is real activity that must stay visible, and an
+// agent that is refused sends the same batch again forever.
+var reservedFields = []string{"@timestamp", "datamodel", "device_time", "dropped_fields", datamodel.SampleField}
+
+// dropReserved removes reservedFields from an event's fields, adds the
+// names it found to seen, and returns how many it removed. On the
+// sample-data loader's pipeline it then marks the event with the load's
+// ID; the marker the generator already put there is not counted.
+func (p *Pipeline) dropReserved(f map[string]any, seen *[]string) int {
+	n := 0
+	for _, k := range reservedFields {
+		if _, ok := f[k]; !ok {
+			continue
+		}
+		delete(f, k)
+		if k == datamodel.SampleField && p.SampleMark != "" {
+			continue
+		}
+		n++
+		if !slices.Contains(*seen, k) {
+			*seen = append(*seen, k)
+		}
+	}
+	if p.SampleMark != "" {
+		f[datamodel.SampleField] = p.SampleMark
+	}
+	return n
 }
 
 // retryable returns, for events OpenSearch rejected because of a field,
@@ -337,10 +406,39 @@ func retryable(errs []store.BulkItemError, events []Event, docs []store.IndexedD
 		prev, _ := ev.Fields["dropped_fields"].(int64)
 		ev.Fields["dropped_fields"] = prev + int64(n)
 		removed += n
-		retry = append(retry, store.IndexedDoc{Index: docs[e.Pos].Index, Doc: ev.Document()})
+		retry = append(retry, store.IndexedDoc{Index: docs[e.Pos].Index, ID: docs[e.Pos].ID, Doc: ev.Document()})
 		pos = append(pos, e.Pos)
 	}
 	return retry, pos, removed
+}
+
+// withoutDuplicates drops the errors saying a document with the same ID is
+// already stored (an earlier send of the same request got it in), and
+// reports how many there were.
+func withoutDuplicates(errs []store.BulkItemError, docs []store.IndexedDoc) ([]store.BulkItemError, int) {
+	out := errs[:0]
+	n := 0
+	for _, e := range errs {
+		if e.Type == "version_conflict_engine_exception" && e.Pos >= 0 && e.Pos < len(docs) && docs[e.Pos].ID != "" {
+			n++
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, n
+}
+
+// temporary reports whether OpenSearch turned an event away for a reason
+// that may pass, so the sender should send it again later: too busy
+// (429, es_rejected_execution_exception), a write block such as a full
+// disk (cluster_block_exception), or a failure on its side (5xx).
+func temporary(e store.BulkItemError) bool {
+	switch e.Type {
+	case "cluster_block_exception", "es_rejected_execution_exception", "circuit_breaking_exception",
+		"unavailable_shards_exception", "process_cluster_event_timeout_exception", "timeout_exception":
+		return true
+	}
+	return e.Status == http.StatusTooManyRequests || e.Status >= 500
 }
 
 // fieldRejection reports whether OpenSearch turned a document away because
@@ -432,13 +530,16 @@ func (p *Pipeline) Admit(ctx context.Context, wait time.Duration) (func(), error
 }
 
 // Document returns the OpenSearch document for an event, dropping empty
-// values so searches like user=* only match real values.
+// values so searches like user=* only match real values. The event time,
+// data model and device time always come from the event itself, never
+// from a field of the same name.
 func (e Event) Document() map[string]any {
-	doc := map[string]any{
-		"@timestamp": e.Time.UTC().Format(time.RFC3339Nano),
-		"datamodel":  e.Model,
-	}
+	doc := map[string]any{}
 	for k, v := range e.Fields {
+		switch k {
+		case "@timestamp", "datamodel", "device_time":
+			continue
+		}
 		if s, ok := v.(string); ok {
 			s = strings.TrimSpace(s)
 			if s == "" || s == "-" {
@@ -451,6 +552,8 @@ func (e Event) Document() map[string]any {
 		}
 		doc[k] = v
 	}
+	doc["@timestamp"] = e.Time.UTC().Format(time.RFC3339Nano)
+	doc["datamodel"] = e.Model
 	if !e.DeviceTime.IsZero() {
 		doc["device_time"] = e.DeviceTime.UTC().Format(time.RFC3339Nano)
 	}
@@ -504,8 +607,8 @@ func sourcetypeForTag(tag string) string {
 func parseGeneric(r map[string]any) Event {
 	fields := map[string]any{"sourcetype": "json"}
 	for k, v := range r {
-		if k == "date" {
-			continue
+		if k == "date" || k == "@timestamp" {
+			continue // the record's time; see recordTime
 		}
 		switch v.(type) {
 		case map[string]any, []any:
@@ -518,24 +621,35 @@ func parseGeneric(r map[string]any) Event {
 	return Event{Model: "Other", Fields: fields}
 }
 
-// recordTime reads Fluent Bit's "date" key (epoch seconds as a float, or an
-// ISO string), falling back to now.
+// recordTime reads Fluent Bit's "date" key, or "@timestamp" when a record
+// has no usable date (JSON sent by a script or another shipper), as epoch
+// seconds or an ISO string, falling back to now. Like every event time, it
+// is then kept within ingest's window (see TimeUsable).
 func recordTime(r map[string]any, now time.Time) time.Time {
-	switch d := r["date"].(type) {
-	case float64:
-		sec := int64(d)
-		return time.Unix(sec, int64((d-float64(sec))*1e9)).UTC()
-	case json.Number:
-		if f, err := d.Float64(); err == nil {
-			sec := int64(f)
-			return time.Unix(sec, int64((f-float64(sec))*1e9)).UTC()
-		}
-	case string:
-		if t, ok := parseTime(d); ok {
+	for _, k := range []string{"date", "@timestamp"} {
+		if t, ok := timeValue(r[k]); ok {
 			return t
 		}
 	}
 	return now.UTC()
+}
+
+// timeValue reads a record's time: epoch seconds as a number, or a string
+// in one of timeLayouts.
+func timeValue(v any) (time.Time, bool) {
+	switch d := v.(type) {
+	case float64:
+		sec := int64(d)
+		return time.Unix(sec, int64((d-float64(sec))*1e9)).UTC(), true
+	case json.Number:
+		if f, err := d.Float64(); err == nil {
+			sec := int64(f)
+			return time.Unix(sec, int64((f-float64(sec))*1e9)).UTC(), true
+		}
+	case string:
+		return parseTime(d)
+	}
+	return time.Time{}, false
 }
 
 var timeLayouts = []string{

@@ -1128,7 +1128,11 @@ dialog.modal::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 /* the sidebar health card links to the Health page */
 a.health { color: var(--text-2); text-decoration: none; transition: background var(--t-fast); }
 a.health:hover { background: var(--active); text-decoration: none; }
-.health__row b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a long title, such as "OpenSearch security not loaded", wraps rather than
+   being cut off; the dot stays by its first line */
+.health__row { align-items: flex-start; }
+.health__row .pulse { margin-top: calc((1lh - 8px) / 2); }
+.health__row b { min-width: 0; overflow-wrap: anywhere; }
 .user-btn .user-name { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menu__header b { overflow-wrap: anywhere; }
 .menu__note { max-width: 240px; padding: 4px 10px 8px; color: var(--text-3); font-size: var(--fs-sm); }
@@ -2387,9 +2391,9 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
    kind of device and a live "did it arrive" line. */
 #page-data .agent { display: grid; gap: var(--sp-4); max-width: 960px; }
 
-/* source: four selectable cards, the real radio drawn at the right. Top
-   aligned, so the titles line up when one description wraps. */
-#page-data .agent-os { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-3); min-width: 0; margin: 0; padding: 0; border: 0; }
+/* source: five selectable cards (three a row), the real radio drawn at the
+   right. Top aligned, so the titles line up when one description wraps. */
+#page-data .agent-os { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-3); min-width: 0; margin: 0; padding: 0; border: 0; }
 #page-data .agent-os__card { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; cursor: pointer; transition: box-shadow var(--t-fast); }
 #page-data .agent-os__card:hover { box-shadow: 0 0 0 1px var(--line-strong), var(--shadow-sm); }
 #page-data .agent-os__card:has(input:checked) { box-shadow: 0 0 0 1.5px var(--accent), var(--shadow-sm); }
@@ -2410,7 +2414,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 /* the setup card: options for the chosen OS sit in its header */
 #page-data .agent-setup .card__head { flex-wrap: wrap; row-gap: var(--sp-2); }
 #page-data .agent-setup .card__body { display: grid; gap: var(--sp-4); padding-top: 20px; }
-#page-data .agent-opt { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text-2); }
+#page-data .agent-opt { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; }
+#page-data .agent-setup .card__actions { flex-wrap: wrap; row-gap: var(--sp-2); }
 
 /* where agents send: one compact address field above the steps */
 #page-data .agent-addr { display: grid; gap: var(--sp-2); padding-bottom: var(--sp-4); box-shadow: inset 0 -1px 0 var(--line-subtle); }
@@ -2525,7 +2530,7 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data #syslog-main > .alert { margin-bottom: 20px; }
 #page-data #syslog-main > .alert p { margin-top: 2px; }
 
-@media (max-width: 1100px) {
+@media (max-width: 1180px) {
   #page-data .agent-os { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
@@ -2733,6 +2738,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-servers .sv-page { display: grid; gap: var(--sp-4); }
 #page-servers .sv-alerts { display: grid; gap: var(--sp-2); }
 #page-servers .sv-alerts .alert > div { min-width: 0; overflow-wrap: anywhere; }
+#page-servers .sv-alerts code { font-size: var(--fs-sm); color: var(--text); }
+:is(#page-servers .sv-alerts, #page-health td[data-col="details"]) a code { color: inherit; }
 #page-servers .sv-table :is(th, td):first-child { padding-left: 16px; }
 #page-servers .sv-table :is(th, td):last-child { padding-right: 16px; }
 #page-servers .sv-table td { height: 64px; }

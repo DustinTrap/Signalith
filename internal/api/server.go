@@ -100,6 +100,10 @@ type Server struct {
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
 	Sessions *auth.Sessions
 	Limiter  *auth.Limiter
+	// KnownBrowsers signs the cookie that marks a browser as one that
+	// signed in to an account before (see auth.Limiter); nil makes a key
+	// kept in memory only.
+	KnownBrowsers *auth.BrowserKey
 	// Users holds local users and directory users seen at sign-in, and
 	// Directory the LDAP or Active Directory sign-in settings. nil keeps
 	// them in memory only.
@@ -183,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	s.sessions()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/ingest", s.handleIngest)
+	mux.HandleFunc(otlpLogsRoute, s.handleOTLPLogs)
 
 	api := &router{s: s, mux: http.NewServeMux()}
 	api.viewer("GET /api/health", s.handleHealth)
@@ -216,7 +221,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeSettings(api)
 	s.routeCluster(api)
 	if s.UI != nil {
-		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(http.FileServerFS(s.UI)))
+		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(staticFiles(s.UI, true)))
 	}
 	s.routes = api.routes
 	s.routeLogin(mux)
@@ -260,7 +265,8 @@ func writeError(w http.ResponseWriter, status int, err error) {
 
 // writeSearchError answers a failed search: 400 for a query that cannot
 // run as written, 503 (retry shortly) when too many searches are running,
-// and 502 when OpenSearch failed.
+// 429 when the user's own searches hold their share of the slots, and 502
+// when OpenSearch failed.
 func writeSearchError(w http.ResponseWriter, err error) {
 	var qe *search.QueryError
 	switch {
@@ -269,6 +275,9 @@ func writeSearchError(w http.ResponseWriter, err error) {
 	case errors.Is(err, search.ErrBusy):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, search.ErrUserBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, err)
 	default:
 		writeError(w, http.StatusBadGateway, err)
 	}
@@ -346,7 +355,18 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(res.Errors) > 0 {
-		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "first", res.Errors[0].Reason)
+		s.Log.Warn("some events were rejected", "rejected", res.Rejected, "temporary", res.Temporary, "first", res.Errors[0].Reason)
+	}
+	if res.Temporary > 0 {
+		// OpenSearch may take these later (its disk is full, or it is too
+		// busy): 503 makes Fluent Bit send the batch again instead of
+		// dropping it. Events already stored count as duplicates then.
+		w.Header().Set("Retry-After", "30")
+		writeJSON(w, http.StatusServiceUnavailable, struct {
+			Error string `json:"error"`
+			*ingest.Result
+		}{"some events could not be stored right now; send them again later", res})
+		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
@@ -407,27 +427,36 @@ func (e *batchError) Unwrap() error { return e.err }
 // too large, 408 when it did not arrive in time, and 503 (retry shortly)
 // when too many batches are arriving at once.
 func (s *Server) batchReadFailed(w http.ResponseWriter, r *http.Request, err error) {
+	status, retry, msg := s.batchFailure(r, err)
+	if retry != "" {
+		w.Header().Set("Retry-After", retry)
+	}
+	writeError(w, status, msg)
+}
+
+// batchFailure is how to answer a batch that could not be read: the
+// status, the Retry-After header ("" for none) and the message.
+func (s *Server) batchFailure(r *http.Request, err error) (int, string, error) {
 	var tooBig *http.MaxBytesError
 	var bad *ingest.BodyError
 	var be *batchError
 	errors.As(err, &be)
 	switch {
 	case errors.As(err, &tooBig):
-		writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20))
+		return http.StatusRequestEntityTooLarge, "", fmt.Errorf("the request body is larger than %d MB; send smaller batches", ingest.MaxBodyBytes>>20)
 	case errors.As(err, &bad):
-		writeError(w, bad.Status, bad)
+		return bad.Status, "", bad
 	case errors.Is(err, ingest.ErrBusy), errors.Is(err, ingest.ErrSenderBusy):
-		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, errors.Unwrap(err))
+		return http.StatusServiceUnavailable, "5", errors.Unwrap(err)
 	case errors.Is(err, os.ErrDeadlineExceeded) && be != nil:
 		took := be.took.Round(time.Second)
 		s.warnSlowBatch("an agent batch took too long to arrive and was refused; the agent will send it again (logged at most once a minute)",
 			"client", r.RemoteAddr, "received_bytes", be.received, "took", took.String())
-		writeError(w, http.StatusRequestTimeout, fmt.Errorf("the batch took too long to arrive (%d KB in %s). A batch must arrive within %s, "+
+		return http.StatusRequestTimeout, "", fmt.Errorf("the batch took too long to arrive (%d KB in %s). A batch must arrive within %s, "+
 			"or within %s while at least %d KB arrives every %s. Send smaller batches (for example a lower Flush in Fluent Bit's [SERVICE] section) or check the network",
-			be.received>>10, took, ingestReadTimeout, ingestMaxReadTime, ingestProgressBytes>>10, ingestProgressWindow))
+			be.received>>10, took, ingestReadTimeout, ingestMaxReadTime, ingestProgressBytes>>10, ingestProgressWindow)
 	default:
-		writeError(w, http.StatusBadRequest, fmt.Errorf("the request body could not be read: %w", errors.Unwrap(err)))
+		return http.StatusBadRequest, "", fmt.Errorf("the request body could not be read: %w", errors.Unwrap(err))
 	}
 }
 
@@ -496,16 +525,20 @@ func bearerToken(r *http.Request) string {
 // server's, and answers it when it is refused.
 //
 // The Docker quick start used to give every agent the same example token,
-// change-this-ingest-token, over plain HTTP. In a container (where that
-// quick start runs), agents still sending it over plain HTTP are accepted
-// while server.tls.plaintext_ingest is allow, as other agents set up for
-// http:// are, and the Health page lists them to update. Over HTTPS it is
-// refused with 503, which Fluent Bit keeps and sends again. Any other
-// token is refused with 401. Refused agents are noted for the Health page.
+// change-this-ingest-token, over plain HTTP. On a Docker quick start
+// upgraded from such a version (see config.Config.OldToken), agents still
+// sending it over plain HTTP are accepted while agents on plain HTTP are,
+// as other agents set up for http:// are, and the Health page lists them
+// to update. There, and while Signalith has not yet found out whether the
+// quick start was upgraded, it is otherwise refused with 503, which
+// Fluent Bit keeps and sends again. Everywhere else, a quick start
+// installed new included, it is a wrong token like any other: anyone can
+// look it up. A wrong token is refused with 401. Refused agents are noted
+// for the Health page.
 func (s *Server) retiredTokenAccepted(w http.ResponseWriter, r *http.Request) bool {
 	from := clientaddr.Parse(r.RemoteAddr)
-	if config.IsPublicIngestToken(bearerToken(r)) && s.inContainer() {
-		if plaintextIngest(r) {
+	if s.oldTokenAgent(r) {
+		if s.conf().OldToken() == config.OldTokenAccepted && plaintextIngest(r) {
 			return true
 		}
 		s.Pipeline.NoteRefused(from, ingest.RefusedOldToken)
@@ -517,6 +550,61 @@ func (s *Server) retiredTokenAccepted(w http.ResponseWriter, r *http.Request) bo
 	s.Pipeline.NoteRefused(from, ingest.RefusedToken)
 	writeError(w, http.StatusUnauthorized, errors.New("missing or invalid ingest token"))
 	return false
+}
+
+// oldTokenAgent reports whether r carries the example ingest token on a
+// Docker quick start that may still have agents sending it: one upgraded
+// from a version that gave it to them, or one not yet known to be new.
+// Such a batch is answered as one from an agent of this server's.
+func (s *Server) oldTokenAgent(r *http.Request) bool {
+	if !config.IsPublicIngestToken(bearerToken(r)) || !s.inContainer() {
+		return false
+	}
+	return s.conf().OldToken() != config.OldTokenRefused
+}
+
+// UseDockerUpgrade puts into use the decision about the example ingest
+// token that Signalith made after the server started (see
+// config.Config.OldToken): an upgraded Docker quick start then accepts
+// its older agents at once.
+func (s *Server) UseDockerUpgrade(u *config.DockerUpgrade) {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	s.live.Store(s.conf().WithDockerUpgrade(u))
+	s.endOldTokenLocked()
+}
+
+// EndOldTokenIfRefused ends the example ingest token for good when the
+// server starts with agents on plain HTTP refused (see endOldTokenLocked).
+func (s *Server) EndOldTokenIfRefused() {
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	s.endOldTokenLocked()
+}
+
+// endOldTokenLocked ends the example ingest token for good on a Docker
+// quick start upgraded from a version whose agents send it, once agents
+// on plain HTTP are refused: it notes when in the state folder, and the
+// token is refused from then on, even if they are accepted again. The
+// caller holds settingsMu.
+func (s *Server) endOldTokenLocked() {
+	c := s.conf()
+	if c.OldToken() != config.OldTokenAccepted || c.Server.PlaintextIngest() {
+		return
+	}
+	u := *c.DockerUpgrade()
+	u.Ended = time.Now().UTC()
+	dir := c.StateDir()
+	if err := config.WriteDockerUpgrade(dir, &u); err != nil {
+		if s.Log != nil {
+			s.Log.Error("could not note in the state folder that the example ingest token change-this-ingest-token is refused for good; "+
+				"it is refused until Signalith restarts, and after that while agents on plain HTTP are refused", "file", config.DockerUpgradeFileIn(dir), "err", err)
+		}
+	} else if s.Log != nil {
+		s.Log.Info("agents on plain HTTP are refused, so the example ingest token change-this-ingest-token, which the older Docker quick start gave every agent, is refused for good",
+			"audit", true, "file", config.DockerUpgradeFileIn(dir))
+	}
+	s.live.Store(c.WithDockerUpgrade(&u))
 }
 
 // ---- search ----
@@ -760,14 +848,23 @@ func (s *Server) handleAgentConfig(w http.ResponseWriter, r *http.Request) {
 		Token:       token,
 		LinuxSource: v.Get("source"),
 		Sysmon:      v.Get("sysmon") == "true",
+		CollectorOS: v.Get("collector"),
 	}
 	if certs != nil {
 		// While a new certificate authority is prepared, agents get both,
 		// so they keep sending after the switch.
 		opts.CA = string(certs.AgentCAPEM())
 		opts.CAUnknown = opts.CA == "" && !certs.PublicCA()
+		opts.OwnCA = certs.LocalCA()
+		if leaf := certs.Leaf(); leaf != nil {
+			opts.CertNames = leaf.DNSNames
+		}
 	}
 	a, err := agents.Generate(opts)
+	if errors.Is(err, agents.ErrNoNameToCheck) {
+		fieldError(err)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -835,8 +932,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats()}
 	status, err := s.Backend.Health(ctx)
+	var problem, advice string
 	if err != nil {
-		status = "unreachable"
+		status, problem, advice = osTrouble(err)
 	}
 	// No server running detections, a full disk: everyone sees those, on
 	// every page.
@@ -849,7 +947,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// paths, addresses, the OpenSearch URL and its errors) and the setup
 	// advice is for admins, who are the ones able to change it.
 	if p := principalOf(r); p == nil || !p.Role.AtLeast(users.Admin) {
-		out["opensearch"] = map[string]any{"status": status}
+		brief := map[string]any{"status": status}
+		if problem != "" {
+			brief["problem"] = problem
+		}
+		out["opensearch"] = brief
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
@@ -861,12 +963,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if sec := s.securityHealth(); sec != nil {
 		out["security"] = sec
 	}
-	osURL := redact.URL(s.conf().OpenSearch.URL)
+	osOut := map[string]any{"status": status, "url": redact.URL(s.conf().OpenSearch.URL)}
 	if err != nil {
-		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
-	} else {
-		out["opensearch"] = map[string]any{"status": status, "url": osURL}
+		osOut["error"] = err.Error()
 	}
+	if problem != "" {
+		osOut["problem"] = problem
+	}
+	if advice != "" {
+		osOut["advice"] = advice
+	}
+	out["opensearch"] = osOut
 	warnings := s.conf().Warnings()
 	if len(s.conf().Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")
@@ -875,7 +982,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	docker := s.inContainer()
 	if senders := s.Pipeline.PlaintextSenders(since); len(senders) > 0 {
 		out["plaintext_senders"] = senders
-		warnings = append(warnings, plaintextWarning(senders, docker))
+		warnings = append(warnings, plaintextWarning(senders, docker, docker && s.conf().OldToken() == config.OldTokenAccepted))
 	}
 	if refused := s.Pipeline.RefusedSenders(since); len(refused) > 0 {
 		out["refused_senders"] = refused
@@ -892,10 +999,37 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if p := s.dir().Problem(); p != "" {
 		warnings = append(warnings, p)
 	}
+	if w := s.behindWarning(time.Now()); w != "" {
+		warnings = append(warnings, w)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// behindWarning names the detections falling behind their schedule
+// (see detect.Behind), on the server that runs them; "" when none are.
+func (s *Server) behindWarning(now time.Time) string {
+	if s.Scheduler == nil || s.Detections == nil || !s.conf().Detections.Scheduler || (s.Cluster != nil && !s.Cluster.RunsJobs()) {
+		return ""
+	}
+	states := s.Scheduler.Status()
+	var late []string
+	for _, d := range s.Detections.List() {
+		if detect.Behind(d, states[d.ID], now) {
+			late = append(late, d.ID)
+		}
+	}
+	if len(late) == 0 {
+		return ""
+	}
+	if len(late) > 10 {
+		late = append(late[:10], fmt.Sprintf("%d more", len(late)-10))
+	}
+	return "Detections are running behind schedule. " + joinAnd(late) + " waited more than their schedule interval for a free worker, " +
+		"because slower detections held every worker. Each run searches on from where the last one stopped, up to a limit, so events are not skipped, " +
+		"but findings arrive late. On the Detections page, narrow or reschedule the slow or timed-out detections."
 }
 
 // tlsInfo says how Signalith serves HTTPS, the names its certificate
@@ -931,8 +1065,10 @@ const plaintextWindow = 24 * time.Hour
 
 // plaintextWarning names the agents still sending over plain HTTP and
 // says how to move them to HTTPS. docker adds that Docker's port
-// forwarding may hide the agents' own addresses.
-func plaintextWarning(senders []ingest.Sender, docker bool) string {
+// forwarding may hide the agents' own addresses, and oldToken that
+// refusing them also ends the example token on an upgraded Docker quick
+// start.
+func plaintextWarning(senders []ingest.Sender, docker, oldToken bool) string {
 	n, list := agentList(senders)
 	where := "signalith.yaml"
 	if docker {
@@ -947,6 +1083,9 @@ func plaintextWarning(senders []ingest.Sender, docker bool) string {
 		msg = fmt.Sprintf("%d agents still send events over plain HTTP, which anyone on the network can read: %s. "+
 			"On the Add data page, get a new configuration, which uses HTTPS, and put it on each of them. "+
 			"Once all are updated, refuse agents on plain HTTP on the Settings page, under HTTPS, or set server.tls.plaintext_ingest: deny in %s.", n, list, where)
+	}
+	if oldToken {
+		msg += " That also ends for good the example token change-this-ingest-token, which the older Docker quick start gave every agent and which anyone can look up."
 	}
 	return msg + dockerNote(senders, docker)
 }
