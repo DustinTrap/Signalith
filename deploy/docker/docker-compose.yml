@@ -58,7 +58,7 @@ services:
     restart: "no"
 
   opensearch:
-    image: opensearchproject/opensearch:2.17.1
+    image: opensearchproject/opensearch:2.17.1@sha256:1193b7c29c5d63028523728243cc4da047ac49f697a8f8105e5aeee2f89bcc4c
     restart: unless-stopped
     depends_on:
       setup: { condition: service_completed_successfully }

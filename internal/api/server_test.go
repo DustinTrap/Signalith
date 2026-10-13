@@ -283,7 +283,7 @@ func TestAgentConfig(t *testing.T) {
 }
 
 func TestAgentConfigServerAddress(t *testing.T) {
-	ts, _ := newTestServer(t)
+	ts, _ := newTestServerWith(t, func(s *Server) { s.TLS = newCertManager(t) })
 	// The default public_url is https://127.0.0.1:8080, which only this
 	// machine can reach; the response says so.
 	_, body := do(t, ts, "GET", "/api/agents/config?os=linux", "", true)

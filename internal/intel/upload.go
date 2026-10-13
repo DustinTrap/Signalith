@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"errors"
@@ -107,13 +108,22 @@ func (in Input) Build(now time.Time) (Indicator, error) {
 		Weight: weight, Expires: exp, Tags: tags}, nil
 }
 
+// maxUploadIndicators caps one upload like maxIndicators caps a feed. An
+// upload is all or nothing, so a larger one is refused, not cut short.
+// Tests lower it.
+var maxUploadIndicators = maxIndicators
+
 // ParseUpload reads uploaded indicators: CSV with a header row naming
 // UploadColumns, or a plain list with one value per line. Lines starting
 // with # are comments. Every bad line is reported and nothing is
-// returned unless the whole file is valid.
-func ParseUpload(data []byte, now time.Time) ([]Indicator, error) {
-	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	r := csv.NewReader(bytes.NewReader(data))
+// returned unless the whole file is valid. An error reading src is
+// returned as it is, so a caller can tell a body that was too large.
+func ParseUpload(src io.Reader, now time.Time) ([]Indicator, error) {
+	br := bufio.NewReader(src)
+	if bom, _ := br.Peek(3); bytes.Equal(bom, []byte("\xef\xbb\xbf")) {
+		_, _ = br.Discard(3)
+	}
+	r := csv.NewReader(br)
 	r.FieldsPerRecord = -1
 	r.TrimLeadingSpace = true
 	r.Comment = '#'
@@ -122,10 +132,15 @@ func ParseUpload(data []byte, now time.Time) ([]Indicator, error) {
 	var out []Indicator
 	var bad []LineError
 	seen := map[string]int{}
+	rows := 0
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
 			break
+		}
+		var ce *csv.ParseError
+		if err != nil && !errors.As(err, &ce) {
+			return nil, err
 		}
 		line, _ := r.FieldPos(0)
 		if err != nil {
@@ -178,6 +193,9 @@ func ParseUpload(data []byte, now time.Time) ([]Indicator, error) {
 		}
 		if empty {
 			continue
+		}
+		if rows++; rows > maxUploadIndicators {
+			return nil, fmt.Errorf("the file has more than %d indicators, the most one upload takes; split it into smaller files", maxUploadIndicators)
 		}
 		ind, err := in.Build(now)
 		if err != nil {

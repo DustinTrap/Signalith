@@ -124,3 +124,28 @@ func TestISODates(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+// TestTextEscapesPeerNames: another server's name comes from its own
+// heartbeat, so escape sequences in it are printed escaped, not sent to
+// the terminal, and a long name is cut.
+func TestTextEscapesPeerNames(t *testing.T) {
+	f := goodFacts(t, "")
+	r := Evaluate(f)
+	at := r.CheckedAt
+	r.Others = []OtherServer{
+		{Name: "evil\x1b[2J\x1b]8;;https://phish.example/\x07click\x1b]8;;\x07\u202egnp.exe\r\u009b31m", CheckedAt: &at},
+		{Name: strings.Repeat("n", 500), CheckedAt: &at},
+	}
+	text := Text(r)
+	for _, bad := range []string{"\x1b", "\x07", "\u202e", "\r", "\u009b"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("report contains %q", bad)
+		}
+	}
+	if !strings.Contains(text, `evil\x1b[2J\x1b]8;;https://phish.example/\x07click`) || !strings.Contains(text, `\u202egnp.exe \x9b31m`) {
+		t.Errorf("peer name not shown escaped:\n%s", text)
+	}
+	if strings.Contains(text, strings.Repeat("n", 81)) || !strings.Contains(text, strings.Repeat("n", 77)+"...") {
+		t.Errorf("long peer name not cut:\n%s", text)
+	}
+}

@@ -130,9 +130,21 @@ const toSignIn = (change) => {
   signingIn = true;
   location.assign('login?' + (change ? 'change=1&' : '') + 'next=' + encodeURIComponent(location.pathname + location.search + location.hash));
 };
+// A request made with no one using the page in the last few seconds,
+// such as a refresh on a timer, is marked as background so the server does
+// not count it as activity: an unattended tab still signs out after the
+// idle timeout (Settings > Sign out after).
+let lastInput = Date.now();
+for (const ev of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'input', 'scroll']) {
+  addEventListener(ev, () => { lastInput = Date.now(); }, { capture: true, passive: true });
+}
+const backgroundAfter = 10000;
 async function api(path, body, method) {
-  const opts = body === undefined ? { method: method || 'GET' } : {
-    method: method || 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (document.hidden || Date.now() - lastInput > backgroundAfter) headers['X-Signalith-Background'] = '1';
+  const opts = body === undefined ? { method: method || 'GET', headers } : {
+    method: method || 'POST', headers, body: JSON.stringify(body),
   };
   const resp = await fetch(path.replace(/^\//, ''), opts);
   const data = await resp.json().catch(() => ({}));
@@ -2086,10 +2098,10 @@ function renderGuide() {
 }
 
 // ---------- add data ----------
-// The server writes the Fluent Bit setup for the chosen OS: plain-sentence
-// steps and the config file. A step written as "Do this: command" shows the
-// command in a copyable well, and the step that saves the config file
-// carries the file itself.
+// The server writes the Fluent Bit (or OpenTelemetry Collector) setup for
+// the chosen OS: plain-sentence steps and the config file. A step written
+// as "Do this: command" shows the command in a copyable well, and the step
+// that saves the config file carries the file itself.
 //
 // "Agents send to" is the address written into the config. It starts as
 // the server's public_url; when that is localhost but this browser reached
@@ -2114,6 +2126,7 @@ try {
 } catch (_) { /* storage may be blocked */ }
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', () => loadDataSource()));
 $('linux-source').addEventListener('change', loadAgentConfig);
+$('otel-host').addEventListener('change', loadAgentConfig);
 $('sysmon').addEventListener('change', loadAgentConfig);
 agentServerEl.addEventListener('input', () => {
   clearTimeout(agentServerTimer);
@@ -2158,14 +2171,21 @@ function loadAgentConfig() {
 
 async function agentSetupLoad() {
   const os = document.querySelector('input[name=os]:checked').value;
-  $('linux-opts').classList.toggle('hidden', os !== 'linux');
-  $('windows-opts').classList.toggle('hidden', os !== 'windows');
-  $('agent-title').textContent = 'Set up Fluent Bit on ' + (os === 'windows' ? 'Windows' : 'Linux');
+  // An OpenTelemetry Collector on Linux or Windows reads the same sources
+  // as Fluent Bit there, so it shares their options.
+  const otel = os === 'otel';
+  const host = otel ? $('otel-host').value : os;
+  $('otel-opts').classList.toggle('hidden', !otel);
+  $('linux-opts').classList.toggle('hidden', host !== 'linux');
+  $('windows-opts').classList.toggle('hidden', host !== 'windows');
+  $('agent-title').textContent = otel ? 'Set up the OpenTelemetry Collector on ' + (host === 'windows' ? 'Windows' : 'Linux')
+    : 'Set up Fluent Bit on ' + (os === 'windows' ? 'Windows' : 'Linux');
   const steps = $('agent-steps');
   const seq = ++agentSetupSeq;
   steps.setAttribute('aria-busy', 'true');
   if (!agentSetupConfig) agentSetupSkeleton();
   const q = new URLSearchParams({ os, source: $('linux-source').value, sysmon: $('sysmon').checked });
+  if (otel) q.set('collector', host);
   const server = agentServerValue();
   agentServerSent = server;
   if (server) q.set('server', server);
@@ -2252,7 +2272,7 @@ function agentSetupRender(a) {
   pathEl.textContent = path.split(/[\\/]/).pop();
   pathEl.title = path;
   agentSetupEditor(agentSetupConfig);
-  const names = [path, a.ca_path, 'signalith-ca.pem', 'fluent-bit.conf', 'server.tls_cert'];
+  const names = [path, a.ca_path, 'signalith-ca.pem', 'fluent-bit.conf', 'config.yaml', 'server.tls_cert'];
   const items = (a.steps || []).map((s, i) => agentSetupStep(s, i + 1, names));
   $('agent-steps').replaceChildren(...items);
   const stepBody = (n) => (n > 0 && items[n - 1] ? items[n - 1].querySelector('.agent-step__body') : null);
@@ -2342,7 +2362,8 @@ function agentSetupEditor(config) {
   lines.forEach((line, i) => {
     let src;
     if (/^\s*#/.test(line)) src = [el('span', { class: 'agent-c' }, line)];
-    else if (/^\s*\[[^\]]+\]\s*$/.test(line)) src = [el('span', { class: 'agent-s' }, line)];
+    // a Fluent Bit [SECTION], or a top-level key of the Collector's YAML
+    else if (/^\s*\[[^\]]+\]\s*$/.test(line) || /^[a-z_]+:\s*$/.test(line)) src = [el('span', { class: 'agent-s' }, line)];
     else {
       const m = line.match(/^(\s*)(\S+)(\s+)(.*)$/);
       src = m ? [m[1], el('span', { class: 'agent-k' }, m[2]), m[3], m[4]] : [line];

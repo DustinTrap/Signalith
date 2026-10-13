@@ -445,10 +445,12 @@ func (c *Client) Health(ctx context.Context) (string, error) {
 type BulkItemError struct {
 	Index  string
 	Reason string
-	// Pos is the document's position in the request, from 0, and Type the
-	// OpenSearch error type, such as mapper_parsing_exception.
-	Pos  int    `json:"-"`
-	Type string `json:"-"`
+	// Pos is the document's position in the request, from 0, Type the
+	// OpenSearch error type, such as mapper_parsing_exception, and Status
+	// the item's HTTP status, such as 429 (0 when unknown).
+	Pos    int    `json:"-"`
+	Type   string `json:"-"`
+	Status int    `json:"-"`
 }
 
 // Bulk indexes documents. docs maps each document to its target index.
@@ -459,7 +461,11 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	for _, d := range docs {
-		if err := enc.Encode(map[string]any{"create": map[string]any{"_index": d.Index}}); err != nil {
+		meta := map[string]any{"_index": d.Index}
+		if d.ID != "" {
+			meta["_id"] = d.ID
+		}
+		if err := enc.Encode(map[string]any{"create": meta}); err != nil {
 			return nil, err
 		}
 		if err := enc.Encode(d.Doc); err != nil {
@@ -485,7 +491,7 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 		for i, item := range out.Items {
 			for _, r := range item {
 				if r.Error != nil {
-					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason, Pos: i, Type: r.Error.Type})
+					errs = append(errs, BulkItemError{Index: r.Index, Reason: r.Error.Type + ": " + r.Error.Reason, Pos: i, Type: r.Error.Type, Status: r.Status})
 				}
 			}
 		}
@@ -496,7 +502,10 @@ func (c *Client) Bulk(ctx context.Context, docs []IndexedDoc) ([]BulkItemError, 
 // IndexedDoc is one document and the index it goes to.
 type IndexedDoc struct {
 	Index string
-	Doc   map[string]any
+	// ID, when set, is the document's _id: writing the same one again is
+	// refused as a conflict (409) instead of storing it twice.
+	ID  string
+	Doc map[string]any
 }
 
 // PutIndexTemplate creates or replaces a composable index template.

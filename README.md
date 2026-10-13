@@ -11,6 +11,8 @@ events, a security posture dashboard plus dashboards you build from queries, and
 investigation cases that collect findings, notes, searches and evidence in one place.
 Response actions and playbooks come next.
 
+Website: **https://signalith.io** (its source is in [`site/`](site/)).
+
 The server is a single Go binary with the web UI embedded. It runs as a Windows
 service or a systemd unit.
 
@@ -204,7 +206,9 @@ Open **Add data** in the UI, pick Linux or Windows, and follow the steps: instal
 Fluent Bit, save Signalith's CA certificate and the generated configuration, restart it.
 The configuration already contains the server address and ingest token, and sends over
 HTTPS, checking the server's certificate with that CA. For firewalls, switches and other network
-devices, pick **Syslog** (see [Syslog](#syslog)).
+devices, pick **Syslog** (see [Syslog](#syslog)). Hosts that run an OpenTelemetry Collector, and
+apps with an OpenTelemetry SDK, can send logs over OTLP instead: pick **OpenTelemetry** (see
+[docs/opentelemetry.md](docs/opentelemetry.md)).
 
 Agents on other machines must send to an address they can reach, such as
 `https://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
@@ -222,11 +226,12 @@ Supported sources in Phase 1:
 | Linux sshd, sudo, su (auth.log, secure, or journald) | Authentication |
 | Linux useradd, userdel, usermod, gpasswd | Change |
 | Syslog from any device (see below), including CEF | Authentication, Change, Network_Traffic or Other |
+| OpenTelemetry Collector or SDK logs over OTLP/HTTP ([docs/opentelemetry.md](docs/opentelemetry.md)) | the same models for Windows, Linux and syslog records; Other for app logs |
 | Anything else | Other (searchable by text and fields) |
 
 #### Ingest limits
 
-Agents send batches to `/api/ingest`. One request can be up to 16 MB, with up to 200,000
+Agents send batches to `/api/ingest`, and OpenTelemetry Collectors to `/api/otlp/v1/logs`. One request can be up to 16 MB, with up to 200,000
 records of at most 1 MB each, nested at most 32 levels deep; Fluent Bit's requests are
 far smaller. A request over a limit is refused with 413 (400 for broken JSON) and a
 message saying what to change, and nothing from it is stored. When many agents send at
@@ -915,10 +920,10 @@ syslog devices ─UDP/TCP/TLS▶ query compiler,
 | `cmd/signalith` | CLI and server entry point, Windows service |
 | `internal/query` | Query language lexer, parser, canonical printer, builder model |
 | `internal/search` | Compiles queries to OpenSearch DSL and runs remaining commands in memory |
-| `internal/ingest` | Fluent Bit record parsing for Windows and Linux, index template |
+| `internal/ingest` | Fluent Bit and OTLP record parsing for Windows and Linux, index template |
 | `internal/syslog` | Syslog receiver (UDP, TCP, TLS), RFC 5424, RFC 3164 and CEF parsing |
 | `internal/datamodel` | Authentication, Endpoint, Network_Traffic, Change, Risk, Other |
-| `internal/agents` | Fluent Bit configuration generator |
+| `internal/agents` | Fluent Bit and OpenTelemetry Collector configuration generator |
 | `internal/detect` | Detection format, built-in content, scheduler, Sigma converter, ATT&CK catalog |
 | `internal/findings` | Findings model and its OpenSearch store |
 | `internal/assets` | Asset and identity lists: CSV parsing, matching, priority |
