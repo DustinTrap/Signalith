@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/intel"
@@ -485,6 +486,11 @@ func writeAll(list []*rewrite, key, undo func() error) error {
 		p, err := prepare(r.path, r.new)
 		if err != nil {
 			discard(todo)
+			if errors.Is(err, syscall.EROFS) {
+				// Such as signalith.yaml in a container, mounted on its own.
+				return fmt.Errorf("could not write %s: %w. Nothing was changed. Its folder is read-only here; "+
+					"in Docker, run the command as docs/encryption.md shows under \"Docker\"", r.path, err)
+			}
 			return fmt.Errorf("could not write %s: %w. Nothing was changed", r.path, err)
 		}
 		r.pending = p
@@ -738,13 +744,34 @@ func secretsSet(c *config.Config, field string, newKey bool, in *os.File, out io
 	} else {
 		fmt.Fprintln(out, "Restart the server to use it.")
 	}
-	if env := secretEnv[field]; env != "" && os.Getenv(env) != "" {
-		fmt.Fprintf(out, "Note: %s is set in this environment; wherever it is set for the server, it is used instead of the file.\n", env)
+	if note := envOverrides(c.Path(), field); note != "" {
+		fmt.Fprintln(out, note)
 	}
 	for _, n := range notes {
 		fmt.Fprintln(out, n)
 	}
 	return nil
+}
+
+// envOverrides says, when an environment variable that replaces field is
+// set here or given to the signalith service, that the value "set" just
+// saved in signalith.yaml is not used where it is set; "" when none is.
+// An ingest token from the environment is accepted besides the file's, so
+// it replaces nothing.
+func envOverrides(path, field string) string {
+	env := secretEnv[field]
+	if env == "" || field == "ingest.tokens" {
+		return ""
+	}
+	for _, name := range []string{env, env + "_FILE"} {
+		if os.Getenv(name) != "" {
+			return fmt.Sprintf("Note: %s is set in this environment; wherever it is set for the server, it is used instead of signalith.yaml's %s.", name, field)
+		}
+	}
+	if name := serviceGives(path, env, env+"_FILE"); name != "" {
+		return fmt.Sprintf("Note: the signalith service is given %s, which it uses instead of signalith.yaml's %s. Remove it there to use the value just saved.", name, field)
+	}
+	return ""
 }
 
 // pageOverrides says, when the Settings page has its own value for field,

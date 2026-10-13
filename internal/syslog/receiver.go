@@ -65,7 +65,10 @@ type Config struct {
 	// UDP, TCP and TLS are host:port listen addresses; empty turns that
 	// listener off.
 	UDP, TCP, TLS string
-	// CertFile and KeyFile are the TLS certificate and key.
+	// GetCertificate gives the TLS certificate (the web UI's, which is
+	// renewed and reloaded while the receiver runs). When nil, CertFile
+	// and KeyFile are loaded once at Start.
+	GetCertificate    func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	CertFile, KeyFile string
 	// Allow lists the senders that may send; empty allows any sender.
 	Allow []netip.Prefix
@@ -274,7 +277,10 @@ func New(cfg Config, sink Sink, log *slog.Logger) *Receiver {
 // an error that says what to do when a port cannot be opened. The receiver
 // stops when ctx ends; Wait then returns once the queue is written out.
 func (r *Receiver) Start(ctx context.Context) error {
-	if r.cfg.TLS != "" {
+	switch {
+	case r.cfg.TLS != "" && r.cfg.GetCertificate != nil:
+		r.tlsConf = &tls.Config{GetCertificate: r.cfg.GetCertificate, MinVersion: tls.VersionTLS12}
+	case r.cfg.TLS != "":
 		cert, err := tls.LoadX509KeyPair(r.cfg.CertFile, r.cfg.KeyFile)
 		if err != nil {
 			return fmt.Errorf("syslog.tls: cannot load the certificate in server.tls_cert and server.tls_key: %w", err)

@@ -250,9 +250,10 @@ func TestValidateReportsUnreadablePageSecret(t *testing.T) {
 // as the secrets commands do, and so find the file the service keeps;
 // a unit for another config file is not used, and only pointed to.
 func TestSettingsCommandsReadTheUnit(t *testing.T) {
-	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
-	t.Setenv("SIGNALITH_LOOKUPS_DIR", "")
-	t.Setenv("SIGNALITH_STATE_DIR", "")
+	for _, k := range []string{"SIGNALITH_SETTINGS_FILE", "SIGNALITH_LOOKUPS_DIR", "SIGNALITH_STATE_DIR",
+		"SIGNALITH_OPENSEARCH_PASSWORD_FILE", "SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_INGEST_TOKEN_FILE"} {
+		t.Setenv(k, "")
+	}
 	fos := newFakeOpenSearch(t)
 	dir := t.TempDir()
 	h, _ := config.HashPassword("s3cret-pass")
@@ -270,7 +271,11 @@ func TestSettingsCommandsReadTheUnit(t *testing.T) {
 	saved := readServiceSettings
 	readServiceSettings = func() *serviceSettings {
 		return &serviceSettings{where: "the test unit", args: []string{"serve", "-c", served},
-			env: map[string]string{"SIGNALITH_LOOKUPS_DIR": svcLookups, "SIGNALITH_OPENSEARCH_PASSWORD": "never-taken"}}
+			env: map[string]string{"SIGNALITH_LOOKUPS_DIR": svcLookups, "SIGNALITH_OPENSEARCH_PASSWORD": "never-taken",
+				// Secrets in files the service reads, such as systemd
+				// credentials that exist only while it runs, are not taken.
+				"SIGNALITH_OPENSEARCH_PASSWORD_FILE": "/nonexistent/os-pass", "SIGNALITH_ADMIN_PASSWORD_FILE": "/nonexistent/admin",
+				"SIGNALITH_INGEST_TOKEN_FILE": "/nonexistent/token"}}
 	}
 	t.Cleanup(func() { readServiceSettings = saved })
 
@@ -281,8 +286,27 @@ func TestSettingsCommandsReadTheUnit(t *testing.T) {
 	}
 	os.Setenv("SIGNALITH_LOOKUPS_DIR", "")
 	out, err = capture(t, func() error { return cmdValidate([]string{"-c", path}) })
-	if err != nil || !strings.Contains(out, "Changed on the Settings page ("+svcFile+"): search.max_events.") || strings.Contains(out, "Note: The Signalith service keeps") {
+	if err != nil || !strings.Contains(out, "Changed on the Settings page ("+svcFile+"): search.max_events.") || strings.Contains(out, "Note: The Signalith service keeps") ||
+		strings.Contains(out, "PASSWORD_FILE") || strings.Contains(out, "TOKEN_FILE") {
 		t.Errorf("validate: %v\n%s", err, out)
+	}
+	os.Setenv("SIGNALITH_LOOKUPS_DIR", "")
+	var status strings.Builder
+	if err := runSecrets([]string{"status", "-c", path}, os.Stdin, &status); err != nil || strings.Contains(status.String(), "PASSWORD_FILE") || strings.Contains(status.String(), "TOKEN_FILE") {
+		t.Errorf("secrets status: %v\n%s", err, status.String())
+	}
+	os.Setenv("SIGNALITH_LOOKUPS_DIR", "")
+	out, err = capture(t, func() error { return cmdSettings([]string{"reset", "-c", path, "search.max_events"}) })
+	if err != nil || !strings.Contains(out, "Reset search.max_events in "+svcFile) {
+		t.Errorf("reset: %v\n%s", err, out)
+	}
+	if err := config.WritePageSettings(svcFile, page); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"SIGNALITH_OPENSEARCH_PASSWORD_FILE", "SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_INGEST_TOKEN_FILE"} {
+		if v := os.Getenv(k); v != "" {
+			t.Errorf("%s=%s was taken from the service", k, v)
+		}
 	}
 
 	// The service runs another config file: its folders are not used, and

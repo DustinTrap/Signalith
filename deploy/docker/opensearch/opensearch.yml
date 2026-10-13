@@ -1,0 +1,42 @@
+# OpenSearch settings for Signalith's Docker quick start. docker-compose.yml
+# puts this file in place of the image's own opensearch.yml, and the files
+# in security/ in place of the image's demo security settings, whose
+# passwords and certificates anyone can look up.
+
+# The image's own settings, which this file replaces.
+cluster.name: docker-cluster
+network.host: 0.0.0.0
+
+# Do not depend on the host's vm.max_map_count, which Docker Desktop
+# resets on every restart.
+node.store.allow_mmap: false
+
+# HTTPS on the REST API (9200) and TLS between nodes (9300), with
+# certificates from Signalith's own OpenSearch CA. The setup service makes
+# them in the opensearch-certs volume, which appears as certs/ here.
+plugins.security.ssl.transport.pemcert_filepath: certs/node.pem
+plugins.security.ssl.transport.pemkey_filepath: certs/node-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: certs/root-ca.pem
+# Nodes are recognized by their certificate's name (nodes_dn below), not
+# by their address, which changes when the container is recreated.
+plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.transport.enabled_protocols: ["TLSv1.3", "TLSv1.2"]
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: certs/node.pem
+plugins.security.ssl.http.pemkey_filepath: certs/node-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: certs/root-ca.pem
+# Clients sign in with a certificate from that CA: Signalith's
+# (CN=signalith) or the admin's. Anything else gets 401.
+plugins.security.ssl.http.clientauth_mode: OPTIONAL
+plugins.security.ssl.http.enabled_protocols: ["TLSv1.3", "TLSv1.2"]
+# The admin certificate may change the security settings (securityadmin.sh).
+plugins.security.authcz.admin_dn: ["CN=signalith-admin,O=Signalith"]
+plugins.security.nodes_dn: ["CN=opensearch,O=Signalith"]
+# On first start, load the security settings from security/ (config.yml,
+# roles.yml and the others). Indices that are already there stay as they
+# are, so an existing install keeps its events.
+plugins.security.allow_default_init_securityindex: true
+plugins.security.allow_unsafe_democertificates: false
+# No audit log in OpenSearch: Signalith is its only user and keeps its own.
+# Without this OpenSearch logs an error that its audit log cannot work.
+plugins.security.audit.type: noop

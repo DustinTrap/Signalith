@@ -5,12 +5,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -222,6 +224,33 @@ func TestSecretsSet(t *testing.T) {
 	if c.OpenSearch.Password != "new OpenSearch pass" || len(c.Ingest.Tokens) != 2 || c.Ingest.Tokens[1] != "another-token-0123456789" {
 		t.Errorf("loaded %q %q", c.OpenSearch.Password, c.Ingest.Tokens)
 	}
+
+	// A variable that replaces the saved value, here or in the service's
+	// environment, is named, in either form.
+	pwFile := filepath.Join(t.TempDir(), "os-pass")
+	os.WriteFile(pwFile, []byte("password in a file\n"), 0o600)
+	t.Setenv("SIGNALITH_OPENSEARCH_PASSWORD_FILE", pwFile)
+	out, err = runCmd(t, "third OpenSearch pass\n", "set", "opensearch.password", "-c", path)
+	if err != nil || !strings.Contains(out, "Note: SIGNALITH_OPENSEARCH_PASSWORD_FILE is set in this environment") {
+		t.Errorf("set with SIGNALITH_OPENSEARCH_PASSWORD_FILE (%v):\n%s", err, out)
+	}
+	t.Setenv("SIGNALITH_OPENSEARCH_PASSWORD_FILE", "")
+	saved := readServiceSettings
+	t.Cleanup(func() { readServiceSettings = saved })
+	readServiceSettings = func() *serviceSettings {
+		return &serviceSettings{where: "the test unit", args: []string{"serve", "-c", path},
+			env: map[string]string{"SIGNALITH_ASSISTANT_API_KEY_FILE": "/run/credentials/signalith.service/ai", "SIGNALITH_INGEST_TOKEN": "a-token-of-the-service"}}
+	}
+	out, err = runCmd(t, "sk-ant-new-key\n", "set", "assistant.api_key", "-c", path)
+	if err != nil || !strings.Contains(out, "Note: the signalith service is given SIGNALITH_ASSISTANT_API_KEY_FILE, which it uses instead of signalith.yaml's assistant.api_key") {
+		t.Errorf("set with the service's SIGNALITH_ASSISTANT_API_KEY_FILE (%v):\n%s", err, out)
+	}
+	// Tokens from the environment are accepted besides the file's.
+	t.Setenv("SIGNALITH_INGEST_TOKEN", "a-token-from-here-0123456789")
+	out, err = runCmd(t, "yet-another-token-0123456789\n", "set", "ingest.tokens", "-c", path)
+	if err != nil || strings.Contains(out, "Note:") {
+		t.Errorf("set ingest.tokens with SIGNALITH_INGEST_TOKEN (%v):\n%s", err, out)
+	}
 }
 
 func TestSecretsRotateAndPrune(t *testing.T) {
@@ -333,6 +362,19 @@ func TestSecretsRotateFailureChangesNothing(t *testing.T) {
 	}
 	same("prepare failure")
 
+	// A read-only folder (signalith.yaml mounted on its own in a
+	// container) points to the way to run the command in Docker.
+	prepareFile = func(p string, data []byte) (*securefile.Pending, error) {
+		if p == path {
+			return nil, &fs.PathError{Op: "open", Path: p + ".tmp", Err: syscall.EROFS}
+		}
+		return securefile.Prepare(p, data)
+	}
+	if _, err := runCmd(t, "", "rotate-master", "-c", path); err == nil || !strings.Contains(err.Error(), `Nothing was changed. Its folder is read-only here; in Docker, run the command as docs/encryption.md shows under "Docker"`) {
+		t.Errorf("read-only folder: %v", err)
+	}
+	same("read-only folder")
+
 	prepareFile = securefile.Prepare
 	commitFile = func(p *securefile.Pending) error {
 		if p.Path() == feedsFile {
@@ -404,9 +446,16 @@ func TestInitWritesEncryptedValues(t *testing.T) {
 
 func TestServiceEnv(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "signalith.env")
-	os.WriteFile(envFile, []byte("# secrets for the service\nSIGNALITH_MASTER_KEY_FILE=\"/srv/keys/signalith.key\"\nSIGNALITH_OPENSEARCH_PASSWORD=never-taken\n"), 0o600)
+	os.WriteFile(envFile, []byte("# secrets for the service\nSIGNALITH_MASTER_KEY_FILE=\"/srv/keys/signalith.key\"\nSIGNALITH_OPENSEARCH_PASSWORD=never-taken\n"+
+		"SIGNALITH_INGEST_TOKEN_FILE=/srv/secrets/token\nSIGNALITH_USERS_FILE=/srv/users.yaml\n"), 0o600)
+	// Secrets in files (SIGNALITH_*_FILE other than the master key's) are
+	// not taken: a systemd credential such as %d/os-pass exists only while
+	// the service runs.
 	show := []byte(`ExecStart={ path=/usr/local/bin/signalith ; argv[]=/usr/local/bin/signalith serve -c /etc/signalith/signalith.yaml ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
-Environment=SIGNALITH_STATE_DIR=/var/lib/signalith SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups "SIGNALITH_ARCHIVE_DIR=/mnt/arch ive" SIGNALITH_OPENSEARCH_PASSWORD=secret GOTRACEBACK=none
+Environment=SIGNALITH_STATE_DIR=/var/lib/signalith SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups "SIGNALITH_ARCHIVE_DIR=/mnt/arch ive" SIGNALITH_OPENSEARCH_PASSWORD=secret GOTRACEBACK=none ` +
+		`SIGNALITH_OPENSEARCH_PASSWORD_FILE=/run/credentials/signalith.service/os-pass SIGNALITH_ADMIN_PASSWORD_FILE=/run/credentials/signalith.service/admin ` +
+		`SIGNALITH_LDAP_BIND_PASSWORD_FILE=/srv/secrets/ldap SIGNALITH_ASSISTANT_API_KEY_FILE=/srv/secrets/ai SIGNALITH_INTEL_FEEDS_FILE=/srv/feeds.yaml ` +
+		`SIGNALITH_SETTINGS_FILE=/srv/settings.yaml SIGNALITH_DASHBOARDS_DIR=/srv/dashboards SIGNALITH_DETECTIONS_DIR=/srv/detections
 EnvironmentFiles=` + envFile + ` (ignore_errors=yes)
 EnvironmentFiles=/nonexistent/other.env (ignore_errors=yes)
 `)
@@ -415,6 +464,8 @@ EnvironmentFiles=/nonexistent/other.env (ignore_errors=yes)
 	want := map[string]string{
 		"SIGNALITH_STATE_DIR": "/var/lib/signalith", "SIGNALITH_LOOKUPS_DIR": "/var/lib/signalith/lookups",
 		"SIGNALITH_ARCHIVE_DIR": "/mnt/arch ive", "SIGNALITH_MASTER_KEY_FILE": "/srv/keys/signalith.key",
+		"SIGNALITH_USERS_FILE": "/srv/users.yaml", "SIGNALITH_INTEL_FEEDS_FILE": "/srv/feeds.yaml", "SIGNALITH_SETTINGS_FILE": "/srv/settings.yaml",
+		"SIGNALITH_DASHBOARDS_DIR": "/srv/dashboards", "SIGNALITH_DETECTIONS_DIR": "/srv/detections",
 	}
 	if len(got) != len(want) {
 		t.Errorf("got %v", got)
@@ -441,6 +492,45 @@ EnvironmentFiles=/nonexistent/other.env (ignore_errors=yes)
 	if runtime.GOOS == "windows" {
 		if got := win.envFor(`c:\programdata\signalith\SIGNALITH.yaml`); len(got) != 1 || got["SIGNALITH_MASTER_KEY_FILE"] == "" {
 			t.Errorf("Windows service: %v", got)
+		}
+	}
+}
+
+// Every folder and file variable the server reads is taken from the
+// service, and no variable naming a file of a secret is (envSecret reads
+// NAME_FILE for those), so a variable added later is not missed.
+func TestServiceVarsCoverTheServersFolders(t *testing.T) {
+	quoted := regexp.MustCompile(`"(SIGNALITH_[A-Z_]+_(DIR|FILE))"`)
+	secret := regexp.MustCompile(`envSecret\("(SIGNALITH_[A-Z_]+)"\)`)
+	paths, _ := filepath.Glob(filepath.Join("..", "..", "internal", "config", "*.go"))
+	more, _ := filepath.Glob(filepath.Join("..", "..", "internal", "secrets", "*.go"))
+	names, secrets := map[string]bool{}, map[string]bool{}
+	for _, p := range append(paths, more...) {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range quoted.FindAllStringSubmatch(string(b), -1) {
+			names[m[1]] = true
+		}
+		for _, m := range secret.FindAllStringSubmatch(string(b), -1) {
+			secrets[m[1]+"_FILE"] = true
+		}
+	}
+	if len(names) < 9 || len(secrets) < 5 {
+		t.Fatalf("found %v and %v", names, secrets)
+	}
+	for n := range names {
+		if !secrets[n] && !serviceVars[n] {
+			t.Errorf("%s is not taken from the service", n)
+		}
+	}
+	for n := range secrets {
+		if serviceVars[n] {
+			t.Errorf("%s, a file holding a secret, is taken from the service", n)
 		}
 	}
 }

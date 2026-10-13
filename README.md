@@ -20,16 +20,94 @@ service or a systemd unit.
 
 ### Docker (evaluation)
 
+From the folder you cloned Signalith into:
+
 ```sh
 docker compose -f deploy/docker/docker-compose.yml up -d
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password
 ```
 
-Open http://localhost:8080 and sign in as `admin` with the password set in
-`deploy/docker/docker-compose.yml` (change it first).
-To update, run `git pull` and then the same command. It rebuilds Signalith from the
-new code each time. After a reboot both containers start again by themselves once
-Docker is running; in Docker Desktop turn on Settings > General > "Start Docker
-Desktop when you sign in".
+The first command starts OpenSearch and Signalith. On first start a setup step makes the
+admin password, the agents' ingest token and the certificates OpenSearch and Signalith use
+with each other, and keeps them in Docker volumes; no password is written in the compose
+files. The second command shows the admin password. Open https://localhost:8080 and sign
+in as `admin` with it. Signalith serves HTTPS with a certificate it makes for itself, so
+the browser warns until you trust it; the sign-in page has a **Download the server
+certificate** link, and [docs/https.md](docs/https.md) says how to trust it.
+
+OpenSearch runs with its security plugin on: it answers only over HTTPS, publishes no
+port, and lets in only Signalith's certificate, which may use only Signalith's own
+indices. See [docs/opensearch-security.md](docs/opensearch-security.md).
+
+To change the admin password (the first one then stops working):
+
+```sh
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith passwd
+docker compose -f deploy/docker/docker-compose.yml restart signalith
+```
+
+Settings changed on the **Settings** page are kept in the `signalith-data` volume
+(`/var/lib/signalith/lookups/settings.yaml` in the container), with Signalith's own
+certificate authority, so they survive updates; settings given in `docker-compose.yml`'s
+`environment:` show there locked.
+
+To update, run `git pull` and then the first command again. It rebuilds Signalith from the
+new code each time. After a reboot everything starts again by itself once Docker is
+running; in Docker Desktop turn on Settings > General > "Start Docker Desktop when you
+sign in".
+
+#### Upgrading the Docker quick start
+
+Earlier versions of the quick start served plain HTTP, ran OpenSearch without security,
+and took the admin password and ingest token from `docker-compose.yml`
+(`change-me-please` and `change-this-ingest-token` unless you changed them). To upgrade,
+in the folder you cloned Signalith into (PowerShell or a terminal, the commands are the
+same):
+
+1. Put your own edits aside and update:
+   ```sh
+   git stash
+   git pull
+   ```
+   `git stash` keeps what you changed (such as the admin password in
+   `docker-compose.yml`, which is no longer needed); `git stash show -p` shows it later.
+2. Start it as usual:
+   ```sh
+   docker compose -f deploy/docker/docker-compose.yml up -d
+   ```
+   This rebuilds Signalith, runs the setup step once and restarts OpenSearch with its
+   security plugin on; the first start takes a minute or two longer. Events, findings,
+   investigations, users, detections and dashboards are kept: they are in the
+   `opensearch-data` and `signalith-data` volumes, which stay.
+3. Show the new admin password:
+   ```sh
+   docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password
+   ```
+   The old one no longer works. People you added on the **Users** page keep theirs.
+4. Open **https**://localhost:8080 (old `http://` bookmarks are redirected) and sign in as
+   `admin`. Trust the certificate as described in [docs/https.md](docs/https.md).
+5. Update the agents. Agents you set up before keep sending for now: over plain `http://`
+   the old example token is still accepted, and the **Health** page lists each agent that
+   still uses it (behind Docker Desktop they share one address, so it names them by the
+   computer names in their events). On each of them, install the configuration from the
+   **Add data** page again; it has this server's own token and moves the agent to HTTPS.
+   Syslog devices need no change. If you had set a token of your own in
+   `SIGNALITH_INGEST_TOKEN`, add that line back under `environment:` of the `signalith`
+   service in `docker-compose.yml` and run step 2 again; new agents still get the new
+   token.
+6. If you had changed other things, such as ports or `SIGNALITH_PUBLIC_URL`, make the same
+   changes in the new files (`SIGNALITH_PUBLIC_URL` now starts with `https://`).
+7. Once the **Health** page lists no agent still sending over plain `http://`, set
+   **Agents on plain HTTP** to **Refuse them** on the **Settings** page (the **HTTPS**
+   card; it applies at once), or set `plaintext_ingest: deny` in
+   `deploy/docker/signalith.yaml` and run step 2 again. That also ends the old token. An agent you missed is turned away until it gets a new
+   configuration; it keeps its events and sends them then, and Health names it.
+
+This version encrypts the passwords and keys it keeps in the `signalith-data` volume
+(`directory.json`, `intel_feeds.yaml` and `settings.yaml`), which older versions cannot
+read. Before going back to one, run `secrets decrypt` in a container of its own (see
+[docs/encryption.md](docs/encryption.md#going-back-to-an-older-version), which has the
+Docker commands).
 
 ### Linux
 
@@ -45,7 +123,12 @@ Desktop when you sign in".
    ```
    `init` prints the admin password once, and where it put the master key that
    encrypts the passwords and keys Signalith stores (`/var/lib/signalith/keys/master.key`).
-   Back that file up, apart from the config; see [Encryption](#encryption).
+   Back that file up, apart from the config; see [Encryption](#encryption). Open
+   `https://<server>:8080`: Signalith serves HTTPS with a certificate it makes for itself
+   (see [HTTPS](#https)).
+3. Replace OpenSearch's demo security setup, whose passwords and certificates are public,
+   and have Signalith sign in with a certificate of its own:
+   [docs/opensearch-security.md](docs/opensearch-security.md).
 
 To upgrade, stop the service, replace the program and the unit, encrypt passwords an older
 version kept as plain text in `signalith.yaml`, and start it again:
@@ -73,6 +156,7 @@ read encrypted values: before going back to one, run `sudo signalith secrets dec
    .\install.ps1 -OpenSearchUrl http://127.0.0.1:9200
    ```
    This writes `C:\ProgramData\Signalith\signalith.yaml`, installs the **Signalith** service and starts it.
+   Open https://localhost:8080 (see [HTTPS](#https) to stop the certificate warning).
    The service runs as its own account, `NT SERVICE\Signalith`, and only SYSTEM, Administrators and
    that account can read `C:\ProgramData\Signalith`. To upgrade, put the new `signalith.exe` next to
    the script and run it again: it stops the service, replaces the program, encrypts passwords an
@@ -84,16 +168,19 @@ read encrypted values: before going back to one, run `sudo signalith secrets dec
    again, as Administrator, so the service may read it. Before going back
    to an older version, run `signalith secrets decrypt` (see
    [docs/encryption.md](docs/encryption.md#going-back-to-an-older-version)).
+3. Secure OpenSearch and have Signalith sign in with a certificate:
+   [docs/opensearch-security.md](docs/opensearch-security.md).
 
 ### Send data
 
-Open **Add data** in the UI, pick Linux or Windows, and follow the three steps: install
-Fluent Bit, paste the generated configuration, restart it. The configuration already
-contains the server address and ingest token. For firewalls, switches and other network
+Open **Add data** in the UI, pick Linux or Windows, and follow the steps: install
+Fluent Bit, save Signalith's CA certificate and the generated configuration, restart it.
+The configuration already contains the server address and ingest token, and sends over
+HTTPS, checking the server's certificate with that CA. For firewalls, switches and other network
 devices, pick **Syslog** (see [Syslog](#syslog)).
 
 Agents on other machines must send to an address they can reach, such as
-`http://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
+`https://192.168.1.20:8080`, not `localhost`. Enter it under **Agents send to** on that page
 (or set `server.public_url` or `SIGNALITH_PUBLIC_URL`), and allow the port, 8080 by default,
 through this computer's firewall.
 
@@ -145,13 +232,14 @@ counted in the event's `dropped_fields` (search `dropped_fields>0`), their value
 #### Syslog
 
 Firewalls, switches, routers, appliances and servers without an agent can send syslog.
-Point them at this server's address on **UDP or TCP port 514** (or the TLS port, if
-you set `syslog.tls`). `signalith init` turns UDP and TCP 514 on; the Docker quick start
-publishes port 514 too.
+Point them at this server's address on **UDP or TCP port 514**, or over **TLS on port
+6514**. `signalith init` turns all three on; the Docker quick start publishes port 514.
+Syslog over TLS uses the web UI's certificate (see [docs/https.md](docs/https.md#agents-and-syslog)).
 
 Open **Add data** and pick **Syslog** for copy-ready setup for rsyslog, syslog-ng, Cisco IOS
 and ASA, Palo Alto, FortiGate, pfSense and OPNsense, UniFi and Windows, with this server's
-address filled in. Send the test message it shows and watch it arrive on the same page.
+address filled in; rsyslog and syslog-ng send over TLS when it is on, with the CA certificate
+to save. Send the test message it shows and watch it arrive on the same page.
 When syslog is off, the page gives the steps to turn it on for this system: the
 UDP and TCP address on the **Settings** page, then **Restart now**, plus the port
 permission for a Linux service or the Windows Firewall rules.
@@ -203,7 +291,7 @@ activity (12 hours by default) or when you sign out; tick **Keep me signed in** 
 signed in for up to 7 days. Ten wrong passwords for one account from one address within
 15 minutes lock that account out for that address for 15 minutes (with wider limits per
 address and per account; see [docs/users.md](docs/users.md#signing-in)). Scripts and API
-clients can keep using HTTP Basic auth with the same username and password.
+clients can keep using HTTP Basic auth with the same username and password, over HTTPS.
 
 Admins add people on the **Users** page and give each one a role: **Viewer** (look,
 search, change nothing), **Analyst** (also triage findings, work investigations, build
@@ -214,8 +302,31 @@ from their groups; set it up and test it on the same page. The `admin` account f
 `signalith.yaml` stays as a break-glass account that always works. See
 [docs/users.md](docs/users.md).
 
+### HTTPS
+
+The web UI, API and agent ingest use HTTPS by default, on the same port as before (8080).
+On first start Signalith makes a small certificate authority of its own and a server
+certificate signed by it, and renews the certificate by itself; nothing has to be set up.
+Browsers warn until the CA is trusted: download it from the sign-in page (**Download the
+server certificate**) and trust it once per computer. Agent setups on **Add data** carry the
+CA and check the server with it. Plain `http://` still reaches the port: browsers are
+redirected, and passwords and sessions are refused.
+
+To use your own certificate, set `server.tls.mode: files` with `server.tls_cert` and
+`tls_key`; behind a reverse proxy that adds HTTPS, `server.tls.mode: off` with
+`server.trusted_proxies`. All of these are also on the **Settings** page, in the
+**HTTPS** card. Configs from earlier versions keep working: agents set up for
+`http://` keep sending until they get a new configuration, and the **Health** page lists
+them. All of this, with the commands to trust the CA on Windows, macOS and Linux, is in
+[docs/https.md](docs/https.md).
+
 ### Hardening built in
 
+- **Encryption in transit**: HTTPS by default, TLS 1.2 or newer, for the UI, API and
+  agents, which check the server's certificate; passwords, Basic credentials and session
+  cookies are refused over plain HTTP, and the session cookie is HTTPS-only
+  (`__Host-signalith_session`). `X-Forwarded-Proto` is believed only from
+  `server.trusted_proxies`. See [docs/https.md](docs/https.md).
 - **Connections**: clients get 10 seconds to send request headers and a minute to send a
   request body (after their token or sign-in is checked, agent batches get 2 minutes, more
   while they keep arriving, and signed-in uploads 10 minutes); idle kept-alive connections
@@ -238,8 +349,15 @@ from their groups; set it up and test it on the same page. The `admin` account f
 - **Logs**: values in log lines are cut to a sensible length, and the Windows service log
   (`C:\ProgramData\Signalith\signalith.log`) rotates at 10 MB, keeping 5 old files. The Docker
   quick start caps container logs the same way; under systemd, journald limits the log.
-- **Secrets**: every password and key Signalith stores in a file is encrypted with a master
-  key (`signalith secrets`; see [Encryption](#encryption)). A password written into
+- **OpenSearch**: Signalith can sign in to OpenSearch with a client certificate over
+  HTTPS, with a role limited to its own indices. The Docker quick start sets this up by
+  itself, with no default passwords anywhere; `signalith opensearch-certs` makes the same
+  files for OpenSearch on Linux or Windows. See
+  [docs/opensearch-security.md](docs/opensearch-security.md).
+- **Secrets**: every password and API key in Signalith's settings files is encrypted with a
+  master key (`signalith secrets`; see [Encryption](#encryption)); files that hold a key on
+  their own, such as the HTTPS CA key and the Docker quick start's generated secrets, are
+  protected by their permissions instead. A password written into
   `opensearch.url` is moved out of the address and encrypted by `signalith secrets encrypt`; one
   in `opensearch.proxy` or a key in a feed's address cannot be, and is reported. Passwords and
   keys in configured URLs are hidden (`***`) everywhere a URL is shown or logged, and agents get a
@@ -259,8 +377,9 @@ Unknown keys are rejected, so typos do not silently do nothing.
 ### Settings page
 
 Admins can change most of these settings on the **Settings** page instead: the public
-and web addresses, the certificate, the OpenSearch connection, search limits, syslog,
-the detection scheduler and the AI assistant. Each one shows where its value comes
+and web addresses, HTTPS (the mode, extra certificate names, your own certificate
+files, agents on plain HTTP and trusted reverse proxies), the OpenSearch connection,
+search limits, syslog, the detection scheduler and the AI assistant. Each one shows where its value comes
 from; an environment variable wins over the page, which wins over `signalith.yaml`.
 Some apply at once; for the rest, the page restarts Signalith inside the same process,
 after checking that the new web address can be listened on and that OpenSearch
@@ -276,14 +395,20 @@ restart the service. The Linux service keeps the file in `/var/lib/signalith/loo
 which these commands read from its unit; where they cannot, give it with
 `-file /var/lib/signalith/lookups/settings.yaml`. See [docs/settings.md](docs/settings.md).
 
-Behind a reverse proxy that serves HTTPS, have it send `X-Forwarded-Proto: https`, so
-the sign-in cookie is marked for HTTPS only.
+Behind a reverse proxy that serves HTTPS, have it send `X-Forwarded-Proto: https` and
+list it under `server.trusted_proxies` (**Trusted reverse proxies** on the Settings
+page), so the sign-in cookie is marked for HTTPS only; the header is ignored from
+anyone else.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `server.listen` | `127.0.0.1:8080` | Address the UI and API bind to |
-| `server.public_url` | from `listen` | URL agents use (scheme, host and port); goes into generated agent configs |
-| `server.tls_cert`, `server.tls_key` | none | Serve HTTPS (TLS 1.2 or newer; browsers are then told to use HTTPS only) |
+| `server.public_url` | `https://` and the `listen` host and port | URL agents use (scheme, host and port); goes into generated agent configs. With HTTPS on it must be `https://` |
+| `server.tls.mode` | `auto` | `auto`: HTTPS with a certificate Signalith makes and renews itself; `files`: `server.tls_cert` and `tls_key`; `off`: plain HTTP behind a reverse proxy that adds HTTPS. See [docs/https.md](docs/https.md) |
+| `server.tls.names` | none | Extra host names or IP addresses for the `auto` certificate (this machine's names and addresses, `public_url` and addresses entered on Add data are always in it) |
+| `server.tls.plaintext_ingest` | `deny` (`allow` for configs from before HTTPS was the default) | Whether agents may still send events over plain `http://`; the Health page lists any that do |
+| `server.tls_cert`, `server.tls_key` | none | Your certificate (with its chain) and key, for `server.tls.mode: files`; reloaded when they change. TLS 1.2 or newer; browsers are told to use HTTPS only |
+| `server.trusted_proxies` | none | IPs or CIDRs of reverse proxies whose `X-Forwarded-Proto: https` is believed (HSTS, HTTPS-only cookie, no redirect) |
 | `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
 | `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown; `signalith secrets encrypt` moves it there in the file, encrypted |
@@ -307,7 +432,7 @@ the sign-in cookie is marked for HTTPS only.
 | `ingest.tokens` | one generated | Tokens agents send as `Authorization: Bearer` |
 | `ingest.max_event_age` | `7d` (or the shortest retention period if shorter) | Events older than this, or more than an hour ahead, are filed under the time they arrived, with their own time in `device_time`. See [Ingest limits](#ingest-limits) |
 | `syslog.udp`, `syslog.tcp` | off (`init` sets `0.0.0.0:514`) | Addresses to receive syslog on; empty turns a listener off. See [Syslog](#syslog) |
-| `syslog.tls` | off | Address for syslog over TLS, such as `0.0.0.0:6514`; uses `server.tls_cert` and `server.tls_key` |
+| `syslog.tls` | off (`init` sets `0.0.0.0:6514`) | Address for syslog over TLS, such as `0.0.0.0:6514`; uses the web UI's certificate |
 | `syslog.allow` | any sender | Sender IPs or CIDRs allowed to send syslog; others are dropped and counted |
 | `syslog.public_port` | the listen port | Port devices send UDP and TCP syslog to, when it is forwarded to the listen port; shown on Add data |
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
@@ -336,17 +461,23 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_OPENSEARCH_URL`, `SIGNALITH_OPENSEARCH_USERNAME`, `SIGNALITH_OPENSEARCH_PROXY`, `SIGNALITH_LISTEN`,
 `SIGNALITH_PUBLIC_URL`, `SIGNALITH_DETECTIONS_DIR`, `SIGNALITH_LOOKUPS_DIR`, `SIGNALITH_DASHBOARDS_DIR`,
 `SIGNALITH_USERS_FILE`, `SIGNALITH_INTEL_FEEDS_FILE`, `SIGNALITH_ARCHIVE_DIR`, `SIGNALITH_ASSISTANT_API_KEY`, and
-`SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). A setting set by an
-environment variable is shown locked on the Settings page. `SIGNALITH_SETTINGS_FILE`
-sets where the Settings page keeps its changes (default `settings.yaml` in `lookups.dir`).
-`SIGNALITH_STATE_DIR` is the folder for files Signalith makes for itself, such as its master key
-(default: the folder holding the lookups folder; the systemd unit and the Docker image set
-`/var/lib/signalith`), and `SIGNALITH_MASTER_KEY_FILE` or `SIGNALITH_MASTER_KEY` supply the master
-key (see [Encryption](#encryption)).
-
+`SIGNALITH_SYSLOG_UDP` and `SIGNALITH_SYSLOG_TCP`, where `off` turns the listener off). Secrets can also be read
+from a file, as Docker and Kubernetes secrets are: set `SIGNALITH_OPENSEARCH_PASSWORD_FILE`,
+`SIGNALITH_ADMIN_PASSWORD_FILE`, `SIGNALITH_INGEST_TOKEN_FILE`, `SIGNALITH_LDAP_BIND_PASSWORD_FILE` or
+`SIGNALITH_ASSISTANT_API_KEY_FILE` to the file's path. Setting both forms of one is an error, except for the
+ingest token, where both tokens are accepted (agents set up on Add data get the file's). A setting set by an
+environment variable, or by a file one names, is shown locked on the Settings page. When the admin password
+comes from `SIGNALITH_ADMIN_PASSWORD_FILE`, or from `SIGNALITH_ADMIN_PASSWORD` given to the systemd or Windows
+service, `signalith passwd` keeps the new one in `admin-password-hash` in the state folder, where it replaces
+that password. `SIGNALITH_STATE_DIR` is the folder
+where Signalith keeps files it makes for itself, such as its master key (in `keys`) and its HTTPS
+certificate (in `tls`); it defaults to the folder that holds `lookups.dir`, and the systemd unit
+and Docker image set it to `/var/lib/signalith`. `SIGNALITH_MASTER_KEY_FILE` or
+`SIGNALITH_MASTER_KEY` supply the master key (see [Encryption](#encryption)). `SIGNALITH_SETTINGS_FILE` sets where the Settings page keeps its changes
+(default `settings.yaml` in `lookups.dir`).
 ## Encryption
 
-Passwords and API keys are encrypted wherever Signalith stores them: in `signalith.yaml`
+Passwords and API keys are encrypted in the files where Signalith keeps its settings: in `signalith.yaml`
 (`opensearch.password`, `assistant.api_key`, `auth.ldap.bind_password`, `ingest.tokens`, feed
 passwords and headers), in `settings.yaml` (the OpenSearch password and the AI model's API key
 saved on the **Settings** page), in `directory.json` (the directory service account password) and
@@ -376,8 +507,9 @@ first of them.
 
 [docs/encryption.md](docs/encryption.md) covers backing up and changing the key, keeping it in a
 systemd credential or a Docker secret, the commands in Docker, going back to an older version,
-disk encryption (BitLocker, LUKS, Docker Desktop, cloud
-disks), what protects passwords in memory, and confidential VMs.
+the key files the master key does not encrypt (such as the HTTPS CA key), disk encryption
+(BitLocker, LUKS, Docker Desktop, cloud disks), what protects passwords in memory, and
+confidential VMs. HTTPS is in [docs/https.md](docs/https.md).
 
 ## Detections and findings
 
@@ -676,9 +808,9 @@ From the shell: `signalith query "datamodel=Authentication | top user"` or add
 ## Architecture
 
 ```
-Fluent Bit agents ──HTTP──▶ signalith (Go) ──REST──▶ OpenSearch
+Fluent Bit agents ──HTTPS──▶ signalith (Go) ──REST──▶ OpenSearch
  (Windows, Linux)            ingest, parse,          events by data model and day
-syslog devices ──UDP/TCP──▶  query compiler,
+syslog devices ─UDP/TCP/TLS▶ query compiler,
                              web UI and API ◀── analyst browser
 ```
 
@@ -703,7 +835,9 @@ syslog devices ──UDP/TCP──▶  query compiler,
 | `internal/config` | YAML config, validation, password hashing, encrypted values in `signalith.yaml`, the Settings page's registry and settings file |
 | `internal/secrets` | Master key, encryption of stored passwords and keys, key rotation |
 | `internal/securefile` | Whole-or-nothing writes of files with secrets, private permissions on Linux and Windows |
-| `internal/httpserver` | Web server timeouts and connection limits |
+| `internal/httpserver` | Web server timeouts, connection limits, HTTPS and plain HTTP on one port |
+| `internal/ospki` | Certificates and security settings for a secured OpenSearch (`bootstrap-docker`, `opensearch-certs`) |
+| `internal/tlsauto` | Signalith's own certificate authority and HTTPS certificate: issue, renew, reload |
 | `internal/safelog` | Length limits for log values, rotating log file |
 | `internal/redact` | Hides secrets in URLs before they are shown or logged |
 | `internal/auth` | Web UI sign-in sessions and the failed sign-in limit |

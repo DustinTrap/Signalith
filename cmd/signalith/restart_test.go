@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -103,6 +105,14 @@ type running struct {
 	os     *fakeOpenSearch
 	logs   *syncBuffer
 	cookie string
+	// dir holds signalith.yaml. scheme is how the web page answers, and
+	// client what calls it: one that trusts the server's certificate
+	// with HTTPS.
+	dir    string
+	scheme string
+	client *http.Client
+	// stop stops the server and waits for it.
+	stop func()
 
 	mu      sync.Mutex
 	started []string // index prefix of each set of components started
@@ -120,6 +130,19 @@ func (rs *running) starts() string {
 // fail, when set, makes starting with a config fail.
 func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]any) *running {
 	t.Helper()
+	// Plain HTTP: these tests are about restarting; restarting with
+	// HTTPS on is tested on its own.
+	return startRunnerWith(t, fail, page, "  tls:\n    mode: off\n")
+}
+
+// noFollow is a client that does not follow redirects.
+var noFollow = &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+// startRunnerWith is startRunner with server added to signalith.yaml's
+// server section. With HTTPS on, the client trusts Signalith's own
+// certificate authority.
+func startRunnerWith(t *testing.T, fail func(*config.Config) error, page map[string]any, server string) *running {
+	t.Helper()
 	for _, name := range []string{"SIGNALITH_LISTEN", "SIGNALITH_PUBLIC_URL", "SIGNALITH_OPENSEARCH_URL", "SIGNALITH_OPENSEARCH_USERNAME",
 		"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_SETTINGS_FILE", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_ASSISTANT_API_KEY",
 		"SIGNALITH_SYSLOG_UDP", "SIGNALITH_SYSLOG_TCP", "SIGNALITH_LOOKUPS_DIR", "SIGNALITH_USERS_FILE"} {
@@ -136,8 +159,8 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 	}
 	addr := freeAddr(t)
 	path := filepath.Join(dir, "signalith.yaml")
-	body := "server:\n  listen: " + addr + "\nopensearch:\n  url: " + fos.URL + "\nauth:\n  admin_password_hash: " + h +
-		"\ndetections:\n  scheduler: false\n"
+	body := "server:\n  listen: " + addr + "\n" + server + "opensearch:\n  url: " + fos.URL + "\nauth:\n  admin_password_hash: " + h +
+		"\ningest:\n  tokens: [tok-0123456789abcdef]\ndetections:\n  scheduler: false\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +179,7 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 	}
 	logs := &syncBuffer{}
 	r := newRunner(path, slog.New(slog.NewTextHandler(logs, nil)))
-	rs := &running{t: t, r: r, addr: addr, os: fos, logs: logs}
+	rs := &running{t: t, r: r, addr: addr, os: fos, logs: logs, dir: dir, scheme: "http", client: &http.Client{Timeout: 10 * time.Second}}
 	r.failStart = func(c *config.Config) error {
 		rs.mu.Lock()
 		rs.started = append(rs.started, c.OpenSearch.IndexPrefix)
@@ -169,17 +192,23 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- r.run(ctx, c) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(20 * time.Second):
-			t.Error("the server did not stop")
-		}
-	})
+	var once sync.Once
+	rs.stop = func() {
+		once.Do(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Error("the server did not stop")
+			}
+		})
+	}
+	t.Cleanup(rs.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if resp, err := http.Get("http://" + addr + "/api/me"); err == nil {
+		// With HTTPS on, plain HTTP on the same port answers with a
+		// redirect.
+		if resp, err := noFollow.Get("http://" + addr + "/api/me"); err == nil {
 			resp.Body.Close()
 			break
 		}
@@ -188,20 +217,44 @@ func startRunner(t *testing.T, fail func(*config.Config) error, page map[string]
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	if c.Server.HTTPS() {
+		rs.useHTTPS(rs.ownCA())
+	}
 	rs.signIn()
 	return rs
+}
+
+// ownCA returns Signalith's own certificate authority, in PEM.
+func (rs *running) ownCA() []byte {
+	rs.t.Helper()
+	pem, err := os.ReadFile(filepath.Join(rs.dir, "tls", "ca.pem"))
+	if err != nil {
+		rs.t.Fatal(err)
+	}
+	return pem
+}
+
+// useHTTPS calls the server over HTTPS, trusting the CA certificates in
+// caPEM.
+func (rs *running) useHTTPS(caPEM []byte) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		rs.t.Fatal("no CA certificate")
+	}
+	rs.scheme = "https"
+	rs.client = &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 }
 
 // signIn signs in as the built-in admin and keeps the session cookie.
 func (rs *running) signIn() {
 	rs.t.Helper()
-	resp, err := http.Post("http://"+rs.addr+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"s3cret-pass"}`))
+	resp, err := rs.client.Post(rs.scheme+"://"+rs.addr+"/api/login", "application/json", strings.NewReader(`{"username":"admin","password":"s3cret-pass"}`))
 	if err != nil {
 		rs.t.Fatal(err)
 	}
 	resp.Body.Close()
 	for _, c := range resp.Cookies() {
-		if c.Name == "signalith_session" {
+		if c.Name == "signalith_session" || c.Name == "__Host-signalith_session" {
 			rs.cookie = c.Name + "=" + c.Value
 		}
 	}
@@ -217,10 +270,10 @@ func (rs *running) call(addr, method, path, body string) (int, map[string]any, e
 	if addr == "" {
 		addr = rs.addr
 	}
-	req, _ := http.NewRequest(method, "http://"+addr+path, strings.NewReader(body))
+	req, _ := http.NewRequest(method, rs.scheme+"://"+addr+path, strings.NewReader(body))
 	req.Header.Set("Cookie", rs.cookie)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := rs.client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -431,7 +484,7 @@ func TestRestartMovesToAllInterfacesOnTheSamePort(t *testing.T) {
 
 func TestFrontHoldsRequestsDuringASwap(t *testing.T) {
 	f := &front{}
-	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "old") }))
+	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "old") }), nil)
 	f.pause(time.Second)
 	got := make(chan string, 1)
 	go func() {
@@ -444,7 +497,7 @@ func TestFrontHoldsRequestsDuringASwap(t *testing.T) {
 		t.Fatalf("answered during the pause: %q", b)
 	case <-time.After(50 * time.Millisecond):
 	}
-	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "new") }))
+	f.resume(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "new") }), nil)
 	if b := <-got; b != "new" {
 		t.Errorf("answered by %q", b)
 	}

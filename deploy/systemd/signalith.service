@@ -70,7 +70,8 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # Custom detections, asset and identity lists, dashboards, retention
-# settings, archived days and a master key Signalith makes are saved here.
+# settings, archived days, a master key Signalith makes (keys/) and the
+# HTTPS certificate it makes for itself (tls/) are saved here.
 StateDirectory=signalith
 StateDirectoryMode=0750
 Environment=SIGNALITH_STATE_DIR=/var/lib/signalith

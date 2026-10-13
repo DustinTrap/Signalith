@@ -268,7 +268,7 @@ func TestAgentConfig(t *testing.T) {
 	ts, _ := newTestServer(t)
 	_, body := do(t, ts, "GET", "/api/agents/config?os=windows&sysmon=true", "", true)
 	cfg := body["config"].(string)
-	for _, want := range []string{"winevtlog", "Microsoft-Windows-Sysmon/Operational", "Bearer tok-0123456789abcdef", "Port             8080", "Header_Tag"} {
+	for _, want := range []string{"winevtlog", "Microsoft-Windows-Sysmon/Operational", "Bearer tok-0123456789abcdef", "Port                 8080", "Header_Tag"} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("windows config missing %q:\n%s", want, cfg)
 		}
@@ -277,21 +277,27 @@ func TestAgentConfig(t *testing.T) {
 
 func TestAgentConfigServerAddress(t *testing.T) {
 	ts, _ := newTestServer(t)
-	// The default public_url is http://127.0.0.1:8080, which only this
+	// The default public_url is https://127.0.0.1:8080, which only this
 	// machine can reach; the response says so.
 	_, body := do(t, ts, "GET", "/api/agents/config?os=linux", "", true)
-	if body["server_url"] != "http://127.0.0.1:8080" || body["server_loopback"] != true {
+	if body["server_url"] != "https://127.0.0.1:8080" || body["server_loopback"] != true {
 		t.Errorf("default address: server_url = %v, server_loopback = %v", body["server_url"], body["server_loopback"])
 	}
 
-	q := url.Values{"os": {"linux"}, "server": {"http://192.168.1.20:9000"}}
+	q := url.Values{"os": {"linux"}, "server": {"https://192.168.1.20:9000"}}
 	code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true)
 	cfg, _ := body["config"].(string)
-	if code != http.StatusOK || !strings.Contains(cfg, "Host             192.168.1.20\n") || !strings.Contains(cfg, "Port             9000\n") {
+	if code != http.StatusOK || !strings.Contains(cfg, "Host                 192.168.1.20\n") || !strings.Contains(cfg, "Port                 9000\n") {
 		t.Fatalf("override: %d %v", code, body)
 	}
-	if body["server_url"] != "http://192.168.1.20:9000" || body["server_loopback"] != false {
+	if body["server_url"] != "https://192.168.1.20:9000" || body["server_loopback"] != false {
 		t.Errorf("override: server_url = %v, server_loopback = %v", body["server_url"], body["server_loopback"])
+	}
+	// Plain http is refused while Signalith serves HTTPS.
+	q.Set("server", "http://192.168.1.20:9000")
+	if code, body := do(t, ts, "GET", "/api/agents/config?"+q.Encode(), "", true); code != http.StatusBadRequest || body["field"] != "server" ||
+		!strings.Contains(body["error"].(string), "https://192.168.1.20:9000") {
+		t.Errorf("http override: %d %v", code, body)
 	}
 
 	for _, bad := range []string{

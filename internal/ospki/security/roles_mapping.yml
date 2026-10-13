@@ -1,0 +1,10 @@
+# Signalith's client certificate (CN=signalith) gets the signalith_server
+# role from roles.yml. The admin certificate (CN=signalith-admin) needs no
+# role: OpenSearch trusts it fully (plugins.security.authcz.admin_dn).
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+
+signalith_server:
+  users:
+    - "signalith"

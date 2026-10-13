@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,6 +43,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
+	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
 	"github.com/jrsamsanchez/signalith/web"
 	"golang.org/x/term"
@@ -58,11 +60,14 @@ Usage:
   signalith validate  [-c file]           check the config file
   signalith passwd    [-c file]           set the admin password
   signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
+  signalith initial-password [-c file]    print the first admin password the Docker quick start made
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
   signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith service   install|uninstall|start|stop     manage the Windows service
+  signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
+  signalith bootstrap-docker -opensearch-dir DIR -signalith-dir DIR   prepare the Docker quick start (its setup service runs this)
   signalith version
 
 The config file defaults to %s
@@ -106,6 +111,12 @@ func main() {
 		err = cmdPasswd(args)
 	case "settings":
 		err = cmdSettings(args)
+	case "initial-password":
+		err = cmdInitialPassword(args)
+	case "bootstrap-docker":
+		err = cmdBootstrapDocker(args)
+	case "opensearch-certs":
+		err = cmdOpenSearchCerts(args)
 	case "query":
 		err = cmdQuery(args)
 	case "ask":
@@ -145,6 +156,7 @@ func cmdInit(args []string) error {
 	password := fs.String("admin-password", "", "admin password (default: generate one)")
 	syslogUDP := fs.String("syslog-udp", "0.0.0.0:514", "address to receive syslog on over UDP (empty: off)")
 	syslogTCP := fs.String("syslog-tcp", "0.0.0.0:514", "address to receive syslog on over TCP (empty: off)")
+	syslogTLS := fs.String("syslog-tls", "0.0.0.0:6514", "address to receive syslog on over TLS (empty: off)")
 	force := fs.Bool("force", false, "overwrite an existing config file")
 	fs.Parse(args)
 
@@ -157,6 +169,9 @@ func cmdInit(args []string) error {
 	c := config.Default()
 	c.Server.Listen = *listen
 	c.Server.PublicURL = *publicURL
+	// HTTPS with a certificate the server makes for itself, and no
+	// agents over plain HTTP.
+	c.Server.TLS = &config.ServerTLS{Mode: config.TLSAuto, PlaintextIngest: "deny"}
 	c.OpenSearch.URL = *osURL
 	c.OpenSearch.Username = *osUser
 	c.OpenSearch.AllowInsecureHTTP = *osInsecure
@@ -164,6 +179,7 @@ func cmdInit(args []string) error {
 	// syslog section keep it off.
 	c.Syslog.UDP = *syslogUDP
 	c.Syslog.TCP = *syslogTCP
+	c.Syslog.TLS = *syslogTLS
 	pw := *password
 	generated := pw == ""
 	if generated {
@@ -183,6 +199,8 @@ func cmdInit(args []string) error {
 	}
 	fmt.Printf("Wrote %s\n\n", *path)
 	fmt.Printf("  Web UI:      %s\n", c.Server.PublicURL)
+	fmt.Printf("  HTTPS:       the server makes its own certificate when it starts; browsers warn\n")
+	fmt.Printf("               until you trust it (see docs/https.md)\n")
 	fmt.Printf("  User:        %s\n", c.Auth.AdminUser)
 	if generated {
 		fmt.Printf("  Password:    %s   (shown once; change it with: signalith passwd)\n", pw)
@@ -199,6 +217,28 @@ func cmdInit(args []string) error {
 	}
 	fmt.Printf("\nNext: start OpenSearch, then run: signalith serve -c %s\n", *path)
 	return nil
+}
+
+// httpsSummary says how the web UI and agents are protected in transit.
+func httpsSummary(c *config.Config) string {
+	var s string
+	switch c.Server.TLSMode() {
+	case config.TLSOff:
+		s = "HTTPS is off (server.tls.mode: off), so a reverse proxy in front must add it."
+	case config.TLSFiles:
+		cert, _ := c.TLSFiles()
+		s = "HTTPS is on with the certificate in " + cert + "."
+	default:
+		s = "HTTPS is on with Signalith's own certificate, kept in " + c.TLSDir() + "."
+	}
+	if c.Server.HTTPS() {
+		if c.Server.PlaintextIngest() {
+			s += " Agents may still send over plain HTTP (server.tls.plaintext_ingest: allow); the Health page lists any that do."
+		} else {
+			s += " Agents must send over HTTPS."
+		}
+	}
+	return s
 }
 
 // syslogSummary describes the syslog listeners, or "" when syslog is off.
@@ -268,6 +308,7 @@ func cmdValidate(args []string) error {
 		return nil
 	}
 	fmt.Printf("%s is valid.\n", *path)
+	fmt.Println(httpsSummary(c))
 	if n := len(c.Unreadable()); n > 0 {
 		fmt.Printf("Warning: %d %s in it cannot be decrypted, so Signalith runs without %s (see the warnings below).\n",
 			n, plural(n, "password or key", "passwords or keys"), plural(n, "it", "them"))
@@ -401,6 +442,11 @@ func cmdPasswd(args []string) error {
 	if _, err := os.Stat(*path); err != nil {
 		return fmt.Errorf("config file %s: %w", *path, err)
 	}
+	// The service's state folder, and whether the service is given the
+	// admin password, which replaces the one in signalith.yaml: a shell
+	// has neither.
+	useServiceEnv(*path, os.Stdout)
+	svcPassword := serviceGives(*path, "SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_ADMIN_PASSWORD")
 	pw := os.Getenv("SIGNALITH_NEW_PASSWORD")
 	if pw == "" {
 		var err error
@@ -411,6 +457,25 @@ func cmdPasswd(args []string) error {
 	h, err := config.HashPassword(pw)
 	if err != nil {
 		return err
+	}
+	// Where the first password was generated and passed in a file (the
+	// Docker quick start, whose signalith.yaml is read-only), the new one
+	// is kept in the state folder and replaces it. So is every later one,
+	// and one for a service given the password in its environment.
+	hashFile := config.AdminHashFileIn(config.StateDirFor(*path))
+	_, statErr := os.Stat(hashFile)
+	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || svcPassword != "" || statErr == nil {
+		if err := writeAdminHash(hashFile, h); err != nil {
+			return err
+		}
+		if svcPassword != "" {
+			fmt.Printf("Password updated. It is kept in %s, since the signalith service is given %s; it replaces that password.\n", hashFile, svcPassword)
+			fmt.Println("Restart the service to apply it.")
+			return nil
+		}
+		fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
+		fmt.Println("Restart the server to apply it. With the Docker quick start, from the Signalith folder: docker compose -f deploy/docker/docker-compose.yml restart signalith")
+		return nil
 	}
 	// Only the hash changes in the file; settings from the environment
 	// (such as SIGNALITH_OPENSEARCH_PASSWORD) are not written into it.
@@ -714,15 +779,25 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 // the Settings page stops and builds again. The web listener, sign-in
 // sessions and the user store belong to the runner and carry over.
 type instance struct {
-	cfg      *config.Config
-	srv      *api.Server
-	handler  http.Handler
+	cfg     *config.Config
+	srv     *api.Server
+	handler http.Handler
+	// plain answers plain HTTP on the port that serves HTTPS; handler
+	// itself when HTTPS is off.
+	plain http.Handler
+	// certs is the HTTPS certificate, which syslog over TLS uses too; nil
+	// when neither needs one. certKey names the settings it is for.
+	certs    *tlsauto.Manager
+	certKey  string
 	receiver *syslog.Receiver
 	// retention is the retention manager when this server runs retention.
 	retention *retention.Manager
-	cancel    context.CancelFunc
-	jobs      sync.WaitGroup // background jobs
-	log       *slog.Logger
+	// store is the OpenSearch client, whose idle connections stop says
+	// goodbye to.
+	store  *store.Client
+	cancel context.CancelFunc
+	jobs   sync.WaitGroup // background jobs
+	log    *slog.Logger
 }
 
 // stop ends the background jobs, retention and the syslog receiver, and
@@ -738,6 +813,9 @@ func (in *instance) stop() {
 		in.receiver.Wait()
 		s := in.receiver.Stats()
 		in.log.Info("syslog receiver stopped", "received", s.Received, "dropped", s.Dropped, "write_failed", s.WriteFailed, "rejected", s.Rejected)
+	}
+	if in.store != nil {
+		in.store.CloseIdleConnections()
 	}
 }
 
@@ -770,10 +848,25 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	for _, w := range c.Warnings() {
 		log.Warn(w)
 	}
+	if f := c.AdminPasswordChanged(); f != "" {
+		log.Info("the built-in admin's password was set with signalith passwd and is kept in a file of its own", "file", f)
+	}
+	// The HTTPS certificate, which syslog over TLS uses too. A restart
+	// keeps the one in use when its settings did not change, and its own
+	// certificate authority in any case.
+	certs, certKey, err := r.certificates(c)
+	if err != nil {
+		return nil, err
+	}
+	if certs != nil {
+		in.certs, in.certKey = certs, certKey
+		in.jobs.Go(func() { certs.Run(ctx) })
+	}
 	// The master key, again after a restart: the files saved from now on
 	// are encrypted with this config's, and their plain values with it.
 	r.useKeys(c)
 	cl := newStore(c)
+	in.store = cl
 	ret := newRetention(c, cl, log)
 	maxAge := c.MaxEventAge(retentionKeepDays(ret))
 	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
@@ -782,12 +875,15 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	templateReady := make(chan struct{})
 	var receiver *syslog.Receiver
 	if c.Syslog.Enabled() {
-		receiver = syslog.New(syslog.Config{
+		sc := syslog.Config{
 			UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS,
-			CertFile: c.Server.TLSCert, KeyFile: c.Server.TLSKey,
 			Allow: c.Syslog.AllowList(), Ready: templateReady,
 			MaxAge: maxAge, PublicPort: c.Syslog.PublicPort,
-		}, pipeline, log)
+		}
+		if certs != nil {
+			sc.GetCertificate = certs.GetCertificate
+		}
+		receiver = syslog.New(sc, pipeline, log)
 		if err := receiver.Start(ctx); err != nil {
 			return nil, keyed(err, "syslog.udp", "syslog.tcp", "syslog.tls")
 		}
@@ -845,7 +941,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	}
 	n := people.Count()
 	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
-	if os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" && c.Auth.LDAP == nil {
+	if (os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" || os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD_FILE") != "") && c.Auth.LDAP == nil {
 		log.Warn("SIGNALITH_LDAP_BIND_PASSWORD is set but signalith.yaml has no auth.ldap, so it is not used; directory sign-in set up on the Users page keeps its own bind password")
 	}
 	if s := dir.Settings(); s.IsEnabled() {
@@ -887,6 +983,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
+		TLS:        certs,
 		Sessions:   r.sessions,
 		Limiter:    r.limiter,
 		Restarter:  r,
@@ -934,6 +1031,10 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			"so old days are not deleted here and the disk guard does not run; the Data retention page is read-only here")
 	}
 	in.srv, in.handler = srv, srv.Handler()
+	in.plain = in.handler
+	if c.Server.HTTPS() {
+		in.plain = srv.PlainHandler(in.handler)
+	}
 	started = true
 	return in, nil
 }
@@ -961,6 +1062,51 @@ func (r *runner) openUsers(c *config.Config) (*users.Store, *users.Directory, er
 		return nil, nil, err
 	}
 	return r.people, dir, nil
+}
+
+// certOptions are the settings of c's HTTPS certificate, which syslog
+// over TLS uses too: server.tls_cert and tls_key in mode files, else one
+// from Signalith's own CA covering this machine, public_url's host and
+// server.tls.names. ok is false when c needs none.
+func certOptions(c *config.Config) (o tlsauto.Options, ok bool) {
+	if !c.Server.HTTPS() && c.Syslog.TLS == "" {
+		return o, false
+	}
+	if c.Server.TLSMode() == config.TLSFiles {
+		o.CertFile, o.KeyFile = c.TLSFiles()
+		return o, true
+	}
+	o.Dir = c.TLSDir()
+	if u, err := url.Parse(c.Server.PublicURL); err == nil && u.Hostname() != "" {
+		o.Names = append(o.Names, u.Hostname())
+	}
+	o.Names = append(o.Names, c.Server.TLSNames()...)
+	return o, true
+}
+
+// newCertificates loads or makes the HTTPS certificate (see certOptions).
+// It logs the CA's fingerprint, so admins can check the CA they install
+// elsewhere.
+func newCertificates(c *config.Config, log *slog.Logger) (*tlsauto.Manager, error) {
+	o, _ := certOptions(c)
+	o.Log = log
+	m, err := tlsauto.New(o)
+	if err != nil {
+		return nil, err
+	}
+	leaf, names := m.Leaf(), m.Names()
+	if out := m.Outside(); len(out) > 0 {
+		log.Warn("the HTTPS certificate leaves out names that Signalith's own certificate authority may not sign; "+
+			"see \"Names the certificate can cover\" in docs/https.md", "names", strings.Join(out, ","))
+	}
+	if m.LocalCA() {
+		log.Info("HTTPS certificate from Signalith's own certificate authority; browsers warn until this CA is trusted (see docs/https.md)",
+			"ca_file", m.CAPath(), "ca_sha256", m.Fingerprint(), "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly))
+	} else {
+		log.Info("HTTPS certificate from server.tls_cert; reloaded when the file changes",
+			"file", o.CertFile, "names", strings.Join(names, ","), "expires", leaf.NotAfter.Format(time.DateOnly), "ca_sha256", m.Fingerprint())
+	}
+	return m, nil
 }
 
 // newRetention returns the retention manager. Policies saved on the Data

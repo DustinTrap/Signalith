@@ -74,7 +74,7 @@ func TestRegistryCoversEveryConfigSetting(t *testing.T) {
 			t.Errorf("Excluded has %s, which is not a setting of Config", k)
 		}
 	}
-	if len(Sections) != 8 {
+	if len(Sections) != 9 {
 		t.Errorf("sections: %d", len(Sections))
 	}
 }
@@ -223,7 +223,7 @@ func TestBrokenSettingsFileDoesNotStopStart(t *testing.T) {
 		"wrong type":    {"settings:\n  search.max_events:\n    value: lots\n", "search.max_events"},
 		"no value":      {"settings:\n  search.max_events:\n    changed_by: x\n", "has no value"},
 		"invalid":       {"settings:\n  search.max_events:\n    value: 0\n", "search.max_events must be between 1 and 100000"},
-		"do not mix":    {"settings:\n  syslog.tls:\n    value: 0.0.0.0:6514\n", "syslog.tls needs server.tls_cert"},
+		"do not mix":    {"settings:\n  server.tls.mode:\n    value: files\n", "server.tls.mode is files, so set server.tls_cert"},
 		"bad listen":    {"settings:\n  server.listen:\n    value: nowhere\n", `server.listen "nowhere" must be host:port`},
 		"session short": {"settings:\n  auth.session_timeout:\n    value: 1m\n", "auth.session_timeout"},
 	} {

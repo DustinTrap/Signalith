@@ -50,8 +50,9 @@ const systemdStateDir = "/var/lib/signalith"
 const systemConfigDir = "/etc/"
 
 // StateDir returns the folder where Signalith keeps files it makes for
-// itself, such as its master key (in keys/): SIGNALITH_STATE_DIR when set,
-// else the folder that holds lookups.dir.
+// itself, such as its master key (in keys/) and its HTTPS certificate (in
+// tls/): SIGNALITH_STATE_DIR when set, else the folder that holds
+// lookups.dir.
 func (c *Config) StateDir() string {
 	if d := os.Getenv("SIGNALITH_STATE_DIR"); d != "" {
 		return d

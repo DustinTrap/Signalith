@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -19,12 +18,21 @@ import (
 // (directory.json, intel_feeds.yaml, a master key it made) in its state
 // folder, and may name its master key (SIGNALITH_MASTER_KEY_FILE). So when
 // the service runs with the same config file, "signalith secrets",
-// "signalith validate" and "signalith init" use the service's folder,
-// file and master key settings too, and find the same files and key.
+// "signalith validate", "signalith settings", "signalith passwd" and
+// "signalith init" use the service's folder, file and master key settings
+// too, and find the same files and key.
 
-// serviceVar matches the settings taken from the service: folders, files
-// and the master key; never other secrets.
-var serviceVar = regexp.MustCompile(`^SIGNALITH_([A-Z_]+_(DIR|FILE)|MASTER_KEY)$`)
+// serviceVars are the settings taken from the service: its folders, the
+// files it keeps (not files of secrets, such as
+// SIGNALITH_ADMIN_PASSWORD_FILE: the server reads those itself, and a
+// command run by hand that cannot read one, such as a systemd credential
+// that exists only while the service runs, would stop) and its master key.
+var serviceVars = map[string]bool{
+	"SIGNALITH_STATE_DIR": true, "SIGNALITH_LOOKUPS_DIR": true, "SIGNALITH_DETECTIONS_DIR": true,
+	"SIGNALITH_DASHBOARDS_DIR": true, "SIGNALITH_ARCHIVE_DIR": true,
+	"SIGNALITH_USERS_FILE": true, "SIGNALITH_INTEL_FEEDS_FILE": true, "SIGNALITH_SETTINGS_FILE": true,
+	"SIGNALITH_MASTER_KEY_FILE": true, "SIGNALITH_MASTER_KEY": true,
+}
 
 // serviceSettings is what the service is given.
 type serviceSettings struct {
@@ -81,8 +89,44 @@ func applyServiceEnv(path string) (where string, set []string) {
 // SIGNALITH_MASTER_KEY_FILE, since the credential folder exists only for
 // the service.
 func (s *serviceSettings) envFor(path string) map[string]string {
-	if s == nil || s.args == nil {
+	if !s.serves(path) {
 		return nil
+	}
+	env := map[string]string{}
+	for k, v := range s.env {
+		if serviceVars[k] && v != "" {
+			env[k] = v
+		}
+	}
+	// $CREDENTIALS_DIRECTORY/master.key comes before SIGNALITH_MASTER_KEY_FILE.
+	if s.cred != "" {
+		env["SIGNALITH_MASTER_KEY_FILE"] = s.cred
+		delete(env, "SIGNALITH_MASTER_KEY")
+	}
+	return env
+}
+
+// serviceGives returns the first of names that the signalith service's
+// environment sets, when it runs with the config file path, or "". Unlike
+// applyServiceEnv it sets nothing here, so it can tell about secrets that
+// are not taken (such as SIGNALITH_ADMIN_PASSWORD_FILE).
+func serviceGives(path string, names ...string) string {
+	s := readServiceSettings()
+	if !s.serves(path) {
+		return ""
+	}
+	for _, n := range names {
+		if s.env[n] != "" {
+			return n
+		}
+	}
+	return ""
+}
+
+// serves reports whether the service runs with the config file path.
+func (s *serviceSettings) serves(path string) bool {
+	if s == nil || s.args == nil {
+		return false
 	}
 	served := s.env["SIGNALITH_CONFIG"]
 	if served == "" {
@@ -98,21 +142,7 @@ func (s *serviceSettings) envFor(path string) map[string]string {
 			served = strings.TrimPrefix(a, "--c=")
 		}
 	}
-	if !sameFile(served, path) {
-		return nil
-	}
-	env := map[string]string{}
-	for k, v := range s.env {
-		if serviceVar.MatchString(k) && v != "" {
-			env[k] = v
-		}
-	}
-	// $CREDENTIALS_DIRECTORY/master.key comes before SIGNALITH_MASTER_KEY_FILE.
-	if s.cred != "" {
-		env["SIGNALITH_MASTER_KEY_FILE"] = s.cred
-		delete(env, "SIGNALITH_MASTER_KEY")
-	}
-	return env
+	return sameFile(served, path)
 }
 
 // parseSystemctlShow reads "systemctl show" output: the service's command
