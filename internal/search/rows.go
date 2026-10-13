@@ -16,12 +16,17 @@ import (
 // that the search has not been cancelled or timed out.
 const checkEvery = 512
 
+// checkWork is how many characters a where command compares against
+// wildcard patterns between those checks, so a few slow rows cannot keep
+// a search running long after it timed out.
+const checkWork = 1 << 20
+
 // applyCommand runs one pipe command over rows held in memory. It stops
 // with ctx's error when ctx ends.
 func applyCommand(ctx context.Context, res *Result, c query.Command) error {
 	switch c := c.(type) {
 	case *query.Where:
-		m := &matcher{}
+		m := &matcher{ctx: ctx}
 		out := res.Rows[:0:0]
 		for i, r := range res.Rows {
 			if i%checkEvery == 0 && ctx.Err() != nil {
@@ -29,6 +34,9 @@ func applyCommand(ctx context.Context, res *Result, c query.Command) error {
 			}
 			if m.eval(c.Expr, r) {
 				out = append(out, r)
+			}
+			if m.err != nil {
+				return m.err
 			}
 		}
 		res.Rows = out
@@ -329,6 +337,12 @@ func compareValues(a, b any) int {
 type matcher struct {
 	globs map[string]glob
 	lower map[string]string
+
+	// ctx is checked every checkWork characters of wildcard matching;
+	// once it ends, err holds its error and every match fails.
+	ctx  context.Context
+	work int
+	err  error
 }
 
 func (m *matcher) eval(e query.Expr, r Row) bool {
@@ -417,20 +431,30 @@ func (m *matcher) equals(v any, want string) bool {
 			g = compileGlob(want, true)
 			m.globs[want] = g
 		}
-		return g.match(fmt.Sprint(v))
+		if m.err != nil {
+			return false
+		}
+		s := fmt.Sprint(v)
+		if m.work += len(s) + len(want); m.work >= checkWork && m.ctx != nil {
+			m.work = 0
+			if m.err = m.ctx.Err(); m.err != nil {
+				return false
+			}
+		}
+		return g.match(s)
 	}
 	return compareValues(v, want) == 0
 }
 
 // glob is a compiled * and ? pattern that must match a whole string: *
 // matches any run of characters (newlines too) and ? any one character.
-// It is matched without regular expressions, in time roughly linear in the
-// string for patterns without ?.
+// It is matched without regular expressions, in time linear in the string
+// times the pattern's length in 64-character words.
 type glob struct {
-	parts []string // the pattern split at each *
-	runes []int    // characters in each part
-	q     []bool   // whether each part has a ?
-	fold  bool     // match case-insensitively
+	parts []string    // the pattern split at each *
+	runes []int       // characters in each part
+	q     []*shiftAnd // for each part with a ?, its matcher
+	fold  bool        // match case-insensitively
 }
 
 func compileGlob(pattern string, fold bool) glob {
@@ -440,7 +464,11 @@ func compileGlob(pattern string, fold bool) glob {
 	g := glob{parts: strings.Split(pattern, "*"), fold: fold}
 	for _, p := range g.parts {
 		g.runes = append(g.runes, utf8.RuneCountInString(p))
-		g.q = append(g.q, strings.Contains(p, "?"))
+		var sa *shiftAnd
+		if strings.Contains(p, "?") {
+			sa = newShiftAnd(p)
+		}
+		g.q = append(g.q, sa)
 	}
 	return g
 }
@@ -488,16 +516,72 @@ func (g glob) match(s string) bool {
 // find returns where the first match of part i in s ends.
 func (g glob) find(i int, s string) (int, bool) {
 	p := g.parts[i]
-	if !g.q[i] {
+	if g.q[i] == nil {
 		at := strings.Index(s, p)
 		return at + len(p), at >= 0
 	}
-	for at := 0; at < len(s); {
-		if n, ok := matchPart(p, s[at:]); ok {
-			return at + n, true
+	return g.q[i].find(s)
+}
+
+// shiftAnd finds a part with ? in a string in one pass (the Shift-And
+// algorithm): bit k of the state is set while the part's first k+1
+// characters match the characters just read. Every match of a part has
+// the same number of characters, so the first to end is also the first
+// to start.
+type shiftAnd struct {
+	n     int               // characters in the part
+	any   []uint64          // positions holding ?
+	exact map[rune][]uint64 // for each other character, its positions
+	state []uint64          // find's scratch; a glob is used by one goroutine
+}
+
+func newShiftAnd(p string) *shiftAnd {
+	rs := []rune(p)
+	words := (len(rs) + 63) / 64
+	sa := &shiftAnd{n: len(rs), any: make([]uint64, words), exact: map[rune][]uint64{}, state: make([]uint64, words)}
+	for k, r := range rs {
+		if r == '?' {
+			sa.any[k/64] |= 1 << (k % 64)
 		}
-		_, size := utf8.DecodeRuneInString(s[at:])
+	}
+	for k, r := range rs {
+		if r == '?' {
+			continue
+		}
+		m, ok := sa.exact[r]
+		if !ok {
+			m = append([]uint64(nil), sa.any...)
+			sa.exact[r] = m
+		}
+		m[k/64] |= 1 << (k % 64)
+	}
+	return sa
+}
+
+// find returns where the first match in s ends.
+func (sa *shiftAnd) find(s string) (int, bool) {
+	if sa.n == 0 {
+		return 0, true
+	}
+	state := sa.state
+	clear(state)
+	last, lastBit := (sa.n-1)/64, uint64(1)<<((sa.n-1)%64)
+	for at := 0; at < len(s); {
+		r, size := utf8.DecodeRuneInString(s[at:])
 		at += size
+		mask, ok := sa.exact[r]
+		if !ok {
+			mask = sa.any
+		}
+		carry := uint64(1) // a match can start at every character
+		for w := range state {
+			next := state[w] >> 63
+			state[w] = (state[w]<<1 | carry) & mask[w]
+			carry = next
+		}
+		if state[last]&lastBit != 0 {
+			return at, true
+		}
 	}
 	return 0, false
 }
@@ -523,44 +607,66 @@ func matchPart(p, s string) (int, bool) {
 // pattern cannot be made big enough to make every comparison slow.
 const maxPatternLen = 1000
 
+// maxWherePatterns caps the characters of all the wildcard values in a
+// query's where commands together. A where command after the search runs
+// over every row in memory, so many long patterns (in an IN list or an OR
+// chain) would make each row slow even when each pattern is short enough.
+const maxWherePatterns = 4096
+
+// maxInValues caps the values in one IN list.
+const maxInValues = 1000
+
 // checkPatterns returns a *QueryError for a wildcard value longer than
-// maxPatternLen in the search or a where command.
+// maxPatternLen in the search or a where command, wildcard values in where
+// commands longer than maxWherePatterns together, or an IN list longer
+// than maxInValues.
 func checkPatterns(q *query.Query) error {
-	exprs := []query.Expr{q.Search}
-	for _, c := range q.Commands {
-		if w, ok := c.(*query.Where); ok {
-			exprs = append(exprs, w.Expr)
-		}
-	}
 	var err error
-	var walk func(e query.Expr)
-	check := func(v string) {
-		if err == nil && strings.ContainsAny(v, "*?") && utf8.RuneCountInString(v) > maxPatternLen {
-			err = &QueryError{Msg: fmt.Sprintf("a wildcard pattern is %d characters long; the limit is %d", utf8.RuneCountInString(v), maxPatternLen)}
+	total := 0
+	var walk func(e query.Expr, where bool)
+	check := func(v string, where bool) {
+		if err != nil || !strings.ContainsAny(v, "*?") {
+			return
+		}
+		n := utf8.RuneCountInString(v)
+		if n > maxPatternLen {
+			err = &QueryError{Msg: fmt.Sprintf("a wildcard pattern is %d characters long; the limit is %d", n, maxPatternLen)}
+			return
+		}
+		if where {
+			if total += n; total > maxWherePatterns {
+				err = &QueryError{Msg: fmt.Sprintf("the wildcard patterns in where commands are more than %d characters long together; filter in the search before the first | instead, or use fewer patterns", maxWherePatterns)}
+			}
 		}
 	}
-	walk = func(e query.Expr) {
+	walk = func(e query.Expr, where bool) {
 		switch e := e.(type) {
 		case *query.And:
 			for _, c := range e.Children {
-				walk(c)
+				walk(c, where)
 			}
 		case *query.Or:
 			for _, c := range e.Children {
-				walk(c)
+				walk(c, where)
 			}
 		case *query.Not:
-			walk(e.Child)
+			walk(e.Child, where)
 		case *query.In:
+			if err == nil && len(e.Values) > maxInValues {
+				err = &QueryError{Msg: fmt.Sprintf("an IN list has %d values; the limit is %d", len(e.Values), maxInValues)}
+			}
 			for _, v := range e.Values {
-				check(v)
+				check(v, where)
 			}
 		case *query.Compare:
-			check(e.Value)
+			check(e.Value, where)
 		}
 	}
-	for _, e := range exprs {
-		walk(e)
+	walk(q.Search, false)
+	for _, c := range q.Commands {
+		if w, ok := c.(*query.Where); ok {
+			walk(w.Expr, true)
+		}
 	}
 	return err
 }
