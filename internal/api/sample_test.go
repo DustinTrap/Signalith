@@ -104,3 +104,65 @@ func TestSampleStatusPartialAndElsewhere(t *testing.T) {
 		t.Errorf("status with the command line loading: %v", out)
 	}
 }
+
+// A failed job's error shows on the server that ran it only until another
+// server loads or removes: then the shared record has moved on and the old
+// error no longer applies.
+func TestSampleErrorFadesWhenAnotherServerActs(t *testing.T) {
+	fake := ostest.New(t)
+	cl := store.New(store.Config{URL: fake.URL})
+	loader := &sample.Loader{Prefix: "signalith", OS: cl, Docs: cl, Server: "siem-a"}
+	var srv *Server
+	ts, _ := newTestServerWith(t, func(s *Server) { s.Sample = loader; srv = s })
+
+	put := func(id string, partial bool) {
+		t.Helper()
+		b, _ := json.Marshal(map[string]any{"kind": "sample_data", "body": map[string]any{
+			"state": sample.State{ID: id, Partial: partial, Started: time.Now()}}})
+		var src map[string]any
+		_ = json.Unmarshal(b, &src)
+		fake.Put("signalith_runtime", "sample:data", src)
+	}
+	failed := func(left string, known bool) {
+		srv.sampleJob.mu.Lock()
+		srv.sampleJob.op, srv.sampleJob.err = "load", errors.New("boom")
+		srv.sampleJob.left, srv.sampleJob.leftKnown = left, known
+		srv.sampleJob.mu.Unlock()
+	}
+	errorShown := func() bool {
+		t.Helper()
+		code, out := do(t, ts, "GET", "/api/sample", "", true)
+		if code != 200 {
+			t.Fatalf("status %d %v", code, out)
+		}
+		return out["error"] != nil
+	}
+
+	// This server's load stopped part way and left its record.
+	put("sample-a", true)
+	failed("sample-a", true)
+	if !errorShown() {
+		t.Error("error missing while the record is the one the failed load left")
+	}
+	// Another server removed it and loaded a set of its own.
+	put("sample-b", false)
+	if errorShown() {
+		t.Error("old error shown after another server loaded")
+	}
+	// Another server removed what this server's failed load left.
+	fake.Delete("signalith_runtime", "sample:data")
+	if errorShown() {
+		t.Error("old error shown after another server removed the record")
+	}
+	// A failed load that wrote nothing: the error stays while nothing is loaded.
+	failed("", true)
+	if !errorShown() {
+		t.Error("error missing for a load that wrote nothing")
+	}
+	// When the record could not be read after the failure, the error stays.
+	put("sample-b", false)
+	failed("", false)
+	if !errorShown() {
+		t.Error("error missing when the record could not be read after the failure")
+	}
+}

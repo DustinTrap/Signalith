@@ -35,18 +35,48 @@ type sampleJob struct {
 	op      string // "load" or "remove"
 	prog    sample.Progress
 	err     error
+	// left is the shared record a failed job left behind: its ID, or ""
+	// when there is none. Once another server's job changes the record,
+	// this server's old error no longer applies. leftKnown is false when
+	// the record could not be read, and the error then stays.
+	left      string
+	leftKnown bool
 }
 
-func (j *sampleJob) snapshot() (running bool, op string, prog sample.Progress, err error) {
+// sampleJobView is a copy of sampleJob's fields for one status reply.
+type sampleJobView struct {
+	running   bool
+	op        string
+	prog      sample.Progress
+	err       error
+	left      string
+	leftKnown bool
+}
+
+func (j *sampleJob) snapshot() sampleJobView {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.running, j.op, j.prog, j.err
+	return sampleJobView{j.running, j.op, j.prog, j.err, j.left, j.leftKnown}
+}
+
+// errorApplies reports whether the last job's error still describes the
+// shared record st: no other server has loaded or removed since.
+func (v sampleJobView) errorApplies(st *sample.State) bool {
+	if v.err == nil {
+		return false
+	}
+	id := ""
+	if st != nil {
+		id = st.ID
+	}
+	return !v.leftKnown || id == v.left
 }
 
 // start begins a background job, refusing when one is already running. The
 // work gets a detached context so it finishes even after the request returns,
 // and a progress callback that records the latest step for the status reply.
-func (j *sampleJob) start(op string, work func(ctx context.Context, prog sample.ProgressFn) error) bool {
+// When the work fails, after reads which shared record it left behind.
+func (j *sampleJob) start(op string, work func(ctx context.Context, prog sample.ProgressFn) error, after func(ctx context.Context) (string, bool)) bool {
 	j.mu.Lock()
 	if j.running {
 		j.mu.Unlock()
@@ -56,20 +86,42 @@ func (j *sampleJob) start(op string, work func(ctx context.Context, prog sample.
 	j.op = op
 	j.prog = sample.Progress{Op: op}
 	j.err = nil
+	j.left, j.leftKnown = "", false
 	j.mu.Unlock()
 
 	go func() {
-		err := work(context.Background(), func(p sample.Progress) {
+		ctx := context.Background()
+		err := work(ctx, func(p sample.Progress) {
 			j.mu.Lock()
 			j.prog = p
 			j.mu.Unlock()
 		})
+		left, known := "", false
+		if err != nil && after != nil {
+			left, known = after(ctx)
+		}
 		j.mu.Lock()
 		j.running = false
 		j.err = err
+		j.left, j.leftKnown = left, known
 		j.mu.Unlock()
 	}()
 	return true
+}
+
+// sampleLeft reads the ID of the shared sample-data record ("" for none),
+// and false when it cannot be read.
+func (s *Server) sampleLeft(ctx context.Context) (string, bool) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	st, err := s.Sample.Status(ctx)
+	if err != nil {
+		return "", false
+	}
+	if st == nil {
+		return "", true
+	}
+	return st.ID, true
 }
 
 // sampleStatus is the GET /api/sample reply: whether the feature is
@@ -112,30 +164,32 @@ func (s *Server) handleSampleStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	running, op, prog, jobErr := s.sampleJob.snapshot()
+	job := s.sampleJob.snapshot()
 	resp := sampleStatus{
 		Available:  true,
 		Loaded:     st != nil && !st.Partial,
 		Partial:    st != nil && st.Partial,
-		Running:    running,
-		Op:         op,
-		Phase:      prog.Phase,
-		Percent:    prog.Percent,
+		Running:    job.running,
+		Op:         job.op,
+		Phase:      job.prog.Phase,
+		Percent:    job.prog.Percent,
 		State:      st,
 		Sizes:      sample.Sizes,
 		CannotFire: s.Sample.CannotFire(),
 	}
 	// A job in another process (another server, the command line, or this
 	// server before a restart in place) reports through the loader's record.
-	if !running && act != nil {
+	if !job.running && act != nil {
 		resp.Running, resp.Op, resp.Phase, resp.Percent = true, act.Op, act.Phase, act.Percent
 		resp.Where = sampleWhere(act)
 	}
 	if resp.Running {
 		// While a load runs, its state is partial by design.
 		resp.Partial = false
-	} else if jobErr != nil {
-		resp.Error, resp.ErrorDetail = sampleErrorText(op, jobErr, resp.Partial)
+	} else if job.errorApplies(st) {
+		// This server's last job failed, and no other server has loaded or
+		// removed since: say what went wrong.
+		resp.Error, resp.ErrorDetail = sampleErrorText(job.op, job.err, resp.Partial)
 	}
 	if st == nil && !resp.Running {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
@@ -230,7 +284,7 @@ func (s *Server) handleSampleLoad(w http.ResponseWriter, r *http.Request) {
 			s.Log.Warn("sample data load failed", "audit", true, "by", user, "size", size, "err", err)
 		}
 		return err
-	})
+	}, s.sampleLeft)
 	if !started {
 		sampleBusy(w)
 		return
@@ -255,7 +309,7 @@ func (s *Server) handleSampleRemove(w http.ResponseWriter, r *http.Request) {
 			s.Log.Warn("sample data remove failed", "audit", true, "by", user, "err", err)
 		}
 		return err
-	})
+	}, s.sampleLeft)
 	if !started {
 		sampleBusy(w)
 		return
@@ -269,7 +323,7 @@ func (s *Server) handleSampleRemove(w http.ResponseWriter, r *http.Request) {
 // removal needs something loaded (complete or partial). The loader checks
 // again when it starts, so two servers asked at once cannot both go ahead.
 func (s *Server) sampleFree(w http.ResponseWriter, r *http.Request, load bool) bool {
-	if running, _, _, _ := s.sampleJob.snapshot(); running {
+	if s.sampleJob.snapshot().running {
 		sampleBusy(w)
 		return false
 	}
