@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -368,17 +369,67 @@ func beginFirstKey(c *config.Config, newKey bool) (*secrets.Rotation, error) {
 	return keys.BeginNew()
 }
 
-// linkNotes says which files had other names (hard links), which keep
-// the old text when a file is replaced.
-func linkNotes(paths ...string) []string {
+// linkNotes says, for the files of list that change, which other files
+// keep their old text when they are written: other names a file has (hard
+// links), and the file a link in place of one pointed to, when the link is
+// replaced rather than followed (secretFile.replace). It must run before
+// they are written.
+func linkNotes(list []*rewrite) []string {
 	var out []string
-	for _, p := range paths {
-		if n := securefile.OtherLinks(p); n > 0 {
+	for _, r := range list {
+		if !r.changed() {
+			continue
+		}
+		if r.replace {
+			if target, ok := linkTarget(r.path); ok {
+				out = append(out, replacedLinkNote(r.secretFile, target, r.old))
+				continue
+			}
+		}
+		if n := securefile.OtherLinks(r.path); n > 0 {
 			out = append(out, fmt.Sprintf("Note: %s has %d other %s (hard links), which still hold its old text, with the values as they were. "+
-				"Remove %s, or copy this file over %s.", p, n, plural(n, "name", "names"), plural(n, "it", "them"), plural(n, "it", "them")))
+				"Remove %s, or copy this file over %s.", r.path, n, plural(n, "name", "names"), plural(n, "it", "them"), plural(n, "it", "them")))
 		}
 	}
 	return out
+}
+
+// linkTarget returns the file a symbolic link at path points to, when
+// path is one.
+func linkTarget(path string) (string, bool) {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode().Type() != os.ModeSymlink {
+		return "", false
+	}
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		return target, true
+	}
+	target, _ := os.Readlink(path)
+	return target, true
+}
+
+// replacedLinkNote says that f, a link to target, is replaced by a file of
+// its own, and that target keeps old, its text, with any plain-text
+// values in it.
+func replacedLinkNote(f secretFile, target string, old []byte) string {
+	what := "the values as they were"
+	if n := plainIn(f, old); n > 0 {
+		what = fmt.Sprintf("%d %s as plain text", n, plural(n, "password or key", "passwords or keys"))
+	}
+	return fmt.Sprintf("Note: %s was a link to %s, and is now a file of its own; %s still holds the old text, with %s. "+
+		"Remove it, or copy %s over it.", f.path, target, target, what, f.path)
+}
+
+// plainIn counts the values stored as plain text in a file's text.
+func plainIn(f secretFile, data []byte) int {
+	list, _ := listSecrets(f, data)
+	n := 0
+	for _, s := range list {
+		if s.Value != "" && !secrets.IsSealed(s.Value) {
+			n++
+		}
+	}
+	return n
 }
 
 // madeKey says where a new master key was made.
@@ -391,12 +442,10 @@ func madeKey(c *config.Config, out io.Writer) {
 // rewrite is a file whose stored values change: n of them, and the text
 // from old to new.
 type rewrite struct {
-	path     string
+	secretFile
 	old, new []byte
 	n        int
 	pending  *securefile.Pending
-	// replace is true when a link at path is replaced, not followed.
-	replace bool
 }
 
 // changed reports whether the file's text changes.
@@ -460,7 +509,7 @@ func writeAll(list []*rewrite, key, undo func() error) error {
 		discard(todo[i+1:])
 		var stuck []string
 		for _, done := range todo[:i] {
-			if werr := (secretFile{path: done.path, replace: done.replace}).writeFile(done.old); werr != nil {
+			if werr := done.writeFile(done.old); werr != nil {
 				stuck = append(stuck, fmt.Sprintf("%s (%v)", done.path, werr))
 			}
 		}
@@ -531,7 +580,7 @@ func secretsEncrypt(c *config.Config, newKey bool, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
-		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n, replace: f.replace})
+		list = append(list, &rewrite{secretFile: f, old: data, new: next, n: n})
 	}
 	var key, undo func() error
 	// A new key is kept only when something was encrypted with it.
@@ -545,7 +594,7 @@ func secretsEncrypt(c *config.Config, newKey bool, out io.Writer) error {
 		}
 		undo = first.Undo
 	}
-	notes := linkNotes(changedPaths(list)...)
+	notes := linkNotes(list)
 	if err := writeAll(list, key, undo); err != nil {
 		return err
 	}
@@ -666,8 +715,9 @@ func secretsSet(c *config.Config, field string, newKey bool, in *os.File, out io
 	if err != nil {
 		return fmt.Errorf("%s: %w", c.Path(), err)
 	}
-	notes := linkNotes(c.Path())
-	if err := writeAll([]*rewrite{{path: c.Path(), old: data, new: next, n: 1}}, key, undo); err != nil {
+	list := []*rewrite{{secretFile: secretFile{path: c.Path(), reseal: config.ResealFile}, old: data, new: next, n: 1}}
+	notes := linkNotes(list)
+	if err := writeAll(list, key, undo); err != nil {
 		return err
 	}
 	if committed {
@@ -683,7 +733,11 @@ func secretsSet(c *config.Config, field string, newKey bool, in *os.File, out io
 	} else {
 		fmt.Fprintf(out, "Saved %s, encrypted, in %s.\n", field, c.Path())
 	}
-	fmt.Fprintln(out, "Restart the server to use it.")
+	if note := pageOverrides(c, field); note != "" {
+		fmt.Fprintln(out, note)
+	} else {
+		fmt.Fprintln(out, "Restart the server to use it.")
+	}
 	if env := secretEnv[field]; env != "" && os.Getenv(env) != "" {
 		fmt.Fprintf(out, "Note: %s is set in this environment; wherever it is set for the server, it is used instead of the file.\n", env)
 	}
@@ -691,6 +745,26 @@ func secretsSet(c *config.Config, field string, newKey bool, in *os.File, out io
 		fmt.Fprintln(out, n)
 	}
 	return nil
+}
+
+// pageOverrides says, when the Settings page has its own value for field,
+// that the server uses that one instead of the one "set" just saved in
+// signalith.yaml, even when it cannot be decrypted, and how to change
+// that; "" when the page has none, or one a restart set aside.
+func pageOverrides(c *config.Config, field string) string {
+	s, err := config.LoadSaved(c.Path())
+	if err != nil || s.Page == nil {
+		return ""
+	}
+	e := s.Page.Settings[field]
+	if e == nil || e.Refused != "" {
+		return ""
+	}
+	note := fmt.Sprintf("Note: %s is also set on the Settings page (in %s), and the server uses that one instead of the one in signalith.yaml", field, s.SettingsFile())
+	if s.PageSecretProblem(field) != "" {
+		note += "; it cannot be decrypted with this master key, so until it is removed the server runs without one"
+	}
+	return note + ".\nTo use the one just saved, remove it on the Settings page, or run: signalith settings reset " + field + "\nThen restart the server."
 }
 
 func secretsRotate(c *config.Config, out io.Writer) error {
@@ -730,9 +804,9 @@ func secretsRotate(c *config.Config, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
-		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n, replace: f.replace})
+		list = append(list, &rewrite{secretFile: f, old: data, new: next, n: n})
 	}
-	notes := linkNotes(changedPaths(list)...)
+	notes := linkNotes(list)
 	err = writeAll(list, func() error {
 		if err := r.Commit(); err != nil {
 			return err
@@ -874,8 +948,9 @@ func secretsDecrypt(c *config.Config, out io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f.path, err)
 		}
-		list = append(list, &rewrite{path: f.path, old: data, new: next, n: n, replace: f.replace})
+		list = append(list, &rewrite{secretFile: f, old: data, new: next, n: n})
 	}
+	notes := linkNotes(list)
 	if err := writeAll(list, nil, nil); err != nil {
 		return err
 	}
@@ -885,6 +960,9 @@ func secretsDecrypt(c *config.Config, out io.Writer) error {
 			fmt.Fprintf(out, "Decrypted %d %s in %s\n", r.n, plural(r.n, "value", "values"), r.path)
 			total += r.n
 		}
+	}
+	for _, n := range notes {
+		fmt.Fprintln(out, n)
 	}
 	if total == 0 {
 		fmt.Fprintln(out, "Nothing to decrypt.")
@@ -934,10 +1012,20 @@ func encryptStores(c *config.Config, log *slog.Logger) {
 		if n == 0 {
 			continue
 		}
+		target, link := "", false
+		if f.replace {
+			target, link = linkTarget(f.path)
+		}
 		if err := f.writeFile(next); err != nil {
 			log.Warn("could not encrypt the passwords and keys in a file; they stay as they are until it can be written", "file", f.path, "err", err)
 			continue
 		}
 		log.Info("encrypted the passwords and keys stored in a file", "file", f.path, "values", n)
+		if link {
+			// The link was replaced by the encrypted file; the file it
+			// pointed to keeps the values as they were.
+			log.Warn("the file was a link, and is now a file of its own; the file it pointed to still holds the old text, "+
+				"with the values as they were (plain_values of them as plain text): remove it", "file", f.path, "link_target", target, "plain_values", plainIn(f, data))
+		}
 	}
 }

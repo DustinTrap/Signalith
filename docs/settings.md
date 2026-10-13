@@ -68,7 +68,11 @@ Docker), never to `signalith.yaml`, which is often read-only. Set
 The file holds only the settings changed on the page, each with who changed it and
 when, when a restart last checked it (`checked_at`), and for a change a restart set
 aside, why (`refused`). Signalith rewrites it whole on every save, through a
-temporary file and a rename, readable only by its own account (mode 0600). The
+temporary file and a rename, readable only by its own account: mode 0600, even
+when the file it replaces allowed more (on Windows, only SYSTEM, Administrators,
+the service account and the account that saved it). A link put in its place is
+replaced by the new file, and the file it pointed to is left as it was, with
+whatever it held; `signalith secrets` and the server's log say so. The
 OpenSearch password and the AI model's API key saved on the page are kept in it
 encrypted with Signalith's master key (`enc:v1:...`, see
 [encryption.md](encryption.md)); one kept as plain text, as earlier versions did,
@@ -239,8 +243,13 @@ docker compose -f deploy/docker/docker-compose.yml restart signalith
 The OpenSearch password and the AI assistant's API key are never shown or sent back
 to the browser; the page only says whether one is set.
 
-- A saved one shows as **Saved, hidden**. **Replace** opens a box to type a new
-  one (**Keep saved** closes it again), and **Remove** removes it when you save.
+- One saved on the page shows as **Saved encrypted, hidden**, and one from
+  `signalith.yaml` as **Saved, hidden**. **Replace** opens a box to type a new one
+  (**Keep saved** closes it again), and **Remove** removes it when you save.
+- One saved on the page that cannot be decrypted (the master key it was saved with
+  is not there) is not used: its field says so, with what to do. Enter it again,
+  or restore that master key. When OpenSearch refuses Signalith without it, a
+  restart says why and sets none of the page's settings aside.
 - A password is only ever sent to the address it was entered for (its scheme, host
   and port). To point Signalith at another OpenSearch or AI provider, enter the
   password or key again, or clear it; the page refuses to save otherwise. A password

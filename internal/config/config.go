@@ -71,8 +71,10 @@ type Config struct {
 	feedLocked map[string][]string
 	// pageUnreadable lists the passwords and keys saved on the Settings
 	// page that cannot be decrypted, with what to do, and pageLocked their
-	// settings, with what the page says about each. See applyPage.
-	pageUnreadable []string
+	// settings, with what the page says about each. See applyPage. A copy
+	// of a Config shares them: they are replaced, never changed in place
+	// (see copyPageProblem).
+	pageUnreadable []pageProblem
 	pageLocked     map[string]string
 	// keys holds the master key; see Keyring.
 	keys *secrets.Keyring

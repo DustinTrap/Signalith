@@ -78,8 +78,10 @@ read encrypted values: before going back to one, run `sudo signalith secrets dec
    the script and run it again: it stops the service, replaces the program, encrypts passwords an
    older version kept as plain text, moves the service off LocalSystem and starts it again. An
    archive folder outside `C:\ProgramData\Signalith` (`retention.archive_dir`) is given to the new
-   account too, and certificate and key files named in `signalith.yaml` (`server.tls_cert`,
-   `opensearch.ca_file` and the like) can be read by it; the script says which. Before going back
+   account too, and certificate and key files named in `signalith.yaml` or on the **Settings** page
+   (`server.tls_cert`, `opensearch.ca_file` and the like) can be read by it; the script says which.
+   After naming one outside `C:\ProgramData\Signalith` on the page later, run `signalith service install`
+   again, as Administrator, so the service may read it. Before going back
    to an older version, run `signalith secrets decrypt` (see
    [docs/encryption.md](docs/encryption.md#going-back-to-an-older-version)).
 

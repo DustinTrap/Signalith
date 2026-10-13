@@ -99,4 +99,14 @@ func TestPrivateAccessList(t *testing.T) {
 	if b, _ := os.ReadFile(g); string(b) != "{ }" {
 		t.Errorf("content %q", b)
 	}
+	// Replace makes a file private whatever its list allowed, such as one
+	// that inherits its folder's.
+	h := filepath.Join(t.TempDir(), "settings.yaml")
+	if err := os.WriteFile(h, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Replace(h, []byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	checkPrivate(t, h)
 }

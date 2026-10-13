@@ -97,8 +97,9 @@ Invoke-Checked "signalith validate" { & $exe validate -c $config }
 # Creates the service, or updates one installed before (older versions ran
 # as LocalSystem), to run as NT SERVICE\Signalith and restart after a
 # failure. It also gives that account the data folders signalith.yaml
-# names outside this folder, such as an archive on another disk, and read
-# access to the certificate and key files it names.
+# names outside this folder, such as an archive on another disk, and the
+# folder of the Settings page's file, and read access to the certificate
+# and key files that signalith.yaml or the Settings page names.
 Invoke-Checked "signalith service install" { & $exe service install -c $config }
 # Waits until the service runs, and stops here, naming the log, if it
 # stops again instead.

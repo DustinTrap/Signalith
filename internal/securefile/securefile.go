@@ -7,7 +7,8 @@
 // own instead, not inherited from the folder above: full control for
 // SYSTEM, Administrators, the Signalith service account (NT
 // SERVICE\Signalith) and the account that made it, and nobody else. A file
-// that is replaced keeps its mode, owner and access list. A symbolic link
+// that is replaced keeps its mode, owner and access list (Replace and
+// PreparePrivate make it private all the same). A symbolic link
 // is followed: the file it points to is replaced and the link stays. Run
 // as root, a link made by another account is refused instead, since the
 // account the server runs as could otherwise point one of its own files
@@ -73,7 +74,10 @@ func PreparePrivate(path string, data []byte) (*Pending, error) { return prepare
 // of its own, such as the Settings page's settings.yaml: a symbolic link
 // at path is replaced by the new file instead of followed, so the file it
 // points to is left as it is, and the new file is made as a new one is
-// (private, and run as root, owned by the folder's owner).
+// (private, and run as root, owned by the folder's owner). A file it
+// replaces keeps its owner but is made private whatever it allowed, as
+// PreparePrivate does: mode 0600, or on Windows the protected access list
+// of a new file.
 func Replace(path string, data []byte) error {
 	p, err := PrepareReplace(path, data)
 	if err != nil {
@@ -83,9 +87,9 @@ func Replace(path string, data []byte) error {
 }
 
 // PrepareReplace is Prepare for Replace: a symbolic link at path is
-// replaced, not followed.
+// replaced, not followed, and the new file is private.
 func PrepareReplace(path string, data []byte) (*Pending, error) {
-	return prepareAt(path, data, false, false)
+	return prepareAt(path, data, true, false)
 }
 
 func prepare(path string, data []byte, private bool) (*Pending, error) {

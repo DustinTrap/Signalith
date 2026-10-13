@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -205,11 +206,16 @@ func (c *Config) openSecrets() {
 // them; Warnings include them.
 func (c *Config) Unreadable() []string { return c.unreadable }
 
+// pageProblem is a secret saved on the Settings page that cannot be
+// decrypted: its setting, and what Warnings say about it.
+type pageProblem struct{ key, text string }
+
 // pageCannotOpen records that the secret saved on the Settings page for
 // key cannot be decrypted (err), so it is left out.
 func (c *Config) pageCannotOpen(key string, err error) {
 	what := strings.Replace(err.Error(), pageField(key), key, 1)
-	c.pageUnreadable = append(c.pageUnreadable, what+". Enter it again on the Settings page, or remove it there or with: signalith settings reset "+key)
+	c.pageUnreadable = append(c.pageUnreadable, pageProblem{key: key,
+		text: what + ". Enter it again on the Settings page, or remove it there or with: signalith settings reset " + key})
 	field := "It cannot be decrypted with this server's master key, so it is not used. Enter it again, or reset it."
 	var oe *secrets.OpenError
 	if errors.As(err, &oe) {
@@ -233,7 +239,43 @@ func (c *Config) pageCannotOpen(key string, err error) {
 // PageUnreadable lists the passwords and keys saved on the Settings page
 // that cannot be decrypted, each with what to do about it. The server runs
 // without them; Warnings include them.
-func (c *Config) PageUnreadable() []string { return c.pageUnreadable }
+func (c *Config) PageUnreadable() []string {
+	var out []string
+	for _, p := range c.pageUnreadable {
+		out = append(out, p.text)
+	}
+	return out
+}
+
+// copyPageProblem makes what c says about the secret saved on the
+// Settings page for key, whether it can be decrypted, what from says: a
+// value copied from from (CopyValue) brings that with it. The lists are
+// replaced, not changed in place, since a copy of c may share them.
+func (c *Config) copyPageProblem(key string, from *Config) {
+	if c.pageLocked[key] == "" && from.pageLocked[key] == "" {
+		return
+	}
+	var list []pageProblem
+	for _, p := range c.pageUnreadable {
+		if p.key != key {
+			list = append(list, p)
+		}
+	}
+	for _, p := range from.pageUnreadable {
+		if p.key == key {
+			list = append(list, p)
+		}
+	}
+	locked := maps.Clone(c.pageLocked)
+	delete(locked, key)
+	if msg := from.pageLocked[key]; msg != "" {
+		if locked == nil {
+			locked = map[string]string{}
+		}
+		locked[key] = msg
+	}
+	c.pageUnreadable, c.pageLocked = list, locked
+}
 
 // PageSecretProblem says, for the Settings page's field of key, why the
 // secret saved there cannot be used: it cannot be decrypted. "" when it
@@ -287,7 +329,7 @@ func (c *Config) secretWarnings() []string {
 		w = append(w, "In signalith.yaml, "+u+". Signalith runs without it until then.")
 	}
 	for _, u := range c.pageUnreadable {
-		w = append(w, "On the Settings page ("+c.SettingsFile()+"), "+u+". Signalith runs without it until then.")
+		w = append(w, "On the Settings page ("+c.SettingsFile()+"), "+u.text+". Signalith runs without it until then.")
 	}
 	if n := len(c.plain); n > 0 {
 		what := "passwords or keys in signalith.yaml are"

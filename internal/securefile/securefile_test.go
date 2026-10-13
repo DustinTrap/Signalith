@@ -157,7 +157,7 @@ func TestWriteFileFollowsLinks(t *testing.T) {
 }
 
 // Replace puts a new file in place of a link and leaves the file the link
-// points to alone; a file it replaces keeps its permissions.
+// points to alone; a file it replaces is made private, whatever it allowed.
 func TestReplaceReplacesLinks(t *testing.T) {
 	dir := t.TempDir()
 	other := filepath.Join(dir, "other.yaml")
@@ -183,12 +183,12 @@ func TestReplaceReplacesLinks(t *testing.T) {
 		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
 			t.Errorf("new file mode %v, want 0600", st.Mode().Perm())
 		}
-		os.Chmod(p, 0o640)
+		os.Chmod(p, 0o644)
 		if err := Replace(p, []byte("two")); err != nil {
 			t.Fatal(err)
 		}
-		if st, _ := os.Stat(p); st.Mode().Perm() != 0o640 {
-			t.Errorf("replaced file mode %v, want 0640", st.Mode().Perm())
+		if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+			t.Errorf("replaced file mode %v, want 0600", st.Mode().Perm())
 		}
 	}
 	// Nothing is written until Commit.

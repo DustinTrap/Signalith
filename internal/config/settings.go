@@ -394,7 +394,9 @@ func (c *Config) SetValue(key string, val any) error {
 }
 
 // CopyValue sets a setting in c to its value in from. The live settings
-// saved on the page reach the running server this way.
+// saved on the page reach the running server this way. A secret saved on
+// the page brings whether it could be decrypted with it, so Warnings and
+// the Settings page stop reporting one entered again.
 func (c *Config) CopyValue(key string, from *Config) error {
 	src, ok := field(from, key)
 	if !ok {
@@ -405,6 +407,7 @@ func (c *Config) CopyValue(key string, from *Config) error {
 	if key == "server.public_url" {
 		c.publicURLDerived = from.publicURLDerived
 	}
+	c.copyPageProblem(key, from)
 	return nil
 }
 

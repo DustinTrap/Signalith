@@ -165,11 +165,11 @@ Master key:    /var/lib/signalith/keys/master.key, key id 9096cd23
 ```
 
 A command run by hand does not see the settings the service is given, so
-`signalith secrets`, `signalith validate` and `signalith init` read them: on Linux
-the systemd unit's `Environment=`, `EnvironmentFile=` and `LoadCredential=` lines,
-and on Windows the Signalith service's `Environment` value in the registry. They
-find the server's files and key that way (only folders, files and the master key
-are taken, never other settings).
+`signalith secrets`, `signalith settings`, `signalith validate` and `signalith init`
+read them: on Linux the systemd unit's `Environment=`, `EnvironmentFile=` and
+`LoadCredential=` lines, and on Windows the Signalith service's `Environment` value
+in the registry. They find the server's files and key that way (only folders,
+files and the master key are taken, never other settings).
 
 #### Keeping the key elsewhere
 
@@ -310,7 +310,10 @@ server keeps running. Enter them again:
   used. Its field on the Settings page, the server log, `signalith validate` and
   the **Health** page say so. Enter it again on the Settings page, or take it off
   the page there (or with `signalith settings reset opensearch.password`) to use
-  the one in `signalith.yaml` again.
+  the one in `signalith.yaml` again: `signalith secrets set` writes only
+  `signalith.yaml`, and says when the page has its own, which is used instead. When
+  OpenSearch refuses Signalith without it, a restart says why and sets none of the
+  page's settings aside.
 - **Directory sign-in** keeps running but cannot search for users until you enter
   the service account password again on the **Users** page, under **Directory
   sign-in**. The **Health** page and the log say so. Signalith does not try a wrong
@@ -391,7 +394,9 @@ and `& "$env:ProgramFiles\Signalith\signalith.exe" secrets decrypt`, then the ol
 version's `install.ps1`. In Docker, run `docker compose stop signalith` and the
 `secrets decrypt` command the way [Docker](#docker) shows, then build the older
 version. If you skip this, enter the directory password and feed keys again in the
-older version, or restore the files from a backup made before the upgrade. Going
+older version, and the OpenSearch password and AI API key saved on the **Settings**
+page (an older version with that page would send their encrypted text as they
+are), or restore the files from a backup made before the upgrade. Going
 forward again needs nothing: the new version encrypts them again.
 
 ### Disk encryption

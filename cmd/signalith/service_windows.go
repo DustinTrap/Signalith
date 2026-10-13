@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -245,8 +244,8 @@ func installService(m *mgr.Mgr, path string) error {
 	}
 	_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
 	sid := securefile.ServiceSID(serviceName)
-	// The folders and files signalith.yaml names, as the service sees
-	// them (with the environment it is given).
+	// The folders and files signalith.yaml and the Settings page name, as
+	// the service sees them (with the environment it is given).
 	applyServiceEnv(abs)
 	access := serviceAccess(abs)
 	for _, dir := range access.write {
@@ -256,7 +255,7 @@ func installService(m *mgr.Mgr, path string) error {
 	}
 	for _, f := range access.read {
 		if err := grantAccess(f, sid, readAccess, false); err != nil {
-			fmt.Printf("Warning: %s may not be able to read %s, which signalith.yaml names (%v). Run: icacls \"%s\" /grant \"*%s:RX\"\n", serviceAccount, f, err, f, sid)
+			fmt.Printf("Warning: %s may not be able to read %s, which signalith.yaml or the Settings page names (%v). Run: icacls \"%s\" /grant \"*%s:RX\"\n", serviceAccount, f, err, f, sid)
 		}
 	}
 	fmt.Printf("%s the %s service using %s.\n", verb, serviceName, abs)
@@ -270,71 +269,6 @@ func installService(m *mgr.Mgr, path string) error {
 
 // readAccess is the "Read & execute" right on a file.
 const readAccess windows.ACCESS_MASK = 0x1200A9
-
-// serviceFiles are the folders the service writes to and the files it
-// reads, outside the config folder.
-type serviceFiles struct {
-	// write are the folders to give the service Modify on: the config
-	// file's folder and every data folder that exists (lookups,
-	// detections, dashboards, archive, state and its keys), each one
-	// itself, since a folder an older version made may have an access
-	// list of its own that the config folder's does not reach. shown
-	// lists the top ones, for people.
-	write, shown []string
-	// read are files the service reads outside those folders, such as a
-	// TLS certificate and key kept in an administrators' folder.
-	read []string
-}
-
-// serviceAccess works out what the service needs, from the config file.
-func serviceAccess(configPath string) serviceFiles {
-	top := filepath.Dir(configPath)
-	out := serviceFiles{write: []string{top}, shown: []string{top}}
-	c, err := config.LoadUnchecked(configPath)
-	if err != nil {
-		return out
-	}
-	inside := func(p string, dirs []string) bool {
-		for _, have := range dirs {
-			if rel, err := filepath.Rel(have, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return true
-			}
-		}
-		return false
-	}
-	folders := []string{c.StateDir(), filepath.Join(c.StateDir(), "keys"), c.LookupsDir(), c.DetectionsDir(), c.DashboardsDir(), c.ArchiveDir(),
-		filepath.Dir(c.UsersFile()), filepath.Dir(c.IntelFeedsFile())}
-	for _, d := range folders {
-		if d == "" || slices.ContainsFunc(out.write, func(have string) bool { return strings.EqualFold(have, d) }) {
-			continue
-		}
-		if st, err := os.Stat(d); err != nil || !st.IsDir() {
-			continue
-		}
-		if !inside(d, out.shown) {
-			out.shown = append(out.shown, d)
-		}
-		out.write = append(out.write, d)
-	}
-	ca, cert, key := c.OpenSearchTLSFiles()
-	files := []string{c.Server.TLSCert, c.Server.TLSKey, ca, cert, key}
-	if c.Auth.LDAP != nil && c.Auth.LDAP.CACertFile != "" {
-		files = append(files, c.Auth.LDAP.CACertFile)
-	}
-	for _, f := range files {
-		if f == "" {
-			continue
-		}
-		if !filepath.IsAbs(f) {
-			f = filepath.Join(top, f)
-		}
-		if _, err := os.Stat(f); err != nil || inside(f, out.write) || slices.Contains(out.read, f) {
-			continue
-		}
-		out.read = append(out.read, f)
-	}
-	return out
-}
 
 // grantAccess adds rights for sid to a file's or folder's access list
 // (inherited by what is in a folder when inherit is set), keeping the

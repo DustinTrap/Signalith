@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
 	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -72,15 +78,32 @@ func TestSecretsCommandsCoverTheSettingsPage(t *testing.T) {
 		t.Errorf("load after rotate: %v", err)
 	}
 
+	// One others can read, such as one copied in by hand, is made private
+	// when it is written again.
+	if runtime.GOOS != "windows" {
+		os.WriteFile(file, []byte(page), 0o644)
+		os.Chmod(file, 0o644)
+		if out, err := runCmd(t, "", "encrypt", "-c", path); err != nil || !strings.Contains(out, "Encrypted 1 value in "+file) {
+			t.Fatalf("encrypt over a 0644 file (%v):\n%s", err, out)
+		}
+		if st, _ := os.Stat(file); st.Mode().Perm() != 0o600 {
+			t.Errorf("mode after encrypting a 0644 file: %v", st.Mode().Perm())
+		}
+	}
+
 	// A link in place of settings.yaml is replaced; the file it points to
-	// is left as it is.
+	// is left as it is, and the command says it still holds the plain
+	// value.
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere.yaml")
 	os.WriteFile(elsewhere, []byte(page), 0o644)
 	os.Remove(file)
 	if err := os.Symlink(elsewhere, file); err != nil {
 		t.Skip("cannot make links here:", err)
 	}
-	if out, err := runCmd(t, "", "encrypt", "-c", path); err != nil || !strings.Contains(out, "Encrypted 1 value in "+file) {
+	target, _ := filepath.EvalSymlinks(elsewhere)
+	out, err = runCmd(t, "", "encrypt", "-c", path)
+	if err != nil || !strings.Contains(out, "Encrypted 1 value in "+file) ||
+		!strings.Contains(out, "Note: "+file+" was a link to "+target+", and is now a file of its own; "+target+" still holds the old text, with 1 password or key as plain text.") {
 		t.Fatalf("encrypt through a link (%v):\n%s", err, out)
 	}
 	if fi, err := os.Lstat(file); err != nil || fi.Mode()&fs.ModeSymlink != 0 {
@@ -88,6 +111,55 @@ func TestSecretsCommandsCoverTheSettingsPage(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(elsewhere); string(b) != page {
 		t.Errorf("the file the link pointed to changed:\n%s", b)
+	}
+}
+
+// "secrets set" writes signalith.yaml, which a value saved on the Settings
+// page overrides: it says so, also when that one cannot be decrypted, so a
+// restart is not expected to use the new value.
+func TestSecretsSetNamesThePageValue(t *testing.T) {
+	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
+	path, lookups := secretsSetup(t)
+	file := filepath.Join(lookups, "settings.yaml")
+	write := func(secret, extra string) {
+		t.Helper()
+		body := "settings:\n  opensearch.password:\n    secret: " + secret + "\n    sent_to: https://os.lab.example.com:9200\n" + extra
+		if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("page-pw", "")
+	out, err := runCmd(t, "new-file-pw\n", "set", "opensearch.password", "-c", path)
+	if err != nil || !strings.Contains(out, "Note: opensearch.password is also set on the Settings page (in "+file+"), and the server uses that one instead of the one in signalith.yaml.\n") ||
+		!strings.Contains(out, "signalith settings reset opensearch.password") || strings.Contains(out, "Restart the server to use it.") {
+		t.Errorf("set with a page value (%v):\n%s", err, out)
+	}
+	if c, err := config.Load(path); err != nil || c.OpenSearch.Password != "page-pw" {
+		t.Errorf("load: %v", err)
+	}
+
+	// One that cannot be decrypted still overrides signalith.yaml.
+	other := secrets.NewKeyring(t.TempDir())
+	sealed, err := other.Seal("settings.opensearch.password", "lost-pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(sealed, "")
+	out, err = runCmd(t, "newer-file-pw\n", "set", "opensearch.password", "-c", path)
+	if err != nil || !strings.Contains(out, "it cannot be decrypted with this master key, so until it is removed the server runs without one") {
+		t.Errorf("set with an unreadable page value (%v):\n%s", err, out)
+	}
+
+	// One a restart set aside is not used: no note.
+	write("page-pw", "    refused: OpenSearch did not answer\n")
+	out, err = runCmd(t, "newest-file-pw\n", "set", "opensearch.password", "-c", path)
+	if err != nil || strings.Contains(out, "Settings page") || !strings.Contains(out, "Restart the server to use it.") {
+		t.Errorf("set with a page value set aside (%v):\n%s", err, out)
+	}
+	// Nor for a setting the page does not have.
+	out, err = runCmd(t, "sk-new\n", "set", "assistant.api_key", "-c", path)
+	if err != nil || strings.Contains(out, "Settings page") || !strings.Contains(out, "Restart the server to use it.") {
+		t.Errorf("set assistant.api_key (%v):\n%s", err, out)
 	}
 }
 
@@ -114,6 +186,30 @@ func TestStartupEncryptsPageSecrets(t *testing.T) {
 	}
 	if c, err := config.Load(path); err != nil || c.OpenSearch.Password != "by-hand-pw" {
 		t.Errorf("load after: %v", err)
+	}
+	if st, _ := os.Stat(file); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v", st.Mode().Perm())
+	}
+
+	// A link in place of settings.yaml is replaced by the encrypted file,
+	// and the log says the file it pointed to still holds the plain value.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.yaml")
+	os.WriteFile(elsewhere, []byte("settings:\n  opensearch.password:\n    secret: by-hand-pw\n    sent_to: https://os.lab.example.com:9200\n"), 0o600)
+	os.Remove(file)
+	if err := os.Symlink(elsewhere, file); err != nil {
+		t.Skip("cannot make links here:", err)
+	}
+	encryptStores(c, log)
+	if fi, err := os.Lstat(file); err != nil || fi.Mode()&fs.ModeSymlink != 0 {
+		t.Errorf("the link is still there: %v", err)
+	}
+	if b, _ := os.ReadFile(elsewhere); !strings.Contains(string(b), "by-hand-pw") {
+		t.Errorf("the file the link pointed to changed:\n%s", b)
+	}
+	target, _ := filepath.EvalSymlinks(elsewhere)
+	if l := logs.String(); !strings.Contains(l, "the file was a link, and is now a file of its own") ||
+		!strings.Contains(l, "link_target="+target) || !strings.Contains(l, "plain_values=1") {
+		t.Errorf("log:\n%s", l)
 	}
 }
 
@@ -267,5 +363,149 @@ func TestRestartSetsUpTheMasterKey(t *testing.T) {
 	}
 	if !rs.signedIn("") {
 		t.Error("signed out by the restarts")
+	}
+}
+
+// newLockedOpenSearch is a fake OpenSearch that refuses requests without
+// the password pw.
+func newLockedOpenSearch(t *testing.T, pw string) *httptest.Server {
+	t.Helper()
+	inner := newFakeOpenSearch(t)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, p, ok := r.BasicAuth(); !ok || p != pw {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			io.WriteString(w, `{"error":"Unauthorized"}`)
+			return
+		}
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+// lockPageSecret replaces the secret saved on the Settings page for key
+// with one encrypted with another master key, as after "secrets
+// rotate-master" while the server still has the previous one, and returns
+// a function that puts the readable one back.
+func lockPageSecret(t *testing.T, file, key string) func() {
+	t.Helper()
+	p, err := config.ReadPageSettings(file)
+	if err != nil || p.Settings[key] == nil || p.Settings[key].Secret == nil {
+		t.Fatalf("no %s in %s: %v", key, file, err)
+	}
+	was := *p.Settings[key].Secret
+	sealed, err := secrets.NewKeyring(t.TempDir()).Seal("settings."+key, "page-pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Settings[key].Secret = &sealed
+	if err := config.WritePageSettings(file, p); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		t.Helper()
+		p, err := config.ReadPageSettings(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Settings[key].Secret = &was
+		if err := config.WritePageSettings(file, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A restart in place that OpenSearch refuses because the password saved
+// on the Settings page cannot be decrypted says so, and sets nothing
+// aside: once the master key is back, the password is used again.
+func TestRestartDoesNotSetAsideAnUnreadablePagePassword(t *testing.T) {
+	rs := startRunner(t, nil, nil)
+	locked := newLockedOpenSearch(t, "page-pw")
+	file := filepath.Join(filepath.Dir(rs.r.path), "lookups", "settings.yaml")
+	rs.save(`{"opensearch.url":"` + locked.URL + `","opensearch.username":"signalith","opensearch.password":"page-pw"}`)
+	if _, res := rs.restart(); !res.OK {
+		t.Fatalf("restart with the page's password %+v\n%s", res, rs.logs.String())
+	}
+	unlock := lockPageSecret(t, file, "opensearch.password")
+	_, res := rs.restart()
+	if res.OK || !strings.Contains(res.Error, "OpenSearch did not answer with the new settings") ||
+		!strings.Contains(res.Error, "But the opensearch.password saved on the Settings page cannot be used, which may be why.") ||
+		len(res.Refused) != 0 || strings.Join(res.ProblemKeys, ",") != "opensearch.password" {
+		t.Fatalf("restart without the password %+v", res)
+	}
+	if data, _ := os.ReadFile(file); strings.Contains(string(data), "refused") {
+		t.Errorf("settings.yaml has something set aside:\n%s", data)
+	}
+	if !rs.signedIn("") {
+		t.Error("the server stopped answering")
+	}
+	unlock()
+	c, err := config.Load(rs.r.path)
+	if err != nil || c.OpenSearch.URL != locked.URL || c.OpenSearch.Password != "page-pw" || len(c.Refused()) != 0 {
+		t.Errorf("with the key back: %v %s %d", err, c.OpenSearch.URL, len(c.Refused()))
+	}
+}
+
+// At startup, the OpenSearch settings saved on the page are not set aside
+// when OpenSearch refuses them only because their password cannot be
+// decrypted: the next start with the master key back uses them all.
+func TestStartupCheckKeepsAnUnreadablePagePassword(t *testing.T) {
+	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
+	t.Setenv("SIGNALITH_OPENSEARCH_URL", "")
+	t.Setenv("SIGNALITH_OPENSEARCH_PASSWORD", "")
+	bootCheckTimeout = 2 * time.Second
+	t.Cleanup(func() { bootCheckTimeout = 10 * time.Second })
+	old := newFakeOpenSearch(t)
+	locked := newLockedOpenSearch(t, "page-pw")
+	dir := t.TempDir()
+	h, _ := config.HashPassword("s3cret-pass")
+	path := filepath.Join(dir, "signalith.yaml")
+	os.WriteFile(path, []byte("opensearch:\n  url: "+old.URL+"\n  username: signalith\nauth:\n  admin_password_hash: "+h+"\n"), 0o600)
+	sealed, err := secrets.NewKeyring(t.TempDir()).Seal("settings.opensearch.password", "page-pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "lookups", "settings.yaml")
+	os.MkdirAll(filepath.Dir(file), 0o750)
+	os.WriteFile(file, []byte("settings:\n  opensearch.url:\n    value: "+locked.URL+"\n  opensearch.password:\n    secret: "+sealed+"\n    sent_to: "+locked.URL+"\n"), 0o600)
+	c, err := config.Load(path)
+	if err != nil || c.PageSecretProblem("opensearch.password") == "" {
+		t.Fatalf("load: %v", err)
+	}
+	r := newRunner(path, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := r.checkPageOpenSearch(context.Background(), c); got != c {
+		t.Error("the page's OpenSearch settings were replaced")
+	}
+	if data, _ := os.ReadFile(file); strings.Contains(string(data), "refused") {
+		t.Errorf("settings.yaml has something set aside:\n%s", data)
+	}
+	if c, err := config.Load(path); err != nil || c.OpenSearch.URL != locked.URL || len(c.Refused()) != 0 {
+		t.Errorf("next start: %v", err)
+	}
+}
+
+// A start that fails does not blame a password saved on the page that
+// cannot be decrypted, which is not in use.
+func TestBlameLeavesOutUnreadablePageSecrets(t *testing.T) {
+	t.Setenv("SIGNALITH_SETTINGS_FILE", "")
+	t.Setenv("SIGNALITH_OPENSEARCH_PASSWORD", "")
+	dir := t.TempDir()
+	h, _ := config.HashPassword("s3cret-pass")
+	path := filepath.Join(dir, "signalith.yaml")
+	os.WriteFile(path, []byte("opensearch:\n  url: https://os.example:9200\n  password: file-pw\nauth:\n  admin_password_hash: "+h+"\n"), 0o600)
+	sealed, _ := secrets.NewKeyring(t.TempDir()).Seal("settings.opensearch.password", "page-pw")
+	file := filepath.Join(dir, "lookups", "settings.yaml")
+	os.MkdirAll(filepath.Dir(file), 0o750)
+	os.WriteFile(file, []byte("settings:\n  opensearch.index_prefix:\n    value: other\n  opensearch.password:\n    secret: "+sealed+"\n    sent_to: https://os.example:9200\n"), 0o600)
+	c, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(blame(errors.New("no start"), c), ","); got != "opensearch.index_prefix" {
+		t.Errorf("blame = %s", got)
+	}
+	if got := blame(keyed(errors.New("refused"), "opensearch.password"), c); len(got) != 1 || got[0] != "opensearch.index_prefix" {
+		t.Errorf("blame for the password = %v", got)
 	}
 }

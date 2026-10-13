@@ -104,3 +104,49 @@ func TestUnreadablePageSecretIsReported(t *testing.T) {
 		t.Error("the settings view shows the stored value")
 	}
 }
+
+// A key saved on the Settings page that cannot be decrypted and is then
+// entered again on the page goes into use at once, and Health stops
+// saying it cannot be decrypted.
+func TestReenteredPageSecretIsNoLongerReported(t *testing.T) {
+	other := secrets.NewKeyring(t.TempDir())
+	sealed, err := other.Seal("settings.assistant.api_key", "lost-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, srv, _ := newSettingsServer(t, "assistant:\n  provider: openai\n  url: http://127.0.0.1:11434/v1\n  model: llama3.1\n", func(s *Server) {
+		file := s.Config.SettingsFile()
+		os.MkdirAll(filepath.Dir(file), 0o750)
+		if err := os.WriteFile(file, []byte("settings:\n  assistant.api_key:\n    secret: "+sealed+"\n    sent_to: http://127.0.0.1:11434\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(s.Config.Path())
+		if err != nil || cfg.PageSecretProblem("assistant.api_key") == "" {
+			t.Fatalf("load: %v", err)
+		}
+		s.Config = cfg
+	})
+	before := srv.conf()
+	_, body := do(t, ts, "GET", "/api/health", "", true)
+	if w := fmt.Sprint(body["warnings"]); !strings.Contains(w, "assistant.api_key is encrypted with master key "+other.KeyID()) {
+		t.Fatalf("health before:\n%s", w)
+	}
+	code, out, _ := call(t, ts, "PUT", "/api/settings", `{"values":{"assistant.api_key":"sk-new-key"}}`, "admin", "s3cret-pass", nil)
+	if code != 200 || !strings.Contains(fmt.Sprint(out["applied"]), "assistant.api_key") {
+		t.Fatalf("save %d %v", code, out)
+	}
+	if got := srv.conf().Assistant.APIKey; got != "sk-new-key" {
+		t.Errorf("key in use %q", got)
+	}
+	_, body = do(t, ts, "GET", "/api/health", "", true)
+	if w := fmt.Sprint(body["warnings"]); strings.Contains(w, "assistant.api_key") {
+		t.Errorf("health after entering it again:\n%s", w)
+	}
+	if srv.conf().PageSecretProblem("assistant.api_key") != "" || len(srv.conf().PageUnreadable()) != 0 {
+		t.Errorf("still reported: %v", srv.conf().PageUnreadable())
+	}
+	// The config it replaced is left as it was.
+	if before.PageSecretProblem("assistant.api_key") == "" || len(before.PageUnreadable()) != 1 {
+		t.Errorf("the previous config changed: %v", before.PageUnreadable())
+	}
+}

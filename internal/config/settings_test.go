@@ -510,6 +510,18 @@ func TestWritePageSettingsIsPrivate(t *testing.T) {
 	if len(entries) != 1 {
 		t.Errorf("files: %v", entries)
 	}
+	// One that others can read, such as one copied in by hand, is made
+	// private by the next save.
+	if runtime.GOOS != "windows" {
+		os.Chmod(file, 0o644)
+		p.Set("search.max_events", 20, "alice", time.Now())
+		if err := WritePageSettings(file, p); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("mode after saving over a 0644 file %v %v", fi.Mode(), err)
+		}
+	}
 }
 
 func TestProblemKeysAndPlainProblem(t *testing.T) {
