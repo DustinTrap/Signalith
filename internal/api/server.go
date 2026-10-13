@@ -896,10 +896,37 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if p := s.dir().Problem(); p != "" {
 		warnings = append(warnings, p)
 	}
+	if w := s.behindWarning(time.Now()); w != "" {
+		warnings = append(warnings, w)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// behindWarning names the detections falling behind their schedule
+// (see detect.Behind), on the server that runs them; "" when none are.
+func (s *Server) behindWarning(now time.Time) string {
+	if s.Scheduler == nil || s.Detections == nil || !s.conf().Detections.Scheduler || (s.Cluster != nil && !s.Cluster.RunsJobs()) {
+		return ""
+	}
+	states := s.Scheduler.Status()
+	var late []string
+	for _, d := range s.Detections.List() {
+		if detect.Behind(d, states[d.ID], now) {
+			late = append(late, d.ID)
+		}
+	}
+	if len(late) == 0 {
+		return ""
+	}
+	if len(late) > 10 {
+		late = append(late[:10], fmt.Sprintf("%d more", len(late)-10))
+	}
+	return "Detections are running behind schedule. " + joinAnd(late) + " waited more than their schedule interval for a free worker, " +
+		"because slower detections held every worker. Each run searches on from where the last one stopped, up to a limit, so events are not skipped, " +
+		"but findings arrive late. On the Detections page, narrow or reschedule the slow or timed-out detections."
 }
 
 // tlsInfo says how Signalith serves HTTPS, the names its certificate

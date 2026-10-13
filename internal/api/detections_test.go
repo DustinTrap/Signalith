@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDetectionsCRUD(t *testing.T) {
@@ -157,5 +159,39 @@ func TestSigmaEndpoint(t *testing.T) {
 	code, body := do(t, ts, "POST", "/api/detections/sigma", "title: x\n", true)
 	if code != 400 || !strings.Contains(body["error"].(string), "detection") {
 		t.Errorf("bad sigma = %d %v", code, body)
+	}
+}
+
+// TestHealthWarnsOfLateDetections: a detection that has been due for
+// longer than its schedule interval (every worker busy) is named on the
+// Health page, and its run state says how far behind it is.
+func TestHealthWarnsOfLateDetections(t *testing.T) {
+	var srv *Server
+	ts, _ := newTestServerWith(t, func(s *Server) { srv = s })
+	_, h := do(t, ts, "GET", "/api/health", "", true)
+	if strings.Contains(fmt.Sprint(h["warnings"]), "behind schedule") {
+		t.Fatalf("warned before anything ran: %v", h["warnings"])
+	}
+	// Ran an hour ago, due every five minutes, and not run since.
+	srv.Scheduler.Now = func() time.Time { return time.Now().Add(-time.Hour) }
+	d, err := srv.Detections.Get("auth-brute-force")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Scheduler.Run(context.Background(), d)
+	_, h = do(t, ts, "GET", "/api/health", "", true)
+	if w := fmt.Sprint(h["warnings"]); !strings.Contains(w, "Detections are running behind schedule. auth-brute-force waited") {
+		t.Errorf("warnings = %v", w)
+	}
+	_, got := do(t, ts, "GET", "/api/detections/auth-brute-force", "", true)
+	if st, _ := got["state"].(map[string]any); st == nil || st["next_run"] == nil {
+		t.Errorf("state = %v", got["state"])
+	}
+
+	// A server that does not run the scheduler cannot tell.
+	srv.Config.Detections.Scheduler = false
+	_, h = do(t, ts, "GET", "/api/health", "", true)
+	if strings.Contains(fmt.Sprint(h["warnings"]), "behind schedule") {
+		t.Errorf("scheduler off, warnings = %v", h["warnings"])
 	}
 }

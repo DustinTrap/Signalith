@@ -73,6 +73,37 @@ const (
 	MaxRunTimeout = 5 * time.Minute
 )
 
+// Bounds of how far back a run that is behind searches (see CatchUp).
+const (
+	MinCatchUp = time.Hour
+	MaxCatchUp = 24 * time.Hour
+)
+
+// CatchUp is how far back a run may search when the detection's last
+// successful run ended longer than its lookback ago: ten lookbacks, at
+// least MinCatchUp and at most MaxCatchUp, and never less than the
+// lookback itself. A run over a much wider window than usual could time
+// out in turn, and then keep timing out as the gap grew; past the limit
+// the gap is counted in RunState.Unsearched and logged instead.
+func CatchUp(lookback time.Duration) time.Duration {
+	return max(lookback, min(max(10*lookback, MinCatchUp), MaxCatchUp))
+}
+
+// Behind reports whether d, with run state st, is falling behind its
+// schedule at now: it has been due for longer than its schedule
+// interval, or a run in the last hour started that late. Only the server
+// that runs the schedule can tell.
+func Behind(d *Detection, st RunState, now time.Time) bool {
+	sched, err := ParseDuration(d.Schedule)
+	if err != nil || !d.Enabled {
+		return false
+	}
+	if !st.Running && !st.NextRun.IsZero() && now.Sub(st.NextRun) > sched {
+		return true
+	}
+	return !st.LastLate.IsZero() && now.Sub(st.LastLate) < time.Hour
+}
+
 // RunState is what the UI shows about a detection's last run.
 type RunState struct {
 	LastRun      time.Time `json:"last_run,omitzero"`
@@ -85,6 +116,26 @@ type RunState struct {
 	// timeout; LastError says how long that was.
 	TimedOut bool `json:"timed_out,omitempty"`
 	Running  bool `json:"running,omitempty"`
+	// SearchedTo is the end of the window the last successful run
+	// searched. The next run searches on from there (see Window), so a run
+	// that starts late, or after failed runs, does not skip the events in
+	// between. It is kept in memory: after a restart, on a server that
+	// takes over the schedule, or once the detection is turned back on,
+	// the first run searches its lookback as before.
+	SearchedTo time.Time `json:"searched_to,omitzero"`
+	// Lag is how long after it was due the last scheduled run started:
+	// with every worker busy, a due detection waits. LateRuns counts the
+	// scheduled runs since the server started that began more than one
+	// schedule interval late, LastLate is when the latest one did, and
+	// Timeouts counts the runs stopped at their timeout.
+	Lag      int64     `json:"lag_ms,omitempty"`
+	LateRuns int       `json:"late_runs,omitempty"`
+	LastLate time.Time `json:"last_late,omitzero"`
+	Timeouts int       `json:"timeouts,omitempty"`
+	// Unsearched is how much time, since the server started, no run
+	// searched because the detection fell further behind than its
+	// catch-up limit (see CatchUp).
+	Unsearched int64 `json:"unsearched_ms,omitempty"`
 
 	queued bool // waiting for a worker
 }
@@ -196,6 +247,14 @@ func (s *Scheduler) RunDue(ctx context.Context) {
 func (s *Scheduler) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 	ctx = context.WithValue(ctx, scheduledKey{}, true)
 	if !s.allowed(ctx) {
+		// Another server runs the schedule now: should this one take it
+		// back, its runs start from their lookback, not from where they
+		// stopped here, so they do not search again what the other did.
+		s.mu.Lock()
+		for _, st := range s.state {
+			st.SearchedTo = time.Time{}
+		}
+		s.mu.Unlock()
 		return
 	}
 	now := s.now()
@@ -211,6 +270,11 @@ func (s *Scheduler) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 	slots := s.slots
 	for _, d := range s.Library.List() {
 		if !d.Enabled {
+			// Turned back on, it starts from its lookback, rather than
+			// catching up on the time it was off.
+			if st := s.state[d.ID]; st != nil {
+				st.SearchedTo = time.Time{}
+			}
 			continue
 		}
 		st := s.stateFor(d.ID)
@@ -220,8 +284,19 @@ func (s *Scheduler) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 		st.queued = true
 		due = append(due, d)
 	}
+	// The longest overdue first (those that never ran have no next run).
+	next := make(map[string]time.Time, len(due))
+	for _, d := range due {
+		next[d.ID] = s.state[d.ID].NextRun
+	}
 	s.mu.Unlock()
-	sort.Slice(due, func(i, j int) bool { return due[i].ID < due[j].ID })
+	sort.Slice(due, func(i, j int) bool {
+		a, b := next[due[i].ID], next[due[j].ID]
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return due[i].ID < due[j].ID
+	})
 	for _, d := range due {
 		wg.Add(1)
 		go func() {
@@ -261,19 +336,36 @@ func (s *Scheduler) RunTimeout(d *Detection) time.Duration {
 	return min(max(sched, MinRunTimeout), MaxRunTimeout)
 }
 
-// Run executes one detection now and raises findings. It also records
-// the run state and schedules the next run. A run that takes longer than
-// RunTimeout is stopped and reported as timed out.
+// Run executes one detection now and raises findings. It searches from
+// where its last successful run stopped, or its lookback if that is
+// later (see Window). It also records the run state, how late a
+// scheduled run started, and schedules the next run. A run that takes
+// longer than RunTimeout is stopped and reported as timed out.
 func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	start := s.now()
+	sched, schedErr := ParseDuration(d.Schedule)
 	s.mu.Lock()
 	st := s.stateFor(d.ID)
 	st.Running = true
+	since := st.SearchedTo
+	// Lateness counts for scheduled runs only: "Run now" is not due.
+	if ctx.Value(scheduledKey{}) != nil {
+		st.Lag = 0
+		if !st.NextRun.IsZero() && start.After(st.NextRun) {
+			late := start.Sub(st.NextRun)
+			st.Lag = late.Milliseconds()
+			if schedErr == nil && late > sched {
+				st.LateRuns++
+				st.LastLate = start
+				s.log().Warn("detection ran late: every worker was busy", "detection", d.ID, "late", late.Round(time.Second), "schedule", d.Schedule)
+			}
+		}
+	}
 	s.mu.Unlock()
 
 	timeout := s.RunTimeout(d)
 	rctx, cancel := context.WithTimeout(ctx, timeout)
-	res, err := s.run(rctx, d, start)
+	res, err := s.run(rctx, d, start, since)
 	// Failed after its own deadline passed (not the caller's): however the
 	// error reads, the run ran out of time.
 	timedOut := err != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
@@ -288,12 +380,26 @@ func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	st.LastRun = start
 	st.LastDuration = s.now().Sub(start).Milliseconds()
 	st.TimedOut = timedOut
-	if sched, perr := ParseDuration(d.Schedule); perr == nil {
+	if timedOut {
+		st.Timeouts++
+	}
+	if schedErr == nil {
 		st.NextRun = start.Add(sched)
 	}
 	if err != nil {
 		st.LastError = err.Error()
 		return nil, err
+	}
+	// The window starts after the checkpoint only when it was further back
+	// than the catch-up limit.
+	if !since.IsZero() && res.Earliest.After(since) {
+		gap := res.Earliest.Sub(since)
+		st.Unsearched += gap.Milliseconds()
+		s.log().Warn("detection fell too far behind: events in a gap were not searched", "detection", d.ID,
+			"from", since.UTC().Format(time.RFC3339), "to", res.Earliest.UTC().Format(time.RFC3339), "gap", gap.Round(time.Second))
+	}
+	if res.Latest.After(st.SearchedTo) {
+		st.SearchedTo = res.Latest
 	}
 	st.LastError = ""
 	st.LastResults = res.Results
@@ -315,34 +421,48 @@ func (s *Scheduler) RunAt(ctx context.Context, d *Detection, at time.Time) (*Run
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// Background so the backfill's searches do not wait behind analysts'.
-	return s.run(search.Background(rctx), d, at)
+	return s.run(search.Background(rctx), d, at, time.Time{})
 }
 
-// Window returns the time range a run at now searches.
-func Window(d *Detection, now time.Time) (time.Time, time.Time, error) {
+// Window returns the time range a run at now searches: its lookback, or,
+// when since (the end of the last successful run's window) is further
+// back, from since, but no further back than CatchUp. A zero since
+// means no earlier run.
+func Window(d *Detection, now, since time.Time) (time.Time, time.Time, error) {
 	lb, err := ParseDuration(d.Lookback)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	return now.Add(-lb), now, nil
+	earliest := now.Add(-lb)
+	if !since.IsZero() && since.Before(earliest) {
+		earliest = later(since, now.Add(-CatchUp(lb)))
+	}
+	return earliest, now, nil
+}
+
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // Preview runs a detection's query over its lookback window without
 // raising findings, for "Test" in the UI.
 func (s *Scheduler) Preview(ctx context.Context, d *Detection) (*search.Result, error) {
-	q, _, _, err := s.prepare(d, s.now())
+	q, _, _, err := s.prepare(d, s.now(), time.Time{})
 	if err != nil {
 		return nil, err
 	}
 	return s.Engine.Execute(ctx, q)
 }
 
-func (s *Scheduler) prepare(d *Detection, now time.Time) (*query.Query, time.Time, time.Time, error) {
+func (s *Scheduler) prepare(d *Detection, now, since time.Time) (*query.Query, time.Time, time.Time, error) {
 	q, err := query.Parse(d.Query)
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, err
 	}
-	earliest, latest, err := Window(d, now)
+	earliest, latest, err := Window(d, now, since)
 	if err != nil {
 		return nil, time.Time{}, time.Time{}, err
 	}
@@ -380,8 +500,8 @@ func (s *Scheduler) lists() *assets.Store {
 	return s.Assets.Own()
 }
 
-func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunResult, error) {
-	q, earliest, latest, err := s.prepare(d, now)
+func (s *Scheduler) run(ctx context.Context, d *Detection, now, since time.Time) (*RunResult, error) {
+	q, earliest, latest, err := s.prepare(d, now, since)
 	if err != nil {
 		return nil, err
 	}
