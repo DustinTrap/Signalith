@@ -207,7 +207,9 @@ func TestStarvedDetectionLeavesNoGaps(t *testing.T) {
 	if len(w) < 2 || len(w) > 20 {
 		t.Fatalf("the fast detection ran %d times; the test means it to be starved", len(w))
 	}
-	if want := start.Add(-time.Minute); !w[0][0].Equal(want) {
+	// Which rule takes the worker first varies, so the first run may start
+	// late; with no earlier run it still searches just its lookback.
+	if want := w[0][1].Add(-time.Minute); !w[0][0].Equal(want) {
 		t.Errorf("first window starts %v, want its lookback, %v", w[0][0], want)
 	}
 	for i := 1; i < len(w); i++ {
