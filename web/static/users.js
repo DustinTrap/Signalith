@@ -513,6 +513,15 @@
     if (load && tab === 'users') loadUsers({ quiet: true });
   }
   for (const t of TABS) $('u-tab-' + t).addEventListener('click', () => selectTab(t, true));
+  // showUsersTab opens the Users page on a tab, for links from other pages
+  // (the Security page's "Open Directory sign-in").
+  window.showUsersTab = (tab) => {
+    if (!TABS.includes(tab)) tab = 'users';
+    if (currentPage === 'users') selectTab(tab, true);
+    else { U.tab = tab; showPage('users'); }
+    const b = $('u-tab-' + tab);
+    if (b && currentPage === 'users') b.focus();
+  };
   document.querySelector('.u-tabs').addEventListener('keydown', (ev) => {
     if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
     const next = TABS[(TABS.indexOf(U.tab) + 1) % TABS.length];

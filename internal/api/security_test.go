@@ -107,7 +107,7 @@ func TestSecurityReport(t *testing.T) {
 	if sec == nil || sec["risk"] != float64(rep.Summary.Risk) || sec["checked_at"] == nil {
 		t.Errorf("health %v", health["security"])
 	}
-	if tlsInfo := health["tls"].(map[string]any); tlsInfo["ca_scope"] != "standard" || tlsInfo["next_ca_sha256"] != nil {
+	if tlsInfo := health["tls"].(map[string]any); tlsInfo["ca_scope"] != "standard" || tlsInfo["next_ca_sha256"] != nil || tlsInfo["ca_made"] == nil {
 		t.Errorf("tls %v", tlsInfo)
 	}
 }

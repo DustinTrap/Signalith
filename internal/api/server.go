@@ -897,6 +897,8 @@ func (s *Server) tlsInfo() map[string]any {
 	}
 	if ca := s.TLS.CAInfo(); ca != nil {
 		t["ca_scope"] = ca.Scope
+		// When it was made, for the Settings page's "In use now".
+		t["ca_made"] = ca.NotBefore
 	}
 	if next := s.TLS.Next(); next != nil {
 		// Signalith is switching certificate authority: agents and browsers

@@ -41,6 +41,10 @@
   };
 
   // ---------- small helpers ----------
+  // How far Signalith's own certificate authority reaches (CAInfo.Scope).
+  const CA_SCOPE = { standard: 'standard', strict: 'strict', unconstrained: 'older, unlimited' };
+  const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+  const securityLink = (text) => el('a', { href: '#security', 'data-page': 'security' }, text);
   const idOf = (key) => 'st-' + key.replace(/[^a-z0-9]+/gi, '-');
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const dirtyKeys = () => Object.keys(S.drafts);
@@ -327,6 +331,10 @@
       rows.push(['Certificate covers', el('span', { class: 'mono' }, t.names.join(', '))]);
     }
     if (t.ca_sha256) rows.push([t.own_ca ? 'Signalith’s CA (SHA-256)' : 'Certificate authority (SHA-256)', el('span', { class: 'mono st-fp' }, t.ca_sha256)]);
+    if (t.own_ca && t.ca_scope) {
+      const made = t.ca_made ? ', made ' + new Date(t.ca_made).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+      rows.push(['Certificate authority', el('span', {}, cap(CA_SCOPE[t.ca_scope] || t.ca_scope) + made + '. ', securityLink('Change it on the Security page'), '.')]);
+    }
     const lead = t.mode === 'off'
       ? 'Signalith serves plain HTTP; the reverse proxy in front serves HTTPS.' + (t.names ? ' Syslog over TLS uses Signalith’s own certificate.' : '')
       : t.own_ca
@@ -615,6 +623,14 @@
     } else if (f.empty_means && !ro && f.type !== 'number' && f.type !== 'secret' && f.type !== 'choice') {
       const v = current(key);
       if (v === '' || (Array.isArray(v) && !v.length)) out.push(el('p', { class: 'st-hint' }, 'When empty: ' + f.empty_means + '.'));
+    }
+    // The certificate authority in use changes only on the Security page.
+    const tls = S.view.tls || {};
+    if (key === 'server.tls.ca_scope' && tls.own_ca && tls.ca_scope) {
+      const chosen = current(key) || 'standard';
+      out.push(el('p', { class: 'st-hint' }, ...(chosen === tls.ca_scope
+        ? ['In use now. The ', securityLink('Security page'), ' makes a new certificate authority and switches to it.']
+        : [`The one in use is ${CA_SCOPE[tls.ca_scope] || tls.ca_scope}. Nothing changes until you make the new one and switch to it on the `, securityLink('Security page'), '.'])));
     }
     if (PORTS.has(key) && (S.view.about || {}).container && (d || f.pending)) {
       out.push(el('p', { class: 'st-hint' }, 'In Docker, also publish the new port under ports: in docker-compose.yml.'));

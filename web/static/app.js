@@ -360,6 +360,7 @@ const JUMP_WORDS = {
   health: 'status opensearch ingest', help: 'help syntax language commands',
   servers: 'cluster nodes servers background jobs leader failover standby readyz',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
+  security: 'hardening encryption certificate authority ca tls https keys permissions bitlocker luks',
   settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
 };
 const jump = $('jump');
@@ -581,6 +582,20 @@ function renderHealthCard(h) {
   }
   clusterBanner.list = banners;
   meReady.then(renderClusterBanner);
+  renderSecurityCount(h.security);
+}
+
+// renderSecurityCount shows how many security checks are at risk on the
+// Security menu item, for admins (api/health has it only for them), and
+// only when there are any: needing attention or can't tell never shows
+// outside the Security page.
+function renderSecurityCount(sec) {
+  const n = sec && sec.risk > 0 ? sec.risk : 0;
+  const count = $('security-count');
+  if (!count) return;
+  count.classList.toggle('hidden', !n);
+  count.replaceChildren(String(n), el('span', { class: 'sr-only' }, ' at risk'));
+  count.title = n ? `${n} security ${n === 1 ? 'check' : 'checks'} at risk` : '';
 }
 
 // ---------- app shell: the servers' red problems ----------
@@ -2194,7 +2209,7 @@ function agentSetupRender(a) {
   // list, and the CA certificate under its own step.
   (stepBody(a.config_step) || $('agent-body')).append(agentFileEl);
   agentFileEl.classList.toggle('hidden', !agentSetupConfig);
-  if (a.ca && stepBody(a.ca_step)) stepBody(a.ca_step).append(caFile(a.ca, a.ca_fingerprint));
+  if (a.ca && stepBody(a.ca_step)) stepBody(a.ca_step).append(caFile(a.ca, a.ca_fingerprint, a.next_ca_fingerprint));
 }
 
 // agentSetupStep renders one numbered step. "Label: command" becomes the
@@ -2235,7 +2250,10 @@ function agentSetupInline(text, names = []) {
 // caFile shows the CA certificate agents and devices check this server
 // with: its file name, Download and Copy, its SHA-256 fingerprint (the one
 // Signalith logs when it starts) and, folded away, the certificate.
-function caFile(pem, fingerprint) {
+// While Signalith is switching certificate authority, the file holds both
+// the current one and the new one (nextFingerprint), so agents and devices
+// set up now keep working after the switch.
+function caFile(pem, fingerprint, nextFingerprint) {
   const name = 'signalith-ca.pem';
   const btn = (ic, label) => el('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, icon(ic), el('span', {}, label));
   const dl = btn('download', 'Download');
@@ -2251,7 +2269,10 @@ function caFile(pem, fingerprint) {
   copy.addEventListener('click', () => agentSetupCopy(pem, copy));
   return el('div', { class: 'agent-file agent-ca' },
     el('div', { class: 'agent-file__bar' }, icon('shield-check'), el('span', { class: 'agent-file__name mono' }, name), el('span', { class: 'spacer' }), dl, copy),
-    fingerprint ? el('p', { class: 'agent-ca__fp' }, el('span', {}, 'SHA-256 fingerprint'), el('code', {}, fingerprint)) : null,
+    fingerprint && nextFingerprint
+      ? el('p', { class: 'agent-ca__fp agent-ca__both' }, 'Signalith is switching certificate authority, so this file holds both: the current one (',
+        el('code', {}, fingerprint), ') and the new one (', el('code', {}, nextFingerprint), ').')
+      : fingerprint ? el('p', { class: 'agent-ca__fp' }, el('span', {}, 'SHA-256 fingerprint'), el('code', {}, fingerprint)) : null,
     el('details', { class: 'agent-ca__more' }, el('summary', {}, icon('chevron-right', 'icon--sm chev'), 'Show certificate'),
       el('pre', { class: 'agent-ca__pem', tabindex: '0', 'aria-label': 'CA certificate' }, pem.trim())));
 }
@@ -2565,11 +2586,13 @@ async function syslogLoadCA(h) {
     st.ca = null;
     return;
   }
-  if (st.ca && st.ca.fp === fp) return;
+  // While Signalith is switching certificate authority, devices get both.
+  const next = h.tls.next_ca_sha256 || '';
+  if (st.ca && st.ca.fp === fp && st.ca.next === next) return;
   try {
-    const resp = await fetch('api/tls/ca.pem');
+    const resp = await fetch(next ? 'api/tls/ca.pem?which=both' : 'api/tls/ca.pem');
     if (!resp.ok) throw new Error(resp.statusText);
-    st.ca = { fp, own: !!h.tls.own_ca, pem: await resp.text() };
+    st.ca = { fp, next, own: !!h.tls.own_ca, pem: await resp.text() };
   } catch (_) {
     st.ca = null; // the setups fall back to TCP or UDP
   }
@@ -2960,7 +2983,7 @@ function syslogVendors(d, ips) {
   };
   const saveCA = (dir) => [
     slText('Save Signalith’s CA certificate as ', slCode('signalith-ca.pem'), ' on each server. The server uses it to check it’s talking to Signalith.'),
-    caFile(d.ca.pem, d.ca.fp),
+    caFile(d.ca.pem, d.ca.fp, d.ca.next),
     slText('From the folder you saved it in, run:'),
     `sudo install -m 644 signalith-ca.pem ${dir}/signalith-ca.pem\n`,
   ];
@@ -3176,6 +3199,10 @@ function healthPageRender(h) {
   for (const w of h.warnings || []) {
     const cut = w.indexOf('. ');
     alerts.push(cut > 0 ? healthPageAlert('warning', 'triangle-alert', w.slice(0, cut + 1), w.slice(cut + 2)) : healthPageAlert('warning', 'triangle-alert', w));
+  }
+  // Admins can see every security check, good and bad, on the Security page.
+  if ((h.warnings || []).length && can('admin')) {
+    alerts.push(el('p', { class: 'hp-more' }, el('a', { href: '#security', 'data-page': 'security' }, 'See all security checks', icon('arrow-right', 'icon--xs'))));
   }
 
   const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
