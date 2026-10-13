@@ -132,12 +132,13 @@
   // retry reloads what failed: the dashboard's definition, or its data.
   const retry = () => smallButton('Try again', 'refresh-cw', () => (dash.current !== 'posture' && !dash.def ? showDashboard(dash.current) : reloadDashboard({ busy: true })));
 
-  function emptyState(iconName, title, text, action, tone) {
+  function emptyState(iconName, title, text, action, tone, hint) {
     return el('div', attrs({ class: 'empty empty--compact' }, { 'data-tone': tone }),
       el('span', { class: 'empty__icon' }, icon(iconName)),
       el('div', { class: 'empty__title' }, title),
       text ? el('p', { class: 'empty__text' }, text) : null,
-      action ? el('div', { class: 'empty__actions' }, action) : null);
+      action ? el('div', { class: 'empty__actions' }, action) : null,
+      hint ? el('p', { class: 'empty__hint' }, hint) : null);
   }
   const errorState = (title, text, action) => emptyState('circle-alert', title, text, action, 'danger');
   const sectionError = (rep, ...names) => names.map((n) => (rep.errors || {})[n]).filter(Boolean).join('\n');
@@ -796,7 +797,7 @@
     const total = rowTotals(res).reduce((a, v) => a + v, 0);
     let content;
     if (err) content = errorState('Couldn’t count events', err, retry());
-    else if (!res || !total) content = emptyState('database', 'No events in this period', 'Check the Health page to confirm data is arriving.', smallButton('Open Health', null, () => showPage('health')));
+    else if (!res || !total) content = emptyState('database', 'No events in this period', 'Check the Health page to confirm data is arriving.', smallButton('Open Health', null, () => showPage('health')), null, typeof samplePointer === 'function' ? samplePointer() : null);
     else content = columnChart(res, { unit: ['event', 'events'], now: true, labels: 5, label: 'Events by data model, ' + lastRange(rep.range) }).node;
     return card({ title: 'Events by data model', sub: err ? '' : plural(total, 'event', 'events'), actions: [searchButton(q.events_by_datamodel, '-' + rep.range)] }, content);
   }

@@ -53,6 +53,13 @@ func (m *Memory) Save(_ context.Context, f *Finding) error {
 	return nil
 }
 
+func (m *Memory) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.byID, id)
+	return nil
+}
+
 // Matches reports whether a finding passes a filter.
 func Matches(f *Finding, flt Filter) bool {
 	if len(flt.Status) > 0 && !slices.Contains(flt.Status, f.Status) {
@@ -69,6 +76,22 @@ func Matches(f *Finding, flt Filter) bool {
 	}
 	if flt.DetectionID != "" && f.DetectionID != flt.DetectionID {
 		return false
+	}
+	if flt.Sample != "" && f.Sample != flt.Sample {
+		return false
+	}
+	if len(flt.EntityValues) > 0 {
+		ev := entityValues(f)
+		any := false
+		for _, want := range flt.EntityValues {
+			if slices.Contains(ev, want) {
+				any = true
+				break
+			}
+		}
+		if !any {
+			return false
+		}
 	}
 	if !flt.Since.IsZero() && f.Created.Before(flt.Since) {
 		return false

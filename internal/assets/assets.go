@@ -486,6 +486,13 @@ func (s *Store) save(name string, data []byte) error {
 // as a formula are written with a leading quote (see SafeCell), as the web
 // UI's exports do.
 func (s *Store) CSV(kind string) []byte {
+	if kind == "assets" {
+		return MarshalAssets(s.Assets())
+	}
+	return MarshalIdentities(s.Identities())
+}
+
+func csvWriter() (*bytes.Buffer, func(...string), func()) {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	write := func(cells ...string) {
@@ -494,24 +501,36 @@ func (s *Store) CSV(kind string) []byte {
 		}
 		w.Write(cells)
 	}
-	join := func(xs []string) string { return strings.Join(xs, "|") }
-	switch kind {
-	case "assets":
-		write(AssetColumns...)
-		for _, a := range s.Assets() {
-			write(join(a.Host), join(a.IP), join(a.CIDR), a.Owner, a.Priority, join(a.Category), a.BUnit, a.Location)
-		}
-	default:
-		write(IdentityColumns...)
-		for _, id := range s.Identities() {
-			wl := ""
-			if id.Watchlist {
-				wl = "true"
-			}
-			write(join(id.Identity), id.Name, id.Email, id.Manager, id.Priority, join(id.Category), id.BUnit, wl)
-		}
+	return &buf, write, w.Flush
+}
+
+func joinMulti(xs []string) string { return strings.Join(xs, "|") }
+
+// MarshalAssets serializes assets to CSV in the column order ParseAssets
+// reads, so the result round-trips. Sample data uses it to merge rows into
+// the user's list without overwriting it.
+func MarshalAssets(as []Asset) []byte {
+	buf, write, flush := csvWriter()
+	write(AssetColumns...)
+	for _, a := range as {
+		write(joinMulti(a.Host), joinMulti(a.IP), joinMulti(a.CIDR), a.Owner, a.Priority, joinMulti(a.Category), a.BUnit, a.Location)
 	}
-	w.Flush()
+	flush()
+	return buf.Bytes()
+}
+
+// MarshalIdentities serializes identities to CSV, matching ParseIdentities.
+func MarshalIdentities(ids []Identity) []byte {
+	buf, write, flush := csvWriter()
+	write(IdentityColumns...)
+	for _, id := range ids {
+		wl := ""
+		if id.Watchlist {
+			wl = "true"
+		}
+		write(joinMulti(id.Identity), id.Name, id.Email, id.Manager, id.Priority, joinMulti(id.Category), id.BUnit, wl)
+	}
+	flush()
 	return buf.Bytes()
 }
 

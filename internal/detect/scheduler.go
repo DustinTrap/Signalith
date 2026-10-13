@@ -43,6 +43,11 @@ type Scheduler struct {
 	// Workers is how many detections run at once (default 4), so one slow
 	// detection cannot hold up the others.
 	Workers int
+	// SampleMark, when set, marks every finding and risk event a run
+	// writes with this value (the sample-data load ID). The sample-data
+	// backfill uses a throwaway Scheduler with it set; the live scheduler
+	// leaves it empty, so normal findings and risk are never marked.
+	SampleMark string
 	// Timeout caps one run. Zero gives each detection its schedule
 	// interval, between MinRunTimeout and MaxRunTimeout, so a run cannot
 	// last into its next one.
@@ -271,6 +276,20 @@ func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	return res, nil
 }
 
+// RunAt runs one detection as if the clock were `at`: it searches
+// [at-lookback, at] and stamps the findings and risk events it raises
+// with that time, without touching the detection's schedule or run state
+// or the live scheduler. The sample-data backfill uses it to raise
+// findings and risk for events placed in the past, so the queue, the
+// Risk page and the dashboards show a realistic timeline straight away.
+func (s *Scheduler) RunAt(ctx context.Context, d *Detection, at time.Time) (*RunResult, error) {
+	timeout := s.RunTimeout(d)
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Background so the backfill's searches do not wait behind analysts'.
+	return s.run(search.Background(rctx), d, at)
+}
+
 // Window returns the time range a run at now searches.
 func Window(d *Detection, now time.Time) (time.Time, time.Time, error) {
 	lb, err := ParseDuration(d.Lookback)
@@ -357,6 +376,11 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 		}
 		if d.Risk != nil && s.Risk != nil {
 			evs := RiskEvents(d, row, key, s.Assets, now)
+			if s.SampleMark != "" {
+				for i := range evs {
+					evs[i].Sample = s.SampleMark
+				}
+			}
 			if err := s.Risk.Write(ctx, evs); err != nil {
 				return nil, err
 			}
@@ -366,6 +390,7 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 			continue
 		}
 		f := NewFinding(d, q, row, key, earliest, latest, now)
+		f.Sample = s.SampleMark
 		f.Context = EntityContext(s.Assets, f.Entities)
 		f.Urgency = Urgency(f.Severity, f.Context)
 		if err := s.Findings.Create(ctx, f); err != nil {

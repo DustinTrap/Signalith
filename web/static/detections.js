@@ -116,7 +116,8 @@ function dxEmpty(o) {
     el('div', { class: 'empty__title' }, o.title),
     o.text ? el('p', { class: 'empty__text' }, o.text) : null,
     o.action ? el('div', { class: 'empty__actions' },
-      dxBtn('secondary', o.action.label, o.action.run, { sm: true, icon: o.action.icon })) : null);
+      dxBtn('secondary', o.action.label, o.action.run, { sm: true, icon: o.action.icon })) : null,
+    o.hint ? el('p', { class: 'empty__hint' }, o.hint) : null);
 }
 const dxRetry = (run) => ({ label: 'Try again', icon: 'refresh-cw', run });
 const dxSkel = (w) => el('span', { class: 'skeleton', style: `width:${w}` });
@@ -578,7 +579,7 @@ function renderFindings() {
     const span = { '24h': 'the last 24 hours', '7d': 'the last 7 days', '30d': 'the last 30 days', '': 'any time' }[fnd.since];
     box.replaceChildren(filtered
       ? dxEmpty({ icon: 'filter-x', title: 'No findings match these filters', text: `Nothing in ${span} matches. Widen the time range or clear the filters.`, action: { label: 'Clear filters', run: clearFindingFilters } })
-      : dxEmpty({ icon: 'shield-check', title: 'No open findings', text: 'Nothing has fired in the last 7 days. New findings appear here as detections fire.', action: { label: 'Review detections', run: () => showPage('detections') } }));
+      : dxEmpty({ icon: 'shield-check', title: 'No open findings', text: 'Nothing has fired in the last 7 days. New findings appear here as detections fire.', action: { label: 'Review detections', run: () => showPage('detections') }, hint: typeof samplePointer === 'function' ? samplePointer() : null }));
     renderFindingsFoot();
     if (openFinding && !findingsList.some((f) => f.id === openFinding) && !dxSlideOver.matches) syncFindingBar();
     if (!openFinding) closeFindingInspector({ keepState: true });

@@ -56,9 +56,12 @@ type Case struct {
 	Entities   []Entity          `json:"entities,omitempty"`
 	Entries    []Entry           `json:"entries,omitempty"`
 	History    []findings.Change `json:"history,omitempty"`
-	CreatedBy  string            `json:"created_by,omitempty"`
-	Created    time.Time         `json:"created"`
-	Updated    time.Time         `json:"updated"`
+	// Sample marks a case the sample-data feature created, holding the
+	// load's ID, so Remove can delete it; empty for real investigations.
+	Sample    string    `json:"sample,omitempty"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	Created   time.Time `json:"created"`
+	Updated   time.Time `json:"updated"`
 }
 
 // Entity is a user, host, IP or other value the case is about.
@@ -95,7 +98,9 @@ type Filter struct {
 	Owner     string
 	Text      string // title, description, ID or an entity value
 	FindingID string
-	Limit     int
+	// Sample keeps only cases with this sample-load marker.
+	Sample string
+	Limit  int
 }
 
 // Update changes a case. Nil fields stay as they are; a non-empty Comment
@@ -325,6 +330,8 @@ type Store interface {
 	Create(ctx context.Context, c *Case) error
 	Get(ctx context.Context, id string) (*Case, error)
 	Save(ctx context.Context, c *Case) error
+	// Delete removes one case by ID. A missing case is not an error.
+	Delete(ctx context.Context, id string) error
 	// Search returns matching cases, most recently updated first, without
 	// their timelines, and the total number that match.
 	Search(ctx context.Context, flt Filter) ([]*Case, int, error)

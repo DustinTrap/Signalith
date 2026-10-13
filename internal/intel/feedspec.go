@@ -132,6 +132,8 @@ func (s *FeedSpec) Problems(env bool) []FeedProblem {
 		add("name", "name must be 2-64 lowercase letters, digits, -, _ or ., for example feodo-tracker")
 	case s.Name == ManualSource:
 		add("name", `name "manual" is reserved for indicators added by hand`)
+	case s.Name == SampleSource:
+		add("name", `name "sample" is reserved for the sample data`)
 	}
 	if !slices.Contains(feedKinds, s.Kind) {
 		add("kind", "kind %q must be url (download a file) or taxii (a TAXII 2.1 server)", s.Kind)

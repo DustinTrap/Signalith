@@ -31,6 +31,19 @@ new code each time. After a reboot both containers start again by themselves onc
 Docker is running; in Docker Desktop turn on Settings > General > "Start Docker
 Desktop when you sign in".
 
+### Try it with sample data
+
+No logs to hand? On the **Add data** page (admins only), **Load sample data** fills
+Signalith with a week of made-up activity for a fictional company, with a handful of
+attacks hidden in it, so detections fire, the triage queue fills, risk builds up,
+threat intel matches and the dashboards light up. Everything is fictional and safe to
+load on any network, and one click removes all of it. See
+[docs/sample-data.md](docs/sample-data.md). From the shell or in Docker:
+
+```sh
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith sample-data load
+```
+
 ### Linux
 
 1. Install OpenSearch 2.x ([instructions](https://opensearch.org/docs/latest/install-and-configure/install-opensearch/index/)).

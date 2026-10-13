@@ -38,6 +38,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
+	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -61,6 +62,7 @@ Usage:
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
+  signalith sample-data load|remove|status [-c file] [-size ...]  load or remove a week of sample data to try
   signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith version
@@ -114,6 +116,8 @@ func main() {
 		err = cmdService(args)
 	case "archive":
 		err = cmdArchive(args)
+	case "sample-data":
+		err = cmdSampleData(args)
 	case "secrets":
 		err = cmdSecrets(args)
 	case "version", "-v", "--version":
@@ -867,6 +871,23 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
 			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
+	// The one-click sample data loads a week of made-up activity through
+	// the same ingest path and removes it exactly. It records what it
+	// wrote in a small file under the state directory.
+	sampleLoader := &sample.Loader{
+		Prefix:   c.OpenSearch.IndexPrefix,
+		Pipeline: pipeline,
+		OS:       cl,
+		Intel:    indicators,
+		Assets:   lists,
+		Library:  lib,
+		Engine:   eng,
+		Findings: fstore,
+		Cases:    cstore,
+		Risk:     &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix},
+		StateDir: c.StateDir(),
+		Log:      log,
+	}
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{
@@ -884,6 +905,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Dashboards: boards,
 		Cases:      cstore,
 		Retention:  ret,
+		Sample:     sampleLoader,
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,

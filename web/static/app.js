@@ -266,7 +266,7 @@ function showPage(name, opts = {}) {
     try { history[opts.replace ? 'replaceState' : 'pushState'](null, '', '#' + name); } catch (_) { /* sandboxed */ }
   }
   if (switching) window.scrollTo(0, 0);
-  if (name === 'data') loadDataSource();
+  if (name === 'data') { loadDataSource(); if (typeof loadSampleCard === 'function') loadSampleCard(); }
   if (name === 'health') loadHealth();
   if (typeof onPageShown === 'function') onPageShown(name);
   try { localStorage.setItem('signalith.page', name); } catch (_) { /* storage may be blocked */ }
@@ -356,7 +356,7 @@ const JUMP_WORDS = {
   dashboards: 'home overview posture charts', findings: 'alerts incidents queue triage', cases: 'cases investigations',
   risk: 'risk scores', search: 'query events logs hunt', intel: 'threat intel ioc indicators feeds',
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
-  data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco', retention: 'retention rotation archive restore delete storage disk guard policies',
+  data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco sample demo test data try example', retention: 'retention rotation archive restore delete storage disk guard policies',
   health: 'status opensearch ingest', help: 'help syntax language commands',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
   settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
@@ -1135,11 +1135,12 @@ function showResultsLoading() {
 }
 
 // stateBox draws the .empty block used for no results and for errors.
-function stateBox({ tone, iconName, title, text, action }) {
+function stateBox({ tone, iconName, title, text, action, hint }) {
   const box = el('div', { class: 'empty' },
     el('span', { class: 'empty__icon' }, icon(iconName)), el('div', { class: 'empty__title' }, title),
     el('p', { class: 'empty__text' }, ...[].concat(text)),
-    action ? el('div', { class: 'empty__actions' }, action) : null);
+    action ? el('div', { class: 'empty__actions' }, action) : null,
+    hint ? el('p', { class: 'empty__hint' }, hint) : null);
   if (tone) box.dataset.tone = tone;
   return box;
 }
@@ -1169,6 +1170,7 @@ function noResults(query) {
   return stateBox({
     iconName: 'search', title: 'No matching events',
     text: ['Nothing matched ' + searchRangeText(query) + '. Try a longer range, or check on the ', el('a', { href: '#health', 'data-page': 'health' }, 'Health'), ' page that data is arriving.'],
+    hint: typeof samplePointer === 'function' ? samplePointer() : null,
     action: next ? el('button', {
       type: 'button', class: 'btn btn--secondary btn--sm',
       onclick: () => { $('time').value = next.value; $('time').dispatchEvent(new Event('change')); },

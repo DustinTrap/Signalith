@@ -33,7 +33,7 @@ func (s *OpenSearch) EnsureIndex(ctx context.Context) error {
 	kw := map[string]any{"type": "keyword"}
 	off := map[string]any{"type": "object", "enabled": false}
 	props := map[string]any{
-		"id": kw, "status": kw, "severity": kw, "owner": kw, "findings": kw, "entity_values": kw, "created_by": kw,
+		"id": kw, "status": kw, "severity": kw, "owner": kw, "findings": kw, "entity_values": kw, "created_by": kw, "sample": kw,
 		"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
 		"description": map[string]any{"type": "text"},
 		"resolution":  map[string]any{"type": "text"},
@@ -80,6 +80,17 @@ func (s *OpenSearch) Create(ctx context.Context, c *Case) error {
 
 func (s *OpenSearch) Save(ctx context.Context, c *Case) error { return s.put(ctx, c, "_doc") }
 
+// Delete removes one case; a missing one is not an error.
+func (s *OpenSearch) Delete(ctx context.Context, id string) error {
+	err := s.Client.Do(ctx, http.MethodDelete,
+		"/"+url.PathEscape(s.Index)+"/_doc/"+url.PathEscape(id)+"?refresh=wait_for", nil, nil)
+	var oe *store.Error
+	if errors.As(err, &oe) && oe.Status == 404 {
+		return nil
+	}
+	return err
+}
+
 func (s *OpenSearch) Get(ctx context.Context, id string) (*Case, error) {
 	var out struct {
 		Found  bool `json:"found"`
@@ -109,6 +120,9 @@ func filterQuery(flt Filter) map[string]any {
 	}
 	if flt.FindingID != "" {
 		fs = append(fs, map[string]any{"term": map[string]any{"findings": flt.FindingID}})
+	}
+	if flt.Sample != "" {
+		fs = append(fs, map[string]any{"term": map[string]any{"sample": flt.Sample}})
 	}
 	if t := strings.TrimSpace(flt.Text); t != "" {
 		fs = append(fs, map[string]any{"bool": map[string]any{"minimum_should_match": 1, "should": []any{

@@ -137,7 +137,10 @@ const (
 	qRiskObjects     = "datamodel=Risk\n| stats sum(risk_score) as risk_score, count as events, dc(detection_id) as detections by risk_object, risk_object_type\n| sort -risk_score\n| head 10"
 	qRiskByDetection = "datamodel=Risk\n| stats count by detection_id"
 	qRiskByTactic    = "datamodel=Risk\n| stats count by mitre_tactic"
-	qSources         = "*\n| stats max(_time) as last_seen, count by host, sourcetype"
+	// Sample data is left out of source health: it is loaded all at once and
+	// removed all at once, so it would otherwise show as a source that goes
+	// stale the moment it is removed.
+	qSources = "NOT sample=*\n| stats max(_time) as last_seen, count by host, sourcetype"
 )
 
 func (p *Posture) now() time.Time {

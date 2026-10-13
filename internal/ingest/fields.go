@@ -51,6 +51,13 @@ var knownFields = func() map[string]string {
 		"device_time":    kw,
 		"dropped_fields": long,
 
+		// A marker on every event, risk event and finding the "Load sample
+		// data" feature creates, so Remove can find and delete exactly
+		// those. It is mapped up front so it survives the known-fields-only
+		// retry and never uses a day's new-name budget; handleFields leaves
+		// it out of the fields rail so it does not clutter real data.
+		"sample": kw,
+
 		// Windows and Linux parsers.
 		"src_host": kw, "logon_type_name": kw, "member": kw,
 
@@ -91,6 +98,10 @@ var knownFields = func() map[string]string {
 	}
 	return m
 }()
+
+// SampleField is the keyword field that marks a document as sample data
+// (see the sample package). Its value is the load's ID.
+const SampleField = "sample"
 
 // KnownField reports whether Signalith's own parsers produce a field name,
 // so the index template maps it and events always keep it.
