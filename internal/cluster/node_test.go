@@ -570,12 +570,25 @@ func TestSlowFingerprintsHoldNothingUp(t *testing.T) {
 	waitReady(t, b, 5*time.Second)
 	until(t, 5*time.Second, "b's heartbeats", func() bool { return heartbeatOf(t, fos, b.ID()).State == StateReady })
 	crash(a)
-	time.Sleep(2*fast.Takeover + 2*fast.FilesWait)
+	// Wait for b to give its reason rather than a fixed time: under the
+	// race detector the takeover check can run late.
+	deadline := time.Now().Add(2*fast.Takeover + 2*fast.FilesWait + 10*time.Second)
+	for {
+		if b.RunsJobs() {
+			t.Fatal("b took the jobs over without knowing its files")
+		}
+		why := b.lease.View().CannotTake
+		if strings.Contains(why, "could not be read in time") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("why: %q", why)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(2 * fast.Takeover)
 	if b.RunsJobs() {
 		t.Fatal("b took the jobs over without knowing its files")
-	}
-	if why := b.lease.View().CannotTake; !strings.Contains(why, "could not be read in time") {
-		t.Errorf("why: %q", why)
 	}
 }
 
