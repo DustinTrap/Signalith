@@ -25,13 +25,38 @@ type Clock interface {
 }
 
 // realClock is the computer's clock.
-type realClock struct{ start time.Time }
+type realClock struct {
+	start time.Time
+	// boot is the time since the computer started when this clock was
+	// made, where that can be read (Linux); Mono then counts from it.
+	boot   time.Duration
+	booted bool
+}
 
 // NewRealClock returns the computer's clock.
-func NewRealClock() Clock { return realClock{start: time.Now()} }
+func NewRealClock() Clock {
+	c := realClock{start: time.Now()}
+	c.boot, c.booted = bootTime()
+	return c
+}
 
-func (realClock) Now() time.Time                         { return time.Now() }
-func (c realClock) Mono() time.Duration                  { return time.Since(c.start) }
+// Now is the wall-clock time without Go's monotonic reading, so that
+// subtracting two of them gives the wall time that passed: a computer that
+// was suspended shows the time it slept (see Lease.validLocked).
+func (realClock) Now() time.Time { return time.Now().Round(0) }
+
+// Mono counts the time a suspended computer slept, where the system can
+// tell (Linux's boot time clock; Go's own monotonic clock does on Windows),
+// so a holder that wakes up after the fence time knows its lease ran out.
+func (c realClock) Mono() time.Duration {
+	if c.booted {
+		if now, ok := bootTime(); ok {
+			return now - c.boot
+		}
+	}
+	return time.Since(c.start)
+}
+
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // Timing holds the intervals the cluster uses. The defaults are the ones
@@ -60,6 +85,10 @@ type Timing struct {
 	// ClockCheck is how often the clock offset to OpenSearch is measured,
 	// and FilesCheck how often the files fingerprints are worked out.
 	ClockCheck, FilesCheck time.Duration
+	// FilesWait is how long a server waits for its files fingerprints when
+	// it needs them now; reading the archive folder on a network share
+	// that does not answer must not hold it up.
+	FilesWait time.Duration
 }
 
 // DefaultTiming is the timing servers run with.
@@ -67,9 +96,11 @@ var DefaultTiming = Timing{
 	Heartbeat: 10 * time.Second, Offline: 30 * time.Second, IdentityWatch: 12 * time.Second,
 	Renew: 10 * time.Second, Retry: 2 * time.Second, Fence: 20 * time.Second, Takeover: 30 * time.Second,
 	Watch: 2 * time.Second, ReleaseWait: 60 * time.Second, PreferWait: 10 * time.Second,
-	ClockCheck: time.Minute, FilesCheck: time.Minute,
+	ClockCheck: time.Minute, FilesCheck: 15 * time.Second, FilesWait: 5 * time.Second,
 }
 
-// MaxClockOffset is how far a server's clock may be off OpenSearch's and
-// still hold the job lease: detections are scheduled by wall-clock time.
+// MaxClockOffset is how far a server's clock may be off OpenSearch's
+// before it leaves the background jobs to another server whose clock is
+// right: detections are scheduled by wall-clock time. A server alone keeps
+// running them whatever its clock says.
 const MaxClockOffset = 30 * time.Second

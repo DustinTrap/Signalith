@@ -39,6 +39,13 @@ func (f *fakeCluster) set(runs bool, holder string) {
 	f.runs, f.holder = runs, holder
 }
 
+func (f *fakeCluster) Banners() []string {
+	if f.RunsJobs() || f.JobHolder() != "" {
+		return nil
+	}
+	return []string{"No server is running detections, threat intel downloads or retention."}
+}
+
 func (f *fakeCluster) Status() cluster.Status {
 	off := int64(-12)
 	started := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
@@ -59,50 +66,21 @@ func (f *fakeCluster) Status() cluster.Status {
 	}
 }
 
-func TestClusterViewersSeeNamesAndStates(t *testing.T) {
+// The list of servers is for admins; everyone sees a banner when no
+// server runs the background jobs.
+func TestClusterIsForAdmins(t *testing.T) {
+	cl := &fakeCluster{holder: "siem-a"}
 	ts, _ := newTestServerWith(t, func(s *Server) {
-		s.Cluster = &fakeCluster{holder: "siem-a"}
+		s.Cluster = cl
 		s.Users = users.NewMemory()
 		if _, err := s.Users.Create(users.NewUser{Username: "vera", Role: users.Viewer, Password: "role-password"}); err != nil {
 			t.Fatal(err)
 		}
 	})
-	code, out := doAs(t, ts, "vera", "role-password", "GET", "/api/cluster", "")
-	if code != 200 {
-		t.Fatalf("viewer: %d %v", code, out)
+	if code, _ := doAs(t, ts, "vera", "role-password", "GET", "/api/cluster", ""); code != http.StatusForbidden {
+		t.Errorf("viewer: %d", code)
 	}
-	servers := out["servers"].([]any)
-	if len(servers) != 2 {
-		t.Fatalf("servers %v", servers)
-	}
-	for _, raw := range servers {
-		sv := raw.(map[string]any)
-		if sv["name"] == "" || sv["state"] != "ready" || sv["jobs"] == "" || sv["version"] != "1.5.0" {
-			t.Errorf("viewer row %v", sv)
-		}
-		for _, hidden := range []string{"node_id", "node_url", "listen", "syslog", "opensearch", "clock_offset_ms", "cannot_take_over", "files_fingerprint", "problems"} {
-			if _, ok := sv[hidden]; ok {
-				t.Errorf("a viewer sees %s: %v", hidden, sv)
-			}
-		}
-	}
-	lease := out["lease"].(map[string]any)
-	if lease["holder_name"] != "siem-a" || lease["frozen"] != false || lease["holder"] != nil || lease["epoch"] != nil {
-		t.Errorf("viewer lease %v", lease)
-	}
-	if out["writes_refused"] != false {
-		t.Errorf("viewer writes_refused %v", out["writes_refused"])
-	}
-	for _, hidden := range []string{"warnings", "self"} {
-		if _, ok := out[hidden]; ok {
-			t.Errorf("a viewer sees %s", hidden)
-		}
-	}
-	if osInfo := out["opensearch"].(map[string]any); osInfo["url"] != nil {
-		t.Errorf("a viewer sees where OpenSearch is: %v", osInfo)
-	}
-
-	code, out = do(t, ts, "GET", "/api/cluster", "", true)
+	code, out := do(t, ts, "GET", "/api/cluster", "", true)
 	if code != 200 {
 		t.Fatalf("admin: %d %v", code, out)
 	}
@@ -110,16 +88,45 @@ func TestClusterViewersSeeNamesAndStates(t *testing.T) {
 	if a["node_url"] != "https://10.0.0.5:8443" || a["clock_offset_ms"] != float64(-12) || a["opensearch"].(map[string]any)["latency_ms"] != float64(3) {
 		t.Errorf("admin row %v", a)
 	}
+	if _, ok := a["uptime_seconds"]; !ok {
+		t.Errorf("no uptime: %v", a)
+	}
 	b := out["servers"].([]any)[1].(map[string]any)
 	if b["self"] != true || !strings.Contains(b["cannot_take_over"].(string), "retention policies") {
 		t.Errorf("admin self row %v", b)
 	}
-	lease = out["lease"].(map[string]any)
+	lease := out["lease"].(map[string]any)
 	if lease["holder"] != "n_a" || lease["epoch"] != float64(17) || lease["mine"] != false {
 		t.Errorf("admin lease %v", lease)
 	}
 	if w := out["warnings"].([]any); len(w) != 1 || out["self"] != "n_b" {
 		t.Errorf("admin warnings %v self %v", w, out["self"])
+	}
+	// The banner, for everyone.
+	_, h := doAs(t, ts, "vera", "role-password", "GET", "/api/health", "")
+	if _, ok := h["cluster_banners"]; ok {
+		t.Errorf("a banner while siem-a runs the jobs: %v", h["cluster_banners"])
+	}
+	cl.set(false, "")
+	_, h = doAs(t, ts, "vera", "role-password", "GET", "/api/health", "")
+	if b, _ := h["cluster_banners"].([]any); len(b) != 1 || !strings.HasPrefix(b[0].(string), "No server is running detections") {
+		t.Errorf("banners %v", h["cluster_banners"])
+	}
+}
+
+// On a server that does not run the background jobs, the Detections page
+// says where they run.
+func TestDetectionsSayWhereTheyRun(t *testing.T) {
+	cl := &fakeCluster{holder: "siem-a"}
+	ts, _ := newTestServerWith(t, func(s *Server) { s.Cluster = cl })
+	_, out := do(t, ts, "GET", "/api/detections", "", true)
+	if out["scheduler"] != false || out["runs_on"] != "siem-a" || out["scheduler_here"] != true {
+		t.Errorf("standby: %v %v %v", out["scheduler"], out["runs_on"], out["scheduler_here"])
+	}
+	cl.set(true, "")
+	_, out = do(t, ts, "GET", "/api/detections", "", true)
+	if out["scheduler"] != true || out["runs_on"] != nil {
+		t.Errorf("runner: %v %v", out["scheduler"], out["runs_on"])
 	}
 }
 

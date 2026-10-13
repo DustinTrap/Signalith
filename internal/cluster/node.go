@@ -47,6 +47,11 @@ type Settings struct {
 // an in-process restart keeps it, with its identity, its lock, its
 // heartbeat and its lease, and only points it at the new OpenSearch
 // client.
+//
+// Two loops run: one writes the heartbeat and reads the other servers'
+// (with the clock check), the other renews or watches the job lease, so a
+// heartbeat that waits for OpenSearch never holds up a renewal. The lease
+// stops its jobs at the fence time on a timer of its own.
 type Node struct {
 	local  *Local
 	opts   Options
@@ -66,35 +71,59 @@ type Node struct {
 	// firstTarget is true until the identity check passed on the first
 	// OpenSearch this process used: a conflict there stops the process.
 	firstTarget bool
-	hb          heartbeatState
-	members     map[string]*member
-	offset      *time.Duration
-	offsetNext  time.Duration
+	// probation is true for a while after this process took over the
+	// heartbeat of the folder's previous process (a crash restart): if
+	// that process writes again, it still runs elsewhere and this folder
+	// is a copy, so this process stops. It takes no jobs meanwhile.
+	probation    bool
+	probationEnd time.Duration
+	hb           heartbeatState
+	members      map[string]*member
+	offset       *time.Duration
+	offsetNext   time.Duration
+	// fp are the files fingerprints worked out last; fpDone is closed when
+	// the one being worked out now is ready (nil when none is).
 	fp          Fingerprints
 	fpNext      time.Duration
 	fpSet       bool
-	leaseNext   time.Duration
+	fpDone      chan struct{}
+	fpSlowAt    time.Duration
+	fpSlowFirst bool
 	started     time.Time
 	stopping    bool
 	conflict    string
+	// copySeen is a process started from a copy of this server's state
+	// folder while this one runs, seen at copyAt.
+	copySeen *Heartbeat
+	copyAt   time.Duration
 	// writesRefused is true while OpenSearch refuses writes (a full disk).
 	writesRefused bool
 	// lastContact is when OpenSearch last answered a heartbeat or a read,
-	// on the monotonic clock; contacted is false until it first did.
+	// and lastRead when the other servers were last read, on the
+	// monotonic clock; contacted is false until OpenSearch first answered.
 	lastContact time.Duration
+	lastRead    time.Duration
 	contacted   bool
 	osLatency   time.Duration
+	// lastErr is why OpenSearch did not take the last heartbeat, and
+	// errLogged and errLoggedAt the error logged last, so a failure that
+	// goes on is logged once a minute rather than at every try.
 	lastErr     string
+	lastErrRaw  error
+	errLogged   string
+	errLoggedAt time.Duration
 	releasing   bool
 	// paused says why this server's components are not running, so it
 	// must not hold the jobs; Use clears it.
 	paused string
 
-	wake     chan struct{}
-	fatal    chan error
-	cancel   context.CancelFunc
-	loopDone chan struct{}
-	stopOnce sync.Once
+	wake      chan struct{}
+	leaseWake chan struct{}
+	fatal     chan error
+	cancel    context.CancelFunc
+	loopDone  chan struct{}
+	leaseDone chan struct{}
+	stopOnce  sync.Once
 }
 
 // heartbeatState is this server's heartbeat on the current OpenSearch.
@@ -122,19 +151,26 @@ func New(o Options) *Node {
 	if o.Timing == (Timing{}) {
 		o.Timing = DefaultTiming
 	}
+	if o.Timing.FilesWait == 0 {
+		o.Timing.FilesWait = DefaultTiming.FilesWait
+	}
 	if o.Log == nil {
 		o.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	n := &Node{local: o.Local, opts: o, clock: o.Clock, timing: o.Timing, log: o.Log, firstTarget: true,
-		members: map[string]*member{}, wake: make(chan struct{}, 1), fatal: make(chan error, 1), started: o.Clock.Now().UTC()}
+		members: map[string]*member{}, wake: make(chan struct{}, 1), leaseWake: make(chan struct{}, 1),
+		fatal: make(chan error, 1), started: o.Clock.Now().UTC()}
 	n.lease = &Lease{
 		Self: Self{NodeID: o.Local.Identity.NodeID, Name: o.Local.Identity.Name, Version: o.Version,
 			BootID: o.Local.BootID, LastBoot: o.Local.LastBoot},
 		Clock: o.Clock, Timing: o.Timing, Log: o.Log,
-		Target:       n.leaseTarget,
-		Eligible:     n.eligible,
-		Fingerprints: n.fingerprints,
-		OnChange:     n.poke,
+		Target:        n.leaseTarget,
+		Eligible:      n.mayTake,
+		Fingerprints:  n.fingerprints,
+		Defer:         n.leaveJobs,
+		WritesRefused: n.refusingWrites,
+		OnChange:      n.poke,
+		OnTakeover:    n.tookOver,
 	}
 	return n
 }
@@ -160,7 +196,8 @@ func (n *Node) leaseTarget() (*store.Client, string) {
 	return n.client, RuntimeIndex(n.prefix)
 }
 
-// poke wakes the loop, to write the heartbeat soon after a change.
+// poke wakes both loops, to write the heartbeat soon after a change and to
+// look at the lease.
 func (n *Node) poke() {
 	n.mu.Lock()
 	n.hb.next = 0
@@ -169,10 +206,18 @@ func (n *Node) poke() {
 	case n.wake <- struct{}{}:
 	default:
 	}
+	n.pokeLease()
 }
 
-// Start starts the heartbeat and lease loop; it ends when ctx does or at
-// Stop. The jobs run under ctx.
+func (n *Node) pokeLease() {
+	select {
+	case n.leaseWake <- struct{}{}:
+	default:
+	}
+}
+
+// Start starts the heartbeat and lease loops; they end when ctx does or
+// at Stop. The jobs run under ctx.
 func (n *Node) Start(ctx context.Context) {
 	n.mu.Lock()
 	if n.loopDone != nil {
@@ -180,10 +225,11 @@ func (n *Node) Start(ctx context.Context) {
 		return
 	}
 	ctx, n.cancel = context.WithCancel(ctx)
-	n.loopDone = make(chan struct{})
+	n.loopDone, n.leaseDone = make(chan struct{}), make(chan struct{})
 	n.mu.Unlock()
 	n.lease.SetBase(ctx)
 	go n.loop(ctx)
+	go n.leaseLoop(ctx)
 }
 
 // Use points the node at an OpenSearch client and index prefix, with this
@@ -212,8 +258,8 @@ func (n *Node) Use(c *store.Client, prefix string, s Settings) {
 	n.hbMu.Lock()
 	n.mu.Lock()
 	n.client, n.prefix, n.endpoint = c, prefix, c.Endpoint()
-	n.hb, n.members, n.fpNext, n.offsetNext, n.leaseNext = heartbeatState{}, map[string]*member{}, 0, 0, 0
-	n.contacted, n.writesRefused, n.offset = false, false, nil
+	n.hb, n.members, n.fpNext, n.offsetNext = heartbeatState{}, map[string]*member{}, 0, 0
+	n.contacted, n.writesRefused, n.offset, n.lastErr, n.lastErrRaw = false, false, nil, "", nil
 	if n.conflict != "" && !n.firstTarget {
 		// A conflict on the old OpenSearch says nothing about the new one.
 		n.conflict = ""
@@ -261,8 +307,8 @@ func (n *Node) SetJobs(jobs []Job) {
 }
 
 // Stop gives the lease up gracefully (waiting for the jobs, at most a
-// minute), writes a last heartbeat saying this server stopped, and stops
-// the loop.
+// minute, while the lease loop keeps renewing it), writes a last
+// heartbeat saying this server stopped, and stops the loops.
 func (n *Node) Stop() {
 	n.stopOnce.Do(func() {
 		n.mu.Lock()
@@ -270,11 +316,12 @@ func (n *Node) Stop() {
 		n.mu.Unlock()
 		n.lease.Release("the server is stopping")
 		n.mu.Lock()
-		cancel, done := n.cancel, n.loopDone
+		cancel, done, leaseDone := n.cancel, n.loopDone, n.leaseDone
 		n.mu.Unlock()
 		if cancel != nil {
 			cancel()
 			<-done
+			<-leaseDone
 		}
 		n.mu.Lock()
 		ok := n.hb.checked && n.conflict == ""
@@ -303,6 +350,21 @@ func (n *Node) loop(ctx context.Context) {
 	}
 }
 
+// leaseLoop renews or watches the job lease, on its own, so nothing else
+// this server waits for can delay a renewal.
+func (n *Node) leaseLoop(ctx context.Context) {
+	defer close(n.leaseDone)
+	for {
+		wait := n.lease.Step(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-n.clock.After(wait):
+		case <-n.leaseWake:
+		}
+	}
+}
+
 // tick does what is due and returns when the next thing is.
 func (n *Node) tick(ctx context.Context) time.Duration {
 	n.mu.Lock()
@@ -312,10 +374,10 @@ func (n *Node) tick(ctx context.Context) time.Duration {
 		return time.Hour
 	}
 	now := n.clock.Mono()
-	if conflict != "" {
-		return n.timing.Heartbeat
-	}
 	if !hb.checked {
+		if conflict != "" {
+			return n.timing.Heartbeat
+		}
 		if now < hb.next {
 			return hb.next - now
 		}
@@ -326,22 +388,29 @@ func (n *Node) tick(ctx context.Context) time.Duration {
 			}
 			if ctx.Err() == nil {
 				n.mu.Lock()
-				n.lastErr = err.Error()
+				n.lastErr, n.lastErrRaw = err.Error(), err
 				n.hb.next = n.clock.Mono() + n.timing.Retry
 				n.mu.Unlock()
-				n.log.Warn("could not write this server's heartbeat to OpenSearch; trying again", "err", err)
+				n.logFailure("could not write this server's heartbeat to OpenSearch, so it runs no background jobs; trying again", err)
 			}
 			return n.timing.Retry
 		}
+		n.pokeLease()
 	}
 	n.mu.Lock()
+	if n.probation && now >= n.probationEnd {
+		// Nobody else wrote this identity's heartbeat meanwhile: this
+		// process is the folder's only one.
+		n.probation, n.firstTarget = false, false
+		n.mu.Unlock()
+		n.pokeLease()
+		n.mu.Lock()
+	}
 	due := now >= n.hb.next
 	offsetDue := now >= n.offsetNext
-	fpDue := now >= n.fpNext
 	n.mu.Unlock()
-	if fpDue {
-		n.fingerprints(true)
-	}
+	// The files fingerprints are worked out in the background.
+	n.fingerprints(false)
 	if offsetDue {
 		n.measureOffset(ctx, c)
 	}
@@ -352,32 +421,58 @@ func (n *Node) tick(ctx context.Context) time.Duration {
 			state = StateStopping
 		}
 		n.mu.Unlock()
-		n.writeHeartbeat(ctx, state)
+		if conflict == "" {
+			n.writeHeartbeat(ctx, state)
+		} else {
+			// Another process uses this identity: this one writes nothing,
+			// but still reads the others, so its page stays true.
+			n.mu.Lock()
+			n.hb.next = n.clock.Mono() + n.timing.Heartbeat
+			n.mu.Unlock()
+		}
 		n.observe(ctx, c, prefix)
 	}
-	// Give the lease up when this server may no longer hold it.
-	if ok, why := n.eligible(); !ok && n.lease.Holding() {
+	// Give the lease up when this server may no longer hold it, or should
+	// leave it to a server whose clock is right.
+	if n.lease.Holding() {
+		ok, why := n.eligible()
+		// Not while OpenSearch refuses writes: nobody could take it, and
+		// the disk guard must go on.
+		if ok && !n.refusingWrites() {
+			if leave, leaveWhy := n.leaveJobs(); leave {
+				ok, why = false, leaveWhy
+			}
+		}
 		n.mu.Lock()
 		stopping, conflicted := n.stopping, n.conflict != ""
 		n.mu.Unlock()
-		if !stopping && !conflicted {
+		if !ok && !stopping && !conflicted {
 			n.releaseAsync(why)
 		}
 	}
 	n.mu.Lock()
-	leaseDue := n.clock.Mono() >= n.leaseNext
-	n.mu.Unlock()
-	if leaseDue {
-		wait := n.lease.Step(ctx)
-		n.mu.Lock()
-		n.leaseNext = n.clock.Mono() + wait
-		n.mu.Unlock()
-	}
-	n.mu.Lock()
 	defer n.mu.Unlock()
 	now = n.clock.Mono()
-	next := min(n.hb.next, n.offsetNext, n.fpNext, n.leaseNext) - now
-	return max(next, 10*time.Millisecond)
+	next := min(n.hb.next, n.offsetNext, n.fpNext)
+	if n.probation {
+		next = min(next, n.probationEnd)
+	}
+	return max(next-now, 10*time.Millisecond)
+}
+
+// logFailure logs a failure to reach OpenSearch the first time, then at
+// most once a minute while it stays the same.
+func (n *Node) logFailure(msg string, err error) {
+	n.mu.Lock()
+	now := n.clock.Mono()
+	quiet := err.Error() == n.errLogged && now-n.errLoggedAt < time.Minute
+	if !quiet {
+		n.errLogged, n.errLoggedAt = err.Error(), now
+	}
+	n.mu.Unlock()
+	if !quiet {
+		n.log.Warn(msg, "err", err)
+	}
 }
 
 // identityConflictError is another live process using this server's
@@ -395,6 +490,9 @@ func (n *Node) firstHeartbeat(ctx context.Context, c *store.Client, prefix strin
 	if err := ensureRuntime(ctx, c, prefix); err != nil {
 		return err
 	}
+	if err := ensureRuntimeTemplate(ctx, c, prefix); err != nil && ctx.Err() == nil {
+		n.log.Warn("could not save the index template of the runtime index; if someone deletes that index while Signalith runs, OpenSearch makes it again with its own settings", "err", err)
+	}
 	index := RuntimeIndex(prefix)
 	id := nodeDocID(n.ID())
 	for range 3 {
@@ -404,10 +502,12 @@ func (n *Node) firstHeartbeat(ctx context.Context, c *store.Client, prefix strin
 		if err != nil {
 			return err
 		}
+		probation := false
 		if found {
 			var other Heartbeat
 			_ = json.Unmarshal(src, &other)
-			if other.BootID != "" && other.BootID != n.local.BootID && other.BootID != n.local.LastBoot {
+			switch {
+			case other.BootID != "" && other.BootID != n.local.BootID && other.BootID != n.local.LastBoot:
 				// Written by a process that was not this folder's last: a
 				// copy of the folder, alive or not. Watch it.
 				live, err := n.watchIdentity(ctx, c, index, id, ver)
@@ -419,6 +519,12 @@ func (n *Node) firstHeartbeat(ctx context.Context, c *store.Client, prefix strin
 				}
 				n.log.Warn("found a heartbeat of this server's identity from another process; it no longer changes, so it was a stale copy",
 					"other_boot", other.BootID, "other_name", other.Name)
+			case other.BootID != "" && other.BootID == n.local.LastBoot && other.State != StateStopped:
+				// The folder's previous process did not stop cleanly: it
+				// crashed, or this folder is a copy of a running server's.
+				// This one starts now, and stops if that process writes
+				// again.
+				probation = true
 			}
 		}
 		if err := n.local.WriteLastBoot(); err != nil {
@@ -442,9 +548,9 @@ func (n *Node) firstHeartbeat(ctx context.Context, c *store.Client, prefix strin
 			// OpenSearch's disk is full: nobody can write, so nobody else
 			// can be using this identity's heartbeat either.
 			n.mu.Lock()
-			n.writesRefused, n.contacted, n.lastContact = true, true, n.clock.Mono()
+			n.writesRefused, n.contacted, n.lastContact, n.lastRead = true, true, n.clock.Mono(), n.clock.Mono()
 			n.hb = heartbeatState{checked: true, ver: ver, next: n.clock.Mono() + n.timing.Heartbeat}
-			n.firstTarget = false
+			n.firstTarget, n.lastErr, n.lastErrRaw = false, "", nil
 			n.mu.Unlock()
 			return nil
 		}
@@ -455,8 +561,14 @@ func (n *Node) firstHeartbeat(ctx context.Context, c *store.Client, prefix strin
 		// The next heartbeat, at once, says it is ready, and the other
 		// servers are read with it.
 		n.hb = heartbeatState{checked: true, ver: nv, next: n.clock.Mono()}
-		n.contacted, n.lastContact, n.osLatency, n.lastErr, n.writesRefused = true, n.clock.Mono(), n.clock.Mono()-sent, "", false
-		n.firstTarget = false
+		n.contacted, n.lastContact, n.osLatency, n.lastErr, n.lastErrRaw, n.writesRefused = true, n.clock.Mono(), n.clock.Mono()-sent, "", nil, false
+		n.lastRead = n.clock.Mono()
+		if probation {
+			n.probation, n.probationEnd = true, n.clock.Mono()+n.timing.Heartbeat+n.timing.IdentityWatch
+		} else {
+			n.firstTarget = false
+		}
+		n.errLogged = ""
 		n.mu.Unlock()
 		n.log.Info("this server joined the servers that share its OpenSearch", "node_id", n.ID(), "index", index)
 		return nil
@@ -507,8 +619,8 @@ func (n *Node) identityConflict(other *Heartbeat) error {
 	if other.NodeURL != "" {
 		where += ", " + other.NodeURL
 	}
-	msg := fmt.Sprintf("Another server (%s) is using this server's identity: its state folder was copied (a cloned computer?) or is shared. "+
-		"To give this server a new identity, stop it, delete %s and start it again.", where, filepath.Join(n.local.Dir, nodeFile))
+	msg := fmt.Sprintf("Another server (%s) is using this server's identity: its state folder was copied (a cloned computer?) or is shared. %s",
+		where, n.newIdentityHowTo())
 	n.mu.Lock()
 	first := n.firstTarget
 	n.conflict = msg
@@ -525,13 +637,23 @@ func (n *Node) identityConflict(other *Heartbeat) error {
 	return err
 }
 
+// newIdentityHowTo says how to give this server a new identity.
+func (n *Node) newIdentityHowTo() string {
+	if n.opts.Deployment == "docker" {
+		return "To give this server a new identity, stop it (docker compose stop signalith), delete node.id from its data volume " +
+			"(docker run --rm -v <volume>:/d busybox rm /d/node.id, where docker volume ls shows the volume, such as docker_signalith-data), " +
+			"then start it again (docker compose up -d)."
+	}
+	return fmt.Sprintf("To give this server a new identity, stop it, delete %s and start it again.", filepath.Join(n.local.Dir, nodeFile))
+}
+
 // heartbeatDoc is this server's heartbeat as it is now.
 func (n *Node) heartbeatDoc(state string) Heartbeat {
 	eligible, why := n.eligible()
 	view := n.lease.View()
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	hb := Heartbeat{Kind: "node", NodeID: n.ID(), Name: n.Name(), BootID: n.local.BootID, State: state,
+	hb := Heartbeat{Kind: "node", NodeID: n.ID(), Name: n.Name(), BootID: n.local.BootID, PrevBoot: n.local.LastBoot, State: state,
 		Version: n.opts.Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Deployment: n.opts.Deployment,
 		StartedAt: n.started, HeartbeatAt: n.clock.Now().UTC(), NodeURL: n.settings.NodeURL, Listen: n.settings.Listen,
 		Syslog: n.settings.Syslog, LeaderEligible: eligible, NotEligible: why, Leader: view.Mine && view.Valid,
@@ -539,6 +661,9 @@ func (n *Node) heartbeatDoc(state string) Heartbeat {
 		OpenSearch: OSInfo{OK: n.contacted && n.lastErr == "", Endpoint: n.endpoint, LatencyMS: n.osLatency.Milliseconds()}}
 	if view.Mine {
 		hb.LeaseEpoch = view.Doc.Epoch
+	}
+	if eligible && !view.Mine {
+		hb.CannotTakeOver = view.CannotTake
 	}
 	if n.offset != nil {
 		ms := n.offset.Milliseconds()
@@ -571,21 +696,24 @@ func (n *Node) writeHeartbeat(ctx context.Context, state string) {
 	} else {
 		nv, err = c.PutIf(rctx, index, id, doc, ver, false)
 	}
-	if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrExists) {
-		nv, err = n.heartbeatConflict(rctx, c, index, id, doc)
+	if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrExists) || errors.Is(err, store.ErrNotFound) {
+		nv, err = n.heartbeatConflict(rctx, c, prefix, id, doc)
 	}
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	switch {
 	case err == nil:
-		n.hb.ver, n.contacted, n.lastContact, n.osLatency, n.lastErr, n.writesRefused = nv, true, n.clock.Mono(), n.clock.Mono()-sent, "", false
+		n.hb.ver, n.contacted, n.lastContact, n.osLatency, n.lastErr, n.lastErrRaw, n.writesRefused = nv, true, n.clock.Mono(), n.clock.Mono()-sent, "", nil, false
+		n.errLogged = ""
 	case store.IsClusterBlock(err):
 		// OpenSearch answers, but its disk is full.
-		n.contacted, n.lastContact, n.writesRefused, n.lastErr = true, n.clock.Mono(), true, ""
+		n.contacted, n.lastContact, n.writesRefused, n.lastErr, n.lastErrRaw = true, n.clock.Mono(), true, "", nil
 	case errors.Is(err, errConflicted):
 	default:
-		n.lastErr = err.Error()
-		n.log.Warn("could not write this server's heartbeat to OpenSearch", "err", err)
+		n.lastErr, n.lastErrRaw = err.Error(), err
+	}
+	n.mu.Unlock()
+	if err != nil && !store.IsClusterBlock(err) && !errors.Is(err, errConflicted) && ctx.Err() == nil {
+		n.logFailure("could not write this server's heartbeat to OpenSearch", err)
 	}
 }
 
@@ -593,18 +721,38 @@ var errConflicted = errors.New("another process uses this identity")
 
 // heartbeatConflict handles a heartbeat that changed since this server
 // wrote it: rewritten by this same process (an answer that got lost), gone
-// (removed), or written by another process with this identity.
-func (n *Node) heartbeatConflict(ctx context.Context, c *store.Client, index, id string, doc Heartbeat) (store.Version, error) {
+// (removed, or its whole index was: it is made again), or written by
+// another process with this identity.
+func (n *Node) heartbeatConflict(ctx context.Context, c *store.Client, prefix, id string, doc Heartbeat) (store.Version, error) {
+	index := RuntimeIndex(prefix)
 	src, ver, found, err := c.Get(ctx, index, id)
 	if err != nil {
 		return store.Version{}, err
 	}
 	if !found {
+		if err := ensureRuntime(ctx, c, prefix); err != nil {
+			return store.Version{}, err
+		}
 		return c.Create(ctx, index, id, doc, false)
 	}
 	var other Heartbeat
 	_ = json.Unmarshal(src, &other)
-	if other.BootID == n.local.BootID {
+	switch {
+	case other.BootID == n.local.BootID:
+		return c.PutIf(ctx, index, id, doc, ver, false)
+	case other.PrevBoot != "" && other.PrevBoot == n.local.BootID:
+		// A process started from a copy of this server's state folder took
+		// itself for this one's next start. This one runs on: it writes
+		// its heartbeat back, and the copy stops when it sees that.
+		n.mu.Lock()
+		cp := other
+		n.copySeen, n.copyAt = &cp, n.clock.Mono()
+		n.mu.Unlock()
+		where := other.Name
+		if other.NodeURL != "" {
+			where += ", " + other.NodeURL
+		}
+		n.log.Error("a copy of this server's state folder was started elsewhere while this server runs; this server goes on, and the copy stops by itself", "copy", where)
 		return c.PutIf(ctx, index, id, doc, ver, false)
 	}
 	_ = n.identityConflict(&other)
@@ -649,27 +797,68 @@ func (n *Node) measureOffset(ctx context.Context, c *store.Client) {
 	}
 }
 
-// fingerprints returns this server's files fingerprints, worked out again
-// when fresh is true or they are older than FilesCheck.
+// fingerprints returns this server's files fingerprints. Working them out
+// reads files, and the archive folder may be on a network share that does
+// not answer, so it runs in the background, once at a time: when the last
+// ones are older than FilesCheck, a new run starts. fresh waits for that
+// run, at most FilesWait; otherwise, and when that wait runs out, the last
+// ones are returned (Unknown when there are none yet).
 func (n *Node) fingerprints(fresh bool) Fingerprints {
 	n.mu.Lock()
-	f := n.settings.Fingerprints
-	now := n.clock.Mono()
-	if !fresh && n.fpSet && now < n.fpNext {
-		fp := n.fp
-		n.mu.Unlock()
+	var done chan struct{}
+	if fresh || !n.fpSet || n.clock.Mono() >= n.fpNext {
+		done = n.fpStartLocked()
+	}
+	fp, set := n.fp, n.fpSet
+	n.mu.Unlock()
+	if done == nil || !fresh {
+		if !set {
+			return Fingerprints{Unknown: true}
+		}
 		return fp
 	}
-	n.fpNext = now + n.timing.FilesCheck
-	n.mu.Unlock()
-	var fp Fingerprints
-	if f != nil {
-		fp = f()
+	select {
+	case <-done:
+	case <-n.clock.After(n.timing.FilesWait):
+		n.mu.Lock()
+		now := n.clock.Mono()
+		quiet := n.fpSlowFirst && now-n.fpSlowAt < 10*time.Minute
+		n.fpSlowAt, n.fpSlowFirst = now, true
+		n.mu.Unlock()
+		if !quiet {
+			n.log.Warn("this server's files that the background jobs use could not be read in time; the archive folder's share may not answer", "wait", n.timing.FilesWait)
+		}
 	}
 	n.mu.Lock()
-	n.fp, n.fpSet = fp, true
-	n.mu.Unlock()
-	return fp
+	defer n.mu.Unlock()
+	if !n.fpSet {
+		return Fingerprints{Unknown: true}
+	}
+	return n.fp
+}
+
+// fpStartLocked starts working out the fingerprints unless that runs
+// already, and returns what is closed when it is done. The caller holds
+// n.mu.
+func (n *Node) fpStartLocked() chan struct{} {
+	if n.fpDone != nil {
+		return n.fpDone
+	}
+	f := n.settings.Fingerprints
+	done := make(chan struct{})
+	n.fpDone = done
+	n.fpNext = n.clock.Mono() + n.timing.FilesCheck
+	go func() {
+		var fp Fingerprints
+		if f != nil {
+			fp = f()
+		}
+		n.mu.Lock()
+		n.fp, n.fpSet, n.fpDone = fp, true, nil
+		n.mu.Unlock()
+		close(done)
+	}()
+	return done
 }
 
 // eligible says whether this server may hold the job lease now, and why
@@ -677,6 +866,10 @@ func (n *Node) fingerprints(fresh bool) Fingerprints {
 func (n *Node) eligible() (bool, string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.eligibleLocked()
+}
+
+func (n *Node) eligibleLocked() (bool, string) {
 	switch {
 	case n.stopping:
 		return false, "it is stopping"
@@ -686,12 +879,102 @@ func (n *Node) eligible() (bool, string) {
 		return false, n.paused
 	case !n.settings.Eligible:
 		return false, "detections.scheduler is off on this server"
+	case !n.hb.checked && n.lastErr != "":
+		return false, n.osProblemLocked()
 	case !n.hb.checked:
 		return false, "it has not reached OpenSearch yet"
-	case n.offset != nil && (*n.offset > MaxClockOffset || *n.offset < -MaxClockOffset):
-		return false, fmt.Sprintf("its clock is %s off OpenSearch's (at most %s is allowed)", n.offset.Abs().Round(time.Second), MaxClockOffset)
 	}
 	return true, ""
+}
+
+// osProblemLocked says, in a few words, why this server could not write
+// its heartbeat. The caller holds n.mu.
+func (n *Node) osProblemLocked() string {
+	var oe *store.Error
+	if errors.As(n.lastErrRaw, &oe) {
+		return fmt.Sprintf("OpenSearch refused its heartbeat (%s)", refusal(oe, RuntimeIndex(n.prefix)))
+	}
+	return "it cannot reach OpenSearch"
+}
+
+// refusal names an OpenSearch error briefly, such as "403
+// security_exception on signalith_runtime".
+func refusal(oe *store.Error, index string) string {
+	var body struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	out := fmt.Sprint(oe.Status)
+	if json.Unmarshal([]byte(oe.Body), &body) == nil && body.Error.Type != "" {
+		out += " " + body.Error.Type
+	}
+	return out + " on " + index
+}
+
+// mayTake is eligible, for the lease: a process on probation also waits.
+func (n *Node) mayTake() (bool, string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if ok, why := n.eligibleLocked(); !ok {
+		return ok, why
+	}
+	if n.probation {
+		return false, "it started a moment ago and is making sure no other process uses its identity"
+	}
+	return true, ""
+}
+
+// leaveJobs says whether this server should leave the background jobs to
+// another one: its clock is more than MaxClockOffset off OpenSearch's,
+// and another server that may run them, whose clock is right, is up. A
+// server alone runs them whatever its clock says.
+func (n *Node) leaveJobs() (bool, string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.offset == nil || n.offset.Abs() <= MaxClockOffset {
+		return false, ""
+	}
+	for id, m := range n.members {
+		// Only to one that would take them: not one whose files differ.
+		if id == n.ID() || n.goneLocked(m) || !m.hb.LeaderEligible || m.hb.State != StateReady || m.hb.ClockOffsetMS == nil || m.hb.CannotTakeOver != "" {
+			continue
+		}
+		if (time.Duration(*m.hb.ClockOffsetMS) * time.Millisecond).Abs() <= MaxClockOffset {
+			return true, fmt.Sprintf("its clock is %s off OpenSearch's, so it leaves them to %s, whose clock is right",
+				n.offset.Abs().Round(time.Second), m.hb.Name)
+		}
+	}
+	return false, ""
+}
+
+// refusingWrites reports whether OpenSearch refuses this server's
+// writes (a full disk).
+func (n *Node) refusingWrites() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.writesRefused
+}
+
+// tookOver is told that this server took the jobs over from server from,
+// because that one stopped renewing the lease: it counts as offline from
+// now on unless its heartbeat changes again.
+func (n *Node) tookOver(from string) {
+	n.mu.Lock()
+	if m := n.members[from]; m != nil {
+		if gone := n.clock.Mono() - n.timing.Offline; m.since > gone {
+			m.since = gone
+		}
+	}
+	n.mu.Unlock()
+	n.poke()
+}
+
+// blindLocked reports whether this server has not been able to read the
+// other servers' heartbeats lately: what it knows of them is old. The
+// caller holds n.mu.
+func (n *Node) blindLocked() bool {
+	return !n.contacted || n.clock.Mono()-n.lastRead > n.timing.Offline/2
 }
 
 // observe reads every server's heartbeat.
@@ -706,7 +989,10 @@ func (n *Node) observe(ctx context.Context, c *store.Client, prefix string) {
 	now := n.clock.Mono()
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.contacted, n.lastContact = true, now
+	// After a time this server could not read, a heartbeat that did not
+	// change may simply not have been seen change: count from now.
+	gap := n.blindLocked()
+	n.contacted, n.lastContact, n.lastRead = true, now, now
 	seen := map[string]bool{}
 	for _, d := range docs {
 		var hb Heartbeat
@@ -718,15 +1004,20 @@ func (n *Node) observe(ctx context.Context, c *store.Client, prefix string) {
 		switch {
 		case m == nil:
 			// First sight: how old it is can only be told from its own
-			// clock, corrected by both servers' offsets when known.
+			// clock, corrected by both servers' offsets when known. It is
+			// kept whole, so a server started again still says when the
+			// others were last seen; heartbeats older than a week are
+			// removed, so more than that is a broken clock.
 			age := n.clock.Now().Sub(hb.HeartbeatAt)
 			if n.offset != nil && hb.ClockOffsetMS != nil {
 				age += *n.offset - time.Duration(*hb.ClockOffsetMS)*time.Millisecond
 			}
-			age = min(max(age, 0), n.timing.Offline)
+			age = min(max(age, 0), 8*24*time.Hour)
 			n.members[hb.NodeID] = &member{hb: hb, ver: d.Version, since: now - age}
 		case !m.ver.Same(d.Version):
 			m.hb, m.ver, m.since = hb, d.Version, now
+		case gap && hb.State != StateStopped:
+			m.since = now
 		}
 		if n.writesRefused {
 			// Nobody can write a heartbeat while OpenSearch refuses
@@ -825,7 +1116,7 @@ func fixFiles(parts []string, server, holder string) string {
 			what = append(what, "retention policies (retention.yaml in the lookups folder, and retention in signalith.yaml)")
 		case "threat intel feeds":
 			what = append(what, "threat intel feeds (intel_feeds.yaml in the lookups folder, and intel in signalith.yaml)")
-		case "archives":
+		case "archive folder":
 			shared = true
 		default:
 			what = append(what, p)
@@ -836,7 +1127,7 @@ func fixFiles(parts []string, server, holder string) string {
 		out = append(out, fmt.Sprintf("Make %s's %s the same as %s's, then restart %s.", server, joinWords(what), holder, server))
 	}
 	if shared {
-		out = append(out, "Keep archives in one shared folder: set retention.archive_dir to the same folder on every server, then restart them.")
+		out = append(out, "Keep archives in one shared folder: set retention.archive_dir to the same shared folder on every server, then restart them.")
 	}
 	if len(out) == 0 {
 		return fmt.Sprintf("Make the files the jobs use the same on %s as on %s, then restart %s.", server, holder, server)
@@ -844,10 +1135,14 @@ func fixFiles(parts []string, server, holder string) string {
 	return strings.Join(out, " ")
 }
 
-// goneLocked reports whether another server is offline or stopped. The
-// caller holds n.mu.
+// goneLocked reports whether another server is offline or stopped. While
+// this server cannot read the heartbeats, or nobody can write them (a full
+// disk), the others stay as they were last seen. The caller holds n.mu.
 func (n *Node) goneLocked(m *member) bool {
-	return m.hb.State == StateStopped || (n.clock.Mono()-m.since >= n.timing.Offline && !n.writesRefused)
+	if m.hb.State == StateStopped {
+		return true
+	}
+	return n.clock.Mono()-m.since >= n.timing.Offline && !n.writesRefused && !n.blindLocked()
 }
 
 // Readiness reasons.
@@ -863,6 +1158,10 @@ const (
 func (n *Node) Ready() (bool, string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.readyLocked()
+}
+
+func (n *Node) readyLocked() (bool, string) {
 	switch {
 	case n.stopping:
 		return false, NotReadyStopping
@@ -894,22 +1193,28 @@ type ServerStatus struct {
 	NodeID string `json:"node_id"`
 	Name   string `json:"name"`
 	Self   bool   `json:"self"`
-	// State is starting, ready, stopping, stopped, conflict or offline.
+	// State is starting, ready, stopping, stopped, conflict, unreachable
+	// (this server cannot use OpenSearch) or offline.
 	State string `json:"state"`
 	// OfflineSince is when its heartbeat stopped, for an offline or
-	// stopped server.
-	OfflineSince *time.Time `json:"offline_since,omitempty"`
-	Version      string     `json:"version"`
+	// stopped server, on this server's clock, and SeenAgo how long ago
+	// that was.
+	OfflineSince *time.Time     `json:"offline_since,omitempty"`
+	SeenAgo      *time.Duration `json:"-"`
+	Version      string         `json:"version"`
 	// Jobs is "runs" for the server that runs the background jobs,
 	// "standby" for one that may take them over, "not_eligible" for one
 	// that may not.
-	Jobs        string     `json:"jobs"`
-	StartedAt   time.Time  `json:"started_at"`
-	HeartbeatAt time.Time  `json:"heartbeat_at"`
-	Detail      *Heartbeat `json:"-"`
+	Jobs        string    `json:"jobs"`
+	StartedAt   time.Time `json:"started_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at"`
+	// Uptime is how long it has run, as of now.
+	Uptime time.Duration `json:"-"`
+	Detail *Heartbeat    `json:"-"`
 	// CannotTakeOver says why this server would not take the jobs over
 	// by itself: its files differ from those of the server that ran them
-	// last. differ lists those files (Fingerprints.Differ).
+	// last, or its clock is far off. differ lists those files
+	// (Fingerprints.Differ).
 	CannotTakeOver string `json:"-"`
 	differ         []string
 }
@@ -932,10 +1237,12 @@ type JobsStatus struct {
 }
 
 // Warning is something about the servers an admin should know, red for a
-// problem and amber for attention.
+// problem and amber for attention. Banner, on red ones, is a short form
+// for a banner on every page, which names no server address.
 type Warning struct {
-	Level string `json:"level"`
-	Text  string `json:"text"`
+	Level  string `json:"level"`
+	Text   string `json:"text"`
+	Banner string `json:"banner,omitempty"`
 }
 
 // Status returns the cluster as this server last saw it.
@@ -943,20 +1250,21 @@ func (n *Node) Status() Status {
 	view := n.lease.View()
 	eligible, notWhy := n.eligible()
 	self := n.heartbeatDoc(StateReady)
-	ready, reason := n.Ready()
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	ready, reason := n.readyLocked()
+	now := n.clock.Mono()
 	st := Status{Self: n.ID(), WritesRefused: n.writesRefused, Warnings: []Warning{}}
 	// This server, as it is now rather than as last written.
 	self.State = StateReady
 	if !ready {
-		self.State = map[string]string{NotReadyStopping: StateStopping, NotReadyIdentity: StateConflict}[reason]
+		self.State = map[string]string{NotReadyStopping: StateStopping, NotReadyIdentity: StateConflict, NotReadyOpenSearch: StateUnreachable}[reason]
 		if self.State == "" {
 			self.State = StateStarting
 		}
 	}
 	mine := ServerStatus{NodeID: self.NodeID, Name: self.Name, Self: true, State: self.State, Version: self.Version,
-		StartedAt: self.StartedAt, HeartbeatAt: self.HeartbeatAt, Detail: &self}
+		StartedAt: self.StartedAt, HeartbeatAt: self.HeartbeatAt, Detail: &self, Uptime: max(n.clock.Now().Sub(n.started), 0)}
 	servers := []ServerStatus{mine}
 	holderID := ""
 	if view.Found {
@@ -967,14 +1275,18 @@ func (n *Node) Status() Status {
 			continue
 		}
 		hb := m.hb
+		unchanged := now - m.since
 		s := ServerStatus{NodeID: id, Name: hb.Name, State: hb.State, Version: hb.Version, StartedAt: hb.StartedAt,
-			HeartbeatAt: hb.HeartbeatAt, Detail: &hb}
+			HeartbeatAt: hb.HeartbeatAt, Detail: &hb, Uptime: max(hb.HeartbeatAt.Sub(hb.StartedAt)+unchanged, 0)}
 		if hb.State != StateStopped && n.goneLocked(m) {
 			s.State = StateOffline
 		}
 		if s.State == StateOffline || s.State == StateStopped {
-			t := hb.HeartbeatAt
-			s.OfflineSince = &t
+			// When it was last seen, told by this server's own clocks: the
+			// other one's may be wrong.
+			ago := max(unchanged, 0)
+			at := n.clock.Now().Add(-ago).UTC()
+			s.OfflineSince, s.SeenAgo = &at, &ago
 		}
 		servers = append(servers, s)
 	}
@@ -991,22 +1303,26 @@ func (n *Node) Status() Status {
 		if s.Self && !eligible {
 			s.Detail.NotEligible = notWhy
 		}
-		// The fingerprint guard: a server that may run the jobs does not
-		// take them over by itself while its files differ from those of
-		// the server that ran them last. This server knows from its own
-		// check of the lease; the others are compared through the
-		// fingerprints in their heartbeats, so every server's page shows
-		// it.
-		d := view.Doc
-		if s.Jobs != "standby" || !view.Found || d.Fingerprint == "" || s.NodeID == d.Holder || d.Holder == "" && s.NodeID == d.ReleasedBy {
+		if s.Jobs != "standby" {
 			continue
 		}
+		// Why a server that may run the jobs would not take them over by
+		// itself: its clock (from its own check), or the fingerprint
+		// guard, its files differing from those of the server that ran
+		// them last. Every server's page shows it: the others' are read
+		// from their heartbeats.
+		d := view.Doc
+		guarded := view.Found && d.Fingerprint != "" && s.NodeID != d.Holder && !(d.Holder == "" && s.NodeID == d.ReleasedBy)
 		switch {
 		case s.Self && view.CannotTake != "":
-			s.CannotTakeOver, s.differ = view.CannotTake, s.Detail.FilesFingerprint.Differ(d.Fingerprints)
-		case !s.Self && s.Detail.FilesFingerprint.Combined() != d.Fingerprint:
+			s.CannotTakeOver = view.CannotTake
+		case !s.Self && s.Detail.CannotTakeOver != "":
+			s.CannotTakeOver = s.Detail.CannotTakeOver
+		case !s.Self && guarded && s.Detail.FilesFingerprint.Combined() != d.Fingerprint:
+			s.CannotTakeOver = cannotTakeOver(s.Detail.FilesFingerprint.Differ(d.Fingerprints), holderName(d))
+		}
+		if s.CannotTakeOver != "" && guarded {
 			s.differ = s.Detail.FilesFingerprint.Differ(d.Fingerprints)
-			s.CannotTakeOver = cannotTakeOver(s.differ, holderName(d))
 		}
 	}
 	sort.Slice(servers, func(i, j int) bool {
@@ -1028,19 +1344,48 @@ func (n *Node) Status() Status {
 			st.Jobs.AcquiredAt, st.Jobs.RenewedAt = &acq, &ren
 		}
 	}
-	st.Warnings = n.warningsLocked(st, view)
+	st.Warnings = n.warningsLocked(st, view, notWhy)
 	return st
 }
 
 // warningsLocked lists what an admin should know, each as a short first
-// sentence, then what it means and what to do. The caller holds n.mu.
-func (n *Node) warningsLocked(st Status, view LeaseView) []Warning {
+// sentence, then what it means and what to do. notWhy is why this server
+// may not run the jobs. The caller holds n.mu.
+func (n *Node) warningsLocked(st Status, view LeaseView, notWhy string) []Warning {
 	w := []Warning{}
 	if n.conflict != "" {
-		w = append(w, Warning{"red", n.conflict})
+		w = append(w, Warning{Level: "red", Text: n.conflict, Banner: "Another server is using this server's identity, so this server runs no background jobs."})
+	}
+	if n.copySeen != nil && n.clock.Mono()-n.copyAt < 10*time.Minute {
+		where := n.copySeen.Name
+		if n.copySeen.NodeURL != "" {
+			where += " at " + n.copySeen.NodeURL
+		}
+		w = append(w, Warning{Level: "amber", Text: fmt.Sprintf("A copy of this server's state folder was started (%s) while this server runs. "+
+			"This server goes on and the copy stops by itself. Before you start the copy again, give it its own identity: delete node.id in its state folder.", where)})
 	}
 	if n.writesRefused {
-		w = append(w, Warning{"red", fullDiskWarning(st.Jobs)})
+		text, banner := fullDiskWarning(st.Jobs)
+		w = append(w, Warning{Level: "red", Text: text, Banner: banner})
+	}
+	// This server cannot use OpenSearch: what it knows of the others is
+	// old, so nothing more is said about them.
+	if ready, why := n.readyLocked(); !ready && why == NotReadyOpenSearch {
+		var text string
+		if n.lastErr != "" && !n.hb.checked {
+			var oe *store.Error
+			if errors.As(n.lastErrRaw, &oe) {
+				text = fmt.Sprintf("OpenSearch refused this server's heartbeat (%s), so this server runs no detections, threat intel downloads or retention. "+
+					"Give Signalith's OpenSearch user the right to create, read and write %s (or %s_*). The error was: %s.",
+					refusal(oe, RuntimeIndex(n.prefix)), RuntimeIndex(n.prefix), n.prefix, oe.Error())
+			} else {
+				text = "This server can't reach OpenSearch, so it can't see the other servers and runs no background jobs. The error was: " + n.lastErr + "."
+			}
+		} else {
+			text = "This server can't reach OpenSearch, so it can't see the other servers and runs no background jobs. The servers below are as it last saw them."
+		}
+		w = append(w, Warning{Level: "red", Text: text, Banner: "This server can't use OpenSearch, so it runs no background jobs."})
+		return append(w, n.localWarningsLocked(st)...)
 	}
 	runs := false
 	var standby, blocked []ServerStatus
@@ -1056,44 +1401,98 @@ func (n *Node) warningsLocked(st Status, view LeaseView) []Warning {
 	}
 	holder := holderName(view.Doc)
 	const none = "No server is running detections, threat intel downloads or retention."
-	if !runs && n.hb.checked && view.Seen {
+	if !runs && n.hb.checked && view.Seen && n.conflict == "" {
 		switch {
 		case len(standby) > 0:
-			w = append(w, Warning{"amber", fmt.Sprintf("No server runs detections, threat intel downloads or retention right now. %s takes them over within a minute.", standby[0].Name)})
+			w = append(w, Warning{Level: "amber", Text: fmt.Sprintf("No server runs detections, threat intel downloads or retention right now. %s takes them over within a minute.", standby[0].Name)})
 		case len(blocked) > 0:
 			b := blocked[0]
-			w = append(w, Warning{"red", fmt.Sprintf("%s %s may run them, but does not take them over from %s by itself, because %s. %s",
-				none, b.Name, holder, b.CannotTakeOver, fixFiles(b.differ, b.Name, holder))})
+			fix := fixFiles(b.differ, b.Name, holder)
+			if len(b.differ) == 0 {
+				fix = ""
+			}
+			w = append(w, Warning{Level: "red", Text: strings.TrimSpace(fmt.Sprintf("%s %s may run them, but does not take them over by itself, because %s. %s",
+				none, b.Name, b.CannotTakeOver, fix)), Banner: none})
 			blocked = blocked[1:]
+		case strings.HasPrefix(notWhy, "detections.scheduler is off"):
+			w = append(w, Warning{Level: "red", Text: none + " No server that may run them is up. Start one, or turn on Run detections on schedule (detections.scheduler) on the Settings page of one of them.", Banner: none})
 		default:
-			w = append(w, Warning{"red", none + " No server that may run them is up. Start one, or turn on Run detections on schedule (detections.scheduler) on the Settings page of one of them."})
+			w = append(w, Warning{Level: "red", Text: fmt.Sprintf("%s No other server that may run them is up, and this one doesn't, because %s.", none, notWhy), Banner: none})
 		}
 	}
 	for _, b := range blocked {
-		w = append(w, Warning{"amber", fmt.Sprintf("%s would not take the background jobs over if %s stopped. Its %s. %s",
-			b.Name, holder, strings.TrimPrefix(b.CannotTakeOver, "its "), fixFiles(b.differ, b.Name, holder))})
+		fix := ""
+		if len(b.differ) > 0 {
+			fix = " " + fixFiles(b.differ, b.Name, holder)
+		}
+		w = append(w, Warning{Level: "amber", Text: fmt.Sprintf("%s would not take the background jobs over if %s stopped, because %s.%s",
+			b.Name, holder, b.CannotTakeOver, fix)})
 	}
+	return append(w, n.localWarningsLocked(st)...)
+}
+
+// localWarningsLocked are warnings about this server's folder, the
+// servers' clocks and names. The caller holds n.mu.
+func (n *Node) localWarningsLocked(st Status) []Warning {
+	var w []Warning
 	for _, msg := range n.local.Warnings {
-		w = append(w, Warning{"amber", msg})
+		w = append(w, Warning{Level: "amber", Text: msg})
 	}
+	names := map[string]int{}
 	for _, s := range st.Servers {
-		if s.Detail != nil && s.Detail.ClockOffsetMS != nil && s.State != StateOffline && s.State != StateStopped {
+		if s.State == StateOffline || s.State == StateStopped {
+			continue
+		}
+		names[s.Name]++
+		if s.Detail != nil && s.Detail.ClockOffsetMS != nil {
 			off := time.Duration(*s.Detail.ClockOffsetMS) * time.Millisecond
 			if off.Abs() > 2*time.Second {
-				w = append(w, Warning{"amber", fmt.Sprintf("%s's clock is %s off OpenSearch's. Detections are scheduled by the clock: keep every server's clock in sync with NTP (Windows Time on Windows).", s.Name, off.Abs().Round(100*time.Millisecond))})
+				w = append(w, Warning{Level: "amber", Text: fmt.Sprintf("%s's clock is %s off OpenSearch's. Detections are scheduled by the clock: keep every server's clock in sync with NTP (Windows Time on Windows).", s.Name, off.Abs().Round(100*time.Millisecond))})
 			}
 		}
+	}
+	dups := []string{}
+	for name, k := range names {
+		if k > 1 {
+			dups = append(dups, name)
+		}
+	}
+	sort.Strings(dups)
+	for _, name := range dups {
+		w = append(w, Warning{Level: "amber", Text: fmt.Sprintf("More than one running server is named %s. Give each its own name: set cluster.node_name in signalith.yaml (SIGNALITH_NODE_NAME in Docker) on all but one, then restart them.", name)})
 	}
 	return w
 }
 
 // fullDiskWarning says that OpenSearch refuses writes, what Signalith does
-// about it, and what an admin can do.
-func fullDiskWarning(jobs JobsStatus) string {
+// about it, and what an admin can do; and briefly, for every page.
+func fullDiskWarning(jobs JobsStatus) (text, banner string) {
 	head := "OpenSearch's disk is full, so it refuses new events. "
 	if jobs.Holder == "" {
-		return head + "No server runs the disk guard right now, so nothing frees space by itself. Give OpenSearch more disk, or start a server that runs the background jobs."
+		return head + "No server runs the disk guard right now, so nothing frees space by itself. Give OpenSearch more disk, or start a server that runs the background jobs.",
+			head + "No server is deleting old days to free space."
 	}
 	return head + fmt.Sprintf("%s keeps only the retention disk guard running: unless it was turned off on the Data retention page, it deletes the oldest days until there is room. "+
-		"New events are stored again by themselves after that; agents keep theirs until then. To make room sooner, give OpenSearch more disk.", jobs.HolderName)
+			"New events are stored again by themselves after that; agents keep theirs until then. To make room sooner, give OpenSearch more disk.", jobs.HolderName),
+		head + "Signalith is deleting the oldest days to free space."
+}
+
+// Banners returns the red problems for a banner on every page, briefly.
+func (n *Node) Banners() []string {
+	var out []string
+	for _, w := range n.Status().Warnings {
+		if w.Level == "red" && w.Banner != "" && !slicesContains(out, w.Banner) {
+			out = append(out, w.Banner)
+		}
+	}
+	return out
+}
+
+func slicesContains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

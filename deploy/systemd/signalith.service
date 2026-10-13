@@ -11,6 +11,9 @@ Group=signalith
 ExecStart=/usr/local/bin/signalith serve -c /etc/signalith/signalith.yaml
 Restart=on-failure
 RestartSec=5
+# A stop gives the background jobs up to a minute to finish before another
+# server takes them over.
+TimeoutStopSec=100
 # Secrets can live here instead of the config file:
 # EnvironmentFile=-/etc/signalith/signalith.env
 NoNewPrivileges=true
@@ -25,6 +28,8 @@ ReadOnlyPaths=/etc/signalith
 # Custom detections, asset and identity lists, dashboards, retention
 # settings and archived days are saved here.
 StateDirectory=signalith
+# This server's identity (node.id) and its lock are kept here.
+Environment=SIGNALITH_STATE_DIR=/var/lib/signalith
 Environment=SIGNALITH_DETECTIONS_DIR=/var/lib/signalith/detections
 Environment=SIGNALITH_LOOKUPS_DIR=/var/lib/signalith/lookups
 Environment=SIGNALITH_DASHBOARDS_DIR=/var/lib/signalith/dashboards

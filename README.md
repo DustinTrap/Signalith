@@ -302,32 +302,44 @@ Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_NODE_URL`). A setting set by an
 environment variable is shown locked on the Settings page. `SIGNALITH_SETTINGS_FILE`
 sets where the Settings page keeps its changes (default `settings.yaml` in `lookups.dir`).
-`SIGNALITH_STATE_DIR` sets the state folder (default: the folder that holds `lookups.dir`).
+`SIGNALITH_STATE_DIR` sets the state folder (default: the folder that holds `lookups.dir`;
+the systemd unit and the Docker image set it to `/var/lib/signalith`).
 
 ### More than one server
 
 Several Signalith servers can share one OpenSearch, for example behind a load
 balancer. They find each other through OpenSearch: each writes a heartbeat to the
-`<prefix>_runtime` index every 10 seconds. The **Servers** page (under Health)
-lists them, which one runs the background jobs, and what to fix when something is
-wrong; `GET /api/cluster` returns the same list. One of
+`<prefix>_runtime` index every 10 seconds, so the OpenSearch user needs the right to
+create, read and write that index (or `<prefix>_*`). The **Servers** page (under
+Health, for admins) lists them, which one runs the background jobs, and what to fix
+when something is wrong; `GET /api/cluster` returns the same list. When something
+stops for everyone, such as no server running detections, every signed-in person
+sees a red banner at the top of the page. One of
 them runs the background jobs (detections, threat intel downloads, retention and
 index upgrades); the others take over within about 40 seconds if it stops, or within
 seconds when it is stopped on purpose. Two servers never run them at once: the one
 that runs them stops by itself when it cannot confirm, within 20 seconds, that it
-still may. Only servers with `detections.scheduler: true` take part.
+still may. Only servers with `detections.scheduler: true` take part. A server whose
+clock is more than 30 seconds off leaves the jobs to one whose clock is right; keep
+clocks in sync with NTP.
 
 Until shared settings arrive, retention policies, feeds and custom detections are
 still kept in files on each server. A server whose files differ from those of the
 server that runs the jobs does not take them over by itself, and the list of servers
-says why. Copy the files across to fix it. The Data retention and feed settings can
-be changed only on the server that runs the jobs.
+says why. Copy the files across to fix it. When a retention policy archives, every
+server must set `retention.archive_dir` to the same shared folder (Signalith names it
+with a `.signalith-archive-id` file; leave it there). The Data retention and feed
+settings can be changed only on the server that runs the jobs.
 
 Each server keeps its identity in its state folder (`node.id`, and `cluster/lock`
-while it runs). The folder must be on a local disk: a network share is refused.
-Never copy it to another server: two servers with one identity are found out, at
-start or within seconds while running, and one of them stops running jobs and says
-why. To give a server a new identity, stop it, delete `node.id` and start it again.
+while it runs). The folder must be on a local disk that the service's user can
+write: when the folder that holds `lookups.dir` is on a network share or cannot be
+written, Signalith uses `/var/lib/signalith` (Linux) or `C:\ProgramData\Signalith`
+(Windows) instead and says so in its log. Servers that share `lookups.dir` must each
+set their own `SIGNALITH_STATE_DIR`. Never copy the folder to another server: two
+servers with one identity are found out, at start or within seconds while running,
+and one of them stops running jobs and says why. To give a server a new identity,
+stop it, delete `node.id` and start it again.
 
 Load balancers and container platforms can ask `GET /readyz` (200
 `{"ready":true}`, or 503 with a one-word `reason`: `starting`, `restarting`, `down`,
@@ -337,9 +349,9 @@ runs). Both answer without signing in and say nothing else.
 Until sessions are shared, a web sign-in is kept by the server it was made on: set
 the load balancer to keep each person on one server (sticky sessions).
 
-**Upgrading a pair of servers:** older versions ignore the shared job lease, so
-upgrade both servers together, or first set `detections.scheduler: false` on the
-server you upgrade last.
+**Upgrading servers that share one OpenSearch:** older versions ignore the shared
+job lease, so upgrade them all together, or first set `detections.scheduler: false`
+on every server but one and turn it back on once all of them run this version.
 
 See [docs/servers.md](docs/servers.md) for the Servers page, how the jobs move,
 adding a server by hand, and load balancer examples.

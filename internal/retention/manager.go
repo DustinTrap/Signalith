@@ -52,7 +52,7 @@ type ReadOnlyError struct {
 
 func (e *ReadOnlyError) Error() string {
 	if e.Holder == "" {
-		return "this server doesn't run retention right now, and no server runs the background jobs at the moment; the list of servers says why"
+		return "this server doesn't run retention right now, and no server runs the background jobs at the moment; the Servers page says why"
 	}
 	return "this server doesn't run retention right now: " + e.Holder + " runs it, with its own settings; make changes there"
 }
@@ -257,10 +257,11 @@ func (m *Manager) Settings() (Settings, error) {
 }
 
 // Fingerprint returns hashes of the retention settings in effect on this
-// server and, while any policy archives, of the list of archives in its
-// archive folder (else ""). Servers that share one OpenSearch compare
-// them, so one whose settings or archives differ from those of the server
-// that runs retention does not take retention over by itself.
+// server and, while any policy archives, of its archive folder's name
+// (Archive.StoreID; else ""). Servers that share one OpenSearch compare
+// them, so one whose settings differ from those of the server that runs
+// retention, or that keeps archives in another folder, does not take
+// retention over by itself.
 func (m *Manager) Fingerprint() (settings, archives string) {
 	hash := func(v any) string {
 		b, _ := json.Marshal(v)
@@ -279,11 +280,11 @@ func (m *Manager) Fingerprint() (settings, archives string) {
 	if !archiving || m.Archive == nil {
 		return settings, ""
 	}
-	ids, err := m.Archive.IDs()
+	id, err := m.Archive.StoreID()
 	if err != nil {
 		return settings, hash(map[string]string{"error": err.Error()})
 	}
-	return settings, hash(ids)
+	return settings, hash(map[string]string{"store_id": id})
 }
 
 // state is a snapshot plus what the overview needs besides the plan.
@@ -1099,8 +1100,11 @@ type ScheduleView struct {
 	// ReadOnly is true on servers that do not run retention; the page
 	// then only shows it.
 	ReadOnly bool `json:"read_only"`
-	// ReadOnlyWhy says why, naming the server that runs retention.
+	// ReadOnlyWhy says why, naming the server that runs retention. RunsOn
+	// names that server; NoRunner is true when none does right now.
 	ReadOnlyWhy string     `json:"read_only_why,omitempty"`
+	RunsOn      string     `json:"runs_on,omitempty"`
+	NoRunner    bool       `json:"no_runner,omitempty"`
 	Running     bool       `json:"running"`
 	Current     string     `json:"current,omitempty"` // run or restore
 	Queued      bool       `json:"queued,omitempty"`  // another run starts when this one ends
@@ -1157,6 +1161,10 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 	if roErr != nil {
 		why := roErr.Error()
 		ov.Schedule.ReadOnlyWhy = strings.ToUpper(why[:1]) + why[1:] + "."
+		var ro *ReadOnlyError
+		if errors.As(roErr, &ro) {
+			ov.Schedule.RunsOn, ov.Schedule.NoRunner = ro.Holder, ro.Holder == ""
+		}
 	}
 	if m.automatic && !m.nextRun.IsZero() {
 		next := m.nextRun

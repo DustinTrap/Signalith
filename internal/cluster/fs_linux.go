@@ -43,6 +43,17 @@ func folderFilesystem(dir string) (network, shared string, err error) {
 	return "", "", nil
 }
 
+// fallbackStateDirs are local folders for the state folder when the one
+// that holds lookups.dir cannot be used: systemd's StateDirectory, then
+// the usual place.
+func fallbackStateDirs() []string {
+	var out []string
+	if d, _, _ := strings.Cut(os.Getenv("STATE_DIRECTORY"), ":"); d != "" {
+		out = append(out, d)
+	}
+	return append(out, "/var/lib/signalith")
+}
+
 // machineID is this computer's id (/etc/machine-id), or "".
 func machineID() string {
 	for _, f := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {

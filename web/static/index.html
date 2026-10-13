@@ -186,7 +186,7 @@
       <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
       <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
-      <a class="nav__item" href="#servers" data-page="servers"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
+      <a class="nav__item" href="#servers" data-page="servers" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
       <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
@@ -223,6 +223,9 @@
   </div>
 </header>
 <main class="content" id="content">
+  <!-- Problems with the servers that share this OpenSearch that everyone
+       should know of, on every page (from api/health). -->
+  <div class="cluster-banner hidden" id="cluster-banner" role="alert"></div>
   <!-- Search -->
   <section id="page-search" class="page active">
     <div class="search-layout">
@@ -754,7 +757,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
         <button class="btn btn--primary" type="button" id="d-new" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
       </div>
     </div>
-    <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b>The scheduler is off on this server.</b><p>Detections only run when you choose Run now.</p></div></div>
+    <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b id="d-scheduler-title">The scheduler is off on this server.</b><p id="d-scheduler-text">Detections only run when you choose Run now.</p></div></div>
     <div class="split split--solo" id="d-split">
       <section class="queue" aria-label="Detection list">
         <div class="pills" id="d-show" role="group" aria-label="Show"></div>

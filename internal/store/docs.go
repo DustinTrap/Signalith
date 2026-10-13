@@ -65,6 +65,15 @@ var (
 // answer was lost went through.
 const recheckTimeout = 10 * time.Second
 
+type recheckKey struct{}
+
+// WithRecheckLimit returns ctx with a limit on that read: a write that is
+// worthless after a moment (a lease renewal after the lease ran out) is
+// not checked for longer.
+func WithRecheckLimit(ctx context.Context, until time.Time) context.Context {
+	return context.WithValue(ctx, recheckKey{}, until)
+}
+
 // docPath is /<index>/<op>/<id>.
 func docPath(index, op, id string) string {
 	return "/" + url.PathEscape(index) + "/" + op + "/" + url.PathEscape(id)
@@ -226,13 +235,19 @@ func (c *Client) Update(ctx context.Context, index, id string, fields map[string
 }
 
 // DeleteIf deletes a document, only if it is still at version v:
-// ErrConflict when it changed since, ErrNotFound when it is gone.
+// ErrConflict when it changed since, ErrNotFound when it is gone (or its
+// index is).
 func (c *Client) DeleteIf(ctx context.Context, index, id string, v Version, refresh bool) error {
 	_, err := c.write(ctx, http.MethodDelete, docPath(index, "_doc", id)+ifQuery(v)+refreshQuery("&", refresh), nil)
 	switch {
 	case err == nil:
 		return nil
 	case conflict(err):
+		// OpenSearch answers a conditional delete of a document that is
+		// gone with a version conflict too: a read tells them apart.
+		if _, _, found, rerr := c.recheck(ctx, index, id); rerr == nil && !found {
+			return ErrNotFound
+		}
 		return ErrConflict
 	case notFound(err):
 		return ErrNotFound
@@ -283,9 +298,14 @@ func (c *Client) settle(ctx context.Context, index, id string, v Version, wid st
 }
 
 // recheck reads a document after a write whose answer was lost, even
-// when the write's own context has ended.
+// when the write's own context has ended, for at most recheckTimeout or
+// until the limit set with WithRecheckLimit.
 func (c *Client) recheck(ctx context.Context, index, id string) (json.RawMessage, Version, bool, error) {
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recheckTimeout)
+	until := time.Now().Add(recheckTimeout)
+	if t, ok := ctx.Value(recheckKey{}).(time.Time); ok && t.Before(until) {
+		until = t
+	}
+	rctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), until)
 	defer cancel()
 	return c.Get(rctx, index, id)
 }

@@ -58,6 +58,15 @@ func TestCreateGetPutIfDeleteIf(t *testing.T) {
 	if _, err := c.PutIf(ctx, "s_runtime", "lease:jobs", map[string]any{"holder": "b"}, v2, false); !errors.Is(err, ErrConflict) {
 		t.Fatalf("put over a deleted document: %v", err)
 	}
+	// A conditional delete of a document that is gone, in an index that is
+	// there: OpenSearch answers it as a version conflict, DeleteIf says
+	// it is gone.
+	if err := c.DeleteIf(ctx, "s_runtime", "lease:jobs", v2, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete of a deleted document: %v", err)
+	}
+	if err := c.DeleteIf(ctx, "s_nothing", "lease:jobs", v2, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete in a missing index: %v", err)
+	}
 	if _, err := c.Create(ctx, "s_runtime", "x", []int{1}, false); err == nil {
 		t.Error("a document that is not an object was written")
 	}

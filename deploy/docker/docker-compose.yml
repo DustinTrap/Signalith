@@ -46,6 +46,9 @@ services:
     restart: unless-stopped
     depends_on:
       opensearch: { condition: service_healthy }
+    # A stop gives the background jobs up to a minute to finish before
+    # another server takes them over.
+    stop_grace_period: 90s
     ports:
       - "8080:8080"
       # Syslog: devices send to this machine on port 514, which reaches the
@@ -59,6 +62,9 @@ services:
       - SIGNALITH_OPENSEARCH_URL=http://opensearch:9200
       - SIGNALITH_ADMIN_PASSWORD=change-me-please
       - SIGNALITH_INGEST_TOKEN=change-this-ingest-token
+      # This server's name on the Servers page. When several servers share
+      # one OpenSearch, give each its own.
+      - SIGNALITH_NODE_NAME=signalith-1
       # Set to http://<this computer's IP>:8080 so agents on other machines can reach it.
       # - SIGNALITH_PUBLIC_URL=http://192.168.1.20:8080
     volumes:

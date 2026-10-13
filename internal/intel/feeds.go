@@ -141,6 +141,11 @@ type Feeds struct {
 	Now        func() time.Time
 	// Tick is how often due feeds are checked (default 30s).
 	Tick time.Duration
+	// Allowed, when set, says whether this server may still run the feed
+	// schedule: with several servers, only the one that runs the
+	// background jobs may. It is asked before each scheduled download and
+	// each clean-up, so a server that lost that role stops at once.
+	Allowed func() bool
 
 	mu       sync.Mutex
 	status   map[string]*FeedStatus
@@ -187,6 +192,8 @@ const (
 	RunTimeout  = 5 * time.Minute
 	TestTimeout = time.Minute
 )
+
+func (f *Feeds) allowed() bool { return f.Allowed == nil || f.Allowed() }
 
 func (f *Feeds) now() time.Time {
 	if f.Now != nil {
@@ -459,7 +466,7 @@ func (f *Feeds) Start(ctx context.Context) {
 		// server that stops running the schedule stores nothing after.
 		f.kicked.Wait()
 	}()
-	if fileOK {
+	if fileOK && f.allowed() {
 		f.storeMu.Lock()
 		n, err := f.Store.RemoveSources(ctx, keep)
 		f.storeMu.Unlock()
@@ -478,7 +485,7 @@ func (f *Feeds) Start(ctx context.Context) {
 	lastPurge := time.Time{}
 	for {
 		f.RunDue(ctx)
-		if f.now().Sub(lastPurge) >= time.Hour {
+		if f.now().Sub(lastPurge) >= time.Hour && f.allowed() {
 			lastPurge = f.now()
 			if n, err := f.Store.Purge(ctx); err != nil {
 				f.log().Warn("could not purge expired indicators", "err", err)
@@ -524,7 +531,11 @@ func (f *Feeds) RunDue(ctx context.Context) {
 	}
 }
 
+// refreshAndLog downloads a feed on the schedule.
 func (f *Feeds) refreshAndLog(ctx context.Context, name string) {
+	if !f.allowed() {
+		return
+	}
 	_, err := f.Refresh(ctx, name)
 	if err != nil && !errors.Is(err, ErrFeedRunning) && !errors.Is(err, ErrFeedChanged) && !errors.Is(err, ErrUnknownFeed) && !errors.Is(err, ErrFeedOff) {
 		f.log().Warn("threat intel feed download failed", "feed", name, "err", err)

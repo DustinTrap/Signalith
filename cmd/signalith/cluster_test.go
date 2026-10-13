@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -151,5 +152,27 @@ func TestReadiness(t *testing.T) {
 	f.resume(downHandler)
 	if ok, why := f.readiness(); ok || why != "down" {
 		t.Errorf("down: %v %s", ok, why)
+	}
+}
+
+// The same detections copied to Windows, with CRLF line ends and a byte
+// order mark, have the same fingerprint; a real change does not.
+func TestDetectionsFingerprintIgnoresLineEnds(t *testing.T) {
+	unix, win := t.TempDir(), t.TempDir()
+	rule := "id: brute\ntitle: Brute force\nquery: event.action=failed | stats count by user\n"
+	if err := os.WriteFile(filepath.Join(unix, "brute.yaml"), []byte(rule), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(win, "brute.yaml"), []byte("\ufeff"+strings.ReplaceAll(rule, "\n", "\r\n")), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := detectionsFingerprint(unix), detectionsFingerprint(win); a != b {
+		t.Errorf("line ends change the fingerprint: %s %s", a, b)
+	}
+	if err := os.WriteFile(filepath.Join(win, "brute.yaml"), []byte(strings.Replace(rule, "Brute", "Brutal", 1)), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if detectionsFingerprint(unix) == detectionsFingerprint(win) {
+		t.Error("a changed rule has the same fingerprint")
 	}
 }

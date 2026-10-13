@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -20,8 +21,11 @@ func lockFile(path string) (func(), error) {
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
-		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		switch {
+		case errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN):
 			return nil, errLocked
+		case errors.Is(err, unix.ENOLCK) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL):
+			return nil, fmt.Errorf("%w: %w", errLockUnsupported, err)
 		}
 		return nil, err
 	}

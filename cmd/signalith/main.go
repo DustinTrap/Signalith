@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -261,7 +262,11 @@ func cmdValidate(args []string) error {
 		fmt.Println("Warning:", w+".")
 	}
 	// The state folder holds this server's identity and its lock.
-	warnings, err := cluster.CheckFolder(c.StateDir())
+	state, why := stateDir(c)
+	if why != "" {
+		fmt.Println("Note:", strings.ToUpper(why[:1])+why[1:]+".")
+	}
+	warnings, err := cluster.CheckFolder(state)
 	if err != nil {
 		return err
 	}
@@ -845,7 +850,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			if !ready(ctx) {
 				return
 			}
-			upgradeIndices(ctx, log, []indexUpgrade{
+			upgradeIndices(ctx, log, func() bool { return r.node == nil || r.node.RunsJobs() }, []indexUpgrade{
 				{intelOK, ibackend.Index, ibackend.Upgrade}, {casesOK, cstore.Index, cstore.Upgrade}, {findingsOK, fstore.Index, fstore.Upgrade},
 			})
 		}},
@@ -881,6 +886,10 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	if r.node != nil {
 		ret.Leader = func() (bool, string) { return r.node.RunsJobs(), r.node.JobHolder() }
 		ret.Fence = r.node.Check
+		// The scheduler and the feeds ask before each run or download, so a
+		// server that lost the job lease stops at once, even before its
+		// jobs' context ends.
+		sched.Allowed, feeds.Allowed = r.node.RunsJobs, r.node.RunsJobs
 		srv.Cluster = r.node
 		in.node = r.node
 	}
@@ -909,9 +918,9 @@ type indexUpgrade struct {
 // upgradeIndices adds fields introduced since the indices were made. Only
 // the server that runs the background jobs does, when it starts running
 // them, rather than every server at every start.
-func upgradeIndices(ctx context.Context, log *slog.Logger, list []indexUpgrade) {
+func upgradeIndices(ctx context.Context, log *slog.Logger, allowed func() bool, list []indexUpgrade) {
 	for _, u := range list {
-		if !u.ok || ctx.Err() != nil {
+		if !u.ok || ctx.Err() != nil || !allowed() {
 			continue
 		}
 		if err := u.upgrade(ctx); err != nil && ctx.Err() == nil {
@@ -947,6 +956,11 @@ func detectionsFingerprint(dir string) string {
 		if err != nil {
 			b = []byte("unreadable: " + err.Error())
 		}
+		// The same rules copied to Windows (by Git, WinSCP or Notepad) get
+		// CRLF line ends and sometimes a byte order mark: neither changes
+		// them.
+		b = bytes.TrimPrefix(b, []byte("\ufeff"))
+		b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 		parts = append(parts, []byte(filepath.Base(f)), b)
 	}
 	return cluster.Hash(parts...)
@@ -1000,17 +1014,31 @@ func deployment() string {
 // record from then on.
 func openNode(c *config.Config, log *slog.Logger) (*cluster.Node, *slog.Logger, error) {
 	inContainer := cluster.InContainer()
-	local, err := cluster.OpenLocal(c.StateDir(), cluster.LocalOptions{Name: c.Cluster.NodeName, InContainer: inContainer})
+	dir, why := stateDir(c)
+	local, err := cluster.OpenLocal(dir, cluster.LocalOptions{Name: c.Cluster.NodeName, InContainer: inContainer})
 	if err != nil {
 		return nil, nil, err
 	}
 	log = log.With("node", local.Identity.Name)
+	if why != "" {
+		log.Warn(why)
+	}
 	for _, w := range local.Warnings {
 		log.Warn(w)
 	}
 	log.Info("this server's identity", "node_id", local.Identity.NodeID, "state_dir", local.Dir)
 	node := cluster.New(cluster.Options{Local: local, Version: version, Deployment: deployment(), Log: log})
 	return node, log, nil
+}
+
+// stateDir is this server's state folder: SIGNALITH_STATE_DIR when set;
+// else the folder that holds lookups.dir, or a local one when that is on
+// a network share or cannot be written, with why.
+func stateDir(c *config.Config) (dir, why string) {
+	if os.Getenv("SIGNALITH_STATE_DIR") != "" {
+		return c.StateDir(), ""
+	}
+	return cluster.PickStateDir(c.StateDir())
 }
 
 // openUsers opens the user store once and keeps it across restarts, so

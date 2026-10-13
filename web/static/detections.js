@@ -1002,6 +1002,10 @@ setInterval(() => {
 // ---------- detections ----------
 let detections = [];
 let schedulerOn = true;
+// runsOn names the server that runs the detections when this one does
+// not; '' when none does; null when this server runs them or its
+// scheduler is off.
+let runsOn = null;
 const det = { show: '', open: null, closed: false, list: [], counts24: null, loaded: false, seq: 0, msg: null, test: null, running: null };
 // d-show is a group of pills; other pages set it like a select ($('d-show').value = '').
 Object.defineProperty($('d-show'), 'value', { configurable: true, get: () => det.show, set: (v) => { det.show = v || ''; } });
@@ -1028,6 +1032,7 @@ async function loadDetections() {
     if (seq !== det.seq) return;
     detections = res.detections;
     schedulerOn = res.scheduler;
+    runsOn = typeof res.runs_on === 'string' && res.scheduler_here ? res.runs_on : null;
     det.counts24 = null;
     if (f24) {
       det.counts24 = {};
@@ -1035,7 +1040,7 @@ async function loadDetections() {
       det.counts24Partial = f24.total > f24.findings.length;
     }
     det.loaded = true;
-    $('d-scheduler-note').classList.toggle('hidden', schedulerOn);
+    schedulerNote();
     renderDetections();
   } catch (e) {
     if (seq !== det.seq) return;
@@ -1063,8 +1068,31 @@ function detectionsHead() {
     el('th', { 'data-col': 'on' }, el('span', { class: 'sr-only' }, 'On'))));
 }
 
+// schedulerNote says when detections do not run on this server: its
+// scheduler is off, another server runs them, or none does right now.
+function schedulerNote() {
+  const note = $('d-scheduler-note');
+  let tone = 'info', ic = 'info', title = 'The scheduler is off on this server.', text = 'Detections only run when you choose Run now.';
+  if (runsOn) {
+    title = `Detections run on ${runsOn}.`;
+    text = 'Their run times and errors are shown there. Run now runs one here.';
+  } else if (runsOn === '') {
+    tone = 'danger'; ic = 'circle-alert';
+    title = 'No server runs detections right now.';
+    text = can('admin') ? 'The Servers page says why.' : 'An admin needs to look.';
+  }
+  note.dataset.tone = tone;
+  note.querySelector('use').setAttribute('href', '#i-' + ic);
+  $('d-scheduler-title').textContent = title;
+  $('d-scheduler-text').replaceChildren(...(runsOn === '' && can('admin')
+    ? ['The ', el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page'), ' says why.'] : [text]));
+  note.classList.toggle('hidden', schedulerOn);
+}
+
 function lastRunCell(st) {
   if (st.running) return [el('div', { class: 'dx-line' }, 'Running…')];
+  // Scheduled runs happen on another server: their times are there.
+  if (!st.last_run && runsOn != null) return [el('div', { class: 'dx-line muted' }, el('span', { 'aria-hidden': 'true' }, '–'), el('span', { class: 'sr-only' }, 'Runs on another server'))];
   if (!st.last_run) return [el('div', { class: 'dx-line muted' }, 'Not yet')];
   const second = st.last_error ? el('span', { class: 'dx-meta dx-fail', title: st.last_error }, st.timed_out ? 'Timed out' : 'Failed')
     : el('span', { class: 'dx-meta' }, st.last_findings ? dxPlural(st.last_findings, 'new finding') : st.last_results ? dxPlural(st.last_results, 'result') : 'No results');
@@ -1319,10 +1347,11 @@ function renderDetectionInspector() {
           dxBtn('ghost', 'Open in Search', () => openSearch(d.query, '-' + (d.lookback || '24h')), { sm: true, icon: 'search' })),
         el('pre', { class: 'dx-code' }, d.query)),
       dxSection('Last run', dxKv([
-        ['When', st.last_run ? el('span', { title: fmtTime(st.last_run) }, ago(st.last_run) + (st.last_duration_ms ? ` · took ${st.last_duration_ms} ms` : '')) : 'Not run yet'],
+        ['When', st.last_run ? el('span', { title: fmtTime(st.last_run) }, ago(st.last_run) + (st.last_duration_ms ? ` · took ${st.last_duration_ms} ms` : '')) : runsOn ? `Not here: it runs on ${runsOn}` : runsOn === '' ? 'Not here' : 'Not run yet'],
         st.last_run ? ['Results', `${dxPlural(st.last_results, 'result')}, ${dxPlural(st.last_findings, 'new finding')}`] : null,
         n24 != null ? ['Last 24 hours', n24 ? el('button', { class: 'link-btn', type: 'button' }, dxPlural(n24, 'finding')) : 'No findings'] : null,
-        schedulerOn && d.enabled ? null : ['Schedule', schedulerOn ? 'Off, so it does not run' : 'Scheduler off; runs only with Run now'],
+        schedulerOn && d.enabled ? null : ['Schedule', schedulerOn || runsOn != null && !d.enabled ? 'Off, so it does not run'
+          : runsOn ? `Runs on ${runsOn}` : runsOn === '' ? 'No server runs detections right now' : 'Scheduler off; runs only with Run now'],
       ])),
       dxSection('Settings', dxKv([
         ['Repeats', (thr.fields || []).length ? `One finding per ${thr.fields.join(', ')}${thr.window ? ' for ' + thr.window : ''}` : thr.window ? `Held back for ${thr.window}` : 'Every result raises a finding'],

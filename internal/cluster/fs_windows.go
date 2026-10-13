@@ -3,6 +3,7 @@
 package cluster
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -32,6 +33,15 @@ func folderFilesystem(dir string) (network, shared string, err error) {
 		return "SMB", "", nil
 	}
 	return "", "", nil
+}
+
+// fallbackStateDirs are local folders for the state folder when the one
+// that holds lookups.dir cannot be used.
+func fallbackStateDirs() []string {
+	if d := os.Getenv("ProgramData"); d != "" {
+		return []string{filepath.Join(d, "Signalith")}
+	}
+	return nil
 }
 
 // machineID is this computer's id (the MachineGuid in the registry), or "".

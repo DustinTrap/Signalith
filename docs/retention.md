@@ -352,8 +352,10 @@ restores. Make retention changes on the server that runs it.
 A server whose retention settings differ from those of the server that runs
 retention does not take retention over by itself, so it can never delete what the
 other keeps: the list of servers (`GET /api/cluster`) says why. While any policy
-archives, the same goes for a server whose archive folder holds different archives.
-Copy `retention.yaml` (and the archives) across to let it take over.
+archives, the same goes for a server that uses a different archive folder: set
+`retention.archive_dir` to the same shared folder on every server. Signalith names
+that folder with a small file in it, `.signalith-archive-id`; leave it there. Copy
+`retention.yaml` across to let it take over.
 
 Before every step that deletes or changes data, retention checks with OpenSearch
 that its server still runs the background jobs, and stops if not. When OpenSearch's

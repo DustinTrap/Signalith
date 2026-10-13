@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,14 +25,18 @@ import (
 //     A failed renewal is retried every 2 seconds; only a version conflict
 //     means the lease is lost, which stops the jobs at once.
 //   - The holder stops its jobs by itself 20 seconds after it sent its last
-//     good renewal (self-fencing).
+//     good renewal (self-fencing). A timer of its own does that, whatever
+//     else the server is waiting for, and jobs ask Valid before each unit of
+//     work.
 //   - Another server takes the lease only after it has seen the document
 //     unchanged for 30 seconds on its own monotonic clock, so there is a gap
 //     of at least 10 seconds in which nobody runs the jobs, and a wrong wall
 //     clock cannot hand them over.
+//   - When the lease is missing, a server makes one at once only when nobody
+//     may still hold it; otherwise it waits the takeover time too.
 //   - A server whose files the jobs use (retention policies, feeds,
-//     detections, archives) differ from the holder's does not take over by
-//     itself (the fingerprint guard).
+//     detections, archive folder) differ from the holder's does not take
+//     over by itself (the fingerprint guard).
 //   - When OpenSearch refuses writes because its disk is full, nobody can
 //     renew or take the lease. The holder keeps it, frozen, as long as a
 //     read shows it unchanged, and runs only the jobs that free space
@@ -94,8 +99,18 @@ type Lease struct {
 	// Fingerprints returns this server's files fingerprints; fresh asks
 	// for them worked out again now.
 	Fingerprints func(fresh bool) Fingerprints
+	// Defer, when set, says whether this server should leave the lease to
+	// another live server for now, and why: its clock is far off.
+	Defer func() (bool, string)
+	// WritesRefused, when set, reports whether OpenSearch refuses this
+	// server's writes (a full disk). Meanwhile nobody can renew the lease,
+	// so the time a held lease has stood unchanged does not count.
+	WritesRefused func() bool
 	// OnChange is called when this server gains or loses the jobs.
 	OnChange func()
+	// OnTakeover is called with the node id of the server this one took
+	// the jobs over from, because that server stopped renewing the lease.
+	OnTakeover func(from string)
 
 	// stepMu lets one write to the lease happen at a time.
 	stepMu sync.Mutex
@@ -115,15 +130,24 @@ type Lease struct {
 	confirmed     time.Duration
 	confirmedWall time.Time
 	obs           observation
-	// cannot says why this server does not take the lease over.
-	cannot  string
-	lastErr string
-	base    context.Context
-	jobs    []Job
-	run     *runSet
+	// seen is true once this process has read or held the lease on the
+	// current OpenSearch: if it goes missing, someone may still hold it.
+	seen bool
+	// cannot says why this server does not take the lease over, and
+	// deferred why it leaves it to another server for now.
+	cannot   string
+	deferred string
+	lastErr  string
+	base     context.Context
+	jobs     []Job
+	run      *runSet
 	// draining are job sets cancelled whose work has not ended yet; new
 	// jobs start only once they have.
 	draining []*runSet
+	// fenceStop ends the fence timer of the current holding.
+	fenceStop chan struct{}
+	// released is closed when the graceful release in progress ends.
+	released chan struct{}
 }
 
 // observation is the lease as a server that does not hold it last saw it.
@@ -134,6 +158,9 @@ type observation struct {
 	doc   LeaseDoc
 	// since is when this version was first seen, on the monotonic clock.
 	since time.Duration
+	// mayCreate is for a missing lease: nobody can still be holding one,
+	// so it is made at once rather than after the takeover time.
+	mayCreate bool
 }
 
 func (l *Lease) fingerprints(fresh bool) Fingerprints {
@@ -178,30 +205,63 @@ func (l *Lease) Step(ctx context.Context) time.Duration {
 	return l.watch(ctx, c, index)
 }
 
+// sentLocked returns when the last good renewal (or, while frozen, the last
+// confirming read) was sent, on the monotonic and the wall clock. The
+// caller holds l.mu.
+func (l *Lease) sentLocked() (time.Duration, time.Time) {
+	if l.state == frozen {
+		return l.confirmed, l.confirmedWall
+	}
+	return l.lastGood, l.lastGoodWall
+}
+
 // validLocked reports whether the holder may still do work: its last
 // good renewal (or, while frozen, its last confirming read) was sent less
 // than Fence ago, and the computer was not suspended since. The caller
 // holds l.mu.
 func (l *Lease) validLocked() bool {
-	var mono time.Duration
-	var wall time.Time
-	switch l.state {
-	case holding, releasing:
-		mono, wall = l.lastGood, l.lastGoodWall
-	case frozen:
-		mono, wall = l.confirmed, l.confirmedWall
-	default:
+	if l.state == standby {
 		return false
 	}
+	mono, wall := l.sentLocked()
 	elapsed := l.Clock.Mono() - mono
 	if elapsed >= l.Timing.Fence {
 		return false
 	}
-	// A computer that was suspended (or a VM that was paused) did not
-	// move its monotonic clock meanwhile, but its wall clock did: other
-	// servers may have taken over.
+	// A computer that was suspended (or a VM that was paused) may not have
+	// moved its monotonic clock meanwhile, but its wall clock did: other
+	// servers may have taken over. (Clock.Now carries no monotonic
+	// reading, so this is the wall time that passed.)
 	wallElapsed := l.Clock.Now().Sub(wall)
 	return wallElapsed < l.Timing.Fence || wallElapsed-elapsed < 5*time.Second
+}
+
+// fence stops the jobs once the lease runs out here, on a timer of its own:
+// the renewals may be held up by a request that does not answer, and the
+// jobs must stop at the fence time whatever else this server waits for. It
+// looks at least once a second, so a computer that wakes up from sleep
+// stops its jobs at once. It ends when this holding does.
+func (l *Lease) fence(stop <-chan struct{}) {
+	for {
+		l.mu.Lock()
+		if l.fenceStop != stop || l.state == standby {
+			l.mu.Unlock()
+			return
+		}
+		if !l.validLocked() {
+			l.loseLocked("its last renewal of the job lease is too old (OpenSearch did not answer in time)")
+			l.mu.Unlock()
+			return
+		}
+		sent, _ := l.sentLocked()
+		left := sent + l.Timing.Fence - l.Clock.Mono()
+		l.mu.Unlock()
+		select {
+		case <-stop:
+			return
+		case <-l.Clock.After(min(max(left, time.Millisecond), time.Second)):
+		}
+	}
 }
 
 // Valid reports whether this server holds the lease and may do a unit of
@@ -276,9 +336,12 @@ func (l *Lease) renew(ctx context.Context, c *store.Client, index string) time.D
 	left := l.lastGood + l.Timing.Fence - l.Clock.Mono()
 	l.mu.Unlock()
 	doc.RenewedAt = l.Clock.Now().UTC()
-	doc.Fingerprints = l.fingerprints(false)
-	doc.Fingerprint = doc.Fingerprints.Combined()
-	rctx, cancel := context.WithTimeout(ctx, min(requestTimeout, left))
+	if fp := l.fingerprints(false); !fp.Unknown {
+		doc.Fingerprints, doc.Fingerprint = fp, fp.Combined()
+	}
+	// A renewal whose answer is lost is checked with a read, but only
+	// while it could still count: after the fence time it is worthless.
+	rctx, cancel := context.WithTimeout(store.WithRecheckLimit(ctx, time.Now().Add(left)), min(requestTimeout, left))
 	sent, sentWall := l.Clock.Mono(), l.Clock.Now()
 	nv, err := c.PutIf(rctx, index, leaseID, doc, ver, false)
 	cancel()
@@ -405,8 +468,13 @@ func (l *Lease) watch(ctx context.Context, c *store.Client, index string) time.D
 	src, ver, found, err := c.Get(rctx, index, leaseID)
 	cancel()
 	now := l.Clock.Mono()
-	// Asked before taking l.mu: it reads the server's own state.
+	// Asked before taking l.mu: they read the server's own state.
 	ok, why := l.Eligible()
+	deferTo, deferWhy := false, ""
+	if ok && l.Defer != nil {
+		deferTo, deferWhy = l.Defer()
+	}
+	refused := l.WritesRefused != nil && l.WritesRefused()
 	l.mu.Lock()
 	if err != nil {
 		l.lastErr = err.Error()
@@ -419,21 +487,59 @@ func (l *Lease) watch(ctx context.Context, c *store.Client, index string) time.D
 			l.lastErr = "lease:jobs cannot be read: " + err.Error()
 		}
 	}
-	if !l.obs.seen || l.obs.found != found || !l.obs.ver.Same(ver) {
+	fresh := !l.obs.seen || l.obs.found != found || !l.obs.ver.Same(ver)
+	if fresh {
 		l.obs = observation{seen: true, found: found, ver: ver, doc: doc, since: now}
+	} else if refused && found && doc.Holder != "" {
+		// Nobody can renew a lease while OpenSearch refuses writes: the
+		// holder gets the whole takeover time once they work again.
+		l.obs.since = now
 	}
-	obs := l.obs
+	check := !found && fresh && !l.seen
+	if found {
+		l.seen = true
+	}
 	l.lastErr = ""
+	l.mu.Unlock()
+	if check {
+		// This process never saw a lease here. It makes one at once only
+		// when no other server says it runs the jobs, as on a first start.
+		lead, err := leaderElsewhere(ctx, c, index, l.Self.NodeID)
+		l.mu.Lock()
+		if l.obs.seen && !l.obs.found && l.obs.since == now {
+			l.obs.mayCreate = err == nil && !lead
+		}
+		l.mu.Unlock()
+	}
+	l.mu.Lock()
+	obs := l.obs
+	// A server that leaves the jobs to another could still take them
+	// over, so that is not a reason it cannot: only logged.
+	l.cannot = ""
 	if !ok {
 		l.cannot = why
-		l.mu.Unlock()
+	}
+	logDefer := deferTo && deferWhy != l.deferred
+	l.deferred = ""
+	if deferTo {
+		l.deferred = deferWhy
+	}
+	l.mu.Unlock()
+	if logDefer {
+		l.Log.Info("this server leaves the background jobs to another server", "why", deferWhy)
+	}
+	if !ok || deferTo {
 		return l.Timing.Watch
 	}
-	l.cannot = ""
-	l.mu.Unlock()
 
 	switch {
 	case !found:
+		// Missing although someone may still hold it (it was deleted, or
+		// its index was): the holder stops its jobs by itself first, as
+		// for any takeover.
+		if wait := l.Timing.Takeover - (now - obs.since); !obs.mayCreate && wait > 0 {
+			return min(l.Timing.Watch, wait)
+		}
 		return l.create(ctx, c, index)
 	case doc.Holder == "":
 		// Released. One that names another server waits for it first.
@@ -466,8 +572,27 @@ func (l *Lease) watch(ctx context.Context, c *store.Client, index string) time.D
 		if !l.guard(doc, true) {
 			return l.Timing.Watch
 		}
+		return l.take(ctx, c, index, ver, doc.Epoch+1, doc.Holder)
 	}
-	return l.take(ctx, c, index, ver, doc.Epoch+1)
+	return l.take(ctx, c, index, ver, doc.Epoch+1, "")
+}
+
+// leaderElsewhere reports whether another server's heartbeat says it runs
+// the background jobs, alive or not.
+func leaderElsewhere(ctx context.Context, c *store.Client, index, self string) (bool, error) {
+	rctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	docs, err := c.SearchDocs(rctx, index, map[string]any{"term": map[string]any{"kind": "node"}})
+	if err != nil {
+		return false, err
+	}
+	for _, d := range docs {
+		var hb Heartbeat
+		if json.Unmarshal(d.Source, &hb) == nil && hb.NodeID != self && hb.Leader {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // guard is the fingerprint guard: this server takes the lease over only
@@ -478,11 +603,15 @@ func (l *Lease) guard(doc LeaseDoc, fresh bool) bool {
 		return true
 	}
 	mine := l.fingerprints(fresh)
-	if mine.Combined() == doc.Fingerprint {
+	if !mine.Unknown && mine.Combined() == doc.Fingerprint {
 		return true
 	}
+	why := cannotTakeOver(mine.Differ(doc.Fingerprints), holderName(doc))
+	if mine.Unknown {
+		why = "its files could not be read in time (does the archive folder's share answer?)"
+	}
 	l.mu.Lock()
-	l.cannot = cannotTakeOver(mine.Differ(doc.Fingerprints), holderName(doc))
+	l.cannot = why
 	l.mu.Unlock()
 	return false
 }
@@ -490,11 +619,14 @@ func (l *Lease) guard(doc LeaseDoc, fresh bool) bool {
 // cannotTakeOver says why a server whose files differ from holder's (parts,
 // from Fingerprints.Differ) does not take the jobs over.
 func cannotTakeOver(parts []string, holder string) string {
-	what := "files the jobs use"
+	what, verb := "files the jobs use", "differ"
 	if len(parts) > 0 {
 		what = joinWords(parts)
 	}
-	return fmt.Sprintf("its %s differ from %s's", what, holder)
+	if len(parts) == 1 && strings.HasSuffix(parts[0], "folder") {
+		verb = "differs"
+	}
+	return fmt.Sprintf("its %s %s from %s's", what, verb, holder)
 }
 
 // create makes a lease where there is none, with an epoch above every
@@ -508,17 +640,21 @@ func (l *Lease) create(ctx context.Context, c *store.Client, index string) time.
 		l.mu.Unlock()
 		return l.Timing.Watch
 	}
-	return l.take(ctx, c, index, store.Version{}, top+1)
+	return l.take(ctx, c, index, store.Version{}, top+1, "")
 }
 
 // take writes the lease for this server with epoch: over version ver, or
-// as a new document when ver is zero.
-func (l *Lease) take(ctx context.Context, c *store.Client, index string, ver store.Version, epoch int64) time.Duration {
+// as a new document when ver is zero. from is the server whose lease ran
+// out, when this is a takeover.
+func (l *Lease) take(ctx context.Context, c *store.Client, index string, ver store.Version, epoch int64, from string) time.Duration {
 	now := l.Clock.Now().UTC()
-	fp := l.fingerprints(true)
 	doc := LeaseDoc{Kind: "lease", Job: "jobs", Holder: l.Self.NodeID, HolderName: l.Self.Name, HolderVersion: l.Self.Version,
-		HolderBoot: l.Self.BootID, Epoch: epoch, AcquiredAt: now, RenewedAt: now, TTLMS: l.Timing.Takeover.Milliseconds(),
-		Fingerprint: fp.Combined(), Fingerprints: fp}
+		HolderBoot: l.Self.BootID, Epoch: epoch, AcquiredAt: now, RenewedAt: now, TTLMS: l.Timing.Takeover.Milliseconds()}
+	// Without its fingerprints yet (its files could not be read in time),
+	// the lease has none until a renewal adds them.
+	if fp := l.fingerprints(true); !fp.Unknown {
+		doc.Fingerprints, doc.Fingerprint = fp, fp.Combined()
+	}
 	rctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	sent, sentWall := l.Clock.Mono(), l.Clock.Now()
 	var nv store.Version
@@ -534,6 +670,9 @@ func (l *Lease) take(ctx context.Context, c *store.Client, index string, ver sto
 	switch {
 	case err == nil:
 		l.gainLocked(nv, doc, sent, sentWall)
+		if from != "" && l.OnTakeover != nil {
+			go l.OnTakeover(from)
+		}
 		return l.Timing.Renew
 	case store.IsClusterBlock(err):
 		// Nobody can write it now, not even its holder: wait the whole
@@ -548,12 +687,28 @@ func (l *Lease) take(ctx context.Context, c *store.Client, index string, ver sto
 	return l.Timing.Watch
 }
 
-// gainLocked starts holding the lease. The caller holds l.mu.
+// gainLocked starts holding the lease, and its fence timer. The caller
+// holds l.mu.
 func (l *Lease) gainLocked(ver store.Version, doc LeaseDoc, sent time.Duration, sentWall time.Time) {
 	l.state, l.ver, l.doc, l.lastGood, l.lastGoodWall, l.lastErr, l.cannot = holding, ver, doc, sent, sentWall, "", ""
+	l.seen = true
+	stop := make(chan struct{})
+	l.fenceStop = stop
+	go l.fence(stop)
 	l.log().Info("this server now runs the background jobs", "epoch", doc.Epoch)
 	l.startLocked()
 	l.changed()
+}
+
+// standbyLocked stops holding the lease and ends its fence timer. The
+// caller holds l.mu and has stopped the jobs.
+func (l *Lease) standbyLocked(ver store.Version, doc LeaseDoc) {
+	l.state = standby
+	if l.fenceStop != nil {
+		close(l.fenceStop)
+		l.fenceStop = nil
+	}
+	l.obs = observation{seen: true, found: true, ver: ver, doc: doc, since: l.Clock.Mono()}
 }
 
 // startLocked starts the jobs under the current epoch, once jobs
@@ -588,8 +743,7 @@ func (l *Lease) loseLocked(why string) {
 	}
 	l.log().Warn("this server stopped running the background jobs", "why", why, "epoch", l.doc.Epoch)
 	l.stopRunLocked()
-	l.state = standby
-	l.obs = observation{seen: true, found: true, ver: l.ver, doc: l.doc, since: l.Clock.Mono()}
+	l.standbyLocked(l.ver, l.doc)
 	l.changed()
 }
 
@@ -644,7 +798,8 @@ func (l *Lease) waitDraining() {
 // Release gives the lease up gracefully: no new work starts, the jobs
 // are cancelled and waited for (at most ReleaseWait, renewing the lease
 // meanwhile as long as Step keeps being called), then the lease is
-// written with no holder, so another server takes over within seconds.
+// written with no holder, so another server takes over within seconds. A
+// Release while another one is in progress waits for that one.
 func (l *Lease) Release(reason string) {
 	l.mu.Lock()
 	switch l.state {
@@ -652,29 +807,37 @@ func (l *Lease) Release(reason string) {
 		l.mu.Unlock()
 		l.waitDraining()
 		return
+	case releasing:
+		done := l.released
+		l.mu.Unlock()
+		<-done
+		l.waitDraining()
+		return
 	case frozen:
 		// Nothing can be written: stop, and let the lease run out.
 		l.stopRunLocked()
-		l.state = standby
-		l.obs = observation{seen: true, found: true, ver: l.ver, doc: l.doc, since: l.Clock.Mono()}
+		l.standbyLocked(l.ver, l.doc)
 		l.changed()
 		l.mu.Unlock()
 		l.waitDraining()
 		return
 	}
 	l.state = releasing
-	rs := l.run
+	done := make(chan struct{})
+	l.released = done
+	defer close(done)
 	l.stopRunLocked()
 	l.mu.Unlock()
-	if rs != nil {
-		done := make(chan struct{})
-		go func() { rs.wait(); close(done) }()
-		select {
-		case <-done:
-		case <-l.Clock.After(l.Timing.ReleaseWait):
-			l.log().Warn("background jobs did not finish in time; giving up the job lease anyway", "wait", l.Timing.ReleaseWait)
-		}
+	finished := make(chan struct{})
+	go func() { l.waitDraining(); close(finished) }()
+	select {
+	case <-finished:
+	case <-l.Clock.After(l.Timing.ReleaseWait):
+		l.log().Warn("background jobs did not finish in time; giving up the job lease anyway", "wait", l.Timing.ReleaseWait)
 	}
+	// The lease says what this server's files are now, for whoever takes
+	// it next.
+	fp := l.fingerprints(true)
 	l.stepMu.Lock()
 	defer l.stepMu.Unlock()
 	l.mu.Lock()
@@ -685,6 +848,9 @@ func (l *Lease) Release(reason string) {
 	doc, ver := l.doc, l.ver
 	l.mu.Unlock()
 	doc.Holder, doc.HolderBoot, doc.ReleasedBy, doc.ReleaseReason, doc.RenewedAt = "", "", l.Self.NodeID, reason, l.Clock.Now().UTC()
+	if !fp.Unknown {
+		doc.Fingerprints, doc.Fingerprint = fp, fp.Combined()
+	}
 	nv, err := store.Version{}, error(nil)
 	if c, index := l.Target(); c != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
@@ -693,14 +859,16 @@ func (l *Lease) Release(reason string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.state != releasing {
+		return
+	}
 	if err != nil {
 		l.log().Warn("could not give up the job lease; another server takes it over once it runs out", "err", err)
 		nv, doc = ver, l.doc
 	} else {
 		l.log().Info("gave up the background jobs", "reason", reason)
 	}
-	l.state = standby
-	l.obs = observation{seen: true, found: true, ver: nv, doc: doc, since: l.Clock.Mono()}
+	l.standbyLocked(nv, doc)
 	l.changed()
 }
 
@@ -718,6 +886,7 @@ func (l *Lease) Reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.obs = observation{}
+	l.seen = false
 	l.cannot, l.lastErr = "", ""
 }
 
@@ -795,7 +964,10 @@ type runSet struct {
 	cancelNormal context.CancelFunc
 	normalWG     *sync.WaitGroup
 	emergencyWG  sync.WaitGroup
-	// waiting are normal jobs cancelled by a freeze that may still run.
+	// frozen is true while only the emergency jobs may run.
+	frozen bool
+	// waiting are normal jobs cancelled by a freeze that may still run;
+	// each leaves the list once it has ended.
 	waiting []*sync.WaitGroup
 }
 
@@ -811,15 +983,18 @@ func (rs *runSet) start(jobs []Job, frozenNow bool) {
 			rs.emergencyWG.Go(func() { j.Run(rs.all) })
 		}
 	}
-	if !frozenNow {
-		rs.startNormal(jobs)
-	}
+	rs.mu.Lock()
+	rs.frozen = frozenNow
+	rs.mu.Unlock()
+	rs.startNormal(jobs)
 }
 
+// startNormal starts the jobs that are not emergency jobs, unless they
+// run already or the set is frozen or cancelled.
 func (rs *runSet) startNormal(jobs []Job) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	if rs.all.Err() != nil {
+	if rs.all.Err() != nil || rs.frozen || rs.cancelNormal != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(rs.all)
@@ -836,6 +1011,7 @@ func (rs *runSet) startNormal(jobs []Job) {
 func (rs *runSet) freeze() {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
+	rs.frozen = true
 	if rs.cancelNormal != nil {
 		rs.cancelNormal()
 		rs.waiting = append(rs.waiting, rs.normalWG)
@@ -844,15 +1020,19 @@ func (rs *runSet) freeze() {
 }
 
 // thaw starts the jobs a freeze cancelled again, once they have ended.
+// Until then wait still waits for them.
 func (rs *runSet) thaw(jobs []Job) {
 	rs.mu.Lock()
-	waiting := rs.waiting
-	rs.waiting = nil
+	rs.frozen = false
+	waiting := append([]*sync.WaitGroup(nil), rs.waiting...)
 	rs.mu.Unlock()
 	go func() {
 		for _, wg := range waiting {
 			wg.Wait()
 		}
+		rs.mu.Lock()
+		rs.waiting = slices.DeleteFunc(rs.waiting, func(wg *sync.WaitGroup) bool { return slices.Contains(waiting, wg) })
+		rs.mu.Unlock()
 		rs.startNormal(jobs)
 	}()
 }

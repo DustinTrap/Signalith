@@ -630,3 +630,36 @@ func TestSettingsChanges(t *testing.T) {
 		t.Error("saved without a store")
 	}
 }
+
+// The archive part of the fingerprint names the folder, not what is in it:
+// it does not change as days are archived, is the same for servers that
+// share the folder, and differs for another folder.
+func TestFingerprintNamesTheArchiveFolder(t *testing.T) {
+	f := newFixture(t, Config{Days: 30, Default: &Policy{KeepDays: 30, Archive: true}})
+	_, before := f.m.Fingerprint()
+	if before == "" {
+		t.Fatal("no archive fingerprint while archiving")
+	}
+	f.add("endpoint", 40, GB, 5)
+	if run, err := f.m.Run(context.Background(), TriggerSchedule, ""); err != nil || run.Archived != 1 {
+		t.Fatalf("run %+v %v", run, err)
+	}
+	if _, after := f.m.Fingerprint(); after != before {
+		t.Error("archiving a day changed the fingerprint")
+	}
+	// Another server sharing the folder.
+	shared := &Manager{Cluster: f.mem, Prefix: "signalith", Config: f.m.Config, Store: NewStore(filepath.Join(t.TempDir(), "retention.yaml")),
+		Archive: &Archive{Dir: f.m.Archive.Dir}}
+	if _, other := shared.Fingerprint(); other != before {
+		t.Error("a server sharing the archive folder has another fingerprint")
+	}
+	shared.Archive.Dir = t.TempDir()
+	if _, other := shared.Fingerprint(); other == before {
+		t.Error("another archive folder has the same fingerprint")
+	}
+	// Without archiving, no part at all.
+	plain := newFixture(t, Config{Days: 30})
+	if _, a := plain.m.Fingerprint(); a != "" {
+		t.Errorf("archive fingerprint %q without archiving", a)
+	}
+}

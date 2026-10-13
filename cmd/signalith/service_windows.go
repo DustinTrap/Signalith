@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unsafe"
 
 	"github.com/jrsamsanchez/signalith/internal/safelog"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -49,7 +51,8 @@ func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, s.configPath, log) }()
-	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	// PreShutdown gives a stop at reboot the same time as any other stop.
+	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPreShutdown}
 	for {
 		select {
 		case err := <-done:
@@ -62,17 +65,44 @@ func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 			switch c.Cmd {
 			case svc.Interrogate:
 				status <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				status <- svc.Status{State: svc.StopPending}
+			case svc.Stop, svc.Shutdown, svc.PreShutdown:
 				cancel()
-				select {
-				case <-done:
-				case <-time.After(15 * time.Second):
-				}
+				stopping(status, done)
 				return false, 0
 			}
 		}
 	}
+}
+
+// stopWait is how long a stop may take: the background jobs get up to a
+// minute to finish before this server hands them to another one, then the
+// last requests to OpenSearch and the web server's own wait.
+const stopWait = 90 * time.Second
+
+// stopping waits for serve to return, at most stopWait, telling Windows
+// every few seconds that the stop is still going, so it does not give up
+// on the service.
+func stopping(status chan<- svc.Status, done <-chan error) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	limit := time.After(stopWait)
+	for cp := uint32(1); ; cp++ {
+		status <- svc.Status{State: svc.StopPending, CheckPoint: cp, WaitHint: 10000}
+		select {
+		case <-done:
+			return
+		case <-limit:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// setPreshutdownTimeout asks Windows to wait up to stopWait for this
+// service at reboot (SERVICE_PRESHUTDOWN_INFO).
+func setPreshutdownTimeout(s *mgr.Service) error {
+	info := struct{ timeout uint32 }{uint32((stopWait + 10*time.Second) / time.Millisecond)}
+	return windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO, (*byte)(unsafe.Pointer(&info)))
 }
 
 func cmdService(args []string) error {
@@ -104,6 +134,7 @@ func cmdService(args []string) error {
 			return err
 		}
 		defer s.Close()
+		_ = setPreshutdownTimeout(s)
 		_ = eventlog.InstallAsEventCreate(serviceName, eventlog.Error|eventlog.Warning|eventlog.Info)
 		fmt.Printf("Installed the %s service using %s. Start it with: signalith service start\n", serviceName, abs)
 	case "uninstall":

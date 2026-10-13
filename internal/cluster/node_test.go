@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,7 @@ var fast = Timing{
 	Heartbeat: 200 * time.Millisecond, Offline: 600 * time.Millisecond, IdentityWatch: 800 * time.Millisecond,
 	Renew: 200 * time.Millisecond, Retry: 50 * time.Millisecond, Fence: time.Second, Takeover: 1500 * time.Millisecond,
 	Watch: 50 * time.Millisecond, ReleaseWait: 3 * time.Second, PreferWait: 200 * time.Millisecond,
-	ClockCheck: time.Second, FilesCheck: time.Second,
+	ClockCheck: time.Second, FilesCheck: time.Second, FilesWait: 300 * time.Millisecond,
 }
 
 func testOptions(name string) LocalOptions {
@@ -372,28 +373,209 @@ func TestCrashedServerShowsOffline(t *testing.T) {
 	}
 }
 
-func TestClockFarOffMayNotHoldTheJobs(t *testing.T) {
+// A server that starts finds the others as they were last written, and
+// says how long ago that was, not merely that it was a while.
+func TestStartedServerSaysWhenOthersWereLastSeen(t *testing.T) {
 	fos := ostest.New(t)
-	fos.Offset = 45 * time.Second
 	c := store.New(store.Config{URL: fos.URL})
+	ago := func(d time.Duration) string { return time.Now().Add(-d).UTC().Format(time.RFC3339Nano) }
+	fos.Put("s_runtime", nodeDocID("n_stopped"), map[string]any{"kind": "node", "node_id": "n_stopped", "name": "old",
+		"boot_id": "b1", "state": StateStopped, "started_at": ago(50 * time.Hour), "heartbeat_at": ago(2 * time.Hour)})
+	fos.Put("s_runtime", nodeDocID("n_killed"), map[string]any{"kind": "node", "node_id": "n_killed", "name": "killed",
+		"boot_id": "b2", "state": StateReady, "started_at": ago(time.Hour), "heartbeat_at": ago(10 * time.Minute)})
 	a := testNode(t, t.TempDir(), c, true)
 	waitReady(t, a, 5*time.Second)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		hb := heartbeatOf(t, fos, a.ID())
-		if hb.ClockOffsetMS != nil && strings.Contains(hb.NotEligible, "clock is 45s off") {
-			if *hb.ClockOffsetMS < 44000 || *hb.ClockOffsetMS > 46000 {
-				t.Errorf("offset %d ms", *hb.ClockOffsetMS)
-			}
-			break
+	want := map[string]struct {
+		state string
+		ago   time.Duration
+	}{"old": {StateStopped, 2 * time.Hour}, "killed": {StateOffline, 10 * time.Minute}}
+	var servers []ServerStatus
+	until(t, 5*time.Second, "both listed", func() bool {
+		servers = a.Status().Servers
+		return len(servers) == 3
+	})
+	for _, s := range servers {
+		w, ok := want[s.Name]
+		if !ok {
+			continue
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("heartbeat %+v", hb)
+		delete(want, s.Name)
+		if s.State != w.state || s.SeenAgo == nil || *s.SeenAgo < w.ago-time.Minute || *s.SeenAgo > w.ago+time.Minute {
+			t.Errorf("%s: state %s, last seen %v ago; want %s, %v ago", s.Name, s.State, s.SeenAgo, w.state, w.ago)
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	if a.RunsJobs() {
-		t.Error("a server with a wrong clock runs the jobs")
+	if len(want) > 0 {
+		t.Errorf("not listed: %v", want)
+	}
+}
+
+// offClock is the real clock with its wall time off by a fixed amount,
+// as on a computer whose clock is wrong.
+type offClock struct {
+	Clock
+	off time.Duration
+}
+
+func (c offClock) Now() time.Time { return c.Clock.Now().Add(c.off) }
+
+// startNode starts a node with its own clock and fingerprints.
+func startNode(t *testing.T, dir string, c *store.Client, clock Clock, fp func() Fingerprints) *Node {
+	t.Helper()
+	l, err := OpenLocal(dir, testOptions("host-"+filepath.Base(dir)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := New(Options{Local: l, Version: "1.0.0", Timing: fast, Clock: clock})
+	ctx, cancel := context.WithCancel(context.Background())
+	n.Start(ctx)
+	n.Use(c, "s", Settings{Eligible: true, Listen: "0.0.0.0:8080", Fingerprints: fp})
+	t.Cleanup(func() {
+		cancel()
+		n.Close()
+	})
+	return n
+}
+
+func until(t *testing.T, within time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A server alone runs the jobs whatever its clock says, and says the
+// clock is wrong.
+func TestClockFarOffAloneStillRunsTheJobs(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	a := startNode(t, t.TempDir(), c, offClock{NewRealClock(), 45 * time.Second}, nil)
+	until(t, 5*time.Second, "the offset in the heartbeat", func() bool {
+		hb := heartbeatOf(t, fos, a.ID())
+		return hb.ClockOffsetMS != nil && *hb.ClockOffsetMS < -44000 && *hb.ClockOffsetMS > -46000
+	})
+	until(t, 5*time.Second, "the jobs", a.RunsJobs)
+	found := false
+	for _, w := range a.Status().Warnings {
+		found = found || w.Level == "amber" && strings.Contains(w.Text, "clock is 45s off OpenSearch's")
+	}
+	if !found {
+		t.Errorf("warnings %+v", a.Status().Warnings)
+	}
+}
+
+// A server whose clock is far off leaves the jobs to one whose clock is
+// right while that one is up, and takes them back when it is gone.
+func TestClockFarOffLeavesTheJobsToAServerWithTheRightClock(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	a := startNode(t, t.TempDir(), c, offClock{NewRealClock(), 45 * time.Second}, nil)
+	until(t, 5*time.Second, "a to run the jobs", a.RunsJobs)
+	b := startNode(t, t.TempDir(), c, nil, nil)
+	until(t, 10*time.Second, "b to run the jobs", func() bool { return b.RunsJobs() && !a.RunsJobs() })
+	// It stays so.
+	time.Sleep(3 * fast.Takeover)
+	if !b.RunsJobs() || a.RunsJobs() {
+		t.Fatal("the jobs moved back to the server whose clock is wrong")
+	}
+	crash(b)
+	until(t, 10*time.Second, "a to take the jobs back", a.RunsJobs)
+}
+
+// A copy of a running server's state folder, with its last_boot, takes
+// itself for that server's next start. The running server goes on; the
+// copy stops.
+func TestLiveCopyWithLastBootStops(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	dir := t.TempDir()
+	a := testNode(t, dir, c, true)
+	waitReady(t, a, 5*time.Second)
+	until(t, 5*time.Second, "a to run the jobs", a.RunsJobs)
+	to := copyIdentity(t, dir)
+	b, err := os.ReadFile(filepath.Join(dir, "cluster", lastBootName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(to, "cluster"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(to, "cluster", lastBootName), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cp := testNode(t, to, c, true)
+	if cp.local.LastBoot != a.local.BootID {
+		t.Fatalf("the copy's last boot %q, want %q", cp.local.LastBoot, a.local.BootID)
+	}
+	select {
+	case err := <-cp.Fatal():
+		if !strings.Contains(err.Error(), "is using this server's identity") {
+			t.Errorf("message: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a copy of a running server's folder kept running")
+	}
+	if cp.lease.Holding() {
+		t.Error("the copy holds the lease")
+	}
+	// The running server never stopped, and keeps its heartbeat.
+	if ok, why := a.Ready(); !ok || !a.RunsJobs() {
+		t.Errorf("a: ready %v (%s), runs jobs %v", ok, why, a.RunsJobs())
+	}
+	until(t, 5*time.Second, "a's heartbeat back", func() bool { return heartbeatOf(t, fos, a.ID()).BootID == a.local.BootID })
+	found := false
+	for _, w := range a.Status().Warnings {
+		found = found || strings.Contains(w.Text, "A copy of this server's state folder was started")
+	}
+	if !found {
+		t.Errorf("a's warnings %+v", a.Status().Warnings)
+	}
+}
+
+// A heartbeat write that hangs does not hold up the lease: the lease runs
+// in its own loop.
+func TestHangingHeartbeatDoesNotHoldUpTheLease(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	a := testNode(t, t.TempDir(), c, true)
+	until(t, 5*time.Second, "the jobs", a.RunsJobs)
+	release := make(chan struct{})
+	defer close(release)
+	fos.SetFault(func(m, p string) *ostest.Fault {
+		if strings.Contains(p, "node:") || strings.Contains(p, "node%3A") || strings.Contains(p, "_search") || strings.Contains(p, "_nodes") {
+			<-release
+		}
+		return nil
+	})
+	time.Sleep(3 * fast.Fence)
+	if !a.RunsJobs() {
+		t.Fatal("a lost the lease while its heartbeat hung")
+	}
+}
+
+// Fingerprints that cannot be worked out in time (an archive share that
+// does not answer) neither hold up the heartbeat nor let a server take the
+// jobs over blindly.
+func TestSlowFingerprintsHoldNothingUp(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	hang := make(chan struct{})
+	defer close(hang)
+	a := startNode(t, t.TempDir(), c, nil, func() Fingerprints { return Fingerprints{Retention: "r"} })
+	until(t, 5*time.Second, "a to run the jobs", a.RunsJobs)
+	b := startNode(t, t.TempDir(), c, nil, func() Fingerprints { <-hang; return Fingerprints{Retention: "r"} })
+	waitReady(t, b, 5*time.Second)
+	until(t, 5*time.Second, "b's heartbeats", func() bool { return heartbeatOf(t, fos, b.ID()).State == StateReady })
+	crash(a)
+	time.Sleep(2*fast.Takeover + 2*fast.FilesWait)
+	if b.RunsJobs() {
+		t.Fatal("b took the jobs over without knowing its files")
+	}
+	if why := b.lease.View().CannotTake; !strings.Contains(why, "could not be read in time") {
+		t.Errorf("why: %q", why)
 	}
 }
 
@@ -501,7 +683,7 @@ func TestEveryServerShowsWhoCannotTakeOver(t *testing.T) {
 				text += w.Level + ": " + w.Text + "\n"
 			}
 			if row.Jobs == "standby" && row.CannotTakeOver == "its retention policies differ from "+a.Name()+"'s" &&
-				strings.Contains(text, "amber: "+b.Name()+" would not take the background jobs over if "+a.Name()+" stopped.") &&
+				strings.Contains(text, "amber: "+b.Name()+" would not take the background jobs over if "+a.Name()+" stopped, because its retention policies differ from "+a.Name()+"'s.") &&
 				strings.Contains(text, "Make "+b.Name()+"'s retention policies (retention.yaml in the lookups folder, and retention in signalith.yaml) the same as "+a.Name()+"'s, then restart "+b.Name()+".") {
 				return
 			}
@@ -539,11 +721,47 @@ func TestFixFiles(t *testing.T) {
 	}{
 		{[]string{"detections folder"}, "Make siem-b's detections folder the same as siem-a's, then restart siem-b."},
 		{[]string{"threat intel feeds", "detections folder"}, "Make siem-b's threat intel feeds (intel_feeds.yaml in the lookups folder, and intel in signalith.yaml) and detections folder the same as siem-a's, then restart siem-b."},
-		{[]string{"archives"}, "Keep archives in one shared folder: set retention.archive_dir to the same folder on every server, then restart them."},
+		{[]string{"archive folder"}, "Keep archives in one shared folder: set retention.archive_dir to the same shared folder on every server, then restart them."},
 		{nil, "Make the files the jobs use the same on siem-b as on siem-a, then restart siem-b."},
 	} {
 		if got := fixFiles(tc.parts, "siem-b", "siem-a"); got != tc.want {
 			t.Errorf("%v:\n got %s\nwant %s", tc.parts, got, tc.want)
 		}
+	}
+}
+
+// The runtime index has an index template, so when someone deletes it
+// while servers run, OpenSearch makes it again with its own settings.
+func TestRuntimeIndexTemplate(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	ctx := context.Background()
+	hasSettings := func(index string) bool {
+		body := string(fos.IndexBody(index))
+		return strings.Contains(body, `"dynamic":"false"`) && strings.Contains(body, `"auto_expand_replicas":"0-1"`)
+	}
+	// A write to a missing index creates it from the template.
+	if err := ensureRuntimeTemplate(ctx, c, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Create(ctx, "x_runtime", "node:n_1", map[string]any{"kind": "node"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if !hasSettings("x_runtime") {
+		t.Errorf("auto-created with %s", fos.IndexBody("x_runtime"))
+	}
+	a := testNode(t, t.TempDir(), c, true)
+	waitReady(t, a, 5*time.Second)
+	if !strings.Contains(strings.Join(fos.Templates(), ","), "s_runtime") {
+		t.Fatalf("templates %v", fos.Templates())
+	}
+	if err := c.Do(ctx, http.MethodDelete, "/s_runtime", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	until(t, 5*time.Second, "the runtime index again", func() bool {
+		return strings.Contains(strings.Join(fos.Indices(), ","), "s_runtime") && heartbeatOf(t, fos, a.ID()).NodeID == a.ID()
+	})
+	if !hasSettings("s_runtime") {
+		t.Errorf("made again with %s", fos.IndexBody("s_runtime"))
 	}
 }

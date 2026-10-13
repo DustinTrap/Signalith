@@ -1108,6 +1108,11 @@ dialog.modal::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 [hidden] { display: none !important; }
 .hidden { display: none !important; }            /* page scripts toggle this class */
 .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* the servers' red problems, above every page */
+.cluster-banner { display: grid; gap: var(--sp-2); padding: var(--sp-5) var(--sp-5) 0; }
+.cluster-banner .alert p { color: var(--text-2); overflow-wrap: anywhere; }
+.cluster-banner .alert a { white-space: nowrap; }
+@media (max-width: 720px) { .cluster-banner { padding: var(--sp-4) var(--sp-4) 0; } }
 .nav__empty { padding: 2px 10px; color: var(--text-3); font-size: var(--fs-sm); }
 /* the sidebar health card links to the Health page */
 a.health { color: var(--text-2); text-decoration: none; transition: background var(--t-fast); }
@@ -2607,9 +2612,10 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-servers .sv-standby { color: var(--text-2); }
 #page-servers .sv-none { color: var(--text-3); }
 #page-servers [data-col="version"] .mono { font-size: var(--fs-sm); color: var(--text-2); }
-#page-servers .sv-foot-note { margin-left: auto; }
 #page-servers .sv-note { line-height: 1.5; }
+#page-servers .sv-note > div { flex: 1; min-width: 0; }
 #page-servers .sv-note i { font-style: normal; font-weight: 500; color: var(--text); }
+#page-servers .sv-note__close { flex: none; margin: -4px -4px 0 0; }
 
 @media (max-width: 720px) {
   /* each server stacks: name and version, then status, then jobs */
@@ -2622,7 +2628,6 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
   #page-servers .sv-table td[data-col="version"] { grid-column: 2; grid-row: 1; padding-top: 8px; }
   #page-servers .sv-table td[data-col="version"]::before { content: "Version "; font-size: var(--fs-sm); color: var(--text-3); }
   #page-servers .sv-table td:is([data-col="status"], [data-col="jobs"]) { grid-column: 1 / -1; padding-left: 44px; }
-  #page-servers .sv-foot-note { margin-left: 0; }
 }
 /* ==== end page:servers ==== */
 

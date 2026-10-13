@@ -89,6 +89,9 @@ func (s *Server) handlePosture(w http.ResponseWriter, r *http.Request) {
 	if s.Scheduler != nil {
 		p.Status = s.Scheduler.Status
 	}
+	if s.Cluster != nil && !s.Cluster.RunsJobs() {
+		p.Elsewhere, p.RunsOn = true, s.Cluster.JobHolder()
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 	writeJSON(w, http.StatusOK, p.Report(ctx, d, label))

@@ -18,31 +18,53 @@ import (
 // indices (<prefix>-*).
 func RuntimeIndex(prefix string) string { return prefix + "_runtime" }
 
-// ensureRuntime creates the runtime index if it is missing. Any server
-// may, at any time; one that finds it already made carries on.
-func ensureRuntime(ctx context.Context, c *store.Client, prefix string) error {
+// runtimeSettings and runtimeMappings are the runtime index's.
+func runtimeSettings() map[string]any {
+	return map[string]any{"number_of_shards": 1, "auto_expand_replicas": "0-1", "refresh_interval": "1s"}
+}
+
+func runtimeMappings() map[string]any {
 	kw := map[string]any{"type": "keyword"}
 	long := map[string]any{"type": "long"}
 	date := map[string]any{"type": "date"}
-	body := map[string]any{
-		"settings": map[string]any{"number_of_shards": 1, "auto_expand_replicas": "0-1", "refresh_interval": "1s"},
-		"mappings": map[string]any{
-			"dynamic": "false",
-			"properties": map[string]any{
-				"kind": kw, "node": kw, "node_id": kw, "state": kw, "target": kw, "detection_id": kw,
-				"group_key": kw, "user": kw, "agent": kw,
-				"epoch": long, "lease_epoch": long,
-				"until": date, "at": date, "last_seen": date, "expires_at": date, "heartbeat_at": date,
-				"body": map[string]any{"type": "object", "enabled": false},
-			},
+	return map[string]any{
+		"dynamic": "false",
+		"properties": map[string]any{
+			"kind": kw, "node": kw, "node_id": kw, "state": kw, "target": kw, "detection_id": kw,
+			"group_key": kw, "user": kw, "agent": kw,
+			"epoch": long, "lease_epoch": long,
+			"until": date, "at": date, "last_seen": date, "expires_at": date, "heartbeat_at": date,
+			"body": map[string]any{"type": "object", "enabled": false},
 		},
 	}
-	err := c.Do(ctx, http.MethodPut, "/"+url.PathEscape(RuntimeIndex(prefix)), body, nil)
+}
+
+// ensureRuntime creates the runtime index if it is missing. Any server
+// may, at any time; one that finds it already made carries on.
+func ensureRuntime(ctx context.Context, c *store.Client, prefix string) error {
+	err := c.Do(ctx, http.MethodPut, "/"+url.PathEscape(RuntimeIndex(prefix)), map[string]any{"settings": runtimeSettings(), "mappings": runtimeMappings()}, nil)
 	var oe *store.Error
 	if errors.As(err, &oe) && oe.Status == http.StatusBadRequest && strings.Contains(oe.Body, "resource_already_exists_exception") {
 		return nil
 	}
 	return err
+}
+
+// ensureRuntimeTemplate saves an index template with the runtime index's
+// settings. If someone deletes the index while servers run, their next
+// heartbeat makes OpenSearch create it again, and the template keeps
+// OpenSearch's defaults (a replica a single node cannot place, fields
+// guessed from the documents) out of it. A user who may not save
+// templates still gets the index.
+func ensureRuntimeTemplate(ctx context.Context, c *store.Client, prefix string) error {
+	name := RuntimeIndex(prefix)
+	return c.Do(ctx, http.MethodPut, "/_index_template/"+url.PathEscape(name), map[string]any{
+		"index_patterns": []string{name},
+		// Above any catch-all template someone may have.
+		"priority": 500,
+		"template": map[string]any{"settings": runtimeSettings(), "mappings": runtimeMappings()},
+		"_meta":    map[string]any{"managed_by": "signalith"},
+	}, nil)
 }
 
 // Document ids in the runtime index.
@@ -62,6 +84,9 @@ const (
 	// StateOffline is never written: it is a heartbeat that stopped
 	// changing.
 	StateOffline = "offline"
+	// StateUnreachable is never written either: it is this server, on its
+	// own page, while it cannot use OpenSearch.
+	StateUnreachable = "unreachable"
 )
 
 // Heartbeat is a server's document in the runtime index, node:<node_id>,
@@ -97,6 +122,14 @@ type Heartbeat struct {
 	OpenSearch       OSInfo       `json:"opensearch"`
 	MachineMoved     bool         `json:"machine_moved"`
 	Problems         []string     `json:"problems"`
+	// PrevBoot is the boot id of the process that used this server's
+	// state folder before this one. A server that finds its heartbeat
+	// overwritten by a process whose PrevBoot is its own BootID knows a
+	// copy of its folder was started elsewhere while it runs.
+	PrevBoot string `json:"prev_boot,omitempty"`
+	// CannotTakeOver says why this server, though it may run the jobs,
+	// would not take them over by itself now.
+	CannotTakeOver string `json:"cannot_take_over,omitempty"`
 }
 
 // Syslog is where a server listens for syslog.
@@ -145,9 +178,12 @@ type Fingerprints struct {
 	Retention  string `json:"retention,omitempty"`
 	Feeds      string `json:"feeds,omitempty"`
 	Detections string `json:"detections,omitempty"`
-	// Archives covers the archive folder's list of archives, only while
-	// some retention policy archives.
+	// Archives names the archive folder (its id file), only while some
+	// retention policy archives: servers that share one folder share it.
 	Archives string `json:"archives,omitempty"`
+	// Unknown is true when they could not be worked out in time: the
+	// archive folder's share may not answer.
+	Unknown bool `json:"-"`
 }
 
 // Combined is one hash over all the parts.
@@ -161,7 +197,7 @@ func (f Fingerprints) Combined() string {
 }
 
 // Differ lists the parts that differ between f and o, in words: "retention
-// policies", "threat intel feeds", "detections folder", "archives".
+// policies", "threat intel feeds", "detections folder", "archive folder".
 func (f Fingerprints) Differ(o Fingerprints) []string {
 	var out []string
 	if f.Retention != o.Retention {
@@ -174,7 +210,7 @@ func (f Fingerprints) Differ(o Fingerprints) []string {
 		out = append(out, "detections folder")
 	}
 	if f.Archives != o.Archives {
-		out = append(out, "archives")
+		out = append(out, "archive folder")
 	}
 	return out
 }

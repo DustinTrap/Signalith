@@ -371,18 +371,52 @@ func TestRecreatedLeaseTakesAnEpochAboveTheStoredOnes(t *testing.T) {
 	s := newSim(t)
 	s.os.Put(testIndex, "node:n_old", map[string]any{"kind": "node", "lease_epoch": 17})
 	s.os.Put(testIndex, "op:x", map[string]any{"kind": "op", "epoch": 21})
-	s.add("n_a", nil)
+	a := s.add("n_a", nil)
 	s.run(time.Second)
 	if d := s.lease(); d.Holder != "n_a" || d.Epoch != 22 {
 		t.Fatalf("lease %+v", d)
 	}
-	// Someone deletes it: the holder loses it, and the next one is above
-	// every epoch still stored, including the holder's own heartbeat.
+	// Someone deletes it: the holder loses it at its next renewal. Nobody
+	// makes a new one before the takeover time, as for a lease that stopped
+	// changing: another holder, cut off from OpenSearch, may not have
+	// stopped its jobs yet. The next one is above every epoch still
+	// stored, including the holder's own heartbeat.
 	s.os.Put(testIndex, "node:n_a", map[string]any{"kind": "node", "lease_epoch": 22})
 	s.os.Delete(testIndex, leaseID)
 	s.run(15 * time.Second)
+	if d := s.lease(); d.Holder != "" || a.l.Holding() {
+		t.Fatalf("lease made again too soon: %+v", d)
+	}
+	s.run(30 * time.Second)
 	if d := s.lease(); d.Holder != "n_a" || d.Epoch != 23 {
 		t.Fatalf("lease %+v", d)
+	}
+}
+
+// A lease deleted while another server holds it, cut off from OpenSearch:
+// the others wait the takeover time, by which that holder has stopped its
+// jobs at the fence time.
+func TestDeletedLeaseWaitsForTheCutOffHolder(t *testing.T) {
+	s := newSim(t)
+	a, b := s.add("n_a", nil), s.add("n_b", nil)
+	pa := &probe{}
+	a.l.SetJobs([]Job{pa.job("detections", false)})
+	s.run(time.Second)
+	if !a.l.Holding() {
+		t.Fatal("a does not hold the lease")
+	}
+	eventually(t, "a's job", func() bool { _, r := pa.state(); return r == 1 })
+	// a is cut off (it no longer steps), and the lease is deleted.
+	a.paused = true
+	s.os.Delete(testIndex, leaseID)
+	s.run(a.l.Timing.Fence + time.Second)
+	if b.l.Holding() {
+		t.Fatal("b made a new lease while a may still run its jobs")
+	}
+	eventually(t, "a to stop its jobs at the fence time", func() bool { _, r := pa.state(); return r == 0 })
+	s.run(a.l.Timing.Takeover)
+	if !b.l.Holding() || s.lease().Holder != "n_b" {
+		t.Fatalf("lease %+v", s.lease())
 	}
 }
 
@@ -566,4 +600,115 @@ func guardFixture(t *testing.T, fence func(context.Context) error) (mem *retenti
 		Archive: &retention.Archive{Dir: filepath.Join(dir, "archive")}, HistoryFile: filepath.Join(dir, "history.json"),
 		Now: func() time.Time { return now }, Fence: fence}
 	return mem, m, retention.IndexName("s", "endpoint", now.AddDate(0, 0, -40)), retention.IndexName("s", "endpoint", now.AddDate(0, 0, -20))
+}
+
+// A second Release while the first still waits for the jobs waits too: the
+// lease is given up only once they have ended.
+func TestSecondReleaseWaitsForTheFirst(t *testing.T) {
+	s := newSim(t)
+	a, b := s.add("n_a", nil), s.add("n_b", nil)
+	p := &probe{hold: make(chan struct{})}
+	a.l.SetJobs([]Job{p.job("detections", false)})
+	s.run(time.Second)
+	eventually(t, "a's job", func() bool { _, r := p.state(); return r == 1 })
+	done := make(chan struct{}, 2)
+	go func() { a.l.Release("first"); done <- struct{}{} }()
+	eventually(t, "the first release", func() bool { return a.l.View().State == releasing.String() })
+	go func() { a.l.Release("second"); done <- struct{}{} }()
+	s.run(5 * time.Second)
+	select {
+	case <-done:
+		t.Fatal("a release returned while the job still runs")
+	default:
+	}
+	if d := s.lease(); d.Holder != "n_a" || b.l.Holding() {
+		t.Fatalf("given up while the job still runs: %+v", d)
+	}
+	close(p.hold)
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a release did not return once the job ended")
+		}
+	}
+	if d := s.lease(); d.Holder != "" || d.ReleasedBy != "n_a" {
+		t.Fatalf("lease %+v", d)
+	}
+}
+
+// After a full disk, the jobs the freeze stopped are still waited for:
+// new ones start only once they have ended, and a release or a restart's
+// SetJobs waits for them.
+func TestThawWaitsForTheFrozenJobs(t *testing.T) {
+	s := newSim(t)
+	a := s.add("n_a", nil)
+	normal := &probe{hold: make(chan struct{})}
+	a.l.SetJobs([]Job{normal.job("detections", false)})
+	s.run(time.Second)
+	eventually(t, "the job", func() bool { _, r := normal.state(); return r == 1 })
+	s.os.Block(true)
+	s.run(15 * time.Second)
+	if !a.l.Frozen() {
+		t.Fatalf("not frozen: %+v", a.l.View())
+	}
+	s.os.Block(false)
+	s.run(5 * time.Second)
+	if a.l.Frozen() {
+		t.Fatalf("still frozen: %+v", a.l.View())
+	}
+	// The stopped job has not returned: no second one runs beside it.
+	if st, r := normal.state(); st != 1 || r != 1 {
+		t.Fatalf("starts %d running %d", st, r)
+	}
+	done := make(chan struct{})
+	go func() { a.l.SetJobs(nil); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("SetJobs returned while the stopped job still runs")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(normal.hold)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetJobs did not return once the job ended")
+	}
+	if _, r := normal.state(); r != 0 {
+		t.Fatalf("%d still running", r)
+	}
+}
+
+// A frozen lease does not move when OpenSearch takes writes again: a
+// standby counts the takeover time from when writes work again, by which
+// the holder has renewed.
+func TestFrozenLeaseDoesNotMoveWhenWritesReturn(t *testing.T) {
+	for off := time.Duration(0); off < 30*time.Second; off += 2500 * time.Millisecond {
+		s := newSim(t)
+		a, b := s.add("n_a", nil), s.add("n_b", nil)
+		var mu sync.Mutex
+		refused := false
+		b.l.WritesRefused = func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return refused
+		}
+		s.run(time.Second)
+		s.os.Block(true)
+		s.run(5 * time.Second)
+		// b's own heartbeat is refused too.
+		mu.Lock()
+		refused = true
+		mu.Unlock()
+		s.run(2*time.Minute + off)
+		s.os.Block(false)
+		s.run(3 * time.Second)
+		mu.Lock()
+		refused = false
+		mu.Unlock()
+		s.run(time.Minute)
+		if d := s.lease(); d.Holder != "n_a" || d.Epoch != 1 || b.l.Holding() || !a.l.Holding() {
+			t.Fatalf("after %v: lease %+v", off, d)
+		}
+	}
 }

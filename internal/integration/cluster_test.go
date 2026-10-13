@@ -502,28 +502,16 @@ func TestClusterNoTakeoverWhenRetentionDiffers(t *testing.T) {
 	refusesTakeover(t, h, a, b, "retention policies")
 }
 
-func TestClusterNoTakeoverWhenArchivesDiffer(t *testing.T) {
+func TestClusterNoTakeoverWhenArchiveFoldersDiffer(t *testing.T) {
 	t.Parallel()
 	h := newClusterHarness(t)
-	// Same policies, which archive; each server has its own archive
-	// folder (the default, next to its lookups), and siem-a's holds an
-	// archive that siem-b's does not.
+	// Same policies, which archive, but each server keeps archives in its
+	// own folder (the default, next to its lookups) instead of one shared
+	// folder.
 	policy := "default:\n  keep_days: 30\n  archive: true\n"
-	a := h.add("siem-a", serverOptions{retention: policy})
-	if err := os.MkdirAll(filepath.Join(a.dir, "archive"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	manifest := `{"format":"signalith-archive/1","id":"` + h.prefix + `-other-2026.01.02.1"}`
-	if err := os.WriteFile(filepath.Join(a.dir, "archive", h.prefix+"-other-2026.01.02.1.json"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a.start()
-	waitUntil(t, 30*time.Second, "siem-a runs the jobs", func() bool {
-		v, ok := a.view()
-		return ok && v.Lease.Mine
-	})
+	a := h.startLeader("siem-a", serverOptions{retention: policy})
 	b := h.start("siem-b", serverOptions{retention: policy})
-	refusesTakeover(t, h, a, b, "archives")
+	refusesTakeover(t, h, a, b, "archive folder")
 }
 
 // A server that crashed and is started again at once, with the same state

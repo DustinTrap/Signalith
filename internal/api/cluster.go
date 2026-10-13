@@ -8,7 +8,6 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/redact"
-	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
 // Cluster is this server among the servers that share its OpenSearch.
@@ -20,29 +19,38 @@ type Cluster interface {
 	JobHolder() string
 	// Status is every server as this one last saw them.
 	Status() cluster.Status
+	// Banners are the red problems everyone should see on every page,
+	// briefly and without addresses.
+	Banners() []string
 }
 
 var errNoCluster = errors.New("the list of servers is not available on this server")
 
 func (s *Server) routeCluster(api *router) {
-	// Everyone signed in sees which servers there are and whether they
-	// work; where they run and what is wrong with them is for admins.
-	api.viewer("GET /api/cluster", s.handleCluster)
+	// The list of servers says where they run and what is wrong with them,
+	// so it is for admins. Everyone else learns of a problem that matters
+	// to them from the banner on every page (cluster_banners in
+	// api/health).
+	api.admin("GET /api/cluster", s.handleCluster)
 }
 
-// clusterServer is one server in GET /api/cluster. Fields after Jobs are
-// for admins only.
+// clusterServer is one server in GET /api/cluster.
 type clusterServer struct {
 	Name         string     `json:"name"`
 	Self         bool       `json:"self"`
 	State        string     `json:"state"`
 	OfflineSince *time.Time `json:"offline_since,omitempty"`
-	Version      string     `json:"version"`
-	Jobs         string     `json:"jobs"`
-	StartedAt    time.Time  `json:"started_at"`
+	// SeenSecondsAgo, for an offline or stopped server, and UptimeSeconds
+	// are ages worked out by this server's own clocks, so the page needs
+	// neither the other server's clock nor the browser's to be right.
+	SeenSecondsAgo *int64    `json:"seen_seconds_ago,omitempty"`
+	UptimeSeconds  int64     `json:"uptime_seconds"`
+	Version        string    `json:"version"`
+	Jobs           string    `json:"jobs"`
+	StartedAt      time.Time `json:"started_at"`
 
-	NodeID         string                `json:"node_id,omitempty"`
-	HeartbeatAt    *time.Time            `json:"heartbeat_at,omitempty"`
+	NodeID         string                `json:"node_id"`
+	HeartbeatAt    time.Time             `json:"heartbeat_at"`
 	NodeURL        string                `json:"node_url,omitempty"`
 	Listen         string                `json:"listen,omitempty"`
 	Syslog         *cluster.Syslog       `json:"syslog,omitempty"`
@@ -58,17 +66,15 @@ type clusterServer struct {
 	Problems       []string              `json:"problems,omitempty"`
 }
 
-// clusterLease is who runs the background jobs. Fields after Frozen are
-// for admins only.
+// clusterLease is who runs the background jobs.
 type clusterLease struct {
-	HolderName string `json:"holder_name"`
-	Frozen     bool   `json:"frozen"`
-
+	HolderName string     `json:"holder_name"`
+	Frozen     bool       `json:"frozen"`
 	Holder     string     `json:"holder,omitempty"`
 	Epoch      int64      `json:"epoch,omitempty"`
 	AcquiredAt *time.Time `json:"acquired_at,omitempty"`
 	RenewedAt  *time.Time `json:"renewed_at,omitempty"`
-	Mine       *bool      `json:"mine,omitempty"`
+	Mine       bool       `json:"mine"`
 	ReleasedBy string     `json:"released_by,omitempty"`
 }
 
@@ -79,47 +85,33 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errNoCluster)
 		return
 	}
-	admin := false
-	if p := principalOf(r); p != nil && p.Role.AtLeast(users.Admin) {
-		admin = true
-	}
 	st := s.Cluster.Status()
 	servers := make([]clusterServer, 0, len(st.Servers))
 	for _, sv := range st.Servers {
 		out := clusterServer{Name: sv.Name, Self: sv.Self, State: sv.State, OfflineSince: sv.OfflineSince,
-			Version: sv.Version, Jobs: sv.Jobs, StartedAt: sv.StartedAt}
-		if admin {
-			hbAt := sv.HeartbeatAt
-			out.NodeID, out.HeartbeatAt, out.CannotTakeOver = sv.NodeID, &hbAt, sv.CannotTakeOver
-			if d := sv.Detail; d != nil {
-				syslog, fp, osInfo := d.Syslog, d.FilesFingerprint, d.OpenSearch
-				osInfo.Endpoint = redact.URL(osInfo.Endpoint)
-				out.NodeURL, out.Listen, out.Syslog, out.OS, out.Arch, out.Deployment = d.NodeURL, d.Listen, &syslog, d.OS, d.Arch, d.Deployment
-				out.ClockOffsetMS, out.NotEligible, out.Fingerprints, out.OpenSearch = d.ClockOffsetMS, d.NotEligible, &fp, &osInfo
-				out.MachineMoved, out.Problems = d.MachineMoved, d.Problems
-			}
+			UptimeSeconds: int64(sv.Uptime / time.Second), Version: sv.Version, Jobs: sv.Jobs, StartedAt: sv.StartedAt,
+			NodeID: sv.NodeID, HeartbeatAt: sv.HeartbeatAt, CannotTakeOver: sv.CannotTakeOver}
+		if sv.SeenAgo != nil {
+			ago := int64(*sv.SeenAgo / time.Second)
+			out.SeenSecondsAgo = &ago
+		}
+		if d := sv.Detail; d != nil {
+			syslog, fp, osInfo := d.Syslog, d.FilesFingerprint, d.OpenSearch
+			osInfo.Endpoint = redact.URL(osInfo.Endpoint)
+			out.NodeURL, out.Listen, out.Syslog, out.OS, out.Arch, out.Deployment = d.NodeURL, d.Listen, &syslog, d.OS, d.Arch, d.Deployment
+			out.ClockOffsetMS, out.NotEligible, out.Fingerprints, out.OpenSearch = d.ClockOffsetMS, d.NotEligible, &fp, &osInfo
+			out.MachineMoved, out.Problems = d.MachineMoved, d.Problems
 		}
 		servers = append(servers, out)
 	}
-	lease := clusterLease{HolderName: st.Jobs.HolderName, Frozen: st.Jobs.Frozen}
-	if admin {
-		mine := st.Jobs.Mine
-		lease.Holder, lease.Epoch, lease.AcquiredAt, lease.RenewedAt = st.Jobs.Holder, st.Jobs.Epoch, st.Jobs.AcquiredAt, st.Jobs.RenewedAt
-		lease.Mine, lease.ReleasedBy = &mine, st.Jobs.ReleasedBy
-	}
+	lease := clusterLease{HolderName: st.Jobs.HolderName, Frozen: st.Jobs.Frozen, Holder: st.Jobs.Holder, Epoch: st.Jobs.Epoch,
+		AcquiredAt: st.Jobs.AcquiredAt, RenewedAt: st.Jobs.RenewedAt, Mine: st.Jobs.Mine, ReleasedBy: st.Jobs.ReleasedBy}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	health, err := s.Backend.Health(ctx)
 	if err != nil {
 		health = "unreachable"
 	}
-	// writes_refused is for everyone: the page says that OpenSearch's disk
-	// is full, which affects what everyone sees.
-	out := map[string]any{"servers": servers, "lease": lease, "opensearch": map[string]any{"status": health}, "writes_refused": st.WritesRefused}
-	if admin {
-		out["self"] = st.Self
-		out["warnings"] = st.Warnings
-		out["opensearch"] = map[string]any{"status": health, "url": redact.URL(s.conf().OpenSearch.URL)}
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, map[string]any{"self": st.Self, "servers": servers, "lease": lease, "warnings": st.Warnings,
+		"writes_refused": st.WritesRefused, "opensearch": map[string]any{"status": health, "url": redact.URL(s.conf().OpenSearch.URL)}})
 }

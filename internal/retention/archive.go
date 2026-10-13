@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -324,28 +325,57 @@ func (a *Archive) List() ([]Manifest, []string, error) {
 	return out, problems, nil
 }
 
-// IDs lists the archives by the file names of their manifests, without
-// reading them, sorted.
-func (a *Archive) IDs() ([]string, error) {
+// storeIDFile names the archive folder: servers that share one folder
+// read the same name.
+const storeIDFile = ".signalith-archive-id"
+
+// StoreID returns the archive folder's name, written into it the first
+// time any server asks. Servers that share one OpenSearch compare it, to
+// tell whether they keep their archives in one shared folder; unlike the
+// list of archives, it does not change as days are archived.
+func (a *Archive) StoreID() (string, error) {
 	if a.Dir == "" {
-		return nil, nil
+		return "", nil
 	}
-	entries, err := os.ReadDir(a.Dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, manifestExt) {
-			out = append(out, strings.TrimSuffix(name, manifestExt))
+	path := a.path(storeIDFile)
+	for try := 0; ; try++ {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			if id := strings.TrimSpace(string(b)); id != "" {
+				return id, nil
+			}
+			// Another server is writing it just now.
+			if try < 20 {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			return "", fmt.Errorf("%s in the archive folder is empty", storeIDFile)
 		}
+		if !errors.Is(err, os.ErrNotExist) || try > 0 {
+			return "", err
+		}
+		if err := a.ensureDir(); err != nil {
+			return "", err
+		}
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue // another server made it first
+		}
+		if err != nil {
+			return "", fmt.Errorf("cannot name the archive folder: %w", err)
+		}
+		r := make([]byte, 12)
+		_, _ = rand.Read(r)
+		id := "as_" + hex.EncodeToString(r)
+		_, werr := f.WriteString(id + "\n")
+		if err := f.Close(); werr == nil {
+			werr = err
+		}
+		if werr != nil {
+			return "", fmt.Errorf("cannot name the archive folder: %w", werr)
+		}
+		return id, nil
 	}
-	sort.Strings(out)
-	return out, nil
 }
 
 // Get returns one archive's manifest.

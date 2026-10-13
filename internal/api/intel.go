@@ -86,6 +86,9 @@ func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
 	if err := s.noDownloads(); err != nil {
 		// Why not, naming the server that does when there is one.
 		out["downloads_why"] = sentence(err.Error())
+		if s.Cluster != nil && !errors.Is(err, errNoSchedule) {
+			out["runs_on"] = s.Cluster.JobHolder()
+		}
 	}
 	out["feeds"] = feeds
 	writeJSON(w, http.StatusOK, out)
@@ -271,7 +274,7 @@ func (s *Server) noDownloads() error {
 	if holder := s.Cluster.JobHolder(); holder != "" {
 		return fmt.Errorf("this server does not download feeds right now: %s does, with its own list of feeds; add and change feeds there", holder)
 	}
-	return errors.New("this server does not download feeds right now, and no server runs the background jobs at the moment; the list of servers says why")
+	return errors.New("this server does not download feeds right now, and no server runs the background jobs at the moment; the Servers page says why")
 }
 
 func (s *Server) feedsOK(w http.ResponseWriter) bool {

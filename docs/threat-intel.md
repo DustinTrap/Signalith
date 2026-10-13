@@ -274,8 +274,8 @@ When several servers share one OpenSearch, feeds download on the one that runs t
 background jobs (one with `detections.scheduler: true`; another takes over if it
 stops), from its own `intel_feeds.yaml`. Add and change feeds on that server's page.
 On other servers the page lists the feeds read-only and says which server downloads
-them (`"downloads": false`, `"manage": false` and `"downloads_why"` in the API, which
-refuses changes there with 409), and **Refresh now** works only for feeds from
+them (`"downloads": false`, `"manage": false`, `"downloads_why"` and `"runs_on"` in
+the API, which refuses changes there with 409), and **Refresh now** works only for feeds from
 signalith.yaml, which every server shares. A server whose feeds differ from those of
 the server that runs the jobs does not take the jobs over by itself, so its list
 never removes the other's indicators; copy `intel_feeds.yaml` across to let it.

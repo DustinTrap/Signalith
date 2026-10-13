@@ -220,15 +220,40 @@ func (s *Server) now() time.Time {
 	return time.Now().Add(s.Offset)
 }
 
-// ensure returns an index, creating it as a write does; the caller holds
-// s.mu.
+// ensure returns an index, creating it as a write does, with the settings
+// and mappings of the index template that matches its name best; the
+// caller holds s.mu.
 func (s *Server) ensure(name string) *index {
 	ix := s.indices[name]
 	if ix == nil {
-		ix = &index{name: name, docs: map[string]*doc{}, seq: -1, created: s.now()}
+		ix = &index{name: name, docs: map[string]*doc{}, seq: -1, created: s.now(), body: s.templateFor(name)}
 		s.indices[name] = ix
 	}
 	return ix
+}
+
+// templateFor returns the "template" part of the index template with the
+// highest priority whose index_patterns match name, or nil; the caller
+// holds s.mu.
+func (s *Server) templateFor(name string) json.RawMessage {
+	var best json.RawMessage
+	bestPriority := -1
+	for _, raw := range s.templates {
+		var t struct {
+			Patterns []string        `json:"index_patterns"`
+			Priority int             `json:"priority"`
+			Template json.RawMessage `json:"template"`
+		}
+		if json.Unmarshal(raw, &t) != nil {
+			continue
+		}
+		for _, pat := range t.Patterns {
+			if ok, _ := path.Match(pat, name); ok && t.Priority > bestPriority {
+				best, bestPriority = t.Template, t.Priority
+			}
+		}
+	}
+	return best
 }
 
 // put writes a document; the caller holds s.mu.

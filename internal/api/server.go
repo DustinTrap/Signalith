@@ -663,6 +663,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status = "unreachable"
 	}
+	// No server running detections, a full disk: everyone sees those, on
+	// every page.
+	if s.Cluster != nil {
+		if b := s.Cluster.Banners(); len(b) > 0 {
+			out["cluster_banners"] = b
+		}
+	}
 	// Everyone signed in sees whether things work. Where they run (file
 	// paths, addresses, the OpenSearch URL and its errors) and the setup
 	// advice is for admins, who are the ones able to change it.
