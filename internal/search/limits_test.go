@@ -371,19 +371,25 @@ func TestWildcardHeavyWhereIsBounded(t *testing.T) {
 		t.Errorf("the largest allowed where took %v", d)
 	}
 
-	// A search that times out stops promptly, mid-command.
+	// A where command whose search times out stops promptly, mid-command.
+	q, err := query.Parse(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	where := q.Commands[len(q.Commands)-1].(*query.Where)
+	res := &Result{}
+	for range 20000 {
+		res.Rows = append(res.Rows, Row{"user": long})
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	fs = funcStore(func(context.Context, string, map[string]any) (map[string]any, error) {
-		return hits(20000, func(int) string { return long }), nil
-	})
 	start = time.Now()
-	_, err = (&Engine{Store: fs, Opt: Options{MaxEvents: 20000}}).Run(ctx, src)
+	err = applyCommand(ctx, res, where)
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("timed-out search: %v", err)
+		t.Errorf("timed-out where: %v", err)
 	}
 	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("a search that timed out after 20ms ran for %v", d)
+		t.Errorf("a where that timed out after 20ms ran for %v", d)
 	}
 }
 
