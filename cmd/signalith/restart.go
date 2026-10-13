@@ -21,6 +21,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/httpserver"
+	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/security"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
@@ -109,6 +110,12 @@ type runner struct {
 	busy      bool
 	last      *api.RestartResult
 	awaiting  *move
+
+	// background is the context of work a request starts that runs on
+	// after it and across restarts in place, such as a sample-data load;
+	// shutdown ends it. Set by run; nil in some tests.
+	background     context.Context
+	stopBackground context.CancelFunc
 
 	// Owned by run.
 	cur     *instance // nil while nothing could start
@@ -238,6 +245,8 @@ func (r *runner) Confirm(req *http.Request) bool {
 
 // run serves until ctx ends, restarting when asked.
 func (r *runner) run(ctx context.Context, c *config.Config) error {
+	r.background, r.stopBackground = context.WithCancel(ctx)
+	defer r.stopBackground()
 	c = r.checkPageOpenSearch(ctx, c)
 	in, ln, err := r.open(ctx, c)
 	if err != nil && len(c.PageKeys()) > 0 {
@@ -313,6 +322,15 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 			}
 		}
 	}
+}
+
+// backgroundContext is the context of work a request starts that runs on
+// after it (see runner.background); parent where run did not set one.
+func (r *runner) backgroundContext(parent context.Context) context.Context {
+	if r.background != nil {
+		return r.background
+	}
+	return parent
 }
 
 // open listens on the web address and starts the components, which load
@@ -470,6 +488,18 @@ func (r *runner) shutdown() error {
 	if m != nil {
 		r.setAside(m.prev.SettingsFile(), m.refuse, "Signalith stopped before anyone opened it at "+m.To+", so it was not used")
 	}
+	// A sample-data load or removal running here stops, and notes in
+	// OpenSearch that it did not finish, so every server shows that at
+	// once rather than a minute later.
+	var sampleWait sync.WaitGroup
+	if r.stopBackground != nil {
+		r.stopBackground()
+		sampleWait.Go(func() {
+			if !sample.WaitJobs(30 * time.Second) {
+				r.log.Warn("a sample-data load or removal did not stop in time; the other servers show it as not finished within a minute")
+			}
+		})
+	}
 	if r.node != nil {
 		// First, while the web page still answers (/readyz says
 		// "stopping"): the background jobs finish their current step and
@@ -480,6 +510,7 @@ func (r *runner) shutdown() error {
 	if r.web != nil {
 		err = r.web.close(10 * time.Second)
 	}
+	sampleWait.Wait()
 	var wg sync.WaitGroup
 	for _, w := range r.retired {
 		w.keep()

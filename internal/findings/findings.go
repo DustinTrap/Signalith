@@ -54,7 +54,10 @@ type Finding struct {
 	Latest   string                     `json:"latest,omitempty"`
 	GroupKey string                     `json:"group_key,omitempty"` // throttle key
 	// CaseID is the investigation this finding belongs to, if any.
-	CaseID   string    `json:"case_id,omitempty"`
+	CaseID string `json:"case_id,omitempty"`
+	// Sample marks a finding the sample-data feature raised, holding the
+	// load's ID, so Remove can delete exactly those; empty for real ones.
+	Sample   string    `json:"sample,omitempty"`
 	Created  time.Time `json:"created"`
 	Updated  time.Time `json:"updated"`
 	Comments []Comment `json:"comments,omitempty"`
@@ -85,7 +88,12 @@ type Filter struct {
 	Owner       string   `json:"owner,omitempty"`
 	DetectionID string   `json:"detection_id,omitempty"`
 	Text        string   `json:"text,omitempty"`
-	Since       time.Time
+	// Sample keeps only findings with this sample-load marker.
+	Sample string `json:"sample,omitempty"`
+	// EntityValues keeps findings whose entity values include any of these,
+	// used to find findings raised from sample entities (hosts, IPs, users).
+	EntityValues []string `json:"entity_values,omitempty"`
+	Since        time.Time
 	// UpdatedSince keeps findings changed at or after this time, so
 	// dashboards see old findings closed recently.
 	UpdatedSince time.Time
@@ -171,6 +179,8 @@ type Store interface {
 	Create(ctx context.Context, f *Finding) error
 	Get(ctx context.Context, id string) (*Finding, error)
 	Save(ctx context.Context, f *Finding) error
+	// Delete removes one finding by ID. A missing finding is not an error.
+	Delete(ctx context.Context, id string) error
 	Search(ctx context.Context, flt Filter) ([]*Finding, int, error)
 	// Exists reports whether a finding with this detection and group key was
 	// created at or after since; used for throttling.

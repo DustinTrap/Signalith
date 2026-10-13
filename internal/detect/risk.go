@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/datamodel"
 )
 
 // Risk makes a detection add risk to the users and systems in its results,
@@ -70,6 +71,9 @@ type RiskEvent struct {
 	Tactics     []string
 	GroupKey    string
 	Fields      map[string]any // the row's entity fields
+	// Sample marks a risk event the sample-data backfill wrote, holding
+	// the load's ID, so Remove can delete exactly those; empty otherwise.
+	Sample string
 }
 
 // Doc renders a risk event as a stored document in the Risk data model.
@@ -86,6 +90,9 @@ func (e RiskEvent) Doc() map[string]any {
 		"detection_id":     e.DetectionID,
 		"group_key":        e.GroupKey,
 		"message":          fmt.Sprintf("%s: +%g risk to %s %s", e.Message, e.Score, e.ObjectType, e.Object),
+	}
+	if e.Sample != "" {
+		d[datamodel.SampleField] = e.Sample
 	}
 	if e.Priority != "" {
 		d["risk_priority"] = e.Priority

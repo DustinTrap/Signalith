@@ -164,3 +164,81 @@ func TestOpenStoreWithADamagedList(t *testing.T) {
 		t.Errorf("after the fix: %v %v, %d assets", changed, err, len(s.Assets()))
 	}
 }
+
+// The overlay (rows the sample data adds) answers only what the user's
+// lists do not, lives in its own files, survives a damaged user list, and
+// leaves the user's files, CSV and listing alone.
+func TestOverlay(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, AssetsFile), []byte(assetCSV), 0o600)
+	os.WriteFile(filepath.Join(dir, IdentitiesFile), []byte(identityCSV), 0o600)
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlayAssets := []Asset{
+		{Host: []string{"dc01"}, IP: []string{"192.0.2.110"}, Priority: "low", BUnit: "Sample data"},
+		{Host: []string{"ws-fin-07"}, IP: []string{"10.20.5.7"}, Priority: "low", BUnit: "Sample data"},
+	}
+	overlayIDs := []Identity{{Identity: []string{`CORP\svc_backup`}, Name: "Sample backup", BUnit: "Sample data"}}
+	if err := s.SetOverlay(overlayAssets, overlayIDs); err != nil {
+		t.Fatal(err)
+	}
+
+	// The user's rows win; the overlay answers the rest.
+	if a, _ := s.Asset("DC01"); a == nil || a.BUnit != "IT" {
+		t.Errorf("DC01 = %+v, want the user's row", a)
+	}
+	if a, _ := s.Asset("10.20.5.7"); a == nil || a.BUnit != "Finance" {
+		t.Errorf("10.20.5.7 = %+v, want the user's network row", a)
+	}
+	if a, _ := s.Asset("ws-fin-07"); a == nil || a.BUnit != "Sample data" {
+		t.Errorf("ws-fin-07 = %+v, want the overlay's row", a)
+	}
+	if id, _ := s.Identity("svc_backup"); id == nil || id.Name != "Backup service" {
+		t.Errorf("svc_backup = %+v, want the user's row", id)
+	}
+	if _, ok := s.Own().Asset("ws-fin-07"); ok {
+		t.Error("Own() answered from the overlay")
+	}
+	if len(s.Assets()) != 4 || len(s.Identities()) != 2 || strings.Contains(string(s.CSV("assets")), "Sample data") {
+		t.Error("the user's list or its CSV includes overlay rows")
+	}
+	if a, i := s.Overlay(); len(a) != 2 || len(i) != 1 {
+		t.Errorf("Overlay() = %d, %d rows", len(a), len(i))
+	}
+	for name, want := range map[string]string{AssetsFile: assetCSV, IdentitiesFile: identityCSV} {
+		if b, _ := os.ReadFile(filepath.Join(dir, name)); string(b) != want {
+			t.Errorf("%s was rewritten", name)
+		}
+	}
+
+	// Another process (the CLI) sees the overlay, even with a damaged user
+	// list, and Reload in this one notices it go.
+	os.WriteFile(filepath.Join(dir, AssetsFile), []byte("host,priority\nx,urgent\n"), 0o600)
+	s2, err := OpenStore(dir)
+	if err == nil {
+		t.Fatal("the damaged list should be reported")
+	}
+	if a, _ := s2.Asset("ws-fin-07"); a == nil || a.BUnit != "Sample data" {
+		t.Errorf("a second store does not see the overlay: %+v", a)
+	}
+	if err := s2.SetOverlay(nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{OverlayAssetsFile, OverlayIdentitiesFile} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s still there: %v", name, err)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, AssetsFile)); string(b) != "host,priority\nx,urgent\n" {
+		t.Error("removing the overlay rewrote the damaged user list")
+	}
+	s.Reload()
+	if _, ok := s.Asset("ws-fin-07"); ok {
+		t.Error("the first store still answers from a removed overlay")
+	}
+	if a, _ := s.Asset("DC01"); a == nil || a.BUnit != "IT" {
+		t.Errorf("the user's last good list was lost: %+v", a)
+	}
+}

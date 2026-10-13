@@ -628,8 +628,11 @@ func (f *Feeds) Refresh(ctx context.Context, name string) (FeedStatus, error) {
 	}
 	st := f.stateFor(name)
 	if st.Running {
+		// Copy the status while still holding the lock: the download that
+		// is running updates it under the lock.
+		cur := *st
 		f.mu.Unlock()
-		return *st, ErrFeedRunning
+		return cur, ErrFeedRunning
 	}
 	st.Running = true
 	gen := f.gen[name]

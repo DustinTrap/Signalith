@@ -342,6 +342,7 @@
 
         <div id="starter" class="card starter">
           <div class="card__head"><div><div class="card__title">Start with a common hunt</div><div class="card__sub">Pick one to fill in the query and run it.</div></div></div>
+          <p id="search-sample-note" class="sample-note sample-note--card" hidden></p>
           <ul id="starter-list" class="hunts" role="list"></ul>
         </div>
       </div>
@@ -384,6 +385,7 @@
       </div>
     </div>
     <div id="db-problems" class="alert hidden" data-tone="warning" role="status"></div>
+    <p id="db-sample-note" class="sample-note" hidden></p>
     <div id="db-body" class="dash" aria-busy="false"></div>
     <div class="db-foot">
       <span class="db-live hidden" id="db-live"><span class="pulse" aria-hidden="true"></span>Live</span>
@@ -823,6 +825,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
         <p class="page-head__desc">Collect logs from your hosts with the Fluent Bit agent, or receive syslog from network devices.</p>
       </div>
     </header>
+    <div class="card sample-card" id="sample-card" hidden></div>
     <div class="agent">
       <fieldset class="agent-os">
         <legend class="sr-only">Source</legend>
@@ -1273,6 +1276,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="cases.js"></script>
 <script src="users.js"></script>
 <script src="retention.js"></script>
+<script src="sample.js"></script>
 <script src="settings.js"></script>
 <script src="servers.js"></script>
 <script src="security.js"></script>

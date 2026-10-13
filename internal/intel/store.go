@@ -284,12 +284,15 @@ func (s *Store) MergeSource(ctx context.Context, source string, inds []Indicator
 }
 
 // RemoveSources deletes every indicator whose source is not in keep, so
-// a feed that is removed or disabled stops matching. Manual indicators
-// are always kept.
+// a feed that is removed or disabled stops matching. Manual and sample
+// indicators are always kept.
 func (s *Store) RemoveSources(ctx context.Context, keep []string) (int, error) {
 	var gone []string
 	for _, ind := range s.snapshot() {
-		if ind.Source != ManualSource && !slices.Contains(keep, ind.Source) {
+		if ind.Source == ManualSource || ind.Source == SampleSource {
+			continue // added by hand or by the sample data; never swept
+		}
+		if !slices.Contains(keep, ind.Source) {
 			gone = append(gone, ind.ID)
 		}
 	}

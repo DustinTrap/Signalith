@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/assets"
+	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/findings"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
@@ -43,6 +44,13 @@ type Scheduler struct {
 	// Workers is how many detections run at once (default 4), so one slow
 	// detection cannot hold up the others.
 	Workers int
+	// SampleMark, when set, makes runs read only the documents of that
+	// sample-data load and marks every finding and risk event they write
+	// with it. The sample-data backfill uses a throwaway Scheduler with it
+	// set. The live scheduler leaves it empty: its runs leave all sample
+	// documents out and use only the user's own asset and identity lists,
+	// so nothing it writes ever comes from sample data. See ScopeSample.
+	SampleMark string
 	// Timeout caps one run. Zero gives each detection its schedule
 	// interval, between MinRunTimeout and MaxRunTimeout, so a run cannot
 	// last into its next one.
@@ -296,6 +304,20 @@ func (s *Scheduler) Run(ctx context.Context, d *Detection) (*RunResult, error) {
 	return res, nil
 }
 
+// RunAt runs one detection as if the clock were `at`: it searches
+// [at-lookback, at] and stamps the findings and risk events it raises
+// with that time, without touching the detection's schedule or run state
+// or the live scheduler. The sample-data backfill uses it to raise
+// findings and risk for events placed in the past, so the queue, the
+// Risk page and the dashboards show a realistic timeline straight away.
+func (s *Scheduler) RunAt(ctx context.Context, d *Detection, at time.Time) (*RunResult, error) {
+	timeout := s.RunTimeout(d)
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Background so the backfill's searches do not wait behind analysts'.
+	return s.run(search.Background(rctx), d, at)
+}
+
 // Window returns the time range a run at now searches.
 func Window(d *Detection, now time.Time) (time.Time, time.Time, error) {
 	lb, err := ParseDuration(d.Lookback)
@@ -329,12 +351,47 @@ func (s *Scheduler) prepare(d *Detection, now time.Time) (*query.Query, time.Tim
 	return q, earliest, latest, nil
 }
 
+// ScopeSample limits a detection's search by the sample-data marker
+// (datamodel.SampleField). The sample backfill (mark set) reads only its
+// own load's documents, so it can never stamp real activity as sample
+// data. The live scheduler (mark empty) leaves every sample document out:
+// the backfill has already run the detections over them, and a live run
+// over them would raise findings and risk that carry no marker, which
+// would look real and outlive the sample's removal.
+func ScopeSample(q *query.Query, mark string) {
+	var f query.Expr = &query.Not{Child: &query.Compare{Field: datamodel.SampleField, Op: "=", Value: "*"}}
+	if mark != "" {
+		f = &query.Compare{Field: datamodel.SampleField, Op: "=", Value: mark}
+	}
+	if q.Search == nil {
+		q.Search = f
+		return
+	}
+	q.Search = &query.And{Children: []query.Expr{q.Search, f}}
+}
+
+// lists is the asset and identity context a run uses. Live runs read only
+// the user's own lists: the sample data's overlay describes its own made-up
+// hosts and users, and must never shape what is stored about real ones.
+func (s *Scheduler) lists() *assets.Store {
+	if s.Assets == nil || s.SampleMark != "" {
+		return s.Assets
+	}
+	return s.Assets.Own()
+}
+
 func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunResult, error) {
 	q, earliest, latest, err := s.prepare(d, now)
 	if err != nil {
 		return nil, err
 	}
+	// Scope the search by the sample marker for this run only: findings
+	// keep the detection's own query for their drilldown.
+	own := q.Search
+	ScopeSample(q, s.SampleMark)
+	lists := s.lists()
 	res, err := s.Engine.Execute(ctx, q)
+	q.Search = own
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +409,9 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 	seen := map[string]bool{}
 	for _, row := range res.Rows {
 		key := GroupKey(d, row)
+		if s.SampleMark != "" {
+			key = sampleGroupKey(key, s.SampleMark)
+		}
 		if seen[key] {
 			out.Throttled++
 			continue
@@ -384,7 +444,12 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 			return nil, ErrNotAllowed
 		}
 		if d.Risk != nil && s.Risk != nil {
-			evs := RiskEvents(d, row, key, s.Assets, now)
+			evs := RiskEvents(d, row, key, lists, now)
+			if s.SampleMark != "" {
+				for i := range evs {
+					evs[i].Sample = s.SampleMark
+				}
+			}
 			if err := s.Risk.Write(ctx, evs); err != nil {
 				return nil, err
 			}
@@ -394,7 +459,8 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 			continue
 		}
 		f := NewFinding(d, q, row, key, earliest, latest, now)
-		f.Context = EntityContext(s.Assets, f.Entities)
+		f.Sample = s.SampleMark
+		f.Context = EntityContext(lists, f.Entities)
 		f.Urgency = Urgency(f.Severity, f.Context)
 		if err := s.Findings.Create(ctx, f); err != nil {
 			return nil, err
@@ -419,6 +485,14 @@ func GroupKey(d *Detection, row map[string]any) string {
 		h.Write(b)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// sampleGroupKey gives the sample backfill throttle keys of its own, so
+// a sample finding or risk event about a host or user that shares a name
+// with a real one never holds back the real one (or the other way round).
+func sampleGroupKey(key, mark string) string {
+	h := sha256.Sum256([]byte(key + "\x00" + mark))
+	return hex.EncodeToString(h[:])[:32]
 }
 
 func withoutTime(row map[string]any) map[string]any {

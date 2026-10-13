@@ -554,6 +554,8 @@ page itself.
 `POST /api/intel/feeds`, `PUT /api/intel/feeds/{name}`, `DELETE /api/intel/feeds/{name}`,
 `POST /api/intel/feeds/test`, `POST /api/intel/feeds/{name}/refresh`, `POST /api/intel/catalog`,
 `POST /api/intel/taxii/collections`, `POST /api/intel/upload`,
+`GET /api/sample`, `POST /api/sample/load`, `POST /api/sample/remove`
+(the one-click [sample data](sample-data.md)),
 `GET /api/cluster` (the Servers page; see [servers.md](servers.md)), every
 `/api/retention` route (see [retention.md](retention.md)), every
 `/api/users` and `/api/auth/directory` route below, and every `/api/settings` route

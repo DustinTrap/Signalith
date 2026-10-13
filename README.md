@@ -109,6 +109,19 @@ read. Before going back to one, run `secrets decrypt` in a container of its own 
 [docs/encryption.md](docs/encryption.md#going-back-to-an-older-version), which has the
 Docker commands).
 
+### Try it with sample data
+
+No logs to hand? On the **Add data** page (under Configure, admins only), **Load
+sample data** fills Signalith with a week of made-up activity for a fictional company,
+with a handful of attacks hidden in it, so detections fire, the triage queue fills,
+risk builds up, threat intel matches and the dashboards light up. Everything is
+fictional and kept apart from your own data, and one click removes all of it. See
+[docs/sample-data.md](docs/sample-data.md). From the shell or in Docker:
+
+```sh
+docker compose -f deploy/docker/docker-compose.yml exec signalith signalith sample-data load
+```
+
 ### Linux
 
 1. Install OpenSearch 2.x ([instructions](https://opensearch.org/docs/latest/install-and-configure/install-opensearch/index/)).

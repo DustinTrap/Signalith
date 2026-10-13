@@ -54,7 +54,8 @@ These run on one server only:
 - data retention, including the disk guard and archiving,
 - index upgrades after a new version.
 
-Searching, dashboards, investigations and receiving data work on every server.
+Searching, dashboards, investigations and receiving data work on every server, and
+so does loading or removing the [sample data](sample-data.md#several-servers).
 
 **How they move.** The server that runs the jobs confirms every 10 seconds, in
 OpenSearch, that it still does. If it stops confirming (it crashed, its computer

@@ -238,6 +238,15 @@ function setRiskSince(v) {
   if (riskOpen) showRiskObject(riskOpen.object, riskOpen.type);
 }
 
+// openRiskSince opens the Risk page on a time window (the sample-data card
+// links to the whole week); opening the page loads it.
+function openRiskSince(v) {
+  riskState.since = v;
+  $('r-since').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.since === v)));
+  if ($('page-risk').classList.contains('active')) setRiskSince(v);
+  else showPage('risk');
+}
+
 function markRiskRow() {
   $('r-list').querySelectorAll('tbody tr').forEach((tr) => {
     if (riskOpen && tr.dataset.key === riskOpen.type + ':' + riskOpen.object) tr.setAttribute('aria-selected', 'true');
@@ -498,6 +507,8 @@ function renderList() {
   const parts = [];
   if (q) parts.push(`${matches.length.toLocaleString()} of ${items.length.toLocaleString()} match`);
   else parts.push(`${total.toLocaleString()} ${total === 1 ? info.noun : info.nouns}`);
+  // Rows the sample data adds while it is loaded: not part of the list.
+  if (!q && res.sample) parts.push(`${res.sample.toLocaleString()} from the sample data, which go when it is removed`);
   if (shown.length < matches.length) parts.push(`showing the first ${shown.length}`);
   if (!q && items.length < total) parts.push(`the server returns the first ${items.length.toLocaleString()}`);
   fill(foot, el('span', {}, parts.join(' · ')), el('span', { class: 'spacer' }),
