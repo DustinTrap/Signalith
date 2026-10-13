@@ -932,8 +932,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out := map[string]any{"version": s.Version, "ingest": s.Pipeline.Stats(), "syslog": s.Syslog.Stats()}
 	status, err := s.Backend.Health(ctx)
+	var problem, advice string
 	if err != nil {
-		status = "unreachable"
+		status, problem, advice = osTrouble(err)
 	}
 	// No server running detections, a full disk: everyone sees those, on
 	// every page.
@@ -946,7 +947,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// paths, addresses, the OpenSearch URL and its errors) and the setup
 	// advice is for admins, who are the ones able to change it.
 	if p := principalOf(r); p == nil || !p.Role.AtLeast(users.Admin) {
-		out["opensearch"] = map[string]any{"status": status}
+		brief := map[string]any{"status": status}
+		if problem != "" {
+			brief["problem"] = problem
+		}
+		out["opensearch"] = brief
 		writeJSON(w, http.StatusOK, out)
 		return
 	}
@@ -958,12 +963,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if sec := s.securityHealth(); sec != nil {
 		out["security"] = sec
 	}
-	osURL := redact.URL(s.conf().OpenSearch.URL)
+	osOut := map[string]any{"status": status, "url": redact.URL(s.conf().OpenSearch.URL)}
 	if err != nil {
-		out["opensearch"] = map[string]any{"status": status, "error": err.Error(), "url": osURL}
-	} else {
-		out["opensearch"] = map[string]any{"status": status, "url": osURL}
+		osOut["error"] = err.Error()
 	}
+	if problem != "" {
+		osOut["problem"] = problem
+	}
+	if advice != "" {
+		osOut["advice"] = advice
+	}
+	out["opensearch"] = osOut
 	warnings := s.conf().Warnings()
 	if len(s.conf().Ingest.Tokens) == 0 {
 		warnings = append(warnings, "No ingest tokens are configured, so agents cannot send data. Add one under ingest.tokens.")

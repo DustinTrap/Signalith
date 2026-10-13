@@ -451,8 +451,10 @@ func cmdValidate(args []string) error {
 	cl := newStore(c)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if status, err := cl.Health(ctx); err != nil {
+	if status, err := cl.Health(ctx); err != nil && store.Problem(err) == "" {
 		fmt.Printf("Warning: OpenSearch is not reachable yet: %v\n", err)
+	} else if err != nil {
+		fmt.Println("Warning:", store.Unusable(err))
 	} else {
 		fmt.Printf("OpenSearch at %s is %s.\n", redact.URL(c.OpenSearch.URL), status)
 	}
@@ -1544,7 +1546,11 @@ func ensureTemplate(ctx context.Context, cl *store.Client, c *config.Config, log
 			log.Info("opensearch index template ready", "url", redact.URL(c.OpenSearch.URL))
 			return true
 		}
-		log.Warn("waiting for opensearch", "url", redact.URL(c.OpenSearch.URL), "err", err)
+		if hint := store.Hint(err); hint != "" {
+			log.Warn("waiting for opensearch", "url", redact.URL(c.OpenSearch.URL), "err", err, "fix", hint)
+		} else {
+			log.Warn("waiting for opensearch", "url", redact.URL(c.OpenSearch.URL), "err", err)
+		}
 		select {
 		case <-ctx.Done():
 			return false
