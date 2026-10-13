@@ -39,9 +39,22 @@ func runtimeMappings() map[string]any {
 	}
 }
 
+// Doer sends OpenSearch REST requests. *store.Client has it.
+type Doer interface {
+	Do(ctx context.Context, method, path string, body any, out any) error
+}
+
+// EnsureRuntime creates the runtime index if it is missing, for what keeps
+// a document there besides the servers' own heartbeats and lease, such as
+// the sample data's bookkeeping, which the signalith sample-data command
+// may write before any server has run.
+func EnsureRuntime(ctx context.Context, c Doer, prefix string) error {
+	return ensureRuntime(ctx, c, prefix)
+}
+
 // ensureRuntime creates the runtime index if it is missing. Any server
 // may, at any time; one that finds it already made carries on.
-func ensureRuntime(ctx context.Context, c *store.Client, prefix string) error {
+func ensureRuntime(ctx context.Context, c Doer, prefix string) error {
 	err := c.Do(ctx, http.MethodPut, "/"+url.PathEscape(RuntimeIndex(prefix)), map[string]any{"settings": runtimeSettings(), "mappings": runtimeMappings()}, nil)
 	var oe *store.Error
 	if errors.As(err, &oe) && oe.Status == http.StatusBadRequest && strings.Contains(oe.Body, "resource_already_exists_exception") {
@@ -71,6 +84,23 @@ func ensureRuntimeTemplate(ctx context.Context, c *store.Client, prefix string) 
 const leaseID = "lease:jobs"
 
 func nodeDocID(nodeID string) string { return "node:" + nodeID }
+
+// LeaseDocID is the job lease's document id in the runtime index.
+const LeaseDocID = leaseID
+
+// NodeDocID returns the id of the heartbeat of the server nodeID.
+func NodeDocID(nodeID string) string { return nodeDocID(nodeID) }
+
+// Features of this version that another server or the command line may
+// need to find in the heartbeat of the server running the background jobs.
+const (
+	// FeatureSampleData: the background jobs leave the one-click sample
+	// data out (the scheduled detections and the threat intel feeds).
+	FeatureSampleData = "sample_data"
+)
+
+// features are this version's, as its heartbeats list them.
+var features = []string{FeatureSampleData}
 
 // Server states in heartbeats.
 const (
@@ -135,6 +165,9 @@ type Heartbeat struct {
 	// CannotTakeOver says why this server, though it may run the jobs,
 	// would not take them over by itself now.
 	CannotTakeOver string `json:"cannot_take_over,omitempty"`
+	// Features lists what this server's version can do that an older one
+	// cannot, where another server must know it (see FeatureSampleData).
+	Features []string `json:"features,omitempty"`
 }
 
 // Syslog is where a server listens for syslog.

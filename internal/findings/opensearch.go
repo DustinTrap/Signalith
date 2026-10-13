@@ -38,7 +38,7 @@ func properties() map[string]any {
 	kw := map[string]any{"type": "keyword"}
 	return map[string]any{
 		"id": kw, "detection_id": kw, "severity": kw, "urgency": kw, "status": kw, "owner": kw,
-		"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw, "case_id": kw,
+		"disposition": kw, "mitre": kw, "group_key": kw, "entity_values": kw, "case_id": kw, "sample": kw,
 		"title":       map[string]any{"type": "text", "fields": map[string]any{"raw": kw}},
 		"description": map[string]any{"type": "text"},
 		"created":     map[string]any{"type": "date"},
@@ -78,6 +78,17 @@ func (s *OpenSearch) Upgrade(ctx context.Context) error {
 	}, nil)
 }
 
+// EnsureSampleField maps the sample-data marker (the "sample" field) on an
+// index made before it existed. The sample-data load needs it to find its
+// own findings again and calls this itself, on whichever server it runs:
+// adding one field is quick and changes nothing for servers of an older
+// version, so it does not wait for Upgrade on the server that runs the
+// background jobs.
+func (s *OpenSearch) EnsureSampleField(ctx context.Context) error {
+	return s.Client.Do(ctx, http.MethodPut, "/"+url.PathEscape(s.Index)+"/_mapping",
+		map[string]any{"properties": map[string]any{"sample": properties()["sample"]}}, nil)
+}
+
 type doc struct {
 	*Finding
 	EntityValues []string `json:"entity_values,omitempty"`
@@ -105,6 +116,17 @@ func (s *OpenSearch) put(ctx context.Context, f *Finding) error {
 
 func (s *OpenSearch) Create(ctx context.Context, f *Finding) error { return s.put(ctx, f) }
 func (s *OpenSearch) Save(ctx context.Context, f *Finding) error   { return s.put(ctx, f) }
+
+// Delete removes one finding; a missing one is not an error.
+func (s *OpenSearch) Delete(ctx context.Context, id string) error {
+	err := s.Client.Do(ctx, http.MethodDelete,
+		"/"+url.PathEscape(s.Index)+"/_doc/"+url.PathEscape(id)+"?refresh=wait_for", nil, nil)
+	var oe *store.Error
+	if errors.As(err, &oe) && oe.Status == 404 {
+		return nil
+	}
+	return err
+}
 
 func (s *OpenSearch) Get(ctx context.Context, id string) (*Finding, error) {
 	var out struct {
@@ -141,6 +163,12 @@ func filterQuery(flt Filter) map[string]any {
 	}
 	if flt.DetectionID != "" {
 		fs = append(fs, map[string]any{"term": map[string]any{"detection_id": flt.DetectionID}})
+	}
+	if flt.Sample != "" {
+		fs = append(fs, map[string]any{"term": map[string]any{"sample": flt.Sample}})
+	}
+	if len(flt.EntityValues) > 0 {
+		fs = append(fs, map[string]any{"terms": map[string]any{"entity_values": flt.EntityValues}})
 	}
 	if !flt.Since.IsZero() {
 		fs = append(fs, map[string]any{"range": map[string]any{"created": map[string]any{"gte": flt.Since.UTC().Format(time.RFC3339Nano)}}})

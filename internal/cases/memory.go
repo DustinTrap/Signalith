@@ -55,6 +55,13 @@ func (m *Memory) Save(_ context.Context, c *Case) error {
 	return nil
 }
 
+func (m *Memory) Delete(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.byID, id)
+	return nil
+}
+
 func matches(c *Case, flt Filter) bool {
 	if len(flt.Status) > 0 && !slices.Contains(flt.Status, c.Status) {
 		return false
@@ -63,6 +70,9 @@ func matches(c *Case, flt Filter) bool {
 		return false
 	}
 	if flt.FindingID != "" && !slices.Contains(c.Findings, flt.FindingID) {
+		return false
+	}
+	if flt.Sample != "" && c.Sample != flt.Sample {
 		return false
 	}
 	if t := strings.ToLower(strings.TrimSpace(flt.Text)); t != "" {

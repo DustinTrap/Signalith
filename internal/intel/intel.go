@@ -46,6 +46,13 @@ var FeedTypes = append([]string{"auto", "hash"}, Types...)
 // ManualSource is the source of indicators added by hand or uploaded.
 const ManualSource = "manual"
 
+// SampleSource is the source of indicators loaded with the sample data (see
+// the sample package). Like ManualSource it is never removed by the feed
+// sync, so sample intel survives a feed refresh and is removed only when the
+// sample data itself is removed. Feed names are lowercase with no spaces,
+// so no feed can ever have this name.
+const SampleSource = "Sample data"
+
 // Indicator is one piece of threat intel.
 type Indicator struct {
 	ID          string    `json:"id"`

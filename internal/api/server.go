@@ -36,6 +36,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/redact"
 	"github.com/jrsamsanchez/signalith/internal/retention"
+	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
@@ -73,6 +74,14 @@ type Server struct {
 	// Retention enforces data retention policies; nil disables the Data
 	// retention page.
 	Retention *retention.Manager
+	// Sample loads and removes the one-click sample data; nil disables the
+	// sample-data card and its endpoints.
+	Sample *sample.Loader
+	// Background is the context of work a request starts that runs on
+	// after it, such as a sample-data load: it ends when the process stops
+	// (not at a restart in place), so that work can stop cleanly and say
+	// so. nil is context.Background().
+	Background context.Context
 	// Assistant is an optional AI model for plain-English questions.
 	Assistant *assistant.Client
 	UI        fs.FS // web UI files; nil disables the UI
@@ -125,6 +134,7 @@ type Server struct {
 	background   sync.WaitGroup // directory checks still running
 	settingsMu   sync.Mutex     // serializes saves on the Settings page
 	testMu       sync.Mutex     // one connection test at a time
+	sampleJob    sampleJob      // the one running sample-data load or remove
 	// live holds Config with the settings saved on the Settings page that
 	// apply at once, and liveAI the assistant they give.
 	live   atomic.Pointer[config.Config]
@@ -192,6 +202,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeCases(api)
 	s.routeUsers(api)
 	s.routeRetention(api)
+	s.routeSample(api)
 	s.routeSettings(api)
 	s.routeCluster(api)
 	if s.UI != nil {
@@ -613,6 +624,9 @@ func (s *Server) handleFields(w http.ResponseWriter, r *http.Request) {
 		if mapping, err := s.Backend.Mapping(ctx, pattern); err == nil {
 			var extra []string
 			for name, typ := range mapping {
+				if name == ingest.SampleField {
+					continue // internal marker for sample data; see the sample package
+				}
 				switch name {
 				case "@timestamp":
 					name = "_time"

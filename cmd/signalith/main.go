@@ -42,6 +42,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/retention"
 	"github.com/jrsamsanchez/signalith/internal/risk"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
+	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -67,6 +68,7 @@ Usage:
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
   signalith ask       [-c file] [-ai] "<question>"     turn a question into a query
   signalith archive   list|verify|restore [-c file] ...  list, check or restore archived days
+  signalith sample-data load|remove|status [-c file] [-size ...]  load or remove a week of sample data to try
   signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
@@ -128,6 +130,8 @@ func main() {
 		err = cmdService(args)
 	case "archive":
 		err = cmdArchive(args)
+	case "sample-data":
+		err = cmdSampleData(args)
 	case "secrets":
 		err = cmdSecrets(args)
 	case "version", "-v", "--version":
@@ -1004,6 +1008,40 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
 			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
+	// The one-click sample data loads a week of made-up activity through
+	// the same parsers and its own ingest pipeline, and removes it exactly.
+	// An admin may load or remove it on any server: it is not a background
+	// job, and its detection backfill reads and marks only its own data, so
+	// it does not wait for the job lease. What it wrote is recorded in the
+	// runtime index, which every server that shares this OpenSearch reads,
+	// so they all show the same sample and only one load happens at a time.
+	sampleServer, sampleNode := "", ""
+	if r.node != nil {
+		sampleServer, sampleNode = r.node.Name(), r.node.ID()
+	}
+	if sampleServer == "" {
+		sampleServer, _ = os.Hostname()
+	}
+	sampleLoader := &sample.Loader{
+		Prefix:   c.OpenSearch.IndexPrefix,
+		Bulk:     cl,
+		OS:       cl,
+		Docs:     cl,
+		Intel:    indicators,
+		Assets:   lists,
+		Library:  lib,
+		Engine:   eng,
+		Findings: fstore,
+		Cases:    cstore,
+		Risk:     &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix},
+		Server:   sampleServer,
+		NodeID:   sampleNode,
+		Log:      log,
+	}
+	// Each server keeps the sample's asset and identity context in its own
+	// lookups folder, and its threat intel in memory: follow a load or
+	// removal made on another server.
+	in.jobs.Go(func() { sampleLoader.WatchLists(ctx, time.Minute) })
 	// Sessions and the failed sign-in limits carry over a restart.
 	r.sessions.SetIdle(c.SessionIdle())
 	srv := &api.Server{
@@ -1021,6 +1059,8 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Dashboards: boards,
 		Cases:      cstore,
 		Retention:  ret,
+		Sample:     sampleLoader,
+		Background: r.backgroundContext(parent),
 		Assistant:  newAssistant(c),
 		Users:      people,
 		Directory:  dir,
