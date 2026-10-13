@@ -100,6 +100,10 @@ type Server struct {
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
 	Sessions *auth.Sessions
 	Limiter  *auth.Limiter
+	// KnownBrowsers signs the cookie that marks a browser as one that
+	// signed in to an account before (see auth.Limiter); nil makes a key
+	// kept in memory only.
+	KnownBrowsers *auth.BrowserKey
 	// Users holds local users and directory users seen at sign-in, and
 	// Directory the LDAP or Active Directory sign-in settings. nil keeps
 	// them in memory only.

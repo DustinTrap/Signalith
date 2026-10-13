@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,6 +52,9 @@ func (s *Server) sessions() *auth.Sessions {
 		}
 		if s.Limiter == nil {
 			s.Limiter = auth.NewLimiter()
+		}
+		if s.KnownBrowsers == nil {
+			s.KnownBrowsers = auth.NewBrowserKey()
 		}
 		if s.Users == nil {
 			s.Users = users.NewMemory()
@@ -119,14 +121,6 @@ func sameOrigin(r *http.Request) bool {
 	return true
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 // secureCookie reports whether the session cookie is sent over HTTPS
 // only: when this very request reached Signalith over HTTPS, itself or
 // through a trusted reverse proxy that says so with X-Forwarded-Proto.
@@ -177,6 +171,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		c.MaxAge = int(s.sessions().MaxAge.Seconds())
 	}
 	http.SetCookie(w, c)
+	// From now on this browser can sign in to the account even while
+	// someone elsewhere is guessing its password.
+	s.rememberBrowser(w, r, req.Username, p.Username)
 	p.Method = "session"
 	writeJSON(w, http.StatusOK, meView(p))
 }
@@ -188,7 +185,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if c, err := r.Cookie(s.cookieName(r)); err == nil {
 		if ss, ok := s.sessions().Lookup(c.Value); ok {
-			s.Log.Info("signed out", "audit", true, "user", ss.User, "client", clientIP(r))
+			s.Log.Info("signed out", append([]any{"audit", true, "user", ss.User}, s.client(r).logAttrs()...)...)
 		}
 		s.sessions().Delete(c.Value)
 	}

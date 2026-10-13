@@ -414,7 +414,10 @@ which these commands read from its unit; where they cannot, give it with
 Behind a reverse proxy that serves HTTPS, have it send `X-Forwarded-Proto: https` and
 list it under `server.trusted_proxies` (**Trusted reverse proxies** on the Settings
 page), so the sign-in cookie is marked for HTTPS only; the header is ignored from
-anyone else.
+anyone else. If the proxy also sets `X-Forwarded-For` itself, set
+`server.client_header: x-forwarded-for` (**Client address header**) so failed sign-ins
+are counted for each person's own address, not the proxy's. See
+[docs/https.md](docs/https.md#behind-a-reverse-proxy).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -426,9 +429,10 @@ anyone else.
 | `server.tls.plaintext_ingest` | `deny` (`allow` for configs from before HTTPS was the default) | Whether agents may still send events over plain `http://`; the Health page lists any that do |
 | `server.tls_cert`, `server.tls_key` | none | Your certificate (with its chain) and key, for `server.tls.mode: files`; reloaded when they change. TLS 1.2 or newer; browsers are told to use HTTPS only |
 | `server.trusted_proxies` | none | IPs or CIDRs of reverse proxies whose `X-Forwarded-Proto: https` is believed (HSTS, HTTPS-only cookie, no redirect) |
+| `server.client_header` | none | `x-forwarded-for` or `forwarded`: the header the trusted proxies set to each person's address, for the failed sign-in limits and the log. Only for a proxy that sets it itself; empty counts everyone behind a trusted proxy as one shared address |
 | `server.max_connections` | `10000` | Open connections (and, over HTTPS, requests in progress) allowed at once; one client, an IPv4 address or an IPv6 /64, may hold a tenth of them. Connections from this machine, such as a local reverse proxy, are not limited that way |
 | `server.node_url` | from `listen` and this computer's name | The address other Signalith servers that share this OpenSearch reach this one at, shown in the list of servers. Set in signalith.yaml or `SIGNALITH_NODE_URL` only; in Docker set it, since a container cannot know it |
-| `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals. The log names the address when one reaches its share |
+| `server.shared_addresses` | none | IPs or CIDRs that many clients reach Signalith through: a reverse proxy, load balancer or NAT on another machine, or Docker Desktop's port forwarding, where every client seems to come from one address. These are not held to one client's share of connections, requests and ingest memory, only to the totals, and wrong passwords from them count per account, never pausing sign-ins from the whole address. The log names the address when one reaches its share |
 | `opensearch.url` | `http://127.0.0.1:9200` | Event store, `http(s)://host:port` (no query string). A `user:password@` in it is moved to `username` and `password` when loaded and never shown; `signalith secrets encrypt` moves it there in the file, encrypted |
 | `opensearch.username`, `opensearch.password` | none | OpenSearch credentials. Sent only over https, or plain http to this machine, unless `allow_insecure_http` is on |
 | `opensearch.ca_file` | none | PEM file with the CA that signed OpenSearch's certificate (for a private CA); system CAs are trusted too. Relative to the config file |

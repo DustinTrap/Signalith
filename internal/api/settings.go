@@ -1346,7 +1346,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pending := pendingSettings(running, saved.Config)
-	if err := s.Restarter.Restart(userOf(r), clientIP(r), localOnly); err != nil {
+	if err := s.Restarter.Restart(userOf(r), s.client(r).String(), localOnly); err != nil {
 		code := "restart_failed"
 		switch {
 		case errors.Is(err, ErrRestarting):

@@ -475,21 +475,44 @@ server:
   tls:
     mode: off
   trusted_proxies: [127.0.0.1]
+  client_header: x-forwarded-for      # only if the proxy sets it, see below
 ```
 
 The proxy must send `X-Forwarded-Proto: https`. Signalith believes that header only from
 the addresses in `server.trusted_proxies`; from anyone else it is ignored, since any
 client can send it. With it, Signalith sends HSTS and uses the HTTPS-only session cookie.
-For nginx:
+
+The proxy should also set `X-Forwarded-For` to the address it got the request from. Then
+set `server.client_header: x-forwarded-for` (**Client address header** on the Settings
+page), and the failed sign-in limits and the log use each person's own address instead
+of the proxy's (see [failed sign-in limits](users.md#signing-in)). The proxy must *set*
+the header, not only pass on one the browser sent: otherwise anyone could pick the
+address their wrong passwords are counted under. With `server.client_header` empty, the
+default, Signalith reads no such header and everyone reaching it through a trusted proxy
+counts as one shared address, so nobody can pause sign-ins for the others. For nginx:
 
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     client_max_body_size 20m;
 }
 ```
+
+Without the `X-Forwarded-For` line, nginx passes on whatever the browser sent, so add the
+line before you set `server.client_header`. Caddy and Traefik set `X-Forwarded-For`
+themselves; HAProxy needs `option forwardfor`; IIS with Application Request Routing sets
+it when **Preserve client IP in the following header** is on. A proxy that writes
+`Forwarded` (RFC 7239) instead can use `server.client_header: forwarded`.
+
+**Upgrading with a proxy already listed.** Earlier versions did not read
+`X-Forwarded-For`, and neither does this one until you set `server.client_header`, so
+nothing changes on its own. Until then, wrong passwords through the proxy count against
+each account only, not against anyone's address. To count each person by their own
+address, add the `X-Forwarded-For` line above to the proxy (if it is nginx), then choose
+**X-Forwarded-For** under **Client address header** on the Settings page.
 
 With `mode: off`, `server.listen` reachable from other machines and no
 `server.trusted_proxies`, `signalith validate` and the **Health** page warn that passwords
@@ -562,6 +585,7 @@ use `https://`; give them the CA, for example `curl --cacert ca.pem`.
 | `server.tls.ca_scope` | `standard` | How far a certificate authority Signalith makes may vouch: `standard` (this server and private network names) or `strict` (only this server's own names and addresses). Used on the first start and when you make a new CA; see [How far the certificate authority reaches](#how-far-the-certificate-authority-reaches) |
 | `server.tls.plaintext_ingest` | `deny` (`allow` for configs from before HTTPS was the default) | Whether agents may still send events over plain HTTP |
 | `server.trusted_proxies` | none | IPs or CIDRs of reverse proxies whose `X-Forwarded-Proto` header is believed |
+| `server.client_header` | none | `x-forwarded-for` or `forwarded`: the header the trusted proxies set to each person's address, for the failed sign-in limits and the log. Only for a proxy that sets it itself (see [Behind a reverse proxy](#behind-a-reverse-proxy)) |
 | `server.tls_cert`, `server.tls_key` | none | Your certificate (with its chain) and key, for `mode: files` |
 | `syslog.tls` | off (`init` sets `0.0.0.0:6514`) | Syslog over TLS, with the same certificate |
 | `SIGNALITH_STATE_DIR` | the folder holding `lookups.dir` | Where the `tls` folder is kept |

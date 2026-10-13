@@ -367,14 +367,23 @@ func TestSessionCookieOverHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	var c *http.Cookie
+	var c, known *http.Cookie
 	for _, x := range resp.Cookies() {
-		if x.Value != "" {
+		switch {
+		case x.Value == "":
+		case strings.HasPrefix(x.Name, knownCookiePrefix):
+			known = x
+		default:
 			c = x
 		}
 	}
 	if c == nil || c.Name != "__Host-signalith_session" || !c.Secure || c.Path != "/" || c.Domain != "" || !c.HttpOnly {
 		t.Fatalf("cookie over HTTPS: %+v", c)
+	}
+	// The browser is remembered for the account, for a year, HTTPS-only.
+	if known == nil || !known.Secure || !known.HttpOnly || known.SameSite != http.SameSiteStrictMode || known.Path != "/" || known.Domain != "" ||
+		known.MaxAge < 300*24*3600 {
+		t.Errorf("known-browser cookie over HTTPS: %+v", known)
 	}
 	me := func(url string, cl *http.Client, cookie *http.Cookie) int {
 		req, _ := http.NewRequest("GET", url+"/api/me", nil)
@@ -405,11 +414,13 @@ func TestSessionCookieOverHTTPS(t *testing.T) {
 		s.Config.Server.TrustedProxies = []string{"127.0.0.1", "::1"}
 	})
 	resp = send(t, "POST", off.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, map[string]string{"X-Forwarded-Proto": "https"})
-	if cs := resp.Cookies(); len(cs) != 1 || cs[0].Name != "__Host-signalith_session" || !cs[0].Secure {
+	if cs := resp.Cookies(); len(cs) != 2 || cs[0].Name != "__Host-signalith_session" || !cs[0].Secure ||
+		!strings.HasPrefix(cs[1].Name, knownCookiePrefix) || !cs[1].Secure {
 		t.Errorf("mode off, through a trusted proxy: %+v", cs)
 	}
 	// The same server reached over plain HTTP: an https:// public_url does
 	// not make the cookie Secure, which the browser would never send back.
+	// The known-browser cookie is HTTPS-only, so it is not set at all.
 	resp = send(t, "POST", off.URL+"/api/login", `{"username":"admin","password":"s3cret-pass"}`, nil)
 	if cs := resp.Cookies(); len(cs) != 1 || cs[0].Name != sessionCookie || cs[0].Secure {
 		t.Errorf("mode off, https public_url, plain HTTP: %+v", cs)

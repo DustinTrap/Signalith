@@ -238,10 +238,13 @@ because `signalith.yaml` was written before HTTPS was the default.
 **Looks at:** each entry in `server.trusted_proxies`, and the proxies believed for the
 older reason in the last day.
 
-- Good: only the listed proxies are believed.
+- Good: only the listed proxies are believed. With **Client address header** empty, a
+  tip says that everyone behind them counts as one shared address for the sign-in
+  limits, and how to count each person instead.
 - Needs attention: an entry is wider than a /16 (IPv4) or /48 (IPv6), so any computer in
-  it can claim a browser used HTTPS; or a proxy is believed only because of the older
-  config.
+  it can claim a browser used HTTPS (and, with **Client address header** set, choose the
+  address its failed sign-ins are counted under); or a proxy is believed only because of
+  the older config.
 
 **To fix:** list only the proxies' own addresses. See
 [Behind a reverse proxy](https.md#behind-a-reverse-proxy).
@@ -593,8 +596,9 @@ keep `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:tru
 
 ### File permissions
 
-**Looks at:** who may read or change Signalith's keys (the HTTPS keys in `tls/`, a key
-file for OpenSearch, and the files named by `SIGNALITH_*_FILE` variables), its private
+**Looks at:** who may read or change Signalith's keys (the HTTPS keys in `tls/`, the
+sign-in key `signin.key`, a key file for OpenSearch, and the files named by
+`SIGNALITH_*_FILE` variables), its private
 files (`users.json`, `directory.json`, `settings.yaml`, `intel_feeds.yaml`, the admin
 password hash), its folders, and `signalith.yaml` with its folder. The master key is
 left to [Master key](#master-key). On Windows it reads each file's access list; on Linux

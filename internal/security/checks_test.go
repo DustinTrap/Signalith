@@ -555,8 +555,15 @@ func TestProxies(t *testing.T) {
 	runCases(t, "transit.proxies", []checkCase{
 		{name: "none", state: ""},
 		{name: "good", set: func(f *Facts) { f.Config.Server.TrustedProxies = []string{"10.0.0.5", "10.1.0.0/24"} }, state: Good, line: "Signalith believes forwarded HTTPS only from 10.0.0.5 and 10.1.0.0/24."},
+		{name: "good with client header", set: func(f *Facts) {
+			f.Config.Server.TrustedProxies, f.Config.Server.ClientHeader = []string{"10.0.0.5"}, "x-forwarded-for"
+		}, state: Good, line: "Signalith believes forwarded HTTPS and client addresses (X-Forwarded-For) only from 10.0.0.5."},
 		{name: "wide", set: func(f *Facts) { f.Config.Server.TrustedProxies = []string{"10.0.0.0/8"} }, state: Attention,
 			line: "Trusted reverse proxies includes 10.0.0.0/8, so any computer in it can claim a browser used HTTPS."},
+		{name: "wide with client header", set: func(f *Facts) {
+			f.Config.Server.TrustedProxies, f.Config.Server.ClientHeader = []string{"10.0.0.0/8"}, "forwarded"
+		}, state: Attention,
+			line: "Trusted reverse proxies includes 10.0.0.0/8, so any computer in it can claim a browser used HTTPS, and choose the address its sign-ins are counted under."},
 		{name: "wide v6", set: func(f *Facts) { f.Config.Server.TrustedProxies = []string{"fd00::/32"} }, state: Attention},
 		{name: "legacy", set: func(f *Facts) { f.Runtime.LegacyProxies = []string{"127.0.0.1"} }, state: Attention,
 			line: "Signalith believes the reverse proxy at 127.0.0.1 only because signalith.yaml was written before HTTPS was the default."},
