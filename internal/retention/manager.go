@@ -199,6 +199,8 @@ func (m *Manager) release() {
 		m.mu.Unlock()
 		return
 	}
+	// It shows as running from now, not only once its goroutine starts.
+	m.current = "run"
 	m.mu.Unlock()
 	go func() {
 		defer m.release()
@@ -393,6 +395,9 @@ func (m *Manager) RunAsync(trigger, by string) error {
 	if !m.job.TryLock() {
 		return m.busy()
 	}
+	// Running from now: a page asked at once, or a caller waiting for the
+	// run to end, must not see it as not started yet.
+	m.setCurrent("run")
 	go func() {
 		defer m.release()
 		_, _ = m.run(m.ctx(), trigger, by)
@@ -418,6 +423,7 @@ func (m *Manager) ApplySoon(trigger, by string) (string, error) {
 	}
 	m.mu.Lock()
 	if m.job.TryLock() {
+		m.current = "run" // running from now; see RunAsync
 		m.mu.Unlock()
 		go func() {
 			defer m.release()

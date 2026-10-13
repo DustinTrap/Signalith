@@ -30,6 +30,10 @@ func newRetentionServer(t *testing.T, cfg retention.Config) (*retention.Manager,
 		HistoryFile: filepath.Join(dir, "retention_history.json"),
 	}
 	ts, _ := newTestServerWith(t, func(s *Server) { s.Retention = m })
+	// A run a request started may still be writing its history to dir when
+	// the test ends: wait for it before dir is removed (cleanups run last
+	// first, so this one runs before TempDir's).
+	t.Cleanup(m.Wait)
 	return m, mem, func(method, path, body string) (int, map[string]any) {
 		t.Helper()
 		return do(t, ts, method, path, body, true)

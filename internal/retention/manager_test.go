@@ -663,3 +663,38 @@ func TestFingerprintNamesTheArchiveFolder(t *testing.T) {
 		t.Errorf("archive fingerprint %q without archiving", a)
 	}
 }
+
+// A run started in the background shows as running from the moment it is
+// started, not only once its goroutine gets going, so a page (or a test)
+// that asks at once never takes it for finished; Wait waits for it,
+// history file included.
+func TestBackgroundRunShowsAsRunningAtOnce(t *testing.T) {
+	f := newFixture(t, Config{Default: &Policy{KeepDays: 30, Archive: true}})
+	for i, start := range []func() error{
+		func() error { return f.m.RunAsync(TriggerManual, "admin") },
+		func() error { _, err := f.m.ApplySoon(TriggerChange, "admin"); return err },
+	} {
+		// A day to archive, whose export waits until the checks are done.
+		f.add("endpoint", 40+i, GB, 2)
+		release := make(chan struct{})
+		var once sync.Once
+		f.mem.OnExport = func(string, int) { once.Do(func() { <-release }) }
+		if err := start(); err != nil {
+			t.Fatal(err)
+		}
+		if ov := f.m.Overview(context.Background()); !ov.Schedule.Running || ov.Schedule.Current != "run" {
+			t.Errorf("right after starting: schedule = %+v", ov.Schedule)
+		}
+		if job := f.m.Job(); job != "run" {
+			t.Errorf("job = %q", job)
+		}
+		close(release)
+		f.m.Wait()
+		if ov := f.m.Overview(context.Background()); ov.Schedule.Running {
+			t.Errorf("after Wait: schedule = %+v", ov.Schedule)
+		}
+		if _, err := os.Stat(f.m.HistoryFile); err != nil {
+			t.Errorf("history not written before Wait returned: %v", err)
+		}
+	}
+}
