@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -16,15 +15,32 @@ import (
 // service is given: the Environment= and EnvironmentFile= lines of its
 // systemd unit on Linux, or the Environment value of the Signalith service
 // in the Windows registry. Those put the server's own files
-// (directory.json, intel_feeds.yaml, a master key it made) in its state
-// folder, and may name its master key (SIGNALITH_MASTER_KEY_FILE). So when
+// (directory.json, intel_feeds.yaml, a master key it made, its HTTPS
+// certificate and identity) in its state folder, and may name its master
+// key (SIGNALITH_MASTER_KEY_FILE). So when
 // the service runs with the same config file, "signalith secrets",
-// "signalith validate" and "signalith init" use the service's folder,
-// file and master key settings too, and find the same files and key.
+// "signalith validate", "signalith settings", "signalith passwd" and
+// "signalith init" use the service's folder, file and master key settings
+// too, and find the same files and key.
 
-// serviceVar matches the settings taken from the service: folders, files
-// and the master key; never other secrets.
-var serviceVar = regexp.MustCompile(`^SIGNALITH_([A-Z_]+_(DIR|FILE)|MASTER_KEY)$`)
+// serviceVars are the settings taken from the service: its folders (the
+// state folder among them, which holds its master key, HTTPS certificate
+// and identity), the files it keeps (not files of secrets, such as
+// SIGNALITH_ADMIN_PASSWORD_FILE: the server reads those itself, and a
+// command run by hand that cannot read one, such as a systemd credential
+// that exists only while the service runs, would stop), its master key,
+// and its name and address among the servers that share its OpenSearch,
+// so "signalith validate" checks those too.
+var serviceVars = map[string]bool{
+	"SIGNALITH_STATE_DIR": true, "SIGNALITH_LOOKUPS_DIR": true, "SIGNALITH_DETECTIONS_DIR": true,
+	"SIGNALITH_DASHBOARDS_DIR": true, "SIGNALITH_ARCHIVE_DIR": true,
+	"SIGNALITH_USERS_FILE": true, "SIGNALITH_INTEL_FEEDS_FILE": true, "SIGNALITH_SETTINGS_FILE": true,
+	"SIGNALITH_MASTER_KEY_FILE": true, "SIGNALITH_MASTER_KEY": true,
+	"SIGNALITH_NODE_NAME": true, "SIGNALITH_NODE_URL": true,
+	// systemd sets it from the unit's StateDirectory= (see
+	// parseSystemctlShow): the state folder falls back to it.
+	"STATE_DIRECTORY": true,
+}
 
 // serviceSettings is what the service is given.
 type serviceSettings struct {
@@ -81,8 +97,44 @@ func applyServiceEnv(path string) (where string, set []string) {
 // SIGNALITH_MASTER_KEY_FILE, since the credential folder exists only for
 // the service.
 func (s *serviceSettings) envFor(path string) map[string]string {
-	if s == nil || s.args == nil {
+	if !s.serves(path) {
 		return nil
+	}
+	env := map[string]string{}
+	for k, v := range s.env {
+		if serviceVars[k] && v != "" {
+			env[k] = v
+		}
+	}
+	// $CREDENTIALS_DIRECTORY/master.key comes before SIGNALITH_MASTER_KEY_FILE.
+	if s.cred != "" {
+		env["SIGNALITH_MASTER_KEY_FILE"] = s.cred
+		delete(env, "SIGNALITH_MASTER_KEY")
+	}
+	return env
+}
+
+// serviceGives returns the first of names that the signalith service's
+// environment sets, when it runs with the config file path, or "". Unlike
+// applyServiceEnv it sets nothing here, so it can tell about secrets that
+// are not taken (such as SIGNALITH_ADMIN_PASSWORD_FILE).
+func serviceGives(path string, names ...string) string {
+	s := readServiceSettings()
+	if !s.serves(path) {
+		return ""
+	}
+	for _, n := range names {
+		if s.env[n] != "" {
+			return n
+		}
+	}
+	return ""
+}
+
+// serves reports whether the service runs with the config file path.
+func (s *serviceSettings) serves(path string) bool {
+	if s == nil || s.args == nil {
+		return false
 	}
 	served := s.env["SIGNALITH_CONFIG"]
 	if served == "" {
@@ -98,30 +150,21 @@ func (s *serviceSettings) envFor(path string) map[string]string {
 			served = strings.TrimPrefix(a, "--c=")
 		}
 	}
-	if !sameFile(served, path) {
-		return nil
-	}
-	env := map[string]string{}
-	for k, v := range s.env {
-		if serviceVar.MatchString(k) && v != "" {
-			env[k] = v
-		}
-	}
-	// $CREDENTIALS_DIRECTORY/master.key comes before SIGNALITH_MASTER_KEY_FILE.
-	if s.cred != "" {
-		env["SIGNALITH_MASTER_KEY_FILE"] = s.cred
-		delete(env, "SIGNALITH_MASTER_KEY")
-	}
-	return env
+	return sameFile(served, path)
 }
 
 // parseSystemctlShow reads "systemctl show" output: the service's command
 // line, its Environment= settings, the files EnvironmentFile= names (read
-// with readFile, later ones winning, as systemd does), and a master key
-// passed as a credential.
+// with readFile, later ones winning, as systemd does), a master key
+// passed as a credential, and its StateDirectory=, which systemd gives the
+// service as $STATE_DIRECTORY (the first one, under /var/lib), where its
+// state folder may fall back to (config.Config.StateDir). A command run by
+// hand gets the same, so it looks for the state folder where the service
+// does.
 func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *serviceSettings {
 	s := &serviceSettings{where: "systemctl show signalith", env: map[string]string{}}
 	var files []string
+	var stateDir string
 	sc := bufio.NewScanner(bytes.NewReader(show))
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -149,6 +192,14 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			if f, _, _ := strings.Cut(value, " ("); unitPathIsAbs(f) {
 				files = append(files, f)
 			}
+		case "StateDirectory":
+			// signalith, or several separated by spaces; a newer systemd
+			// may add :link to an entry.
+			if f := strings.Fields(value); len(f) > 0 {
+				if d, _, _ := strings.Cut(f[0], ":"); d != "" && !path.IsAbs(d) && !strings.Contains(d, "..") {
+					stateDir = path.Join("/var/lib", d)
+				}
+			}
 		case "LoadCredential":
 			if id, file, ok := strings.Cut(value, ":"); ok && id == "master.key" && unitPathIsAbs(file) {
 				s.cred = file
@@ -167,6 +218,10 @@ func parseSystemctlShow(show []byte, readFile func(string) ([]byte, error)) *ser
 			s.env[k] = v
 		}
 		clear(data)
+	}
+	// systemd sets STATE_DIRECTORY itself, over any Environment= line.
+	if stateDir != "" {
+		s.env["STATE_DIRECTORY"] = stateDir
 	}
 	return s
 }

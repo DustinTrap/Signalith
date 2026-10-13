@@ -90,7 +90,9 @@ function rtPolicyText(p) {
   ].join(' · ');
 }
 function rtNextRun(sch) {
-  if (sch.read_only) return 'Runs on the scheduler server';
+  if (sch.read_only && sch.runs_on) return `Runs on ${sch.runs_on}`;
+  if (sch.read_only && sch.no_runner) return 'No server runs it right now';
+  if (sch.read_only) return 'Runs on the server that runs the background jobs';
   if (!sch.automatic) return 'Not scheduled on this server';
   if (!sch.next_run) return `Every ${sch.interval}`;
   const u = until(sch.next_run);
@@ -304,6 +306,10 @@ function rtSummary(ov) {
   // After a run that couldn't get under the limit, the guard waits for
   // the next scheduled run.
   if (g.paused_until && st.state !== 'paused' && st.state !== 'off') gs[2] = `Waits for the next run, ${until(g.paused_until)}`;
+  // With several servers, the guard runs where retention runs: nowhere
+  // right now.
+  if (ov.schedule.no_runner && g.enabled) gs.splice(0, 3, 'down', 'Not running', 'No server runs retention right now');
+  else if (ov.schedule.runs_on && st.state === 'ok') gs[2] = `On ${ov.schedule.runs_on}, above ${g.max_disk_percent}% disk use`;
   const dot = el('span', { class: 'rt-dot', 'data-state': gs[0], 'aria-hidden': 'true' });
   const guard = rtStat('shield', 'Disk guard', [dot, gs[1]], gs[2], { tone: gs[0] === 'down' ? 'danger' : gs[0] === 'warn' && st.state === 'over' ? 'warning' : '' });
 
@@ -350,9 +356,17 @@ function rtAlerts(ov) {
   for (const n of ov.notes || []) {
     if (n !== st.message) out.push(riAlert('warning', rtSentence(n)));
   }
-  if (ov.schedule.read_only) {
+  const sch = ov.schedule;
+  const servers = () => (can('admin') ? el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page') : 'Servers page');
+  if (sch.read_only && sch.no_runner) {
+    out.push(riAlert('danger', 'No server runs retention right now.',
+      el('p', {}, 'Old days are not deleted until a server runs the background jobs again. The ', servers(), ' says why.')));
+  } else if (sch.read_only && sch.runs_on) {
+    out.push(riAlert('info', `Retention runs on ${sch.runs_on}.`,
+      el('p', {}, `This server only shows it. Make changes and restores on ${sch.runs_on}, with the settings saved there. The `, servers(), ' has its address.')));
+  } else if (sch.read_only) {
     out.push(riAlert('info', 'This server only shows retention.',
-      p('Retention runs on the server with the detection scheduler (detections.scheduler: true), with the settings saved there. Make changes and restores on that server.')));
+      p(sch.read_only_why || 'Retention runs on the server that runs the background jobs, with the settings saved there. Make changes and restores on that server.')));
   } else if (!ov.schedule.automatic) {
     out.push(riAlert('info', 'Retention doesn’t run on a schedule yet.', p('It starts once the server has finished starting up.')));
   }
@@ -377,7 +391,7 @@ const rtCanEdit = (c) => c.editable && !rtState.ov.settings_error;
 // rtLock is the badge for settings the page can't change, saying why.
 function rtLock(ov, source) {
   if (ov.settings_error) return el('span', { class: 'badge badge--outline', title: 'Fix the settings file first' }, icon('lock', 'icon--xs'), 'Settings file error');
-  if (ov.schedule.read_only) return el('span', { class: 'badge badge--outline', title: 'Change it on the server that runs the detection scheduler' }, icon('lock', 'icon--xs'), 'Read-only here');
+  if (ov.schedule.read_only) return el('span', { class: 'badge badge--outline', title: 'Change it on the server that runs the background jobs' }, icon('lock', 'icon--xs'), 'Read-only here');
   return el('span', { class: 'badge badge--outline', title: source === 'config' ? 'From signalith.yaml; change it there' : '' }, icon('lock', 'icon--xs'), 'signalith.yaml');
 }
 
@@ -539,7 +553,7 @@ function rtActivity(ov) {
   const head = (sub) => el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'Last run'), sub ? el('p', { class: 'card__sub' }, sub) : null));
   if (!run) {
     box.replaceChildren(head(rtNextRun(sch)), riEmpty({ icon: 'clock', title: sch.running ? 'Running now' : 'No runs yet',
-      text: sch.read_only ? 'Retention runs on the server with the detection scheduler, not on this one.'
+      text: sch.read_only ? 'Retention runs on the server that runs the background jobs, not on this one.'
         : 'The first scheduled run starts 2 minutes after the server starts. Run now runs it sooner.' }));
   } else {
     const secs = Math.max(0, Math.round((new Date(run.finished) - new Date(run.started)) / 1000));

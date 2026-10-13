@@ -220,7 +220,7 @@
 
   function userRow(u) {
     const [state, stateLabel, stateTitle] = statusOf(u);
-    const sub = u.source === 'builtin' ? ['Set in signalith.yaml'] : [u.name ? u.username : '', u.email].filter(Boolean);
+    const sub = u.source === 'builtin' ? ['Set on the server (signalith passwd)'] : [u.name ? u.username : '', u.email].filter(Boolean);
     const roleBadge = el('span', { class: 'badge u-role', 'data-role': u.role }, roleLabel(u.role));
     if (u.source === 'directory') roleBadge.title = 'From their directory groups at their last sign-in';
     const nameAttrs = { class: 'u-user__name' };

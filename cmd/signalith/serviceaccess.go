@@ -15,10 +15,11 @@ import (
 type serviceFiles struct {
 	// write are the folders to give the service Modify on: the config
 	// file's folder and every data folder that exists (lookups,
-	// detections, dashboards, archive, state and its keys, and the
-	// Settings page's file's), each one itself, since a folder an older
-	// version made may have an access list of its own that the config
-	// folder's does not reach. shown lists the top ones, for people.
+	// detections, dashboards, archive, state with its keys and HTTPS
+	// certificate, and the Settings page's file's), each one itself, since
+	// a folder an older version made may have an access list of its own
+	// that the config folder's does not reach. shown lists the top ones,
+	// for people.
 	write, shown []string
 	// read are files the service reads outside those folders, such as a
 	// TLS certificate and key kept in an administrators' folder.
@@ -49,7 +50,7 @@ func serviceAccess(configPath string) serviceFiles {
 		}
 		return false
 	}
-	folders := []string{c.StateDir(), filepath.Join(c.StateDir(), "keys"), c.LookupsDir(), c.DetectionsDir(), c.DashboardsDir(), c.ArchiveDir(),
+	folders := []string{c.StateDir(), filepath.Join(c.StateDir(), "keys"), c.TLSDir(), c.LookupsDir(), c.DetectionsDir(), c.DashboardsDir(), c.ArchiveDir(),
 		filepath.Dir(c.UsersFile()), filepath.Dir(c.IntelFeedsFile()), filepath.Dir(c.SettingsFile())}
 	for _, d := range folders {
 		if d == "" || slices.ContainsFunc(out.write, func(have string) bool { return strings.EqualFold(have, d) }) {

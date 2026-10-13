@@ -2,6 +2,9 @@ package retention
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,11 +36,28 @@ var (
 	ErrBusy      = errors.New("a retention run is already in progress; try again when it finishes")
 	ErrRestoring = errors.New("archived days are being restored; try again when that finishes")
 	// ErrReadOnly is returned on servers that do not run retention.
-	ErrReadOnly = errors.New("this server doesn't run retention: it runs on the server with the detection scheduler (detections.scheduler: true), with that server's settings; make changes there")
+	ErrReadOnly = errors.New("this server doesn't run retention, because detections.scheduler is off here: the server that runs the background jobs does, with its own settings; make changes there")
 	// ErrOpenSearch wraps failures to read OpenSearch, so callers can tell
 	// them from bad settings.
 	ErrOpenSearch = errors.New("OpenSearch could not be read")
 )
+
+// ReadOnlyError is returned on a server that may run retention but does
+// not now, because another server that shares its OpenSearch runs the
+// background jobs. It is an ErrReadOnly.
+type ReadOnlyError struct {
+	// Holder is the server that runs them, or "" when none does yet.
+	Holder string
+}
+
+func (e *ReadOnlyError) Error() string {
+	if e.Holder == "" {
+		return "this server doesn't run retention right now, and no server runs the background jobs at the moment; the Servers page says why"
+	}
+	return "this server doesn't run retention right now: " + e.Holder + " runs it, with its own settings; make changes there"
+}
+
+func (e *ReadOnlyError) Is(target error) bool { return target == ErrReadOnly }
 
 // maxGuardPasses is how many times one run lets the disk guard choose
 // again after days it chose could not be deleted, for example because
@@ -65,6 +85,15 @@ type Manager struct {
 	// there, so these only show retention: settings changes, runs and
 	// restores are refused.
 	ReadOnly bool
+	// Leader, when set, says whether this server runs retention now: of
+	// the servers that share one OpenSearch, only the one that holds the
+	// background jobs does. When it does not, the others behave as with
+	// ReadOnly, and holder names the server that does.
+	Leader func() (runs bool, holder string)
+	// Fence, when set, is asked before every step that changes data in
+	// OpenSearch; the step runs only when it returns nil. It confirms that
+	// this server still holds the background jobs.
+	Fence func(ctx context.Context) error
 
 	initOnce sync.Once
 	hist     *history
@@ -92,6 +121,31 @@ type queuedRun struct{ trigger, by string }
 
 // maxRestores is how many restores the archive view remembers.
 const maxRestores = 50
+
+// readOnly returns why this server cannot change retention now, or nil.
+func (m *Manager) readOnly() error {
+	if m.ReadOnly {
+		return ErrReadOnly
+	}
+	if m.Leader != nil {
+		if runs, holder := m.Leader(); !runs {
+			return &ReadOnlyError{Holder: holder}
+		}
+	}
+	return nil
+}
+
+// fence checks, before a step that changes data, that this server may
+// still take it.
+func (m *Manager) fence(ctx context.Context) error {
+	if m.Fence == nil {
+		return nil
+	}
+	if err := m.Fence(ctx); err != nil {
+		return fmt.Errorf("refused: this server no longer runs retention (%w)", err)
+	}
+	return nil
+}
 
 func (m *Manager) init() {
 	m.initOnce.Do(func() {
@@ -202,6 +256,37 @@ func (m *Manager) Settings() (Settings, error) {
 	return Effective(m.Config, saved), err
 }
 
+// Fingerprint returns hashes of the retention settings in effect on this
+// server and, while any policy archives, of its archive folder's name
+// (Archive.StoreID; else ""). Servers that share one OpenSearch compare
+// them, so one whose settings differ from those of the server that runs
+// retention, or that keeps archives in another folder, does not take
+// retention over by itself.
+func (m *Manager) Fingerprint() (settings, archives string) {
+	hash := func(v any) string {
+		b, _ := json.Marshal(v)
+		sum := sha256.Sum256(b)
+		return "sha256:" + hex.EncodeToString(sum[:])
+	}
+	s, err := m.Settings()
+	if err != nil {
+		return hash(map[string]string{"error": err.Error()}), ""
+	}
+	settings = hash(map[string]any{"default": s.Default, "policies": s.Policies, "guard": s.Guard})
+	archiving := s.Default.Archive
+	for _, p := range s.Policies {
+		archiving = archiving || p.Archive
+	}
+	if !archiving || m.Archive == nil {
+		return settings, ""
+	}
+	id, err := m.Archive.StoreID()
+	if err != nil {
+		return settings, hash(map[string]string{"error": err.Error()})
+	}
+	return settings, hash(map[string]string{"store_id": id})
+}
+
 // state is a snapshot plus what the overview needs besides the plan.
 type state struct {
 	snap     Snapshot
@@ -302,8 +387,8 @@ func (m *Manager) Run(ctx context.Context, trigger, by string) (*Run, error) {
 // RunAsync starts a run in the background, for "Run now".
 func (m *Manager) RunAsync(trigger, by string) error {
 	m.init()
-	if m.ReadOnly {
-		return ErrReadOnly
+	if err := m.readOnly(); err != nil {
+		return err
 	}
 	if !m.job.TryLock() {
 		return m.busy()
@@ -328,8 +413,8 @@ const (
 // step, so it never deletes what the new settings keep.
 func (m *Manager) ApplySoon(trigger, by string) (string, error) {
 	m.init()
-	if m.ReadOnly {
-		return "", ErrReadOnly
+	if err := m.readOnly(); err != nil {
+		return "", err
 	}
 	m.mu.Lock()
 	if m.job.TryLock() {
@@ -488,6 +573,10 @@ func (m *Manager) deleteRecords(ctx context.Context, run *Run, recs []RecordStep
 			r.KeepDays = pol.KeepDays
 			r.Before = m.now().Add(-time.Duration(pol.KeepDays) * 24 * time.Hour)
 		}
+		if err := m.fence(ctx); err != nil {
+			run.Errors = append(run.Errors, r.Category+": "+err.Error())
+			return
+		}
 		n, err := m.Cluster.DeleteClosed(ctx, r.Index, r.Before, r.keepCases)
 		act := Action{Time: m.now(), Action: ActionDeleteRecords, Category: r.Category, Docs: n, Rule: RuleRecords, Reason: r.Reason}
 		if err != nil {
@@ -580,6 +669,10 @@ func (m *Manager) apply(ctx context.Context, d Decision, today time.Time) Action
 		return act
 	case d.Action == ActionCompact && !day.Before(today.AddDate(0, 0, -1)):
 		act.Error = "refused: today and yesterday are never compacted"
+		return act
+	}
+	if err := m.fence(ctx); err != nil {
+		act.Error = err.Error()
 		return act
 	}
 	var err error
@@ -730,6 +823,11 @@ func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	m.automatic, m.baseCtx, m.nextRun = true, ctx, m.now().Add(firstRunDelay)
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.automatic = false
+		m.mu.Unlock()
+	}()
 	timer := time.NewTimer(firstRunDelay)
 	defer timer.Stop()
 	check := time.NewTicker(diskCheck)
@@ -812,8 +910,8 @@ func (m *Manager) SetGuard(g Guard) error {
 }
 
 func (m *Manager) change(ch Change, save func(*Saved)) error {
-	if m.ReadOnly {
-		return ErrReadOnly
+	if err := m.readOnly(); err != nil {
+		return err
 	}
 	if m.Store == nil {
 		return errors.New("retention settings cannot be saved on this server")
@@ -1001,11 +1099,16 @@ type ScheduleView struct {
 	Automatic bool `json:"automatic"`
 	// ReadOnly is true on servers that do not run retention; the page
 	// then only shows it.
-	ReadOnly bool       `json:"read_only"`
-	Running  bool       `json:"running"`
-	Current  string     `json:"current,omitempty"` // run or restore
-	Queued   bool       `json:"queued,omitempty"`  // another run starts when this one ends
-	NextRun  *time.Time `json:"next_run"`
+	ReadOnly bool `json:"read_only"`
+	// ReadOnlyWhy says why, naming the server that runs retention. RunsOn
+	// names that server; NoRunner is true when none does right now.
+	ReadOnlyWhy string     `json:"read_only_why,omitempty"`
+	RunsOn      string     `json:"runs_on,omitempty"`
+	NoRunner    bool       `json:"no_runner,omitempty"`
+	Running     bool       `json:"running"`
+	Current     string     `json:"current,omitempty"` // run or restore
+	Queued      bool       `json:"queued,omitempty"`  // another run starts when this one ends
+	NextRun     *time.Time `json:"next_run"`
 }
 
 const fromConfig = "From signalith.yaml"
@@ -1032,7 +1135,8 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 	if serr != nil {
 		ov.SettingsError = serr.Error()
 	}
-	canEdit := m.Store != nil && !m.ReadOnly
+	roErr := m.readOnly()
+	canEdit := m.Store != nil && roErr == nil
 	ov.Default = DefaultView{Policy: s.Default, Source: s.DefaultSource, Editable: s.DefaultSource != SourceConfig && canEdit}
 	if s.DefaultSource == SourceConfig {
 		ov.Default.Note = fromConfig
@@ -1053,7 +1157,15 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 	iv := m.interval()
 	m.mu.Lock()
 	ov.Schedule = ScheduleView{Interval: shortDuration(iv), IntervalSeconds: int64(iv / time.Second),
-		Automatic: m.automatic, ReadOnly: m.ReadOnly, Running: m.current != "", Current: m.current, Queued: m.queued != nil}
+		Automatic: m.automatic, ReadOnly: roErr != nil, Running: m.current != "", Current: m.current, Queued: m.queued != nil}
+	if roErr != nil {
+		why := roErr.Error()
+		ov.Schedule.ReadOnlyWhy = strings.ToUpper(why[:1]) + why[1:] + "."
+		var ro *ReadOnlyError
+		if errors.As(roErr, &ro) {
+			ov.Schedule.RunsOn, ov.Schedule.NoRunner = ro.Holder, ro.Holder == ""
+		}
+	}
 	if m.automatic && !m.nextRun.IsZero() {
 		next := m.nextRun
 		ov.Schedule.NextRun = &next
@@ -1463,8 +1575,8 @@ func (m *Manager) CheckRestore(ctx context.Context, ids []string, keepDays int) 
 // delete live days, or fill the disk, is refused with a ConfirmError.
 func (m *Manager) Restore(ctx context.Context, ids []string, keepDays int, by string, confirm bool) ([]RestoreStatus, error) {
 	m.init()
-	if m.ReadOnly {
-		return nil, ErrReadOnly
+	if err := m.readOnly(); err != nil {
+		return nil, err
 	}
 	mans, keepDays, err := m.restoreManifests(ids, keepDays)
 	if err != nil {
@@ -1543,6 +1655,9 @@ func (m *Manager) RestoreArchive(ctx context.Context, man Manifest, until string
 	m.init()
 	if err := m.Archive.Verify(man); err != nil {
 		return 0, fmt.Errorf("the archive file failed its check, so nothing was restored: %w", err)
+	}
+	if err := m.fence(ctx); err != nil {
+		return 0, err
 	}
 	if err := m.Cluster.CreateIndex(ctx, man.Index); err != nil {
 		return 0, fmt.Errorf("could not create %s: %w", man.Index, err)

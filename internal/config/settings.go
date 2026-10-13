@@ -1,12 +1,14 @@
 package config
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +25,24 @@ import (
 // key in signalith.yaml, so a value saved on the page, one in the file and
 // one from the environment all mean the same thing. Every setting of
 // Config is either in Registry or in Excluded with the reason it is not on
-// the page; a test fails when a new one is in neither.
+// the page; a test fails when a new one is in neither, or has no Scope.
+
+// Scope says which servers a setting is for, once several servers share
+// one OpenSearch.
+type Scope string
+
+const (
+	// ScopeCluster settings are the same on every server, such as the
+	// retention policies or the search defaults.
+	ScopeCluster Scope = "cluster"
+	// ScopeServer settings belong to one server, such as the address it
+	// listens on or whether it may run the background jobs.
+	ScopeServer Scope = "server"
+	// ScopeBootstrap settings are what a server needs before it can reach
+	// anything shared: how to connect to OpenSearch, its own name and its
+	// folders. They are only ever set on that server.
+	ScopeBootstrap Scope = "bootstrap"
+)
 
 // Setting types, which decide how the page shows a setting and how a
 // value from the page is read.
@@ -55,6 +74,7 @@ type Choice struct {
 // Setting describes one setting on the Settings page.
 type Setting struct {
 	Key     string // the key in signalith.yaml, such as "syslog.udp"
+	Scope   Scope
 	Section string
 	Label   string
 	Help    string
@@ -66,6 +86,8 @@ type Setting struct {
 	Placeholder string
 	// EmptyMeans says what an empty value does, such as "off".
 	EmptyMeans string
+	// File is true for the full path of a file on this server.
+	File bool
 	// Env is the environment variable that overrides the setting; the
 	// page shows such a setting read-only.
 	Env string
@@ -138,6 +160,7 @@ func intp(n int) *int { return &n }
 var Sections = []Section{
 	{ID: "general", Title: "General", Help: "How people and agents reach this server, and how long a sign-in lasts."},
 	{ID: "web", Title: "Web server", Help: "Where the web page and the API listen."},
+	{ID: "https", Title: "HTTPS", Help: "How the web page, the API, agents and syslog over TLS are kept private on the network: the certificate, and what is still accepted over plain HTTP."},
 	{ID: "opensearch", Title: "OpenSearch", Help: "Where events, findings and investigations are stored."},
 	{ID: "search", Title: "Search", Help: "What a new search starts with, and when a quiet data source is flagged."},
 	{ID: "syslog", Title: "Syslog", Help: "Receive syslog from firewalls, switches and servers that cannot run an agent."},
@@ -148,139 +171,174 @@ var Sections = []Section{
 
 // Registry lists every setting on the page, in page order.
 var Registry = []Setting{
-	{Key: "server.public_url", Section: "general", Label: "Public address", Type: TypeURL,
-		Help:        "The address agents and links use to reach this server.",
+	{Key: "server.public_url", Scope: ScopeCluster, Section: "general", Label: "Public address", Type: TypeURL,
+		Help:        "The address agents and links use to reach this server. With HTTPS on it starts with https://, and Signalith's own certificate is made to cover its host.",
 		Placeholder: "https://siem.example.com:8080", EmptyMeans: "worked out from the listen address",
-		Env: "SIGNALITH_PUBLIC_URL", WaitsFor: []string{"server.listen", "server.tls_cert", "server.tls_key"}},
-	{Key: "auth.session_timeout", Section: "general", Label: "Sign out after", Type: TypeDuration,
+		Env: "SIGNALITH_PUBLIC_URL", WaitsFor: []string{"server.listen", "server.tls.mode", "server.tls_cert", "server.tls_key"}},
+	{Key: "auth.session_timeout", Scope: ScopeCluster, Section: "general", Label: "Sign out after", Type: TypeDuration,
 		Help:        "Signs people out of the web page after this long without use, unless they ticked Keep me signed in. At least 5m.",
 		Placeholder: "12h", EmptyMeans: "12h"},
-	{Key: "ingest.max_event_age", Section: "general", Label: "Oldest event time", Type: TypeDuration, Restart: true,
+	{Key: "ingest.max_event_age", Scope: ScopeCluster, Section: "general", Label: "Oldest event time", Type: TypeDuration, Restart: true,
 		Help:        "Events from agents and syslog that say they are older than this are filed under the time they arrived, with their own time kept in device_time. Raise it to load old logs.",
 		Placeholder: "30d", EmptyMeans: "7d, or the shortest retention period when that is shorter"},
 
-	{Key: "server.listen", Section: "web", Label: "Listen address", Type: TypeAddress, Restart: true,
+	{Key: "server.listen", Scope: ScopeServer, Section: "web", Label: "Listen address", Type: TypeAddress, Restart: true,
 		Help:        "The address and port the web page and API listen on. 0.0.0.0 accepts other computers; 127.0.0.1 only this one.",
 		Placeholder: "0.0.0.0:8080", Env: "SIGNALITH_LISTEN",
 		Confirm: "After the restart Signalith answers only at the new address. Agents and bookmarks that use the old one stop working until they are changed."},
-	{Key: "server.tls_cert", Section: "web", Label: "Certificate file", Type: TypeText, Restart: true,
-		Help:        "Full path of a PEM certificate. With a key file, the web page, the API and syslog over TLS use HTTPS. When Public address is empty, it changes from http:// to https:// too.",
-		Placeholder: "/etc/signalith/tls/cert.pem", EmptyMeans: "HTTP, no certificate"},
-	{Key: "server.tls_key", Section: "web", Label: "Key file", Type: TypeText, Restart: true,
-		Help:        "Full path of the certificate's PEM private key.",
-		Placeholder: "/etc/signalith/tls/key.pem"},
-	{Key: "server.max_connections", Section: "web", Label: "Most connections", Type: TypeNumber, Restart: true, Min: intp(0), Max: intp(1000000),
+	{Key: "server.max_connections", Scope: ScopeServer, Section: "web", Label: "Most connections", Type: TypeNumber, Restart: true, Min: intp(0), Max: intp(1000000),
 		Help:       "The most connections open at once from browsers, agents and the API. One computer may use a tenth of them.",
 		EmptyMeans: "10000"},
-	{Key: "server.shared_addresses", Section: "web", Label: "Proxies and gateways", Type: TypeList, Restart: true,
+	{Key: "server.shared_addresses", Scope: ScopeServer, Section: "web", Label: "Proxies and gateways", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges of a reverse proxy, load balancer or NAT gateway that many people and agents reach Signalith through. They are not limited like one computer.",
 		Placeholder: "10.0.0.5", EmptyMeans: "none", check: checkAddressList, problem: listProblem("server.shared_addresses")},
 
-	{Key: "opensearch.url", Section: "opensearch", Label: "Address", Type: TypeURL, Restart: true,
+	{Key: "server.tls.mode", Scope: ScopeServer, Section: "https", Label: "HTTPS", Type: TypeChoice, Restart: true,
+		Help: "Automatic: Signalith makes its own certificate and renews it; browsers warn until its certificate authority is trusted, which the sign-in page offers to download. " +
+			"Your own certificate files: a certificate from your organization or a public authority, in the two files below. " +
+			"Off: plain HTTP, only behind a reverse proxy that serves HTTPS, since passwords and events would otherwise cross the network unencrypted.",
+		Choices: []Choice{{TLSAuto, "Automatic: Signalith's own certificate"}, {TLSFiles, "Your own certificate files"}, {TLSOff, "Off: a reverse proxy serves HTTPS"}},
+		problem: tlsModeProblem},
+	{Key: "server.tls.names", Scope: ScopeCluster, Section: "https", Label: "Extra certificate names", Type: TypeList, Restart: true,
+		Help: "Host names or IP addresses that people and agents also use to reach Signalith, for the automatic certificate: a DNS alias, or the address a NAT or Docker publishes. " +
+			"This computer's own names and addresses and the public address are always in it.",
+		Placeholder: "siem.corp.local", EmptyMeans: "none besides those", check: checkCertNames, problem: certNamesProblem},
+	{Key: "server.tls_cert", Scope: ScopeServer, File: true, Section: "https", Label: "Certificate file", Type: TypeText, Restart: true,
+		Help:        "Only with your own certificate files: full path of the PEM certificate, followed by any intermediate certificates. Signalith loads it again when the file changes.",
+		Placeholder: "/etc/signalith/tls/cert.pem", problem: tlsFileProblem("server.tls_cert")},
+	{Key: "server.tls_key", Scope: ScopeServer, File: true, Section: "https", Label: "Key file", Type: TypeText, Restart: true,
+		Help:        "Only with your own certificate files: full path of the certificate's PEM private key.",
+		Placeholder: "/etc/signalith/tls/key.pem", problem: tlsFileProblem("server.tls_key")},
+	{Key: "server.tls.plaintext_ingest", Scope: ScopeCluster, Section: "https", Label: "Agents on plain HTTP", Type: TypeChoice,
+		Help: "Agents set up before HTTPS was the default still send to an http:// address. Accept them while you give each one a new configuration from Add data " +
+			"(the Health page lists those still on plain HTTP, whose events anyone on the network can read), then refuse them. A refused agent keeps its events and sends them again once it is updated.",
+		Choices: []Choice{{"deny", "Refuse them"}, {"allow", "Accept them for now"}}},
+	{Key: "server.trusted_proxies", Scope: ScopeCluster, Section: "https", Label: "Trusted reverse proxies", Type: TypeList,
+		Help:        "IP addresses or ranges of reverse proxies in front of Signalith. Only from them is X-Forwarded-Proto believed, so a browser that reached the proxy over HTTPS gets the HTTPS-only sign-in cookie and is not sent to https:// again.",
+		Placeholder: "10.0.0.5", EmptyMeans: "none", check: checkAddressList, problem: listProblem("server.trusted_proxies")},
+
+	{Key: "opensearch.url", Scope: ScopeBootstrap, Section: "opensearch", Label: "Address", Type: TypeURL, Restart: true,
 		Help:        "Where OpenSearch answers.",
 		Placeholder: "https://opensearch.example.com:9200", Env: "SIGNALITH_OPENSEARCH_URL", check: noSecretIn("put the username and password in their own fields below"),
 		Confirm: "Signalith will store and search events in the OpenSearch at the new address. Events stored in the current one stay there and do not show in searches."},
-	{Key: "opensearch.username", Section: "opensearch", Label: "Username", Type: TypeText, Restart: true,
+	{Key: "opensearch.username", Scope: ScopeBootstrap, Section: "opensearch", Label: "Username", Type: TypeText, Restart: true,
 		Help: "Leave empty if OpenSearch does not ask for a password.", Env: "SIGNALITH_OPENSEARCH_USERNAME"},
-	{Key: "opensearch.password", Section: "opensearch", Label: "Password", Type: TypeSecret, Restart: true,
+	{Key: "opensearch.password", Scope: ScopeBootstrap, Section: "opensearch", Label: "Password", Type: TypeSecret, Restart: true,
 		Help: "Only sent to the address it was entered for.", Env: "SIGNALITH_OPENSEARCH_PASSWORD",
 		SentWith: []string{"opensearch.url"}, sentTo: func(c *Config) string { return c.OpenSearch.URL }},
-	{Key: "opensearch.ca_file", Section: "opensearch", Label: "CA certificate file", Type: TypeText, Restart: true,
+	{Key: "opensearch.ca_file", Scope: ScopeBootstrap, File: true, Section: "opensearch", Label: "CA certificate file", Type: TypeText, Restart: true,
 		Help:        "Full path of the PEM certificate of the authority that signed OpenSearch's certificate, for an https address with a private authority.",
 		Placeholder: "/etc/signalith/opensearch-ca.pem", EmptyMeans: "only authorities this computer trusts"},
-	{Key: "opensearch.cert_file", Section: "opensearch", Label: "Client certificate file", Type: TypeText, Restart: true,
+	{Key: "opensearch.cert_file", Scope: ScopeBootstrap, File: true, Section: "opensearch", Label: "Client certificate file", Type: TypeText, Restart: true,
 		Help:        "For signing in to OpenSearch with a certificate instead of a password: full path of the PEM certificate Signalith presents.",
 		Placeholder: "/etc/signalith/opensearch-client.pem", EmptyMeans: "no certificate sign-in"},
-	{Key: "opensearch.key_file", Section: "opensearch", Label: "Client key file", Type: TypeText, Restart: true,
+	{Key: "opensearch.key_file", Scope: ScopeBootstrap, File: true, Section: "opensearch", Label: "Client key file", Type: TypeText, Restart: true,
 		Help:        "Full path of the client certificate's PEM private key.",
 		Placeholder: "/etc/signalith/opensearch-client-key.pem"},
-	{Key: "opensearch.proxy", Section: "opensearch", Label: "Proxy", Type: TypeText, Restart: true,
+	{Key: "opensearch.proxy", Scope: ScopeBootstrap, Section: "opensearch", Label: "Proxy", Type: TypeText, Restart: true,
 		Help:        "A proxy to reach OpenSearch through, such as http://proxy:3128. It sees every event, so use one only when the network needs it.",
 		Placeholder: "http://proxy:3128", EmptyMeans: "connect directly", Env: "SIGNALITH_OPENSEARCH_PROXY",
 		check: noSecretIn("a proxy that needs a password is set in signalith.yaml or with SIGNALITH_OPENSEARCH_PROXY, where it is not shown")},
-	{Key: "opensearch.allow_insecure_http", Section: "opensearch", Label: "Allow password over plain http", Type: TypeBool, Restart: true,
+	{Key: "opensearch.allow_insecure_http", Scope: ScopeBootstrap, Section: "opensearch", Label: "Allow password over plain http", Type: TypeBool, Restart: true,
 		Help:    "Lets the username and password go to OpenSearch on another computer over http:// instead of https://.",
 		Confirm: "The OpenSearch username and password will cross the network unencrypted, where anyone on the way can read them. Use an https:// address instead when you can.", ConfirmWhen: "on"},
-	{Key: "opensearch.tls_skip_verify", Section: "opensearch", Label: "Skip certificate check", Type: TypeBool, Restart: true,
+	{Key: "opensearch.tls_skip_verify", Scope: ScopeBootstrap, Section: "opensearch", Label: "Skip certificate check", Type: TypeBool, Restart: true,
 		Help:    "Connects even when OpenSearch's certificate is not trusted, for a test system with a self-signed certificate.",
 		Confirm: "Signalith will not check who it is connecting to, so someone on the network could read events and the OpenSearch password. Use this only on a test system.", ConfirmWhen: "on"},
-	{Key: "opensearch.index_prefix", Section: "opensearch", Label: "Index prefix", Type: TypeText, Restart: true,
+	{Key: "opensearch.index_prefix", Scope: ScopeBootstrap, Section: "opensearch", Label: "Index prefix", Type: TypeText, Restart: true,
 		Help:    "The start of every index name, as in signalith-authentication-2026.10.12. Lowercase, no spaces.",
 		Confirm: "Signalith will start with empty indices under the new prefix. Events, findings and investigations stored under the current prefix stay in OpenSearch but no longer show in searches or on any page."},
-	{Key: "opensearch.replicas", Section: "opensearch", Label: "Replicas", Type: TypeNumber, Restart: true, Min: intp(0),
+	{Key: "opensearch.replicas", Scope: ScopeCluster, Section: "opensearch", Label: "Replicas", Type: TypeNumber, Restart: true, Min: intp(0),
 		Help: "Extra copies of each new index on other OpenSearch nodes: 0 for one node, 1 or more for a cluster. Applies to indices created after the restart."},
 
-	{Key: "search.default_earliest", Section: "search", Label: "Default time range", Type: TypeChoice,
+	{Key: "search.default_earliest", Scope: ScopeCluster, Section: "search", Label: "Default time range", Type: TypeChoice,
 		Help: "The time range the Search page starts with until someone picks another, and of a search sent without one, such as from the API.", check: checkEarliest,
 		Choices: []Choice{{"-15m", "Last 15 minutes"}, {"-1h", "Last hour"}, {"-4h", "Last 4 hours"},
 			{"-24h", "Last 24 hours"}, {"-7d", "Last 7 days"}, {"-30d", "Last 30 days"}}},
-	{Key: "search.max_events", Section: "search", Label: "Events per search", Type: TypeNumber, Min: intp(1), Max: intp(100000),
+	{Key: "search.max_events", Scope: ScopeCluster, Section: "search", Label: "Events per search", Type: TypeNumber, Min: intp(1), Max: intp(100000),
 		Help: "The most events a search fetches to sort, filter or count after searching. More uses more memory."},
-	{Key: "dashboards.stale_after", Section: "search", Label: "Quiet data source after", Type: TypeDuration,
+	{Key: "dashboards.stale_after", Scope: ScopeCluster, Section: "search", Label: "Quiet data source after", Type: TypeDuration,
 		Help:        "The Posture dashboard lists a host and source type as stopped when nothing arrives from it for this long. At least 5m.",
 		Placeholder: "2h"},
 
-	{Key: "syslog.udp", Section: "syslog", Label: "UDP address", Type: TypeAddress, Restart: true,
+	{Key: "syslog.udp", Scope: ScopeServer, Section: "syslog", Label: "UDP address", Type: TypeAddress, Restart: true,
 		Help: "Address to receive syslog on over UDP.", Placeholder: "0.0.0.0:514", EmptyMeans: "off",
 		Env: "SIGNALITH_SYSLOG_UDP"},
-	{Key: "syslog.tcp", Section: "syslog", Label: "TCP address", Type: TypeAddress, Restart: true,
+	{Key: "syslog.tcp", Scope: ScopeServer, Section: "syslog", Label: "TCP address", Type: TypeAddress, Restart: true,
 		Help: "Address to receive syslog on over TCP.", Placeholder: "0.0.0.0:514", EmptyMeans: "off",
 		Env: "SIGNALITH_SYSLOG_TCP"},
-	{Key: "syslog.tls", Section: "syslog", Label: "TLS address", Type: TypeAddress, Restart: true,
-		Help:        "Address for syslog over TLS. It uses the web server's certificate and key files.",
+	{Key: "syslog.tls", Scope: ScopeServer, Section: "syslog", Label: "TLS address", Type: TypeAddress, Restart: true,
+		Help:        "Address for syslog over TLS. It uses the same certificate as HTTPS: Signalith's own, or your own certificate files.",
 		Placeholder: "0.0.0.0:6514", EmptyMeans: "off"},
-	{Key: "syslog.allow", Section: "syslog", Label: "Allowed senders", Type: TypeList, Restart: true,
+	{Key: "syslog.allow", Scope: ScopeCluster, Section: "syslog", Label: "Allowed senders", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges, such as 10.0.0.0/8, that may send syslog. Others are dropped and counted.",
 		Placeholder: "10.0.0.0/8", EmptyMeans: "any sender", check: checkAddressList, problem: listProblem("syslog.allow")},
-	{Key: "syslog.public_port", Section: "syslog", Label: "Port devices send to", Type: TypeNumber, Restart: true, Min: intp(0), Max: intp(65535),
+	{Key: "syslog.public_port", Scope: ScopeCluster, Section: "syslog", Label: "Port devices send to", Type: TypeNumber, Restart: true, Min: intp(0), Max: intp(65535),
 		Help:       "When Docker or a firewall forwards another port to the one Signalith listens on, the port devices send to. Add data shows it.",
 		EmptyMeans: "the listen port"},
 
-	{Key: "detections.scheduler", Section: "detections", Label: "Run detections on schedule", Type: TypeBool, Restart: true,
-		Help:    "Runs enabled detections on their schedules and downloads threat intel feeds. Turn it off on extra servers that share one OpenSearch, so each rule runs once.",
-		Confirm: "No detections will run and no threat intel feeds will download on this server until this is turned on again.", ConfirmWhen: "off"},
-	{Key: "detections.max_findings_per_run", Section: "detections", Label: "Most findings per run", Type: TypeNumber, Min: intp(1), Max: intp(10000),
+	{Key: "detections.scheduler", Scope: ScopeServer, Section: "detections", Label: "Run detections on schedule", Type: TypeBool, Restart: true,
+		Help:    "Lets this server run detections, threat intel downloads and retention. Servers that share one OpenSearch take turns automatically; turn it off only on a server that should never run them.",
+		Confirm: "This server will stop running detections, threat intel downloads and retention. If no other server shares its OpenSearch, none of them run until this is turned on again.", ConfirmWhen: "off"},
+	{Key: "detections.max_findings_per_run", Scope: ScopeCluster, Section: "detections", Label: "Most findings per run", Type: TypeNumber, Min: intp(1), Max: intp(10000),
 		Help: "The most findings one detection run can raise, so a noisy rule cannot flood the queue."},
 
-	{Key: "assistant.provider", Section: "assistant", Label: "Provider", Type: TypeChoice,
+	{Key: "assistant.provider", Scope: ScopeCluster, Section: "assistant", Label: "Provider", Type: TypeChoice,
 		Help: "Who runs the model. OpenAI or compatible includes Ollama, LM Studio and vLLM on your own hardware.",
 		Choices: []Choice{{"", "Off"}, {assistant.Anthropic, "Anthropic"},
 			{assistant.OpenAI, "OpenAI or compatible"}}},
-	{Key: "assistant.url", Section: "assistant", Label: "Address", Type: TypeURL,
+	{Key: "assistant.url", Scope: ScopeCluster, Section: "assistant", Label: "Address", Type: TypeURL,
 		Help:        "Only for a model on your own hardware or another compatible service, such as http://localhost:11434/v1 for Ollama.",
 		Placeholder: "http://localhost:11434/v1", EmptyMeans: "the provider's own address", check: noSecretIn("put the key in API key below")},
-	{Key: "assistant.model", Section: "assistant", Label: "Model", Type: TypeText,
+	{Key: "assistant.model", Scope: ScopeCluster, Section: "assistant", Label: "Model", Type: TypeText,
 		Help:        "The model's name. Required for OpenAI or compatible, such as llama3.1 with Ollama.",
 		Placeholder: "llama3.1", EmptyMeans: "the provider's default model", problem: modelProblem},
-	{Key: "assistant.api_key", Section: "assistant", Label: "API key", Type: TypeSecret,
+	{Key: "assistant.api_key", Scope: ScopeCluster, Section: "assistant", Label: "API key", Type: TypeSecret,
 		Help: "Only sent to the provider's address it was entered for. Local models often need none.",
 		Env:  "SIGNALITH_ASSISTANT_API_KEY", SentWith: []string{"assistant.provider", "assistant.url"},
 		sentTo: func(c *Config) string { return c.AssistantURL() }},
 
-	{Key: "intel.allow_loopback_feeds", Section: "intel", Label: "Allow feeds from this computer", Type: TypeBool, Restart: true,
+	{Key: "intel.allow_loopback_feeds", Scope: ScopeCluster, Section: "intel", Label: "Allow feeds from this computer", Type: TypeBool, Restart: true,
 		Help:    "Lets feeds download from 127.0.0.1 or ::1, for a feed server on this computer.",
 		Confirm: "Feeds can then reach services on this computer that are not meant to be reachable from outside. Turn this on only if a feed server runs here.", ConfirmWhen: "on"},
 }
 
+// Exclusion is a setting of Config that is not on the Settings page.
+type Exclusion struct {
+	Scope  Scope
+	Reason string // why it is not on the page
+}
+
 // Excluded lists the settings of Config that are not on the Settings
 // page, and why.
-var Excluded = map[string]string{
-	"retention.days":           "Data retention has its own page.",
-	"retention.interval":       "Data retention has its own page.",
-	"retention.archive_dir":    "Data retention has its own page, and archived days are kept in this folder.",
-	"retention.default":        "Data retention has its own page.",
-	"retention.policies":       "Data retention has its own page.",
-	"retention.guard":          "Data retention has its own page.",
-	"auth.admin_user":          "The built-in admin is the break-glass account. It is set only in signalith.yaml, so no change on a page can lock everyone out.",
-	"auth.admin_password_hash": "The built-in admin's password is changed on the server with signalith passwd.",
-	"auth.users_file":          "The Users page keeps its users there, and a page cannot move a file it depends on. Shown under About this server.",
-	"auth.ldap":                "Directory sign-in is set up on the Users page.",
-	"ingest.tokens":            "Agent tokens are set in signalith.yaml (ingest.tokens) or with SIGNALITH_INGEST_TOKEN; Add data shows the agent setup that uses them. The page shows how many there are.",
-	"detections.dir":           "Pages save detections there, and a page cannot move a folder it saves into. Shown under About this server.",
-	"lookups.dir":              "It holds this page's own settings file, users and lists, so it cannot move from a page. Shown under About this server.",
-	"dashboards.dir":           "Pages save dashboards there, and a page cannot move a folder it saves into. Shown under About this server.",
-	"intel.feeds":              "Feeds are added and changed on the Threat intel page.",
-	"intel.feeds_file":         "The Threat intel page keeps its feeds there, and a page cannot move a file it depends on. Shown under About this server.",
+var Excluded = map[string]Exclusion{
+	"retention.days":           {ScopeCluster, "Data retention has its own page."},
+	"retention.interval":       {ScopeCluster, "Data retention has its own page."},
+	"retention.archive_dir":    {ScopeServer, "Data retention has its own page, and archived days are kept in this folder."},
+	"retention.default":        {ScopeCluster, "Data retention has its own page."},
+	"retention.policies":       {ScopeCluster, "Data retention has its own page."},
+	"retention.guard":          {ScopeCluster, "Data retention has its own page."},
+	"auth.admin_user":          {ScopeCluster, "The built-in admin is the break-glass account. It is set only in signalith.yaml, so no change on a page can lock everyone out."},
+	"auth.admin_password_hash": {ScopeCluster, "The built-in admin's password is changed on the server with signalith passwd."},
+	"auth.users_file":          {ScopeBootstrap, "The Users page keeps its users there, and a page cannot move a file it depends on. Shown under About this server."},
+	"auth.ldap":                {ScopeCluster, "Directory sign-in is set up on the Users page."},
+	"ingest.tokens":            {ScopeCluster, "Agent tokens are set in signalith.yaml (ingest.tokens) or with SIGNALITH_INGEST_TOKEN; Add data shows the agent setup that uses them. The page shows how many there are."},
+	"detections.dir":           {ScopeBootstrap, "Pages save detections there, and a page cannot move a folder it saves into. Shown under About this server."},
+	"lookups.dir":              {ScopeBootstrap, "It holds this page's own settings file, users and lists, so it cannot move from a page. Shown under About this server."},
+	"dashboards.dir":           {ScopeBootstrap, "Pages save dashboards there, and a page cannot move a folder it saves into. Shown under About this server."},
+	"intel.feeds":              {ScopeCluster, "Feeds are added and changed on the Threat intel page."},
+	"intel.feeds_file":         {ScopeBootstrap, "The Threat intel page keeps its feeds there, and a page cannot move a file it depends on. Shown under About this server."},
+	"cluster.node_name":        {ScopeBootstrap, "This server's name is set in signalith.yaml or with SIGNALITH_NODE_NAME, and kept in its state folder once chosen. The Servers page shows it."},
+	"server.node_url":          {ScopeServer, "The address other servers reach this one at is set in signalith.yaml or with SIGNALITH_NODE_URL. The Servers page shows it."},
+}
+
+// ScopeOf returns the scope of a setting of Config, on the page or not,
+// or "" for a key that is neither.
+func ScopeOf(key string) Scope {
+	if s, ok := Lookup(key); ok {
+		return s.Scope
+	}
+	return Excluded[key].Scope
 }
 
 // Lookup returns the setting with a key.
@@ -310,6 +368,10 @@ func LeafKeys() []string {
 				walk(f.Type, prefix+name+".")
 				continue
 			}
+			if f.Type.Kind() == reflect.Pointer && sectionPointers[f.Type.Elem()] {
+				walk(f.Type.Elem(), prefix+name+".")
+				continue
+			}
 			out = append(out, prefix+name)
 		}
 	}
@@ -330,10 +392,51 @@ func yamlName(f reflect.StructField) string {
 	return name
 }
 
-// field returns the value a key names in c.
-func field(c *Config, key string) (reflect.Value, bool) {
+// sectionPointers are the sections of signalith.yaml held by a pointer,
+// whose settings are on the page one by one: server.tls, which a file
+// from before HTTPS was the default does not have. Other pointers, such
+// as auth.ldap, are one setting.
+var sectionPointers = map[reflect.Type]bool{reflect.TypeOf(ServerTLS{}): true}
+
+// tlsKeys are the settings whose change on the page fills in the
+// server.tls section of a file that has none (see Server.materializeTLS).
+func tlsKey(key string) bool {
+	return strings.HasPrefix(key, "server.tls.") || key == "server.tls_cert" || key == "server.tls_key" || key == "server.public_url"
+}
+
+// field returns the value a key names in c, to read. A setting in a
+// section c does not have, such as server.tls in a file from before
+// HTTPS was the default, reads as its zero value.
+func field(c *Config, key string) (reflect.Value, bool) { return walkField(c, key, false) }
+
+// fieldToSet is field for a setting about to be changed. A missing
+// server.tls section is filled in as in effect (see Server.materializeTLS)
+// and a shared one is copied first, so changing a shallow copy of c, as
+// the settings applied at once are, never changes c itself.
+func fieldToSet(c *Config, key string) (reflect.Value, bool) {
+	if tlsKey(key) {
+		c.Server.materializeTLS(c.Server)
+		t := *c.Server.TLS
+		t.Names = slices.Clone(t.Names)
+		c.Server.TLS = &t
+	}
+	return walkField(c, key, true)
+}
+
+func walkField(c *Config, key string, set bool) (reflect.Value, bool) {
 	v := reflect.ValueOf(c).Elem()
 	for _, part := range strings.Split(key, ".") {
+		if v.Kind() == reflect.Pointer && sectionPointers[v.Type().Elem()] {
+			switch {
+			case !v.IsNil():
+				v = v.Elem()
+			case set:
+				v.Set(reflect.New(v.Type().Elem()))
+				v = v.Elem()
+			default:
+				v = reflect.New(v.Type().Elem()).Elem()
+			}
+		}
 		if v.Kind() != reflect.Struct {
 			return reflect.Value{}, false
 		}
@@ -355,15 +458,31 @@ func field(c *Config, key string) (reflect.Value, bool) {
 // Value returns the value of a setting in c: a string, int, bool or
 // []string. Lists are never nil.
 //
-// A public address worked out from the listen address is "", as it was
-// set: that is what the page shows, compares and saves.
+// A public address worked out from the listen address is "", and an
+// http:// one read as https:// (see Validate) is the http:// one, as they
+// were set: that is what the page shows, compares and saves. The HTTPS
+// mode and plain-HTTP ingest are the ones in effect, which for a file
+// from before HTTPS was the default follow from its other settings.
 func (c *Config) Value(key string) any {
 	v, ok := field(c, key)
 	if !ok {
 		return nil
 	}
-	if key == "server.public_url" && c.publicURLDerived {
-		return ""
+	switch key {
+	case "server.public_url":
+		if c.publicURLDerived {
+			return ""
+		}
+		if c.httpPublicURL != "" {
+			return c.httpPublicURL
+		}
+	case "server.tls.mode":
+		return c.Server.TLSMode()
+	case "server.tls.plaintext_ingest":
+		if c.Server.PlaintextIngest() {
+			return "allow"
+		}
+		return "deny"
 	}
 	if v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.String {
 		out := make([]string, v.Len())
@@ -386,9 +505,10 @@ func (c *Config) SetValue(key string, val any) error {
 	if !nv.Type().AssignableTo(v.Type()) {
 		return fmt.Errorf("%s takes a %s, not a %s", key, v.Type(), nv.Type())
 	}
+	v, _ = fieldToSet(c, key)
 	v.Set(nv)
 	if key == "server.public_url" {
-		c.publicURLDerived = false
+		c.publicURLDerived, c.httpPublicURL = false, ""
 	}
 	return nil
 }
@@ -402,10 +522,14 @@ func (c *Config) CopyValue(key string, from *Config) error {
 	if !ok {
 		return fmt.Errorf("unknown setting %s", key)
 	}
-	dst, _ := field(c, key)
+	if key == "server.tls.mode" || key == "server.tls.plaintext_ingest" {
+		// The value in effect, which an empty one in the file is not.
+		return c.SetValue(key, from.Value(key))
+	}
+	dst, _ := fieldToSet(c, key)
 	dst.Set(src)
 	if key == "server.public_url" {
-		c.publicURLDerived = from.publicURLDerived
+		c.publicURLDerived, c.httpPublicURL = from.publicURLDerived, from.httpPublicURL
 	}
 	c.copyPageProblem(key, from)
 	return nil
@@ -595,6 +719,78 @@ func listProblem(key string) func(*Config) string {
 		return addressListProblem(list)
 	}
 }
+
+// tlsModeProblem words what is wrong with the HTTPS mode and the
+// certificate files together, for the mode's field.
+func tlsModeProblem(c *Config) string {
+	s := c.Server
+	files := s.TLSCert != "" || s.TLSKey != ""
+	switch s.TLSMode() {
+	case TLSAuto, TLSOff:
+		if files {
+			return "The certificate and key files below are used only with your own certificate files. Choose that, or clear them."
+		}
+	case TLSFiles:
+		if !files {
+			return "Enter your certificate and key files below, or choose Automatic."
+		}
+	default:
+		return "Choose Automatic, your own certificate files, or Off."
+	}
+	return ""
+}
+
+// tlsFileProblem words what is wrong with server.tls_cert or tls_key
+// (key) for its field.
+func tlsFileProblem(key string) func(*Config) string {
+	return func(c *Config) string {
+		s := c.Server
+		mine, other := s.TLSCert, s.TLSKey
+		what := "your certificate file"
+		if key == "server.tls_key" {
+			mine, other, what = s.TLSKey, s.TLSCert, "the certificate's key file"
+		}
+		switch mode := s.TLSMode(); {
+		case (mode == TLSAuto || mode == TLSOff) && mine != "":
+			return "Used only when HTTPS is set to your own certificate files. Choose that, or clear this."
+		case mode == TLSFiles && mine == "":
+			return "Enter the full path of " + what + "."
+		case mode == TLSFiles && key == "server.tls_cert" && other != "":
+			cert, k := c.TLSFiles()
+			if _, err := tls.LoadX509KeyPair(cert, k); err != nil {
+				return "The certificate and key files can't be used: " + err.Error() + "."
+			}
+		}
+		return ""
+	}
+}
+
+// badCertNames lists the entries of server.tls.names that cannot go in
+// a certificate.
+func badCertNames(list []string) string {
+	var bad []string
+	for _, n := range list {
+		if !validCertName(n) {
+			bad = append(bad, "“"+n+"”")
+		}
+	}
+	switch len(bad) {
+	case 0:
+		return ""
+	case 1:
+		return bad[0] + " isn't a host name or IP address."
+	}
+	return joinWords(bad) + " aren't host names or IP addresses."
+}
+
+func checkCertNames(v any) error {
+	if p := badCertNames(v.([]string)); p != "" {
+		return errors.New(p)
+	}
+	return nil
+}
+
+func certNamesProblem(c *Config) string { return badCertNames(c.Server.TLSNames()) }
 
 // modelProblem asks for a model where the provider needs one named.
 func modelProblem(c *Config) string {

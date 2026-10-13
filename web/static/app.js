@@ -358,6 +358,7 @@ const JUMP_WORDS = {
   detections: 'rules sigma alerts', coverage: 'mitre attack matrix techniques tactics', assets: 'hosts users identities cmdb priority',
   data: 'ingest agents fluent bit sources onboarding syslog firewall switch router cisco sample demo test data try example', retention: 'retention rotation archive restore delete storage disk guard policies',
   health: 'status opensearch ingest', help: 'help syntax language commands',
+  servers: 'cluster nodes servers background jobs leader failover standby readyz',
   users: 'accounts people roles permissions ldap active directory sign-in passwords',
   settings: 'configuration config server opensearch syslog listen address port tls certificate ai assistant model api key restart yaml',
 };
@@ -435,7 +436,7 @@ syncThemeButtons();
 // Display preferences stay in this browser after signing out. Everything
 // else stored under signalith.* (the last query, its time range, the last
 // page) belongs to whoever is signed in, so signing out removes it.
-const KEEP_ON_SIGN_OUT = new Set(['signalith.theme', 'signalith.builder', 'signalith.agentServer',
+const KEEP_ON_SIGN_OUT = new Set(['signalith.theme', 'signalith.builder', 'signalith.agentServer', 'signalith.serversUpgradeNote',
   'signalith.dashRange', 'signalith.dashAuto', 'signalith.dashRefresh']);
 function clearUserStorage() {
   try {
@@ -516,6 +517,22 @@ $('sign-out').addEventListener('click', async () => {
   location.replace('login?signedout');
 });
 
+// About Signalith: who made it and where its code lives. The version
+// comes from api/health (renderHealthCard). Esc, the close button and a
+// click on the backdrop close it, and focus goes back to the account menu.
+// The click must also start on the backdrop: a text selection dragged
+// out past the card's edge ends with a click on the dialog itself.
+const aboutBox = $('about');
+let aboutPressedBackdrop = false;
+$('about-open').addEventListener('click', () => {
+  $('user-menu').removeAttribute('open');
+  aboutBox.showModal();
+});
+aboutBox.querySelector('[data-close]').addEventListener('click', () => aboutBox.close());
+aboutBox.addEventListener('pointerdown', (ev) => { aboutPressedBackdrop = ev.target === aboutBox; });
+aboutBox.addEventListener('click', (ev) => { if (aboutPressedBackdrop && ev.target === aboutBox) aboutBox.close(); });
+aboutBox.addEventListener('close', () => $('user-menu').querySelector('summary').focus());
+
 // ---------- app shell: sidebar health ----------
 // One calm line about OpenSearch and when the last event arrived; the
 // dot turns amber or red when something needs a look on the Health page.
@@ -531,14 +548,18 @@ function renderHealthCard(h) {
   const os = h.opensearch || {};
   const ing = h.ingest || {};
   const warnings = h.warnings || [];
+  const banners = h.cluster_banners || [];
   const failed = ing.failed || 0;
   // Yellow is normal on a single node, so only red, unreachable, failed
-  // events or config warnings change the card.
+  // events, the servers' red problems or config warnings change the card.
   let state = '';
   let title = 'Healthy';
   if (!os.status || os.status === 'red' || os.status === 'unreachable') {
     state = 'down';
     title = 'OpenSearch ' + (os.status || 'unknown');
+  } else if (banners.length) {
+    state = 'down';
+    title = 'Needs attention';
   } else if (failed > 0 || warnings.length) {
     state = 'warn';
     title = 'Needs attention';
@@ -550,10 +571,35 @@ function renderHealthCard(h) {
   if (failed) meta.push(failed.toLocaleString() + ' failed');
   $('health-meta').textContent = meta.join(' · ');
   const card = $('health-card');
-  card.title = visibleText(['OpenSearch ' + (os.status || 'unknown'), os.error, ...warnings].filter(Boolean).join('\n'));
+  card.title = visibleText(['OpenSearch ' + (os.status || 'unknown'), os.error, ...banners, ...warnings].filter(Boolean).join('\n'));
   card.setAttribute('aria-label', `Health: ${title}, OpenSearch ${os.status || 'unknown'}, ${meta.join(', ')}`);
   card.classList.remove('hidden');
-  if (h.version) $('user-menu-version').textContent = 'Signalith ' + h.version;
+  if (h.version) {
+    $('user-menu-version').textContent = h.version;
+    $('about-version').textContent = 'Version ' + h.version;
+    $('about-version').classList.remove('hidden');
+  }
+  clusterBanner.list = banners;
+  meReady.then(renderClusterBanner);
+}
+
+// ---------- app shell: the servers' red problems ----------
+// No server running detections, OpenSearch's disk full: everyone sees
+// them on every page but Servers, which says the same at more length, and
+// Health, which lists them among its own alerts. Admins get a link there;
+// it says why and what to do.
+const clusterBanner = { list: [], key: '' };
+function renderClusterBanner() {
+  const box = $('cluster-banner');
+  const list = currentPage === 'servers' || currentPage === 'health' ? [] : clusterBanner.list;
+  const key = list.join('\n') + '|' + can('admin');
+  if (key === clusterBanner.key) return;
+  clusterBanner.key = key;
+  box.replaceChildren(...list.map((text) => el('div', { class: 'alert', 'data-tone': 'danger' }, icon('circle-alert'),
+    el('p', {}, el('b', {}, text), ' ', can('admin')
+      ? el('a', { href: '#servers', 'data-page': 'servers' }, 'See why on the Servers page')
+      : 'An admin needs to look.'))));
+  box.classList.toggle('hidden', !list.length);
 }
 refreshHealthCard();
 setInterval(refreshHealthCard, 30000);
@@ -1995,7 +2041,13 @@ let agentServerGuess = ''; // known once the server has answered without server=
 let agentServerSent = null;
 let agentServerTimer = 0;
 let agentSetupPending = null; // the latest load, which Copy and Download may wait for
-try { agentServerEl.value = localStorage.getItem(agentServerKey) || ''; } catch (_) { /* storage may be blocked */ }
+let agentNameAdd = ''; // the address Signalith's certificate doesn't cover yet (from the latest setup)
+try {
+  // An address saved while this server spoke plain HTTP: agents now send
+  // over HTTPS, on the same port.
+  const saved = localStorage.getItem(agentServerKey) || '';
+  agentServerEl.value = location.protocol === 'https:' && /^http:\/\//i.test(saved) ? 'https://' + saved.slice(7) : saved;
+} catch (_) { /* storage may be blocked */ }
 document.querySelectorAll('input[name=os]').forEach((r) => r.addEventListener('change', () => loadDataSource()));
 $('linux-source').addEventListener('change', loadAgentConfig);
 $('sysmon').addEventListener('change', loadAgentConfig);
@@ -2003,10 +2055,28 @@ agentServerEl.addEventListener('input', () => {
   clearTimeout(agentServerTimer);
   agentServerTimer = setTimeout(agentServerChanged, 400);
 });
-agentServerEl.addEventListener('change', () => {
+agentServerEl.addEventListener('change', async () => {
   if (!agentServerEl.value.trim()) agentServerEl.value = agentServerGuess; // cleared: back to the default
-  agentServerChanged();
+  if (await agentSetupFresh()) agentEnsureName();
 });
+
+// agentEnsureName adds the address agents send to to Signalith's HTTPS
+// certificate, once it is entered (the field is left, or Copy or Download
+// is used), never while it is being typed. It is false when the name
+// can't be added; the field then says why.
+async function agentEnsureName() {
+  const name = agentNameAdd;
+  if (!name) return true;
+  try {
+    await api('api/tls/names', { name });
+    if (agentNameAdd === name) agentNameAdd = '';
+    return true;
+  } catch (e) {
+    agentServerError(e.message);
+    agentServerEl.focus();
+    return false;
+  }
+}
 
 function agentServerChanged() {
   clearTimeout(agentServerTimer);
@@ -2091,7 +2161,7 @@ function agentServerWarn(a) {
   if (w.dataset.url === a.server_url) return; // unchanged: don't announce it again
   w.dataset.url = a.server_url;
   let host = 'localhost';
-  let example = 'http://192.168.1.20:8080';
+  let example = 'https://192.168.1.20:8080';
   let port = '8080';
   try {
     const u = new URL(a.server_url);
@@ -2108,6 +2178,7 @@ function agentServerWarn(a) {
 
 function agentSetupRender(a) {
   if (agentSetupErrEl) agentSetupErrEl.remove();
+  agentNameAdd = a.add_name || '';
   agentServerWarn(a);
   agentSetupConfig = a.config || '';
   $('agent-steps').classList.remove('hidden');
@@ -2117,37 +2188,38 @@ function agentSetupRender(a) {
   pathEl.textContent = path.split(/[\\/]/).pop();
   pathEl.title = path;
   agentSetupEditor(agentSetupConfig);
-  let fileStep = null;
-  const items = (a.steps || []).map((s, i) => {
-    const li = agentSetupStep(s, i + 1, path);
-    if (!fileStep && path && s.includes(path)) fileStep = li;
-    return li;
-  });
+  const names = [path, a.ca_path, 'signalith-ca.pem', 'fluent-bit.conf', 'server.tls_cert'];
+  const items = (a.steps || []).map((s, i) => agentSetupStep(s, i + 1, names));
   $('agent-steps').replaceChildren(...items);
-  // The config file sits under the step that saves it, else after the list.
-  (fileStep ? fileStep.querySelector('.agent-step__body') : $('agent-body')).append(agentFileEl);
+  const stepBody = (n) => (n > 0 && items[n - 1] ? items[n - 1].querySelector('.agent-step__body') : null);
+  // The config file sits under the step that saves it, else after the
+  // list, and the CA certificate under its own step.
+  (stepBody(a.config_step) || $('agent-body')).append(agentFileEl);
   agentFileEl.classList.toggle('hidden', !agentSetupConfig);
+  if (a.ca && stepBody(a.ca_step)) stepBody(a.ca_step).append(caFile(a.ca, a.ca_fingerprint));
 }
 
 // agentSetupStep renders one numbered step. "Label: command" becomes the
 // label plus a command well.
-function agentSetupStep(text, n, path) {
+function agentSetupStep(text, n, names) {
   const body = el('div', { class: 'agent-step__body' });
   const cut = text.indexOf(': ');
   if (cut > 0 && cut < text.length - 2) {
-    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text.slice(0, cut), path)),
+    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text.slice(0, cut), names)),
       agentSetupCommand(text.slice(cut + 2)));
   } else {
-    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text, path)));
+    body.append(el('p', { class: 'agent-step__text' }, ...agentSetupInline(text, names)));
   }
   return el('li', { class: 'agent-step' }, el('span', { class: 'agent-step__num' }, n), body);
 }
 
-// agentSetupInline turns URLs into links, the config path into code and
-// "Health page" into a link to that page.
-function agentSetupInline(text, path) {
+// agentSetupInline turns URLs into links, file names and paths into code
+// and "Health page" into a link to that page.
+function agentSetupInline(text, names = []) {
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp('(https?://[^\\s,;]*[^\\s,;.)])|(Health page)' + (path ? '|(' + esc(path) + ')' : ''), 'g');
+  // longest first, so a full path wins over the file name inside it
+  const lits = [...new Set(names.filter(Boolean))].sort((x, y) => y.length - x.length).map(esc);
+  const re = new RegExp('(https?://[^\\s,;]*[^\\s,;.)])|(Health page)' + (lits.length ? '|(' + lits.join('|') + ')' : ''), 'g');
   const parts = [];
   let last = 0;
   let m;
@@ -2160,6 +2232,30 @@ function agentSetupInline(text, path) {
   }
   if (last < text.length) parts.push(text.slice(last));
   return parts;
+}
+
+// caFile shows the CA certificate agents and devices check this server
+// with: its file name, Download and Copy, its SHA-256 fingerprint (the one
+// Signalith logs when it starts) and, folded away, the certificate.
+function caFile(pem, fingerprint) {
+  const name = 'signalith-ca.pem';
+  const btn = (ic, label) => el('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, icon(ic), el('span', {}, label));
+  const dl = btn('download', 'Download');
+  const copy = btn('copy', 'Copy');
+  dl.addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([pem], { type: 'application/x-pem-file' }));
+    const a = el('a', { href: url, download: name, class: 'hidden' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  copy.addEventListener('click', () => agentSetupCopy(pem, copy));
+  return el('div', { class: 'agent-file agent-ca' },
+    el('div', { class: 'agent-file__bar' }, icon('shield-check'), el('span', { class: 'agent-file__name mono' }, name), el('span', { class: 'spacer' }), dl, copy),
+    fingerprint ? el('p', { class: 'agent-ca__fp' }, el('span', {}, 'SHA-256 fingerprint'), el('code', {}, fingerprint)) : null,
+    el('details', { class: 'agent-ca__more' }, el('summary', {}, icon('chevron-right', 'icon--sm chev'), 'Show certificate'),
+      el('pre', { class: 'agent-ca__pem', tabindex: '0', 'aria-label': 'CA certificate' }, pem.trim())));
 }
 
 function agentSetupCommand(cmd, label = 'Copy command') {
@@ -2259,11 +2355,12 @@ const agentSetupStale = () => agentServerValue() !== agentServerSent || $('agent
 
 $('copy-config').addEventListener('click', async () => {
   if (agentSetupStale() && !(await agentSetupFresh())) return;
+  if (!(await agentEnsureName())) return;
   agentSetupCopy(agentSetupConfig, $('copy-config'));
 });
 $('agent-download').addEventListener('click', async () => {
   if (agentSetupStale() && !(await agentSetupFresh())) return;
-  if (!agentSetupConfig) return;
+  if (!agentSetupConfig || !(await agentEnsureName())) return;
   const url = URL.createObjectURL(new Blob([agentSetupConfig], { type: 'text/plain' }));
   const a = el('a', { href: url, download: 'fluent-bit.conf', class: 'hidden' });
   document.body.append(a);
@@ -2284,7 +2381,9 @@ const syslogHostEl = $('syslog-host');
 const syslogVendorKey = 'signalith.syslogVendor';
 const syslogHostKey = 'signalith.syslogHost';
 const syslogState = {
-  h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', vendor: 'rsyslog', hostTimer: 0, tabsObserver: null,
+  h: null, tried: 0, busy: false, ticker: null, shape: '', host: '', vendor: 'rsyslog', hostTimer: 0, tabsObserver: null, ca: null,
+  // why the certificate can't include a host devices send to: { host, msg }
+  nameError: null,
   // since the panel opened: when, the counts then, new senders announced, and what the live box says
   opened: 0, base: null, announced: new Set(), liveKey: '',
 };
@@ -2320,6 +2419,8 @@ async function syslogOpen() {
   const h = syslogHostEl.value.trim();
   st.host = syslogHostProblem(h) ? st.host || syslogDefaultHost() : h.replace(/^\[|\]$/g, '');
   await syslogPoll();
+  // The address shown was entered before, or is the one agents use.
+  syslogEnsureName();
 }
 
 // syslogGuessHost asks for the agent setup once when no address is known
@@ -2393,7 +2494,33 @@ syslogHostEl.addEventListener('input', () => {
 syslogHostEl.addEventListener('change', () => {
   if (!syslogHostEl.value.trim()) syslogHostEl.value = syslogDefaultHost();
   syslogHostChanged();
+  syslogEnsureName();
 });
+
+// syslogCovers says whether Signalith's certificate names host.
+function syslogCovers(host) {
+  const names = ((syslogState.h && syslogState.h.tls && syslogState.h.tls.names) || []).map((n) => n.toLowerCase());
+  const h = host.toLowerCase();
+  return names.some((n) => n === h || (n.startsWith('*.') && h.endsWith(n.slice(1)) && !h.slice(0, h.length - n.length + 1).includes('.')));
+}
+
+// syslogEnsureName adds the host devices send to to Signalith's own
+// certificate once it is entered, so devices sending over TLS can check
+// it. When it can't be, the setups say why.
+async function syslogEnsureName() {
+  const st = syslogState;
+  const host = st.host;
+  const tls = st.h && ((st.h.syslog && st.h.syslog.listeners) || []).some((l) => l.protocol === 'tls');
+  if (!tls || !st.ca || !st.ca.own || !host || syslogHostProblem(host) || syslogCovers(host)) return;
+  try {
+    const r = await api('api/tls/names', { name: host });
+    if (st.h.tls) st.h.tls.names = r.names || [];
+    if (st.nameError && st.nameError.host === host) st.nameError = null;
+  } catch (e) {
+    st.nameError = { host, msg: e.message };
+  }
+  syslogRender();
+}
 
 // syslogUseAddress is a button that puts one of this computer's addresses
 // in "Devices send to". Used from the keyboard, focus returns to the field,
@@ -2402,6 +2529,7 @@ function syslogUseAddress(ip) {
   return el('button', { class: 'link-btn mono sl-ip', type: 'button', title: 'Use ' + ip, onclick: (e) => {
     syslogHostEl.value = ip;
     syslogHostChanged();
+    syslogEnsureName();
     if (e.detail === 0) syslogHostEl.focus();
   } }, ip);
 }
@@ -2420,11 +2548,32 @@ async function syslogPoll() {
   try {
     st.h = await api('api/health');
     renderHealthCard(st.h);
+    await syslogLoadCA(st.h);
     syslogRender();
   } catch (e) {
     if (!st.h) syslogFailed(e);
   } finally {
     st.busy = false;
+  }
+}
+
+// syslogLoadCA fetches, once per certificate, the CA certificate devices
+// check Signalith with over TLS. Without it, servers send over TCP or UDP.
+async function syslogLoadCA(h) {
+  const st = syslogState;
+  const fp = h.tls && h.tls.ca_sha256;
+  const tls = ((h.syslog && h.syslog.listeners) || []).some((l) => l.protocol === 'tls');
+  if (!fp || !tls) {
+    st.ca = null;
+    return;
+  }
+  if (st.ca && st.ca.fp === fp) return;
+  try {
+    const resp = await fetch('api/tls/ca.pem');
+    if (!resp.ok) throw new Error(resp.statusText);
+    st.ca = { fp, own: !!h.tls.own_ca, pem: await resp.text() };
+  } catch (_) {
+    st.ca = null; // the setups fall back to TCP or UDP
   }
 }
 
@@ -2445,7 +2594,7 @@ function syslogTick() {
 // syslogDest is where devices send: the host and, per protocol, the port
 // they use (0 when that listener is off) and the address listened on.
 function syslogDest(sl) {
-  const d = { host: syslogState.host, udp: 0, tcp: 0, tls: 0, listen: {} };
+  const d = { host: syslogState.host, udp: 0, tcp: 0, tls: 0, listen: {}, ca: syslogState.ca };
   for (const l of sl.listeners || []) {
     d[l.protocol] = l.port || +String(l.address).split(':').pop() || 0;
     d.listen[l.protocol] = l.address;
@@ -2467,7 +2616,7 @@ function syslogRender() {
   if (!st.h) return;
   const sl = st.h.syslog || {};
   $('syslog-body').removeAttribute('aria-busy');
-  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.runtime]);
+  const shape = JSON.stringify([sl.enabled, sl.listeners, sl.allow, st.host, st.h.runtime, st.ca && st.ca.fp, st.h.tls && st.h.tls.names, st.nameError]);
   if (shape !== st.shape) {
     st.shape = shape;
     st.liveKey = '';
@@ -2790,14 +2939,63 @@ function syslogVendors(d, ips) {
   const v6 = d.host.includes(':');
   const none = () => [slNote('Only syslog over TLS is on, and this setup needs UDP or TCP. Set syslog.udp or syslog.tcp to turn one on.')];
   const udpOnly = (name) => [slNote(name + ' sends over UDP only, and UDP is off here. Set syslog.udp to turn it on.')];
+  // Servers send over TLS when it is on and Signalith has a CA to give
+  // them: they check the server with it, and nobody on the network can
+  // read the logs.
+  const tls = d.tls && d.ca;
+  // A note when Signalith's certificate does not name the host devices
+  // send to, so the device would refuse to connect. Its own certificate
+  // takes the name when it is entered (syslogEnsureName); one from
+  // server.tls_cert has to be sent to by a name it covers. Names only
+  // this computer can use are left out, and addresses come first.
+  const nameError = syslogState.nameError && syslogState.nameError.host === d.host ? syslogState.nameError.msg : '';
+  const usable = ((syslogState.h && syslogState.h.tls && syslogState.h.tls.names) || [])
+    .filter((n) => !agentLoopbackHost(n.includes(':') ? '[' + n + ']' : n))
+    .sort((a, b) => syslogIsIP(b) - syslogIsIP(a)).slice(0, 4);
+  const notCovered = (who) => {
+    if (syslogCovers(d.host)) return null;
+    if (d.ca.own && !nameError) return null; // being added
+    const text = nameError ? [nameError.charAt(0).toUpperCase() + nameError.slice(1) + (/[.?!]$/.test(nameError) ? '' : '.')]
+      : [`Signalith’s certificate doesn’t cover ${d.host}, so ${who} won’t connect. `,
+        ...(usable.length ? ['Send to a name it covers, such as ', usable.join(', '), ', or get a certificate that includes it.'] : ['Get a certificate that includes it.'])];
+    return el('p', { class: 'hint', 'data-tone': 'warning' }, icon('triangle-alert'), el('span', {}, ...text));
+  };
+  const saveCA = (dir) => [
+    slText('Save Signalith’s CA certificate as ', slCode('signalith-ca.pem'), ' on each server. The server uses it to check it’s talking to Signalith.'),
+    caFile(d.ca.pem, d.ca.fp),
+    slText('From the folder you saved it in, run:'),
+    `sudo install -m 644 signalith-ca.pem ${dir}/signalith-ca.pem\n`,
+  ];
   return [
     { id: 'rsyslog', label: 'rsyslog', title: 'rsyslog: most Linux servers', render() {
+      if (tls) {
+        // Signalith's own CA issues certificates for this server only, so
+        // checking the CA is enough. Another CA's certificate must also
+        // name the host; rsyslog can only match host names, not IPs.
+        const ip = syslogIsIP(d.host);
+        const byName = !d.ca.own && !ip;
+        const auth = byName ? `StreamDriverAuthMode="x509/name" StreamDriverPermittedPeers="${d.host}"` : 'StreamDriverAuthMode="x509/certvalid"';
+        const [t1, ca, t2, install] = saveCA('/etc/rsyslog.d');
+        return [t1, ca, t2,
+          agentSetupCommand('sudo apt-get install -y rsyslog-gnutls || sudo dnf install -y rsyslog-gnutls\n' + install +
+            `sudo tee /etc/rsyslog.d/90-signalith.conf <<'EOF'\nglobal(DefaultNetstreamDriverCAFile="/etc/rsyslog.d/signalith-ca.pem")\n` +
+            `*.* action(type="omfwd" target="${d.host}" port="${d.tls}" protocol="tcp" StreamDriver="gtls" StreamDriverMode="1" ${auth})\nEOF\nsudo systemctl restart rsyslog`),
+          ip && !d.ca.own ? slNote('rsyslog can’t check an IP address against the certificate, only that the CA issued it. Use this computer’s host name for a full check.') : null,
+          byName ? notCovered('rsyslog') : null];
+      }
       const p = pick('tcp', 'udp');
       if (!p) return none();
       return [slText('On each Linux server, run:'),
         agentSetupCommand(`echo '*.* ${p === 'tcp' ? '@@' : '@'}${hp(p)}' | sudo tee /etc/rsyslog.d/90-signalith.conf\nsudo systemctl restart rsyslog`)];
     } },
     { id: 'syslog-ng', label: 'syslog-ng', render() {
+      if (tls) {
+        const [t1, ca, t2, install] = saveCA('/etc/syslog-ng');
+        return [t1, ca, t2,
+          agentSetupCommand(install + `sudo tee /etc/syslog-ng/conf.d/signalith.conf <<'EOF'\ndestination d_signalith { network("${d.host}" transport("tls") port(${d.tls})${v6 ? ' ip-protocol(6)' : ''} ` +
+            'tls(ca-file("/etc/syslog-ng/signalith-ca.pem") peer-verify(required-trusted))); };\nlog { source(s_src); destination(d_signalith); };\nEOF\nsudo systemctl restart syslog-ng'),
+          slNote('On RHEL and Fedora the source is ', slCode('s_sys'), ', not ', slCode('s_src'), '.'), notCovered('syslog-ng')];
+      }
       const p = pick('tcp', 'udp');
       if (!p) return none();
       return [slText('On each Linux server, run:'),
@@ -2972,6 +3170,11 @@ function healthPageRender(h) {
   else if (status === 'red') alerts.push(healthPageAlert('danger', 'circle-alert', 'OpenSearch is red.', 'Some data cannot be searched or stored until it recovers.'));
   if (failed) alerts.push(healthPageAlert('warning', 'triangle-alert', `${healthPageNum(failed)} ${failed === 1 ? 'event' : 'events'} could not be stored.`, 'Counted since the server started. OpenSearch rejected them or did not answer.'));
   if (sl.dropped) alerts.push(healthPageAlert('warning', 'triangle-alert', `${healthPageNum(sl.dropped)} syslog ${sl.dropped === 1 ? 'message was' : 'messages were'} dropped.`, 'Counted since the server started. They arrived faster than OpenSearch could store them.'));
+  // The servers' red problems, as on every page.
+  for (const b of h.cluster_banners || []) {
+    alerts.push(healthPageAlert('danger', 'circle-alert', b, can('admin')
+      ? el('span', {}, 'The ', el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page'), ' says why and what to do.') : 'An admin needs to look.'));
+  }
   for (const w of h.warnings || []) {
     const cut = w.indexOf('. ');
     alerts.push(cut > 0 ? healthPageAlert('warning', 'triangle-alert', w.slice(0, cut + 1), w.slice(cut + 2)) : healthPageAlert('warning', 'triangle-alert', w));

@@ -2,6 +2,8 @@ package intel
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/redact"
 )
 
 // Feed is one threat intel feed, from signalith.yaml or added on the
@@ -137,6 +141,11 @@ type Feeds struct {
 	Now        func() time.Time
 	// Tick is how often due feeds are checked (default 30s).
 	Tick time.Duration
+	// Allowed, when set, says whether this server may still run the feed
+	// schedule: with several servers, only the one that runs the
+	// background jobs may. It is asked before each scheduled download and
+	// each clean-up, so a server that lost that role stops at once.
+	Allowed func() bool
 
 	mu       sync.Mutex
 	status   map[string]*FeedStatus
@@ -149,6 +158,8 @@ type Feeds struct {
 	// running meanwhile throws its result away.
 	gen    map[string]int
 	runCtx context.Context // set while Start runs
+	// kicked counts downloads started by kick, which Start waits for.
+	kicked sync.WaitGroup
 	// storeMu orders storing a download against removing a feed's
 	// indicators, so a deleted feed's last download cannot bring them back.
 	storeMu    sync.Mutex
@@ -181,6 +192,8 @@ const (
 	RunTimeout  = 5 * time.Minute
 	TestTimeout = time.Minute
 )
+
+func (f *Feeds) allowed() bool { return f.Allowed == nil || f.Allowed() }
 
 func (f *Feeds) now() time.Time {
 	if f.Now != nil {
@@ -414,7 +427,7 @@ func fmtDuration(d time.Duration) string {
 // Start downloads due feeds, removes indicators of feeds that are no
 // longer configured, and purges expired indicators, until ctx ends.
 // Feeds added or changed on the page meanwhile download at once. Run it
-// on one server only (the one with the detection scheduler).
+// on one server only: the one that runs the background jobs.
 func (f *Feeds) Start(ctx context.Context) {
 	// Feeds replace what they stored before, so the current indicators
 	// must be known first.
@@ -452,8 +465,11 @@ func (f *Feeds) Start(ctx context.Context) {
 		f.mu.Lock()
 		f.runCtx = nil
 		f.mu.Unlock()
+		// Downloads of feeds just added or changed end with the run, so a
+		// server that stops running the schedule stores nothing after.
+		f.kicked.Wait()
 	}()
-	if fileOK {
+	if fileOK && f.allowed() {
 		f.storeMu.Lock()
 		n, err := f.Store.RemoveSources(ctx, keep)
 		f.storeMu.Unlock()
@@ -472,7 +488,7 @@ func (f *Feeds) Start(ctx context.Context) {
 	lastPurge := time.Time{}
 	for {
 		f.RunDue(ctx)
-		if f.now().Sub(lastPurge) >= time.Hour {
+		if f.now().Sub(lastPurge) >= time.Hour && f.allowed() {
 			lastPurge = f.now()
 			if n, err := f.Store.Purge(ctx); err != nil {
 				f.log().Warn("could not purge expired indicators", "err", err)
@@ -518,7 +534,11 @@ func (f *Feeds) RunDue(ctx context.Context) {
 	}
 }
 
+// refreshAndLog downloads a feed on the schedule.
 func (f *Feeds) refreshAndLog(ctx context.Context, name string) {
+	if !f.allowed() {
+		return
+	}
 	_, err := f.Refresh(ctx, name)
 	if err != nil && !errors.Is(err, ErrFeedRunning) && !errors.Is(err, ErrFeedChanged) && !errors.Is(err, ErrUnknownFeed) && !errors.Is(err, ErrFeedOff) {
 		f.log().Warn("threat intel feed download failed", "feed", name, "err", err)
@@ -532,7 +552,42 @@ func (f *Feeds) kick(name string) {
 		return
 	}
 	ctx := f.runCtx
-	go f.refreshAndLog(ctx, name)
+	f.kicked.Go(func() { f.refreshAndLog(ctx, name) })
+}
+
+// Fingerprint is a hash of every feed's settings, without secrets, so
+// servers that share one OpenSearch can tell whether their feed lists
+// differ. Any change to a feed, adding or removing one, or a feeds file
+// that cannot be read changes it.
+func (f *Feeds) Fingerprint() string {
+	f.mu.Lock()
+	list := f.all()
+	fileErr := f.fileErr
+	f.mu.Unlock()
+	type part struct {
+		Name, Kind, URL, Collection, Format, Type, Column string
+		Interval, MaxAge                                  time.Duration
+		Weight                                            float64
+		Tags, Headers                                     []string
+		Username                                          bool
+		Enabled                                           bool
+		Source, Problem                                   string
+	}
+	parts := make([]part, 0, len(list))
+	for _, fd := range list {
+		var headers []string
+		for k := range fd.Headers {
+			headers = append(headers, strings.ToLower(k))
+		}
+		sort.Strings(headers)
+		parts = append(parts, part{Name: fd.Name, Kind: fd.Kind, URL: redact.URL(fd.URL), Collection: fd.Collection,
+			Format: fd.Format, Type: fd.Type, Column: fd.Column, Interval: fd.Interval, MaxAge: fd.MaxAge, Weight: fd.Weight,
+			Tags: fd.Tags, Headers: headers, Username: fd.Username != "", Enabled: fd.Enabled, Source: fd.Source, Problem: fd.Problem})
+	}
+	sort.SliceStable(parts, func(i, j int) bool { return parts[i].Name < parts[j].Name })
+	b, _ := json.Marshal(map[string]any{"feeds": parts, "file_ok": fileErr == nil})
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // Running reports whether this server downloads feeds on their schedules.

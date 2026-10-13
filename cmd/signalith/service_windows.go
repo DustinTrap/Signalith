@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/safelog"
@@ -27,6 +28,7 @@ func init() {
 	// When Windows starts us as a service, run the service handler instead
 	// of the CLI.
 	if isSvc, err := svc.IsWindowsService(); err == nil && isSvc {
+		asService = true
 		path := defaultConfigPath()
 		if len(os.Args) > 2 && os.Args[1] == "-c" {
 			path = os.Args[2]
@@ -63,7 +65,8 @@ func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- serve(ctx, s.configPath, log) }()
-	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+	// PreShutdown gives a stop at reboot the same time as any other stop.
+	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPreShutdown}
 	for {
 		select {
 		case err := <-done:
@@ -76,17 +79,44 @@ func (s *service) Execute(args []string, req <-chan svc.ChangeRequest, status ch
 			switch c.Cmd {
 			case svc.Interrogate:
 				status <- c.CurrentStatus
-			case svc.Stop, svc.Shutdown:
-				status <- svc.Status{State: svc.StopPending}
+			case svc.Stop, svc.Shutdown, svc.PreShutdown:
 				cancel()
-				select {
-				case <-done:
-				case <-time.After(15 * time.Second):
-				}
+				stopping(status, done)
 				return false, 0
 			}
 		}
 	}
+}
+
+// stopWait is how long a stop may take: the background jobs get up to a
+// minute to finish before this server hands them to another one, then the
+// last requests to OpenSearch and the web server's own wait.
+const stopWait = 90 * time.Second
+
+// stopping waits for serve to return, at most stopWait, telling Windows
+// every few seconds that the stop is still going, so it does not give up
+// on the service.
+func stopping(status chan<- svc.Status, done <-chan error) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	limit := time.After(stopWait)
+	for cp := uint32(1); ; cp++ {
+		status <- svc.Status{State: svc.StopPending, CheckPoint: cp, WaitHint: 10000}
+		select {
+		case <-done:
+			return
+		case <-limit:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// setPreshutdownTimeout asks Windows to wait up to stopWait for this
+// service at reboot (SERVICE_PRESHUTDOWN_INFO).
+func setPreshutdownTimeout(s *mgr.Service) error {
+	info := struct{ timeout uint32 }{uint32((stopWait + 10*time.Second) / time.Millisecond)}
+	return windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO, (*byte)(unsafe.Pointer(&info)))
 }
 
 func cmdService(args []string) error {
@@ -230,6 +260,11 @@ func installService(m *mgr.Mgr, path string) error {
 		}
 	}
 	defer s.Close()
+	// At a reboot Windows waits for the service as long as for any other
+	// stop (stopWait), so the background jobs are handed over first.
+	if err := setPreshutdownTimeout(s); err != nil {
+		fmt.Printf("Warning: could not give the service time to stop when Windows shuts down: %v\n", err)
+	}
 	// Restart after 5 seconds, then 30, then every minute; count failures
 	// from zero again after a day without one.
 	actions := []mgr.RecoveryAction{
@@ -247,6 +282,14 @@ func installService(m *mgr.Mgr, path string) error {
 	// The folders and files signalith.yaml and the Settings page name, as
 	// the service sees them (with the environment it is given).
 	applyServiceEnv(abs)
+	// The state folder must exist to be given to the service: it keeps its
+	// identity (node.id) and lock there, next to its master key and HTTPS
+	// certificate.
+	if c, err := config.LoadUnchecked(abs); err == nil {
+		if err := prepareStateDir(c.StateDir(), filepath.Dir(abs)); err != nil {
+			fmt.Printf("Warning: could not prepare the state folder %s: %v\n", c.StateDir(), err)
+		}
+	}
 	access := serviceAccess(abs)
 	for _, dir := range access.write {
 		if err := grantAccess(dir, sid, modifyAccess, true); err != nil {
@@ -313,4 +356,28 @@ func grantAccess(path, sid string, rights windows.ACCESS_MASK, inherit bool) err
 		return err
 	}
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil)
+}
+
+// prepareStateDir makes the state folder, or the fallback folder in
+// ProgramData that Signalith uses as one, private: only SYSTEM,
+// Administrators, the service and this account may use it, as
+// install.ps1 does for the config folder, and nothing is passed down
+// from ProgramData, where every user may read. The config folder, which
+// install.ps1 protects, and any other folder that already exists (one
+// chosen with SIGNALITH_STATE_DIR) are left as they are.
+func prepareStateDir(dir, configDir string) error {
+	if strings.EqualFold(filepath.Clean(dir), filepath.Clean(configDir)) {
+		return nil
+	}
+	_, err := os.Stat(dir)
+	own := errors.Is(err, os.ErrNotExist)
+	for _, f := range config.StateDirFallbacks() {
+		if strings.EqualFold(filepath.Clean(f), filepath.Clean(dir)) {
+			own = true
+		}
+	}
+	if !own {
+		return nil
+	}
+	return securefile.MkdirPrivate(dir)
 }

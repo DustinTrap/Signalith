@@ -256,6 +256,16 @@ func (c *limitConn) Close() error {
 	return err
 }
 
+// CloseWrite passes a half-close through. net/http uses it before closing
+// a connection whose request body it did not read, such as a refused
+// upload, so the client reads the reply instead of losing it to a reset.
+func (c *limitConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 // limitRequests answers 503 to a request when its client already has
 // PerClient requests in progress, or the server Max. Over HTTP/1.1 a
 // connection carries one request at a time, so the connection limits

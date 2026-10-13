@@ -7,22 +7,26 @@ they and your events are protected:
 
 | | What protects it | What you do |
 | --- | --- | --- |
-| **In transit** (on the network) | HTTPS and TLS | Turn on HTTPS (`server.tls_cert` and `server.tls_key`) |
+| **In transit** (on the network) | HTTPS and TLS | Nothing: HTTPS is on by default; see [docs/https.md](https.md) |
 | **At rest** (on disk) | Signalith encrypts the passwords and keys it stores; disk encryption protects everything else | Back up the master key; turn on disk encryption |
 | **In use** (in memory) | The service is locked down so other programs cannot read its memory | Nothing, or a confidential VM for more |
 
 ## In transit
 
-Use HTTPS for the web UI and the API (agents send events over it, with the ingest
-token), TLS for syslog where devices support it, `https://` for OpenSearch, and
-`ldaps://` or StartTLS for directory sign-in. Signalith refuses to send the OpenSearch password over plain http to another
+Signalith serves the web UI and the API (agents send events over it, with the
+ingest token) over HTTPS by default, with a certificate from a small certificate
+authority of its own; [docs/https.md](https.md) covers trusting it, using your own
+certificate, and syslog over TLS. Use TLS for syslog where devices support it,
+`https://` for OpenSearch, and `ldaps://` or StartTLS for directory sign-in.
+Signalith refuses to send the OpenSearch password over plain http to another
 machine unless you allow it, and warns while certificate checks are off.
 
 ## At rest
 
 ### What Signalith encrypts
 
-Every password and key Signalith stores in a file is encrypted:
+Every password and API key Signalith keeps in its settings files is encrypted (files
+that hold a key on their own are not; see [below](#not-encrypted-by-the-master-key)):
 
 | File | Encrypted values | Written by |
 | --- | --- | --- |
@@ -91,6 +95,27 @@ header's name, not to the feed's: rename a feed as you like, but after renaming 
 header (`X-API-Key` to `X-Auth-Key`) enter its value again. Header names ignore
 case, so `x-api-key` is the same header.
 
+### Not encrypted by the master key
+
+Some keys and secrets are files of their own, kept as plain text and protected only by
+their permissions (readable by Signalith's account and administrators). Keep them out
+of backups that many people can read, as you keep the master key:
+
+- **Signalith's HTTPS keys**, `ca.key` and `server.key` in the `tls` folder of the
+  state folder, next to `keys` (`/var/lib/signalith/tls`,
+  `C:\ProgramData\Signalith\tls`, and in Docker the `signalith-data` volume). Whoever
+  has `ca.key` can make certificates that browsers and agents trusting Signalith's CA
+  accept; see [docs/https.md](https.md).
+- **The Docker quick start's `signalith-secrets` volume**, made by its setup step: the
+  first admin password (`initial-admin-password`), the agents' ingest token
+  (`ingest-token`) and Signalith's OpenSearch client key (`opensearch-client-key.pem`).
+  OpenSearch's own keys are in the `opensearch-certs` volume.
+- **Files named by `SIGNALITH_*_FILE` variables** (`SIGNALITH_OPENSEARCH_PASSWORD_FILE`
+  and the others), such as Docker or Kubernetes secrets and systemd credentials.
+  Signalith only reads them.
+- **Key files you name** in `signalith.yaml` or on the **Settings** page, such as
+  `server.tls_key` and `opensearch.key_file`.
+
 ### The master key
 
 The master key is 32 random bytes. Signalith makes it the first time it stores a
@@ -103,7 +128,8 @@ password or key (`signalith init` does), and looks for it in this order:
    Signalith warns while it is used.
 4. The key file Signalith makes, `keys/master.key` (on Windows
    `keys\master.key.dpapi`), in the state folder (`SIGNALITH_STATE_DIR`, or the
-   folder that holds the lookups folder), then next to `signalith.yaml`, then on
+   folder that holds the lookups folder; [docs/servers.md](servers.md#identity)
+   says when another folder is used), then next to `signalith.yaml`, then on
    Linux in `/var/lib/signalith`. For a config in `/etc` on Linux,
    `/var/lib/signalith` comes first, so the key is never made next to
    `signalith.yaml`, where a copy of `/etc` would carry both.
@@ -168,8 +194,11 @@ A command run by hand does not see the settings the service is given, so
 `signalith secrets`, `signalith settings`, `signalith validate` and `signalith init`
 read them: on Linux the systemd unit's `Environment=`, `EnvironmentFile=` and
 `LoadCredential=` lines, and on Windows the Signalith service's `Environment` value
-in the registry. They find the server's files and key that way (only folders,
-files and the master key are taken, never other settings).
+in the registry. They find the server's files and key that way (only its folders,
+the files it keeps and the master key are taken, never other settings or secrets:
+a secret given in a file, such as `SIGNALITH_OPENSEARCH_PASSWORD_FILE` naming a
+systemd credential, is read by the server alone). `signalith passwd` reads them too,
+so a new admin password goes where the service uses it.
 
 #### Keeping the key elsewhere
 
@@ -222,9 +251,12 @@ files and the master key are taken, never other settings).
 
 In the Docker quick start the key is `/var/lib/signalith/keys/master.key` in the
 `signalith-data` volume, together with `directory.json`, `intel_feeds.yaml` and
-`settings.yaml`. A
-backup of the volume therefore holds both the key and the values it decrypts. Copy
-the key out and keep it apart (in a password manager or a vault). From the
+`settings.yaml`. A backup of the volume therefore holds both the key and the values it
+decrypts. The same volume holds Signalith's HTTPS keys (`tls/ca.key` and
+`tls/server.key`), and the `signalith-secrets` volume the first admin password, the
+ingest token and Signalith's OpenSearch client key, none of them encrypted (see
+[above](#not-encrypted-by-the-master-key)): keep backups of both volumes as private as
+the key. Copy the key out and keep it apart (in a password manager or a vault). From the
 repository folder, in a shell or PowerShell:
 
 ```sh
@@ -257,17 +289,27 @@ status` notes it, and `docker run --rm -v docker_signalith-data:/data busybox rm
 
 `signalith.yaml` is mounted read-only in the container, so to encrypt a password
 you pasted into it (as the warning on the **Health** page asks), run the command in
-a container of its own that may write the file and uses the same volume, and so the
-same key. From `deploy/docker`, in a shell or PowerShell:
+a container of its own that may write the file's folder and uses the same volumes, and
+so the same key. From `deploy/docker`, in a shell or PowerShell:
 
 ```sh
-docker compose run --rm --no-deps --user 0 -v "$PWD/signalith.yaml:/work/signalith.yaml" signalith secrets encrypt -c /work/signalith.yaml
+docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER -v "${PWD}:/work" signalith secrets encrypt -c /work/signalith.yaml
 docker compose restart signalith
 ```
 
-`--user 0` lets it write a file that belongs to you rather than to the container's
-account; a key it makes is given to the account of its folder, so the server can
-read it. Any other `signalith secrets` command runs the same way.
+That container has the service's hardening (no privileges, a read-only file system),
+so the command gives back only what it needs. `--user 0` with `DAC_OVERRIDE` reads the
+setup step's secrets and the key, which belong to the container's account, and writes
+your file; `CHOWN` and `FOWNER` keep your file's owner and permissions and give a key it
+makes to the container's account, so the server can read it. The folder is mounted, not
+just the file, because the file is replaced through a temporary file next to it. Any
+other `signalith secrets` command runs the same way (`set` asks for the value in the
+terminal).
+
+A password not pasted yet needs none of this: enter the OpenSearch password and the AI
+model's API key on the **Settings** page, which keeps them encrypted in the volume, or
+give a secret to the container in a file with a `SIGNALITH_*_FILE` variable (see
+[Configuration](../README.md#configuration)).
 
 ### Backing up the key
 
@@ -280,6 +322,12 @@ On Windows the `.dpapi` file can only be read on the same Windows installation, 
 copy helps when you restore that server (a VM snapshot or system backup), not on a
 new one. Keep the passwords themselves in your vault too, or use a key file you can
 move (above).
+
+A backup of the state folder (or of the Docker volumes) also holds the files the
+master key does not encrypt, such as Signalith's HTTPS CA key (`tls/ca.key`; see
+[Not encrypted by the master key](#not-encrypted-by-the-master-key)). Give such a
+backup the same care as the key, or leave the `tls` folder out: a server restored
+without it makes a new CA, which browsers and agents then have to trust again.
 
 ### Losing the key
 
@@ -391,13 +439,19 @@ sudo systemctl start signalith
 
 On Windows, in a PowerShell opened as Administrator, run `Stop-Service Signalith`
 and `& "$env:ProgramFiles\Signalith\signalith.exe" secrets decrypt`, then the older
-version's `install.ps1`. In Docker, run `docker compose stop signalith` and the
-`secrets decrypt` command the way [Docker](#docker) shows, then build the older
-version. If you skip this, enter the directory password and feed keys again in the
-older version, and the OpenSearch password and AI API key saved on the **Settings**
-page (an older version with that page would send their encrypted text as they
-are), or restore the files from a backup made before the upgrade. Going
-forward again needs nothing: the new version encrypts them again.
+version's `install.ps1`. In Docker, from `deploy/docker` (the second command is the
+one [Docker](#docker) explains):
+
+```sh
+docker compose stop signalith
+docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER -v "${PWD}:/work" signalith secrets decrypt -c /work/signalith.yaml
+```
+
+then check out the older version and start it. If you skip this, enter the directory
+password and feed keys again in the older version, and the OpenSearch password and AI
+API key saved on the **Settings** page (an older version with that page would send
+their encrypted text as they are), or restore the files from a backup made before the
+upgrade. Going forward again needs nothing: the new version encrypts them again.
 
 ### Disk encryption
 
@@ -453,7 +507,7 @@ change.
 
 | Variable | Meaning |
 | --- | --- |
-| `SIGNALITH_STATE_DIR` | Folder for files Signalith makes for itself, such as its master key (in `keys/`). Default: the folder that holds the lookups folder. The systemd unit and the Docker image set `/var/lib/signalith` |
+| `SIGNALITH_STATE_DIR` | Folder for files Signalith makes for itself: its master key (in `keys/`), its HTTPS certificate (in `tls/`) and this server's identity (`node.id`). Default: the folder that holds the lookups folder (see [docs/servers.md](servers.md#identity) for when another one is used). The systemd unit and the Docker image set `/var/lib/signalith` |
 | `SIGNALITH_MASTER_KEY_FILE` | A file holding the master key (32 bytes, or one line of base64 or hex) |
 | `SIGNALITH_MASTER_KEY` | The master key itself, in base64. Weaker than a file; Signalith warns while it is used |
 | `CREDENTIALS_DIRECTORY` | Set by systemd for `LoadCredential=`; Signalith reads `master.key` there |

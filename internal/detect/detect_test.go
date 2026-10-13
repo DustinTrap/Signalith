@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -382,5 +383,50 @@ func TestCoverage(t *testing.T) {
 	}
 	if !found {
 		t.Error("T1110 missing from matrix")
+	}
+}
+
+// losingRunner is a search during which this server loses the job role.
+type losingRunner struct {
+	fakeRunner
+	lose func()
+}
+
+func (r *losingRunner) Execute(ctx context.Context, q *query.Query) (*search.Result, error) {
+	r.lose()
+	return r.fakeRunner.Execute(ctx, q)
+}
+
+// A server that no longer runs the background jobs starts no scheduled
+// run, and one that loses them during a run writes no findings. A run
+// someone starts by hand is not fenced.
+func TestSchedulerAsksAllowed(t *testing.T) {
+	lib, _, _ := NewLibrary("")
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	store := findings.NewMemory()
+	var allowed atomic.Bool
+	runner := &losingRunner{fakeRunner: fakeRunner{rows: []search.Row{{"src": "203.0.113.9", "dest": "web1"}}}, lose: func() { allowed.Store(false) }}
+	s := &Scheduler{Library: lib, Engine: runner, Findings: store, Now: func() time.Time { return now }, Allowed: allowed.Load}
+	s.RunDue(context.Background())
+	if len(s.Status()) != 0 {
+		t.Fatalf("ran while not allowed: %+v", s.Status())
+	}
+	allowed.Store(true)
+	s.RunDue(context.Background())
+	failed := 0
+	for _, st := range s.Status() {
+		if strings.Contains(st.LastError, "no longer runs the background jobs") {
+			failed++
+		}
+	}
+	if failed == 0 {
+		t.Fatalf("state %+v", s.Status())
+	}
+	if list, _, _ := store.Search(context.Background(), findings.Filter{}); len(list) != 0 {
+		t.Fatalf("%d findings written after the role was lost", len(list))
+	}
+	d, _ := lib.Get("auth-brute-force")
+	if res, err := s.Run(context.Background(), d); err != nil || len(res.Findings) != 1 {
+		t.Fatalf("a run by hand: %+v %v", res, err)
 	}
 }

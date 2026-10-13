@@ -15,8 +15,8 @@ answers them `403`.
 
 ## Using the page
 
-The page has one card per section (General, Web server, OpenSearch, Search,
-Syslog, Detections, AI assistant, Threat intel) and **About this server**. On a
+The page has one card per section (General, Web server, HTTPS, OpenSearch,
+Search, Syslog, Detections, AI assistant, Threat intel) and **About this server**. On a
 wide screen a list of the sections stays on the left; on a phone the sections
 are a row of buttons under the top bar that scrolls sideways.
 
@@ -56,6 +56,37 @@ only behind a proxy or a port forward.
 Turning syslog on is two settings in the **Syslog** card (UDP and TCP address,
 such as `0.0.0.0:514`), then a restart. The **Add data** page's syslog steps send
 you there.
+
+## HTTPS
+
+The **HTTPS** card has how Signalith keeps the web page, the API, agents and syslog
+over TLS private (see [HTTPS](https.md)):
+
+- **HTTPS**: Automatic (Signalith's own certificate, the default), your own certificate
+  files, or Off, only behind a reverse proxy that serves HTTPS.
+- **Extra certificate names**: other names or addresses people and agents use, for the
+  automatic certificate.
+- **Certificate file** and **Key file**: used only with your own certificate files. The
+  page checks that they load before saving.
+- **Agents on plain HTTP**: whether agents set up for `http://` may still send while you
+  update them from **Add data**. Applies at once.
+- **Trusted reverse proxies**: the proxies whose `X-Forwarded-Proto` header is believed.
+  Applies at once. With this empty, a `signalith.yaml` from before HTTPS was the default
+  believes a proxy on this computer or a private network, and the field says so; listing
+  one ends that. A list that leaves out the proxy you opened the page through is
+  refused, since with HTTPS on that proxy would stop working at once: add it, or make
+  the change from a browser that reaches Signalith without the proxy.
+
+The rules are those of `signalith.yaml`: your own files need both files, and the files
+are refused with the other modes; an `http://` public address is read as `https://`
+while HTTPS is on, and the page offers the `https://` one. Certificate files saved on
+the page by a version without the **HTTPS** setting, which was then how HTTPS was turned
+on, mean your own certificate files, as they do in a `signalith.yaml` without
+`server.tls.mode`. A restart keeps the same
+certificate authority, so browsers and agents that trust it go on doing so; a public
+address saved on the page joins the certificate at once. **In use now**, under the
+settings, shows the mode in use, the names the certificate covers and the CA's
+fingerprint, with a link to download the CA.
 
 ## Where changes are kept
 
@@ -134,7 +165,11 @@ itself inside the same process: it stops its components (web handlers, OpenSearc
 client, syslog receiver, detection scheduler, feed downloader and the rest) and
 builds them again from the saved settings. This works the same under Docker,
 systemd, a Windows service or a terminal. People stay signed in, and requests that
-arrive during the few milliseconds of the switch wait for it.
+arrive during the few milliseconds of the switch wait for it. The server keeps its
+identity, and, when it runs the background jobs, keeps running them: they finish
+their current step and start again with the new settings. If the restart turns
+**Run detections on schedule** off, or moves to another OpenSearch, it hands them to
+another server that shares the OpenSearch, if there is one.
 
 ### Protection against locking yourself out
 
@@ -154,7 +189,10 @@ Before anything stops, a restart checks that the new settings can work:
 If one of these fails, nothing changes: Signalith keeps running with the settings
 in use, and the page says what failed. A change that caused it is **set aside**:
 it stays in the settings file, marked with why, but is not used, not even when
-Signalith next starts, until you **Try it again**, change it or **Remove** it. The
+Signalith next starts, until you **Try it again**, change it or **Remove** it.
+Changes that cannot be used without it are set aside with it, such as the
+certificate files saved with **HTTPS** set to your own files, so the rest still
+work at the next start. The
 other changes can then be applied with **Restart now**. If the new
 components then fail to start anyway, Signalith goes back to the previous
 settings, sets the changes aside, and says so. If even the previous settings
@@ -162,7 +200,9 @@ cannot start, the web page stays up to say so, and Signalith tries again every
 30 seconds.
 
 When the web address or HTTPS changes, the page moves to the new address, and
-Signalith waits up to 2 minutes for an admin to open a page there. If nobody
+Signalith waits up to 2 minutes for an admin to open a page there. Behind a
+trusted reverse proxy, turning HTTPS on or off leaves the proxy's address as it
+is, so the page stays there, and its next request confirms the change. If nobody
 does (the new address cannot be reached from your computer, or a firewall blocks
 it), Signalith goes back to the previous address by itself and sets the change
 aside. For a move to another port, the old address keeps answering until then.
@@ -221,15 +261,26 @@ In Docker, see below.
 In the quick start (`deploy/docker/docker-compose.yml`), `signalith.yaml` is
 mounted read-only, and the page keeps its changes in the `signalith-data` volume.
 
-- Settings set in the compose file's `environment:` (the listen address, the
-  OpenSearch address, the admin password and agent token, and the public address
-  when you set it there) are locked on the page. Change them in
+- The page's file is `/var/lib/signalith/lookups/settings.yaml`, in the
+  `signalith-data` volume with Signalith's own certificate authority (`tls`) and
+  master key (`keys`), so changes survive updates and `docker compose down`.
+- Only settings set in the compose file's `environment:` are locked on the page.
+  In the quick start that is the public address, once you uncomment
+  `SIGNALITH_PUBLIC_URL`, and the OpenSearch password or the AI model's API key if
+  you add a `SIGNALITH_..._FILE` variable for one (the admin password and ingest
+  token it reads from files are not page settings). Change them in
   `docker-compose.yml`, then `docker compose -f deploy/docker/docker-compose.yml up -d`.
+- The listen address, the OpenSearch connection and the other settings come from
+  the read-only `deploy/docker/signalith.yaml`, so they can be changed on the page,
+  and the page's value wins. Change the OpenSearch settings only if you run
+  OpenSearch somewhere else: the quick start's own OpenSearch is set up for the
+  client certificate in `signalith.yaml`.
 - A port Signalith listens on inside the container only reaches it when the
-  compose file publishes it under `ports:`. The quick start publishes 8080 (web)
-  and 514 to the container's 5514 (syslog). If you change a syslog address on the
-  page, add the port to `ports:` too, and set **Port devices send to** to the port
-  on the host. The page reminds you on those settings when it runs in a container.
+  compose file publishes it under `ports:`. The quick start publishes 8080 (web),
+  514 to the container's 5514 (syslog over UDP and TCP) and 6514 (syslog over
+  TLS). If you change the listen port or a syslog address on the page, add the
+  port to `ports:` too (and for syslog set **Port devices send to** to the port on
+  the host). The page reminds you on those settings when it runs in a container.
 - To undo a change from the command line:
 
 ```
@@ -344,7 +395,7 @@ A save with problems saves nothing and answers 400 with each problem by setting:
 ```json
 {"error": "Nothing was saved. Fix the settings marked below.",
  "fields": {"server.listen": "Must be host:port, for example 0.0.0.0:8080",
-            "syslog.tls": "Needs “Certificate file” and “Key file”; syslog over TLS uses the same certificate as the web UI"},
+            "server.tls_cert": "Enter the full path of your certificate file."},
  "problems": []}
 ```
 

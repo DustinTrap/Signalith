@@ -14,6 +14,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -51,24 +52,57 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 }
 
 func TestHSTSWhenServingHTTPS(t *testing.T) {
-	// Served over TLS by Signalith itself.
+	hsts := func(resp *http.Response) bool {
+		return strings.HasPrefix(resp.Header.Get("Strict-Transport-Security"), "max-age=")
+	}
+	byName := map[string]string{"Host": "siem.example.com:8080"}
+	// Served over TLS by Signalith itself, to a host name.
 	var srv *Server
 	plain, _ := newTestServerWith(t, func(s *Server) { srv = s })
 	plain.Close()
 	ts := httptest.NewTLSServer(srv.Handler())
 	defer ts.Close()
-	resp, err := ts.Client().Get(ts.URL + "/login")
-	if err != nil {
-		t.Fatal(err)
+	get := func(host string) *http.Response {
+		req, _ := http.NewRequest("GET", ts.URL+"/login", nil)
+		req.Host = host
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
 	}
-	resp.Body.Close()
-	if got := resp.Header.Get("Strict-Transport-Security"); !strings.HasPrefix(got, "max-age=") {
-		t.Errorf("HSTS over TLS = %q", got)
+	if resp := get("siem.example.com:8080"); !hsts(resp) {
+		t.Errorf("HSTS over TLS = %q", resp.Header.Get("Strict-Transport-Security"))
 	}
-	// Behind a TLS proxy, with an https public_url.
-	proxied, _ := newTestServerWith(t, func(s *Server) { s.Config.Server.PublicURL = "https://siem.example.com" })
-	if got := send(t, "GET", proxied.URL+"/api/health", "", nil).Header.Get("Strict-Transport-Security"); got == "" {
-		t.Error("no HSTS with an https public_url")
+	// Not for localhost or an IP address: it would force HTTPS on every
+	// other port of that host, such as other local tools.
+	for _, host := range []string{"localhost:8080", "LOCALHOST", "app.localhost:8080", "127.0.0.1:8080", "[::1]:8080", "192.168.1.20:8080", "localhost.:8080"} {
+		if resp := get(host); resp.Header.Get("Strict-Transport-Security") != "" {
+			t.Errorf("HSTS for %s", host)
+		}
+	}
+	// An https public_url alone does not make a plain HTTP request
+	// secure.
+	byURL, _ := newTestServerWith(t, func(s *Server) {
+		s.Config.Server.PublicURL = "https://siem.example.com"
+		s.Config.Server.TLS = &config.ServerTLS{Mode: "auto"}
+	})
+	if resp, _ := plainSend(t, "GET", byURL.URL+"/api/health", "", byName); hsts(resp) {
+		t.Error("HSTS over plain HTTP with an https public_url")
+	}
+	// Behind a TLS proxy: only one listed in server.trusted_proxies is
+	// believed.
+	xfp := map[string]string{"X-Forwarded-Proto": "https", "Host": "siem.example.com:8080"}
+	if resp, _ := plainSend(t, "GET", byURL.URL+"/api/health", "", xfp); hsts(resp) {
+		t.Error("HSTS from an untrusted X-Forwarded-Proto")
+	}
+	proxied, _ := newTestServerWith(t, func(s *Server) { s.Config.Server.TrustedProxies = []string{"127.0.0.0/8"} })
+	if resp, _ := plainSend(t, "GET", proxied.URL+"/api/health", "", xfp); !hsts(resp) {
+		t.Error("no HSTS behind a trusted proxy")
+	}
+	if resp, _ := plainSend(t, "GET", proxied.URL+"/api/health", "", map[string]string{"X-Forwarded-Proto": "http", "Host": "siem.example.com:8080"}); hsts(resp) {
+		t.Error("HSTS for a proxy that says http")
 	}
 }
 

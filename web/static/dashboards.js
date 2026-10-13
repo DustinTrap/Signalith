@@ -142,7 +142,7 @@
   }
   const errorState = (title, text, action) => emptyState('circle-alert', title, text, action, 'danger');
   const sectionError = (rep, ...names) => names.map((n) => (rep.errors || {})[n]).filter(Boolean).join('\n');
-  const cardAlert = (tone, text) => el('div', { class: 'alert db-card-alert', 'data-tone': tone }, icon(tone === 'danger' ? 'circle-alert' : 'triangle-alert'), el('p', {}, text));
+  const cardAlert = (tone, text) => el('div', { class: 'alert db-card-alert', 'data-tone': tone }, icon({ danger: 'circle-alert', info: 'info' }[tone] || 'triangle-alert'), el('p', {}, text));
 
   const sk = (w, h) => el('span', { class: 'skeleton', style: `width:${w}` + (h ? `;height:${h}px` : '') });
   const skRank = (n) => el('ul', { class: 'rank', role: 'list', 'aria-hidden': 'true' },
@@ -774,14 +774,23 @@
     const issues = (title, count, items) => (items.length ? el('div', { class: 'db-issues' },
       el('div', { class: 'section-title' }, title, el('span', { class: 'count' }, String(count))),
       el('ul', { class: 'db-issue-list', role: 'list' }, ...items)) : null);
-    return card({ title: 'Detection health', sub: h.scheduler_on ? 'Scheduler on' : 'Scheduler off', actions: [pageLink('Detections', 'detections')] },
+    // On a server that does not run the detections, their run times and
+    // errors are on the one that does.
+    const away = !!h.runs_elsewhere;
+    const sub = away ? (h.runs_on ? `Run on ${h.runs_on}` : 'Not running') : h.scheduler_on ? 'Scheduler on' : 'Scheduler off';
+    const none = el('span', {}, el('span', { 'aria-hidden': 'true' }, '–'), el('span', { class: 'sr-only' }, 'Not known here'));
+    let note = null;
+    if (away && h.runs_on) note = cardAlert('info', `Detections run on ${h.runs_on}. Their run times and errors are shown there.`);
+    else if (away) note = cardAlert('danger', 'No server runs detections right now.' + (can('admin') ? ' The Servers page says why.' : ' An admin needs to look.'));
+    else if (!h.scheduler_on) note = cardAlert('warning', 'The scheduler is off on this server, so detections only run when you click Run now.');
+    return card({ title: 'Detection health', sub, actions: [pageLink('Detections', 'detections')] },
       el('div', { class: 'db-hstats' },
         stat(String(h.enabled), ` of ${h.total}`, 'detections on', null, h.not_run ? `${h.not_run} enabled detections have not run since the server started` : ''),
-        stat(String(erroring.length), '', 'erroring', erroring.length ? 'danger' : null),
+        away ? stat(none, '', 'erroring', null, h.runs_on ? `Shown on ${h.runs_on}` : '') : stat(String(erroring.length), '', 'erroring', erroring.length ? 'danger' : null),
         stat(String(silent.length), '', `no match in ${h.silent_window}`, null, 'Enabled detections with no findings and no risk events. They may need tuning, or the data they need may be missing.'),
         stat(String(stale.length), ` of ${h.sources}`, 'sources stopped', stale.length ? 'warning' : null, `Hosts and source types seen in the last ${h.source_lookback} with nothing in the last ${h.stale_after}`)),
       err ? cardAlert('danger', err) : null,
-      h.scheduler_on ? null : cardAlert('warning', 'The scheduler is off on this server, so detections only run when you click Run now.'),
+      note,
       issues('Erroring', erroring.length, erroring.map((d) => el('li', {}, detLink(d), el('span', { class: 'db-issue__meta', title: d.error }, d.error)))),
       issues(`Stopped sending for ${h.stale_after}+`, stale.length, stale.map((s) => el('li', {},
         el('span', { class: 'db-issue__name mono' }, s.host), el('span', { class: 'db-issue__meta' }, `${s.sourcetype} · last event ${ago(s.last_seen)}`)))),

@@ -288,7 +288,7 @@ func TestIntelFeedsWithoutScheduler(t *testing.T) {
 		{"POST", "/api/intel/catalog", `{"ids":["urlhaus"]}`},
 		{"POST", "/api/intel/feeds/page-feed/refresh", ""},
 	} {
-		if code, raw := feedCall(t, ts, c.method, c.path, c.body); code != 409 || !strings.Contains(raw, "runs detections") {
+		if code, raw := feedCall(t, ts, c.method, c.path, c.body); code != 409 || !strings.Contains(raw, "detections.scheduler is off here") {
 			t.Errorf("%s %s = %d %s", c.method, c.path, code, raw)
 		}
 	}

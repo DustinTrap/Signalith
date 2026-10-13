@@ -15,24 +15,33 @@ import (
 )
 
 // TestRegistryCoversEveryConfigSetting fails when a setting of Config is
-// neither on the Settings page nor listed in Excluded with a reason. A
-// branch that adds a setting must decide which, so the page never misses
-// one without anyone noticing.
+// neither on the Settings page nor listed in Excluded with a reason, or
+// has no scope. A branch that adds a setting must decide both, so the
+// page never misses one and servers that share one OpenSearch know
+// whether to share it.
 func TestRegistryCoversEveryConfigSetting(t *testing.T) {
 	leaves := LeafKeys()
 	if len(leaves) < 30 {
 		t.Fatalf("only %d settings found in Config; is LeafKeys still working?", len(leaves))
 	}
+	scopes := []Scope{ScopeCluster, ScopeServer, ScopeBootstrap}
 	for _, k := range leaves {
-		_, onPage := Lookup(k)
-		why, excluded := Excluded[k]
+		set, onPage := Lookup(k)
+		ex, excluded := Excluded[k]
 		switch {
 		case onPage && excluded:
 			t.Errorf("%s is both on the Settings page and in Excluded", k)
 		case !onPage && !excluded:
 			t.Errorf("%s is a new setting: add it to Registry in settings.go (for the Settings page) or to Excluded with the reason it is not there", k)
-		case excluded && strings.TrimSpace(why) == "":
+		case excluded && strings.TrimSpace(ex.Reason) == "":
 			t.Errorf("%s is in Excluded without a reason", k)
+		case excluded && !slices.Contains(scopes, ex.Scope):
+			t.Errorf("%s is in Excluded without a Scope: say whether every server shares it (ScopeCluster), it is one server's own (ScopeServer), or it is needed before OpenSearch can be reached (ScopeBootstrap)", k)
+		case onPage && !slices.Contains(scopes, set.Scope):
+			t.Errorf("%s is in Registry without a Scope: say whether every server shares it (ScopeCluster), it is one server's own (ScopeServer), or it is needed before OpenSearch can be reached (ScopeBootstrap)", k)
+		}
+		if ScopeOf(k) == "" {
+			t.Errorf("ScopeOf(%s) is empty", k)
 		}
 	}
 	seen := map[string]bool{}
@@ -74,7 +83,7 @@ func TestRegistryCoversEveryConfigSetting(t *testing.T) {
 			t.Errorf("Excluded has %s, which is not a setting of Config", k)
 		}
 	}
-	if len(Sections) != 8 {
+	if len(Sections) != 9 {
 		t.Errorf("sections: %d", len(Sections))
 	}
 }
@@ -105,6 +114,87 @@ func TestRegistryEnvMatchesTheEnvironment(t *testing.T) {
 		}
 		if s.Env == "" && src.Kind == FromEnv {
 			t.Errorf("%s is set by %s but Registry has no Env for it", s.Key, src.Env)
+		}
+	}
+}
+
+// TestScopes pins the scope of the settings whose scope matters most: a
+// setting that belongs to one server must never be copied to another as
+// if every server shared it.
+func TestScopes(t *testing.T) {
+	want := map[string]Scope{
+		"detections.scheduler":    ScopeServer,
+		"server.listen":           ScopeServer,
+		"server.node_url":         ScopeServer,
+		"syslog.udp":              ScopeServer,
+		"retention.archive_dir":   ScopeServer,
+		"server.public_url":       ScopeCluster,
+		"retention.policies":      ScopeCluster,
+		"assistant.api_key":       ScopeCluster,
+		"opensearch.replicas":     ScopeCluster,
+		"opensearch.url":          ScopeBootstrap,
+		"opensearch.index_prefix": ScopeBootstrap,
+		"cluster.node_name":       ScopeBootstrap,
+		"lookups.dir":             ScopeBootstrap,
+	}
+	for k, sc := range want {
+		if got := ScopeOf(k); got != sc {
+			t.Errorf("%s: scope %q, want %q", k, got, sc)
+		}
+	}
+	if ScopeOf("no.such") != "" {
+		t.Error("an unknown key has a scope")
+	}
+	// Every file path on the page is marked as one, and only those.
+	for _, s := range Registry {
+		file := strings.HasSuffix(s.Key, "_file") || strings.HasSuffix(s.Key, "tls_cert") || strings.HasSuffix(s.Key, "tls_key")
+		if s.File != file {
+			t.Errorf("%s: File %v", s.Key, s.File)
+		}
+	}
+}
+
+// TestNodeNameAndAddress checks the two settings that name this server
+// among others: from signalith.yaml, from the environment, and what
+// Validate refuses.
+func TestNodeNameAndAddress(t *testing.T) {
+	path := writeConfig(t, "cluster:\n  node_name: siem-a\nserver:\n  node_url: https://10.0.0.5:8443\n")
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cluster.NodeName != "siem-a" || c.Server.NodeURL != "https://10.0.0.5:8443" {
+		t.Fatalf("from the file: %q %q", c.Cluster.NodeName, c.Server.NodeURL)
+	}
+	t.Setenv("SIGNALITH_NODE_NAME", "siem-b")
+	t.Setenv("SIGNALITH_NODE_URL", "https://10.0.0.6:8443")
+	c, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Cluster.NodeName != "siem-b" || c.Server.NodeURL != "https://10.0.0.6:8443" {
+		t.Fatalf("from the environment: %q %q", c.Cluster.NodeName, c.Server.NodeURL)
+	}
+	if src := c.Source("cluster.node_name"); src.Kind != FromEnv || src.Env != "SIGNALITH_NODE_NAME" {
+		t.Errorf("source %+v", src)
+	}
+	t.Setenv("SIGNALITH_NODE_URL", "10.0.0.6:8443")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "SIGNALITH_NODE_URL") {
+		t.Errorf("a node address without http(s):// is taken: %v", err)
+	}
+	t.Setenv("SIGNALITH_NODE_URL", "")
+	t.Setenv("SIGNALITH_NODE_NAME", "")
+	for _, bad := range []string{"-a", "a b", "siem/a", strings.Repeat("a", 64)} {
+		c := Default()
+		c.Auth.AdminPasswordHash = "$2a$10$0123456789012345678901uJmAeTkM1bLCuQZ5gYk1yJw3bJ1Q2W"
+		c.Cluster.NodeName = bad
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "cluster.node_name") {
+			t.Errorf("node name %q: %v", bad, err)
+		}
+	}
+	for _, good := range []string{"siem-a", "SIEM_01", "a", "siem.plant.local"} {
+		if !ValidNodeName(good) {
+			t.Errorf("%q is refused", good)
 		}
 	}
 }
@@ -223,7 +313,7 @@ func TestBrokenSettingsFileDoesNotStopStart(t *testing.T) {
 		"wrong type":    {"settings:\n  search.max_events:\n    value: lots\n", "search.max_events"},
 		"no value":      {"settings:\n  search.max_events:\n    changed_by: x\n", "has no value"},
 		"invalid":       {"settings:\n  search.max_events:\n    value: 0\n", "search.max_events must be between 1 and 100000"},
-		"do not mix":    {"settings:\n  syslog.tls:\n    value: 0.0.0.0:6514\n", "syslog.tls needs server.tls_cert"},
+		"do not mix":    {"settings:\n  server.tls.mode:\n    value: files\n", "server.tls.mode is files, so set server.tls_cert"},
 		"bad listen":    {"settings:\n  server.listen:\n    value: nowhere\n", `server.listen "nowhere" must be host:port`},
 		"session short": {"settings:\n  auth.session_timeout:\n    value: 1m\n", "auth.session_timeout"},
 	} {

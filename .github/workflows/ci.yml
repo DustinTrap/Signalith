@@ -19,6 +19,18 @@ jobs:
       - run: go test ./...
       - run: go build -o dist/ ./cmd/signalith
 
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The same tests with the data race detector on. It needs cgo, which
+      # the Linux runner has. It is slow: internal/api alone takes about 6
+      # minutes, so the 10 minute default limit is raised.
+      - run: go test -race -timeout 20m ./...
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:
@@ -32,31 +44,131 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
-    services:
-      opensearch:
-        image: opensearchproject/opensearch:2.17.1
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: "true"
-          DISABLE_INSTALL_DEMO_CONFIG: "true"
-          OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
-          # Same as the Docker quick start, so the tests cover that setting.
-          node.store.allow_mmap: "false"
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd "curl -sf http://localhost:9200/_cluster/health"
-          --health-interval 10s
-          --health-retries 30
+    env:
+      # The Docker quick start as users run it, plus an override that also
+      # publishes OpenSearch on this machine for the Go tests.
+      COMPOSE: docker compose -f deploy/docker/docker-compose.yml -f ${{ github.workspace }}/ci-opensearch-port.yml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: End-to-end tests against OpenSearch
+      - name: Start the Docker quick start
+        run: |
+          cat > ci-opensearch-port.yml <<'EOF'
+          services:
+            opensearch:
+              ports:
+                - "127.0.0.1:9200:9200"
+          EOF
+          $COMPOSE up -d --build
+      - name: Sign in to Signalith with the generated password
+        run: |
+          secrets="$RUNNER_TEMP/signalith-secrets"
+          mkdir -p "$secrets"
+          $COMPOSE cp signalith:/run/signalith-secrets/. "$secrets/"
+          # Signalith makes its HTTPS certificate when it starts; wait for
+          # it, then check every request against it.
+          for i in $(seq 1 30); do
+            $COMPOSE cp signalith:/var/lib/signalith/tls/ca.pem "$RUNNER_TEMP/signalith-ca.pem" 2>/dev/null &&
+              curl -sf -o /dev/null --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/tls/ca.pem && break
+            sleep 2
+          done
+          password=$($COMPOSE exec -T signalith signalith initial-password)
+          curl -sf -c "$RUNNER_TEMP/cookies" --cacert "$RUNNER_TEMP/signalith-ca.pem" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg p "$password" '{username: "admin", password: $p}')" \
+            https://localhost:8080/api/login > /dev/null
+          health=$(curl -sf -b "$RUNNER_TEMP/cookies" --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/health)
+          echo "$health" | jq -e '.opensearch.status == "green" or .opensearch.status == "yellow"'
+          # The public example password from earlier versions is refused.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$RUNNER_TEMP/signalith-ca.pem" \
+            -H 'Content-Type: application/json' -d '{"username":"admin","password":"change-me-please"}' \
+            https://localhost:8080/api/login)
+          test "$code" = 401
+      - name: Check OpenSearch refuses anyone without Signalith's certificate
+        run: |
+          ca="$RUNNER_TEMP/signalith-secrets/opensearch-ca.pem"
+          test "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" https://localhost:9200/)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" -u admin:admin https://localhost:9200/)" = 401
+          if curl -s -o /dev/null http://localhost:9200/; then echo "OpenSearch answers plain HTTP"; exit 1; fi
+      - name: Encrypt a pasted API key the way docs/encryption.md shows
+        working-directory: deploy/docker
+        run: |
+          printf 'assistant:\n  provider: anthropic\n  api_key: sk-ant-ci-pasted-0123456789\n' >> signalith.yaml
+          owner=$(stat -c %u:%a signalith.yaml)
+          docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER -v "${PWD}:/work" signalith secrets encrypt -c /work/signalith.yaml
+          docker compose restart signalith
+          grep -q 'api_key: enc:v1:' signalith.yaml
+          if grep -q 'sk-ant-ci-pasted' signalith.yaml; then echo "the key is still in plain text"; exit 1; fi
+          test "$(stat -c %u:%a signalith.yaml)" = "$owner"
+          # The server's own account reads the master key the command made.
+          docker compose exec -T signalith signalith secrets status | tee "$RUNNER_TEMP/secrets-status.txt"
+          grep -q 'assistant.api_key *encrypted' "$RUNNER_TEMP/secrets-status.txt"
+          grep -q ' 0 plain text' "$RUNNER_TEMP/secrets-status.txt"
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/tls/ca.pem && break
+            sleep 2
+          done
+          curl -sf -o /dev/null --cacert "$RUNNER_TEMP/signalith-ca.pem" https://localhost:8080/api/tls/ca.pem
+      - name: End-to-end tests against the secured OpenSearch
         env:
-          SIGNALITH_TEST_OPENSEARCH: http://localhost:9200
-        run: go test -tags integration -count=1 -v ./internal/integration/
+          SIGNALITH_TEST_OPENSEARCH: https://localhost:9200
+          SIGNALITH_TEST_OPENSEARCH_CA: ${{ runner.temp }}/signalith-secrets/opensearch-ca.pem
+          SIGNALITH_TEST_OPENSEARCH_CERT: ${{ runner.temp }}/signalith-secrets/opensearch-client.pem
+          SIGNALITH_TEST_OPENSEARCH_KEY: ${{ runner.temp }}/signalith-secrets/opensearch-client-key.pem
+        run: |
+          # The tests use indices of their own; stop the server so it does
+          # not work on them at the same time. The cluster tests run in the
+          # cluster job.
+          $COMPOSE stop signalith
+          go test -tags integration -count=1 -v -skip '^TestCluster' ./internal/integration/
+      - name: Container logs
+        if: failure()
+        run: $COMPOSE logs --no-color
+
+  cluster:
+    runs-on: ubuntu-latest
+    env:
+      # The secured OpenSearch of the Docker quick start, published on this
+      # machine for the tests: servers that share one OpenSearch need its
+      # security on.
+      COMPOSE: docker compose -f deploy/docker/docker-compose.yml -f ${{ github.workspace }}/ci-opensearch-port.yml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start the Docker quick start's OpenSearch
+        run: |
+          cat > ci-opensearch-port.yml <<'EOF'
+          services:
+            opensearch:
+              ports:
+                - "127.0.0.1:9200:9200"
+          EOF
+          $COMPOSE up -d --build
+          # Signalith's OpenSearch certificate, which the test servers use;
+          # the quick start's own server is not needed.
+          secrets="$RUNNER_TEMP/signalith-secrets"
+          mkdir -p "$secrets"
+          $COMPOSE cp signalith:/run/signalith-secrets/. "$secrets/"
+          $COMPOSE stop signalith
+      # Two `signalith serve` processes per test share the OpenSearch, each
+      # with its own state folder and the test's own index prefix, and HTTPS
+      # on: one runs the background jobs, another takes over after kill -9
+      # or SIGSTOP, and none takes over while its files differ. The tests
+      # build the binary themselves, with the clustertest tag.
+      - name: Several servers sharing one OpenSearch
+        env:
+          SIGNALITH_TEST_OPENSEARCH: https://localhost:9200
+          SIGNALITH_TEST_OPENSEARCH_CA: ${{ runner.temp }}/signalith-secrets/opensearch-ca.pem
+          SIGNALITH_TEST_OPENSEARCH_CERT: ${{ runner.temp }}/signalith-secrets/opensearch-client.pem
+          SIGNALITH_TEST_OPENSEARCH_KEY: ${{ runner.temp }}/signalith-secrets/opensearch-client-key.pem
+        run: go test -tags integration -count=1 -v -run '^TestCluster' -timeout 20m ./internal/integration/
+      - name: Container logs
+        if: failure()
+        run: $COMPOSE logs --no-color
 
   release-build:
     runs-on: ubuntu-latest

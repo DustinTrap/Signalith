@@ -124,7 +124,7 @@
     const f = S.fields[key];
     const sec = sectionOf(key);
     if (!f || !sec) return key;
-    if (['general', 'web', 'search', 'detections', 'intel'].includes(sec.id)) return f.label;
+    if (['general', 'web', 'https', 'search', 'detections', 'intel'].includes(sec.id)) return f.label;
     return sec.title + ' ' + noun(f.label);
   }
   // noun is a label inside a sentence: "Password" becomes "password",
@@ -311,7 +311,33 @@
           sec.help ? el('p', { class: 'st-card__desc' }, sec.help) : null),
         tag),
       el('div', { class: 'st-card__body' }, ...sec.fields.map((f) => fieldRow(f, mixed))),
-      TESTS[sec.id] ? testBlock(sec.id) : null);
+      TESTS[sec.id] ? testBlock(sec.id) : null,
+      sec.id === 'https' ? certificateBlock() : null);
+  }
+
+  // certificateBlock says how Signalith serves HTTPS now: the mode in use,
+  // the names its certificate covers and, with its own certificate
+  // authority, the CA to trust.
+  function certificateBlock() {
+    const t = S.view.tls || {};
+    const f = S.fields['server.tls.mode'];
+    const mode = f && (f.choices || []).find((c) => c.value === t.mode);
+    const rows = [['HTTPS', mode ? mode.label : (t.mode || 'unknown')]];
+    if (t.mode !== 'off' && (t.names || []).length) {
+      rows.push(['Certificate covers', el('span', { class: 'mono' }, t.names.join(', '))]);
+    }
+    if (t.ca_sha256) rows.push([t.own_ca ? 'Signalith’s CA (SHA-256)' : 'Certificate authority (SHA-256)', el('span', { class: 'mono st-fp' }, t.ca_sha256)]);
+    const lead = t.mode === 'off'
+      ? 'Signalith serves plain HTTP; the reverse proxy in front serves HTTPS.' + (t.names ? ' Syslog over TLS uses Signalith’s own certificate.' : '')
+      : t.own_ca
+        ? 'Browsers warn until this certificate authority is trusted. Agents and syslog devices get it with their setup on Add data.'
+        : 'Your certificate is loaded again when its file changes.';
+    return el('div', { class: 'st-test st-cert', id: 'st-cert' },
+      el('h4', { class: 'section-title' }, 'In use now'),
+      el('p', { class: 'st-test__lead' }, lead),
+      el('dl', { class: 'kv st-kv' }, ...rows.flatMap(([k, val]) => [el('dt', {}, k), el('dd', {}, val)])),
+      t.own_ca ? el('div', { class: 'btn-row' }, el('a', { class: 'btn btn--secondary btn--sm', href: 'api/tls/ca.pem', download: 'signalith-ca.pem' },
+        icon('download'), 'Download the CA certificate')) : null);
   }
 
   // fieldRow draws one setting: its label, help and where its value comes
@@ -1112,7 +1138,7 @@
     } else {
       out.push(el('b', {}, `Restart Signalith to apply: ${listWords(names)}`));
       // Browsers keep sign-ins over http:// and https:// apart.
-      const flips = pending.some((p) => (p.key === 'server.tls_cert' || p.key === 'server.tls_key') && !p.old !== !p.new);
+      const flips = pending.some((p) => p.key === 'server.tls.mode' && (p.old === 'off') !== (p.new === 'off'));
       out.push(el('p', {}, r.available
         ? 'Saved changes wait for a restart. Signalith restarts in a few seconds' + (flips ? '; with HTTPS turned on or off, people sign in again.' : ' and everyone stays signed in.')
         : (r.unavailable || 'Restart Signalith on the server to apply them.')));
@@ -1277,7 +1303,9 @@
         st.done = true;
         renderAlerts();
         if (st.reachable === false) return;
-        if (st.goTo) follow(st);
+        // A move this very page confirmed (it asked through a reverse
+        // proxy whose address stays the same) is already where it goes.
+        if (st.goTo && !last.confirmed) follow(st);
         else {
           try { sessionStorage.setItem(RESTART_NOTE, '1'); } catch (_) { /* ignore */ }
           location.reload();

@@ -56,6 +56,7 @@ func Check(ctx context.Context, cfg Config) Report {
 	rep := Report{URL: redact.URL(cfg.URL)}
 	defer func() { rep.TookMS = time.Since(start).Milliseconds() }()
 	c := New(cfg)
+	defer c.CloseIdleConnections()
 	var root struct {
 		Name        string `json:"name"`
 		ClusterName string `json:"cluster_name"`

@@ -73,6 +73,7 @@
 <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
 <symbol id="i-folder-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
 <symbol id="i-gauge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></symbol>
+<symbol id="i-github" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></symbol>
 <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
 <symbol id="i-grid-3x3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></symbol>
 <symbol id="i-grip-vertical" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="12" r="1"/><circle cx="9" cy="5" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="19" r="1"/></symbol>
@@ -186,6 +187,7 @@
       <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
       <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
       <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
+      <a class="nav__item" href="#servers" data-page="servers" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
       <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
@@ -213,15 +215,19 @@
         <div class="menu__sep"></div>
         <div class="menu__row"><span>Theme</span><div class="seg seg--sm" role="group" aria-label="Theme"><button type="button" data-set-theme="light" aria-label="Light" title="Light"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button><button type="button" data-set-theme="dark" aria-label="Dark" title="Dark"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button><button type="button" data-set-theme="" aria-label="Match system" title="Match system"><svg class="icon" aria-hidden="true"><use href="#i-monitor"/></svg></button></div></div>
         <div class="menu__sep"></div>
+        <button class="menu__item" type="button" id="about-open" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>About Signalith <span class="menu__hint" id="user-menu-version" aria-hidden="true"></span></button>
+        <div class="menu__sep"></div>
         <button class="menu__item hidden" type="button" id="change-password"><svg class="icon" aria-hidden="true"><use href="#i-key-round"/></svg>Change password</button>
         <button class="menu__item menu__item--danger" type="button" id="sign-out"><svg class="icon" aria-hidden="true"><use href="#i-log-out"/></svg>Sign out</button>
         <p class="menu__note hidden" id="basic-note">Signed in with HTTP Basic auth. Close the browser to sign out.</p>
-        <p class="menu__note menu__version" id="user-menu-version"></p>
       </div>
     </details>
   </div>
 </header>
 <main class="content" id="content">
+  <!-- Problems with the servers that share this OpenSearch that everyone
+       should know of, on every page (from api/health). -->
+  <div class="cluster-banner hidden" id="cluster-banner" role="alert"></div>
   <!-- Search -->
   <section id="page-search" class="page active">
     <div class="search-layout">
@@ -755,7 +761,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
         <button class="btn btn--primary" type="button" id="d-new" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>New detection</button>
       </div>
     </div>
-    <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b>The scheduler is off on this server.</b><p>Detections only run when you choose Run now.</p></div></div>
+    <div class="alert hidden" data-tone="info" id="d-scheduler-note"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg><div><b id="d-scheduler-title">The scheduler is off on this server.</b><p id="d-scheduler-text">Detections only run when you choose Run now.</p></div></div>
     <div class="split split--solo" id="d-split">
       <section class="queue" aria-label="Detection list">
         <div class="pills" id="d-show" role="group" aria-label="Show"></div>
@@ -1164,6 +1170,17 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
     <div id="health" class="health-page"></div>
   </section>
 
+  <!-- Servers -->
+  <section id="page-servers" class="page">
+    <div class="page-head">
+      <div>
+        <h2 class="page-head__title">Servers</h2>
+        <p class="page-head__desc">The Signalith servers that share this OpenSearch. One of them runs the background jobs: detections, threat intel downloads and data retention.</p>
+      </div>
+    </div>
+    <div id="servers" class="sv-page"></div>
+  </section>
+
   <!-- Help -->
   <section id="page-help" class="page">
     <article class="card guide">
@@ -1214,6 +1231,18 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 </div>
 </div>
 <dialog id="case-picker" class="modal" aria-labelledby="cp-title"></dialog>
+<dialog id="about" class="modal about" aria-label="About Signalith" aria-describedby="about-desc">
+  <button class="btn btn--ghost btn--icon btn--sm modal__close about__close" type="button" data-close aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
+  <div class="about__body">
+    <svg class="about__mark" viewBox="0 0 20 28" width="30" height="42" aria-hidden="true"><use href="#logo-mark"/></svg>
+    <h2 class="about__name">Signalith</h2>
+    <p class="about__version hidden" id="about-version"></p>
+    <p class="about__desc" id="about-desc">An open-source SIEM for Windows and Linux.</p>
+    <p class="about__credit">Created by <b>Samuel Sanchez Jr.</b></p>
+    <a class="btn btn--secondary about__link" href="https://github.com/jrsamsanchez/Signalith" target="_blank" rel="noopener noreferrer"><svg class="icon" aria-hidden="true"><use href="#i-github"/></svg>View on GitHub<span class="sr-only"> (opens in a new tab)</span><svg class="icon icon--xs about__ext" aria-hidden="true"><use href="#i-arrow-up-right"/></svg></a>
+  </div>
+  <p class="about__license">Apache License 2.0</p>
+</dialog>
 <div id="toast" class="toast hidden" role="status"></div>
 <script src="app.js"></script>
 <script src="detections.js"></script>
@@ -1225,5 +1254,6 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
 <script src="retention.js"></script>
 <script src="sample.js"></script>
 <script src="settings.js"></script>
+<script src="servers.js"></script>
 </body>
 </html>

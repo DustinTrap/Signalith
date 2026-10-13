@@ -164,6 +164,10 @@ async function loadIntel(opts = {}) {
   tiState.overview = res;
   tiState.feeds = res.feeds || [];
   tiState.downloads = !!res.downloads;
+  tiState.downloadsWhy = res.downloads_why || '';
+  // The server that downloads feeds, '' when none does, null when this
+  // one does or its scheduler is off.
+  tiState.runsOn = typeof res.runs_on === 'string' ? res.runs_on : null;
   // Only admins add and change feeds.
   tiState.manage = res.manage !== false && can('admin');
   tiState.fileError = res.file_error || '';
@@ -279,9 +283,16 @@ function renderFeeds() {
   $('ti-feed-add').classList.toggle('btn--secondary', !hasFeeds && tiState.manage);
   const notes = [];
   if (tiState.fileError && can('admin')) notes.push(riAlert('danger', 'Feeds can’t be changed on this page right now.', el('p', {}, tiState.fileError)));
-  if (!tiState.downloads && can('admin')) {
+  const servers = el('a', { href: '#servers', 'data-page': 'servers' }, 'Servers page');
+  if (!tiState.downloads && can('admin') && tiState.runsOn === '') {
+    notes.push(riAlert('danger', 'No server downloads feeds right now.',
+      el('p', {}, 'Feeds don’t update until a server runs the background jobs again. The ', servers, ' says why.')));
+  } else if (!tiState.downloads && can('admin') && tiState.runsOn) {
+    notes.push(riAlert('info', `Feeds are managed on ${tiState.runsOn}.`,
+      el('p', {}, `This server doesn’t download feeds: add and change them on ${tiState.runsOn}. The `, servers, ' has its address.')));
+  } else if (!tiState.downloads && can('admin')) {
     notes.push(riAlert('info', 'Feeds are managed on another server.',
-      el('p', {}, 'This server’s detection scheduler is off (detections.scheduler: false), so it doesn’t download feeds. Add and change feeds on the Signalith server that runs detections.')));
+      el('p', {}, tiState.downloadsWhy || 'This server doesn’t download feeds. Add and change feeds on the Signalith server that runs the background jobs.')));
   }
   const noteBox = notes.length ? el('div', { class: 'ti-feeds__notes' }, ...notes) : null;
   if (!hasFeeds) {
@@ -423,7 +434,7 @@ function feedUpdatedText(f, state) {
 }
 function feedUpdated(f, state) {
   const st = f.status || {};
-  const title = st.last_success ? 'Last downloaded ' + fmtTime(st.last_success) : !tiState.downloads ? 'Downloaded by the server that runs detections' : '';
+  const title = st.last_success ? 'Last downloaded ' + fmtTime(st.last_success) : !tiState.downloads ? 'Downloaded by the server that runs the background jobs' : '';
   return el('span', { class: 'ti-upd' + (state === 'run' ? ' ti-upd--run' : ''), title }, feedUpdatedText(f, state));
 }
 

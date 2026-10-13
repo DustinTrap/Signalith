@@ -23,7 +23,7 @@
     4 App shell      8 Cards & KPI tiles     13 Pattern: search
     5 Buttons        9 Ranked lists, charts  14 Pattern: dashboard
                     10 Tables                15 Sign-in page   16 Responsive
-   17 Shell behaviour (pages, jump box, drawer, user menu)
+   17 Shell behaviour (pages, jump box, drawer, user menu, About)
    18 Shared helpers (charts drawn by app.js, toast, utilities)
    19 Pages: one block per page, in nav order
    ========================================================================== */
@@ -970,6 +970,8 @@ dialog.modal::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 .auth__submit .icon { transition: transform var(--t) var(--ease); }
 .auth__submit:hover .icon { transform: translateX(2px); }
 .auth__help { text-align: center; color: var(--text-3); font-size: var(--fs-sm); }
+.auth__ca { display: grid; justify-items: center; gap: 2px; line-height: 18px; }
+.auth__ca > a { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
 .auth__foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--text-3); font-size: var(--fs-sm); flex-wrap: wrap; }
 .auth__foot .row { gap: 6px; }
 .caps { display: none; }
@@ -1117,6 +1119,11 @@ dialog.modal::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 [hidden] { display: none !important; }
 .hidden { display: none !important; }            /* page scripts toggle this class */
 .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* the servers' red problems, above every page */
+.cluster-banner { display: grid; gap: var(--sp-2); padding: var(--sp-5) var(--sp-5) 0; }
+.cluster-banner .alert p { color: var(--text-2); overflow-wrap: anywhere; }
+.cluster-banner .alert a { white-space: nowrap; }
+@media (max-width: 720px) { .cluster-banner { padding: var(--sp-4) var(--sp-4) 0; } }
 .nav__empty { padding: 2px 10px; color: var(--text-3); font-size: var(--fs-sm); }
 /* the sidebar health card links to the Health page */
 a.health { color: var(--text-2); text-decoration: none; transition: background var(--t-fast); }
@@ -1126,8 +1133,22 @@ a.health:hover { background: var(--active); text-decoration: none; }
 .menu__header b { overflow-wrap: anywhere; }
 .menu__note { max-width: 240px; padding: 4px 10px 8px; color: var(--text-3); font-size: var(--fs-sm); }
 .menu__item:disabled { opacity: .45; pointer-events: none; }
-.menu__version:empty { display: none; }
-.menu__version { padding-top: 0; font-size: var(--fs-xs); }
+/* a quiet value at the end of a menu item: the version on About Signalith */
+.menu__hint { margin-left: auto; max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font: var(--fs-xs)/1 var(--font-mono); }
+.menu__hint:empty { display: none; }
+/* About Signalith (account menu): a small centred card */
+dialog.about { width: min(360px, calc(100vw - 32px)); text-align: center; }
+.about__close { position: absolute; top: 12px; right: 12px; }
+.about__body { display: grid; justify-items: center; padding: 36px 28px 24px; }
+.about__mark { display: block; margin-bottom: 14px; color: var(--text); }
+.about__name { font-size: var(--fs-xl); }
+.about__version { margin-top: 2px; color: var(--text-3); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.about__desc { margin-top: 12px; color: var(--text-2); line-height: 1.5; text-wrap: balance; }
+.about__credit { margin-top: 20px; color: var(--text-2); }
+.about__credit b { font-weight: 600; color: var(--text); }
+.about__link { margin-top: 14px; }
+.about__link .about__ext { color: var(--text-3); }
+.about__license { padding: 12px 20px; color: var(--text-3); font-size: var(--fs-xs); box-shadow: inset 0 1px 0 var(--line-subtle); }
 /* roles: controls a role cannot use carry data-min-role="analyst" or "admin";
    <body data-role> is the signed-in user's role (app.js). Until it is known,
    every such control stays hidden. */
@@ -2423,6 +2444,21 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .agent-file .editor { font-size: var(--fs-sm); line-height: 20px; box-shadow: inset 0 1px 0 var(--line-subtle); }
 /* a value that wraps (phones) hangs under its key instead of the margin */
 #page-data .agent-file .editor .src { padding-left: calc(16px + 6ch); text-indent: -6ch; }
+/* the CA certificate agents check the server with: file bar, its
+   fingerprint and, folded away, the PEM (wrapped on phones; copying keeps
+   its lines) */
+#page-data .agent-file__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--text-2); }
+#page-data .agent-ca__more { box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-data .agent-ca__more > summary { display: flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; list-style: none; cursor: pointer; font-size: var(--fs-sm); color: var(--text-3); }
+#page-data .agent-ca__more > summary::-webkit-details-marker { display: none; }
+#page-data .agent-ca__more > summary:hover { color: var(--text); }
+#page-data .agent-ca__more > summary:focus-visible { outline-offset: -2px; }
+#page-data .agent-ca__more > summary .chev { transition: transform var(--t) var(--ease); }
+#page-data .agent-ca__more[open] > summary .chev { transform: rotate(90deg); }
+#page-data .agent-ca__pem { margin: 0; padding: 10px 12px; font: var(--fs-sm)/18px var(--font-mono); color: var(--text-2); white-space: pre-wrap; word-break: break-all; box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-data .agent-ca__pem:focus-visible { outline-offset: -2px; }
+#page-data .agent-ca__fp { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 8px 12px 10px; font-size: var(--fs-sm); line-height: 18px; color: var(--text-3); box-shadow: inset 0 1px 0 var(--line-subtle); }
+#page-data .agent-ca__fp code { min-width: 0; font-size: var(--fs-sm); color: var(--text-2); overflow-wrap: anywhere; }
 #page-data .agent-s { color: var(--code-cmd); font-weight: 500; }
 #page-data .agent-k { color: var(--text-2); }
 #page-data .agent-c { color: var(--text-3); }
@@ -2435,6 +2471,8 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .sl-notes:empty { display: none; }
 #page-data .agent-addr .hint, #page-data .sl-panel .hint { align-items: flex-start; line-height: 18px; overflow-wrap: anywhere; }
 #page-data .hint .icon { margin-top: 2px; }
+#page-data .hint[data-tone="warning"] { color: var(--text-2); }
+#page-data .hint[data-tone="warning"] .icon { color: var(--warning); }
 #page-data :is(.hint, .sl-text, .sl-ui-steps) code { padding: 1px 5px; border-radius: var(--r-xs); font-size: var(--fs-sm); color: var(--text); background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-subtle); }
 #page-data .sl-ip { font-size: var(--fs-sm); }
 /* the address has an error: the setup below still has the last good one */
@@ -2626,6 +2664,55 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
   #page-health .hp-sl-host { max-width: none; }
 }
 /* ==== end page:health ==== */
+
+/* ==== page:servers (styles for this page only) ==== */
+/* Alerts only when something needs a look, then one list of servers.
+   Colour means something: the accent badge marks the server that runs
+   the jobs, red a server that stopped answering, amber what to fix. */
+#page-servers .sv-page { display: grid; gap: var(--sp-4); }
+#page-servers .sv-alerts { display: grid; gap: var(--sp-2); }
+#page-servers .sv-alerts .alert > div { min-width: 0; overflow-wrap: anywhere; }
+#page-servers .sv-table :is(th, td):first-child { padding-left: 16px; }
+#page-servers .sv-table :is(th, td):last-child { padding-right: 16px; }
+#page-servers .sv-table td { height: 64px; }
+#page-servers .sv-table td[data-col="server"] { max-width: 0; }
+#page-servers .sv-table [data-col="status"] { width: 210px; }
+#page-servers .sv-table [data-col="jobs"] { width: 32%; }
+#page-servers .sv-table [data-col="version"] { width: 120px; }
+#page-servers .sv-server { display: flex; align-items: center; gap: 12px; min-width: 0; }
+#page-servers .sv-server__icon { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: var(--r-md); color: var(--text-2); background: var(--hover); }
+#page-servers .sv-server__text { min-width: 0; }
+#page-servers .sv-server__name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; color: var(--text); }
+#page-servers .sv-server__name > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#page-servers .sv-server__name .badge { height: 18px; flex: none; }
+#page-servers .sv-server__addr { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#page-servers tr.sv-gone .sv-server__name { color: var(--text-2); }
+#page-servers .sv-state { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; color: var(--text); white-space: nowrap; }
+#page-servers .sv-sub { display: flex; align-items: flex-start; gap: 5px; margin-top: 3px; font-size: var(--fs-sm); line-height: 1.4; color: var(--text-3); }
+#page-servers [data-col="status"] .sv-sub { padding-left: 18px; }
+#page-servers .sv-sub .icon { margin-top: 1px; }
+#page-servers .sv-warn { color: var(--warning); }
+#page-servers .sv-standby { color: var(--text-2); }
+#page-servers .sv-none { color: var(--text-3); }
+#page-servers [data-col="version"] .mono { font-size: var(--fs-sm); color: var(--text-2); }
+#page-servers .sv-note { line-height: 1.5; }
+#page-servers .sv-note > div { flex: 1; min-width: 0; }
+#page-servers .sv-note i { font-style: normal; font-weight: 500; color: var(--text); }
+#page-servers .sv-note__close { flex: none; margin: -4px -4px 0 0; }
+
+@media (max-width: 720px) {
+  /* each server stacks: name and version, then status, then jobs */
+  #page-servers .sv-table thead { display: none; }
+  #page-servers .sv-table, #page-servers .sv-table tbody { display: block; }
+  #page-servers .sv-table tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px 12px; padding: 14px 16px; box-shadow: inset 0 -1px 0 var(--line-subtle); }
+  #page-servers .sv-table tbody tr:last-child { box-shadow: none; }
+  #page-servers .sv-table td[data-col] { display: block; width: auto; max-width: none; height: auto; padding: 0; box-shadow: none; }
+  #page-servers .sv-table tbody tr:hover td { background: none; }
+  #page-servers .sv-table td[data-col="version"] { grid-column: 2; grid-row: 1; padding-top: 8px; }
+  #page-servers .sv-table td[data-col="version"]::before { content: "Version "; font-size: var(--fs-sm); color: var(--text-3); }
+  #page-servers .sv-table td:is([data-col="status"], [data-col="jobs"]) { grid-column: 1 / -1; padding-left: 44px; }
+}
+/* ==== end page:servers ==== */
 
 /* ==== page:users (styles for this page only) ==== */
 /* Users tab: one table, row menu on the right. Directory tab: the settings
@@ -3185,6 +3272,11 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-settings .st-test__qa { display: grid; gap: 6px; margin-top: 6px; color: var(--text-2); }
 #page-settings .st-test__query { margin: 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--sunken); font-size: var(--fs-sm); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 #page-settings .st-goto { margin-top: 4px; font-size: var(--fs-sm); justify-self: start; }
+/* the HTTPS certificate in use */
+#page-settings .st-cert { gap: 10px; }
+#page-settings .st-cert .st-kv { font-size: var(--fs-sm); }
+#page-settings .st-cert .btn-row { justify-content: flex-start; }
+#page-settings .st-fp { font-size: var(--fs-xs); line-height: 1.5; color: var(--text-2); }
 #page-settings .st-problems { margin: 4px 0 0; padding-left: 18px; color: var(--text-2); display: grid; gap: 2px; }
 #page-settings .st-problems b { color: var(--text); font-weight: 600; }
 /* a test result whose settings changed since: a note, the rest dimmed */

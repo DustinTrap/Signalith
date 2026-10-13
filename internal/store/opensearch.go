@@ -107,6 +107,19 @@ func New(cfg Config) *Client {
 	return c
 }
 
+// Endpoint is the OpenSearch address, as errors show it: without any
+// password.
+func (c *Client) Endpoint() string { return c.shown }
+
+// CloseIdleConnections closes the connections kept open for the next
+// request, for a client that is no longer used, such as the one of the
+// settings in use before a restart.
+func (c *Client) CloseIdleConnections() {
+	if c.setupErr == nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 // Transport returns the HTTP transport for cfg: TLS 1.2 or newer, the
 // system's certificate authorities plus cfg.CAFile, the client
 // certificate if set, and no proxy unless cfg.Proxy is set. On an error

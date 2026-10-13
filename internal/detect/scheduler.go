@@ -55,6 +55,12 @@ type Scheduler struct {
 	// interval, between MinRunTimeout and MaxRunTimeout, so a run cannot
 	// last into its next one.
 	Timeout time.Duration
+	// Allowed, when set, says whether this server may still run the
+	// schedule: with several servers, only the one that runs the
+	// background jobs may. It is asked before each scheduled run and
+	// before each finding or risk event it writes, so a server that lost
+	// that role stops at once.
+	Allowed func() bool
 
 	mu    sync.Mutex
 	state map[string]*RunState
@@ -92,6 +98,21 @@ type RunResult struct {
 	Capped    bool                `json:"capped,omitempty"`
 	Earliest  time.Time           `json:"earliest"`
 	Latest    time.Time           `json:"latest"`
+}
+
+// ErrNotAllowed stops a scheduled run on a server that no longer runs the
+// background jobs.
+var ErrNotAllowed = errors.New("stopped: this server no longer runs the background jobs, another one does")
+
+// scheduledKey marks the context of a scheduled run, which Allowed fences.
+type scheduledKey struct{}
+
+// allowed reports whether a run under ctx may go on.
+func (s *Scheduler) allowed(ctx context.Context) bool {
+	if s.Allowed == nil || ctx.Value(scheduledKey{}) == nil {
+		return true
+	}
+	return s.Allowed()
 }
 
 func (s *Scheduler) now() time.Time {
@@ -173,6 +194,10 @@ func (s *Scheduler) RunDue(ctx context.Context) {
 // dispatch starts every due detection that is not already running or
 // waiting; each waits for a free worker.
 func (s *Scheduler) dispatch(ctx context.Context, wg *sync.WaitGroup) {
+	ctx = context.WithValue(ctx, scheduledKey{}, true)
+	if !s.allowed(ctx) {
+		return
+	}
 	now := s.now()
 	var due []*Detection
 	s.mu.Lock()
@@ -212,7 +237,7 @@ func (s *Scheduler) dispatch(ctx context.Context, wg *sync.WaitGroup) {
 				return
 			}
 			defer func() { <-slots }()
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || !s.allowed(ctx) {
 				return
 			}
 			// The scheduler bounds its own searches, so they do not wait
@@ -414,6 +439,9 @@ func (s *Scheduler) run(ctx context.Context, d *Detection, now time.Time) (*RunR
 		if len(out.Findings) >= maxF || out.Risk >= maxF*4 {
 			out.Capped = true
 			break
+		}
+		if !s.allowed(ctx) {
+			return nil, ErrNotAllowed
 		}
 		if d.Risk != nil && s.Risk != nil {
 			evs := RiskEvents(d, row, key, lists, now)

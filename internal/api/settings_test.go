@@ -158,7 +158,7 @@ func TestGetSettings(t *testing.T) {
 	if strings.Contains(raw, "hunter2-secret") {
 		t.Fatal("GET /api/settings returned a secret")
 	}
-	if n := len(view["sections"].([]any)); n != 8 {
+	if n := len(view["sections"].([]any)); n != 9 {
 		t.Errorf("sections %d", n)
 	}
 	pw := field(t, view, "opensearch.password")
@@ -193,16 +193,16 @@ func TestGetSettings(t *testing.T) {
 }
 
 func TestSaveSettings(t *testing.T) {
-	ts, srv, logs := newSettingsServer(t, "server:\n  listen: 127.0.0.1:8080\n", nil)
+	ts, srv, logs := newSettingsServer(t, "server:\n  listen: 127.0.0.1:8080\n  tls:\n    mode: off\n", nil)
 	put := func(body string) (int, map[string]any) {
 		t.Helper()
 		code, out, _ := call(t, ts, "PUT", "/api/settings", body, "admin", "s3cret-pass", nil)
 		return code, out
 	}
 	// Problems come back by field, and nothing is written.
-	code, out := put(`{"values":{"search.max_events":0,"server.listen":"nowhere","syslog.tls":"0.0.0.0:6514"}}`)
+	code, out := put(`{"values":{"search.max_events":0,"server.listen":"nowhere","server.tls.mode":"files"}}`)
 	fields, _ := out["fields"].(map[string]any)
-	if code != 400 || len(fields) < 3 || !strings.Contains(fields["syslog.tls"].(string), "Certificate file") {
+	if code != 400 || len(fields) < 3 || !strings.Contains(fields["server.tls_cert"].(string), "certificate file") {
 		t.Fatalf("bad save %d %v", code, out)
 	}
 	file := srv.Config.SettingsFile()
@@ -451,6 +451,11 @@ func TestNewAddress(t *testing.T) {
 	cfg := func(listen, cert string) *config.Config {
 		c := config.Default()
 		c.Server.Listen, c.Server.TLSCert, c.Server.TLSKey = listen, cert, cert
+		// HTTPS with the certificate, plain HTTP without.
+		c.Server.TLS = &config.ServerTLS{Mode: config.TLSOff}
+		if cert != "" {
+			c.Server.TLS.Mode = config.TLSFiles
+		}
 		return c
 	}
 	r := httptest.NewRequest("GET", "http://10.0.0.5:8080/", nil)
@@ -464,9 +469,17 @@ func TestNewAddress(t *testing.T) {
 		{cfg("0.0.0.0:8080", ""), cfg("192.0.2.7:8080", ""), "http://192.0.2.7:8080/"},
 		{cfg("0.0.0.0:8080", ""), cfg("[::]:8443", "x.pem"), "https://10.0.0.5:8443/"},
 	} {
-		if got := newAddress(r, c.from, c.to); got != c.want {
+		if got := newAddress(r, c.from, c.to, false); got != c.want {
 			t.Errorf("%s -> %s: %q, want %q", c.from.Server.Listen, c.to.Server.Listen, got, c.want)
 		}
+	}
+	// Through a trusted reverse proxy, HTTPS turned on or off leaves the
+	// proxy's address as it is; another port is still a move.
+	if got := newAddress(r, cfg("127.0.0.1:8080", ""), cfg("127.0.0.1:8080", "x.pem"), true); got != "" {
+		t.Errorf("HTTPS on behind a proxy: %q", got)
+	}
+	if got := newAddress(r, cfg("127.0.0.1:8080", ""), cfg("127.0.0.1:9090", ""), true); got != "http://127.0.0.1:9090/" {
+		t.Errorf("another port behind a proxy: %q", got)
 	}
 }
 
@@ -477,8 +490,13 @@ func TestExportSettings(t *testing.T) {
 		t.Fatalf("%d %s", code, raw)
 	}
 	text := out["yaml"].(string)
-	for _, want := range []string{"syslog:\n", "  udp: 0.0.0.0:514\n", "  allow: [10.0.0.0/8]\n", "  # password: left out; set it here or with SIGNALITH_OPENSEARCH_PASSWORD\n", "  listen: 127.0.0.1:8080  # this server's own address\n",
-		"  public_url: \"\"  # this server's own address\n"} {
+	// Settings that belong to this server are marked, so a copy does not,
+	// for one, turn on a second job runner; shared ones are not. The
+	// public address is marked too: another server set up on its own has
+	// its own.
+	for _, want := range []string{"syslog:\n", "  udp: 0.0.0.0:514  # this server's own address\n", "  allow: [10.0.0.0/8]\n", "  # password: left out; set it here or with SIGNALITH_OPENSEARCH_PASSWORD\n", "  listen: 127.0.0.1:8080  # this server's own address\n",
+		"  public_url: \"\"  # this server's own address\n", "  scheduler: true  # this server only\n", "  ca_file: \"\"  # a file on this server\n", "  max_events: 10000\n",
+		"    mode: auto  # this server only\n", "  trusted_proxies: []\n"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("export lacks %q:\n%s", want, text)
 		}
@@ -500,6 +518,74 @@ func TestExportSettings(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(resp.Header.Get("Content-Disposition"), "signalith-settings.yaml") || string(body) != text {
 		t.Errorf("download %v", resp.Header)
+	}
+}
+
+// recordingPages is a PageStore that counts what the Settings page does
+// with it.
+type recordingPages struct {
+	config.PageStore
+	reads, writes, checks int
+}
+
+func (p *recordingPages) Read() (*config.PageSettings, error) { p.reads++; return p.PageStore.Read() }
+func (p *recordingPages) Write(ps *config.PageSettings) error {
+	p.writes++
+	return p.PageStore.Write(ps)
+}
+func (p *recordingPages) CheckEdit(e config.Edit) (*config.EditResult, error) {
+	p.checks++
+	return p.PageStore.CheckEdit(e)
+}
+
+// TestSettingsPageUsesItsPageStore checks that saves go through Pages, so
+// the settings can be kept somewhere other than the file.
+func TestSettingsPageUsesItsPageStore(t *testing.T) {
+	var pages *recordingPages
+	ts, srv, _ := newSettingsServer(t, "", func(s *Server) {
+		pages = &recordingPages{PageStore: config.PageFile{Config: s.Config.Path()}}
+		s.Pages = pages
+	})
+	code, out, _ := call(t, ts, "PUT", "/api/settings", `{"values":{"search.max_events":321}}`, "admin", "s3cret-pass", nil)
+	if code != 200 || pages.checks != 1 || pages.writes != 1 {
+		t.Fatalf("save %d %v: %+v", code, out, pages)
+	}
+	if srv.conf().Search.MaxEvents != 321 {
+		t.Errorf("not applied: %d", srv.conf().Search.MaxEvents)
+	}
+	if p, err := (config.PageFile{Config: srv.Config.Path()}).Read(); err != nil || strings.Join(p.Keys(), ",") != "search.max_events" {
+		t.Errorf("file: %v %v", p, err)
+	}
+	// A check-only save writes nothing.
+	call(t, ts, "PUT", "/api/settings", `{"values":{"search.max_events":322},"check_only":true}`, "admin", "s3cret-pass", nil)
+	if pages.checks != 2 || pages.writes != 1 {
+		t.Errorf("check only: %+v", pages)
+	}
+}
+
+// TestApplyLiveComparesTwoConfigs checks applyLive(old, new) on its own,
+// as a change that did not come from this server's page would use it: only
+// what differs and applies at once is put into use.
+func TestApplyLiveComparesTwoConfigs(t *testing.T) {
+	_, srv, _ := newSettingsServer(t, "", nil)
+	old := srv.conf()
+	next := *old
+	next.Search.MaxEvents = 777
+	next.Server.Listen = "0.0.0.0:9999" // waits for a restart
+	next.Detections.MaxFindingsPerRun = 9
+	applied := srv.applyLive(old, &next)
+	if strings.Join(applied, ",") != "search.max_events,detections.max_findings_per_run" {
+		t.Errorf("applied %v", applied)
+	}
+	if srv.conf().Search.MaxEvents != 777 || srv.Engine.Opt.MaxEvents != 777 || srv.Scheduler.MaxFindingsPerRun != 9 {
+		t.Errorf("not live: %d %d %d", srv.conf().Search.MaxEvents, srv.Engine.Opt.MaxEvents, srv.Scheduler.MaxFindingsPerRun)
+	}
+	if srv.conf().Server.Listen == "0.0.0.0:9999" {
+		t.Error("a restart setting applied at once")
+	}
+	// Nothing changed: nothing applies.
+	if applied := srv.applyLive(&next, &next); applied != nil {
+		t.Errorf("no change applied %v", applied)
 	}
 }
 
@@ -545,11 +631,13 @@ func TestPublicURLWarning(t *testing.T) {
 		yaml, warn, suggest string
 	}{
 		{"server:\n  listen: 0.0.0.0:9090\n", "", ""},
-		{"server:\n  listen: 0.0.0.0:9090\n  public_url: http://siem.example.com:9090\n", "", ""},
+		{"server:\n  listen: 0.0.0.0:9090\n  public_url: http://siem.example.com:9090\n  tls:\n    mode: off\n", "", ""},
+		// HTTPS on by default: the same address over https:// is fine.
+		{"server:\n  listen: 0.0.0.0:9090\n  public_url: https://siem.example.com:9090\n  tls:\n    mode: auto\n", "", ""},
 		{"server:\n  listen: 0.0.0.0:9090\n  public_url: https://siem.example.com\n", "Agents are told to use https:// on port 443, but Signalith answers with http:// on port 9090.", "http://siem.example.com:9090"},
 		{"server:\n  listen: 0.0.0.0:443\n  public_url: https://siem.example.com\n", "Agents are told to use https://, but Signalith answers with http://.", "http://siem.example.com:443"},
 		{"server:\n  listen: 0.0.0.0:443\n  public_url: https://siem.example.com" + tlsOn, "", ""},
-		{"server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n", "Agents are told to use port 18740, but Signalith answers on port 18743.", "http://127.0.0.1:18743"},
+		{"server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n  tls:\n    mode: off\n", "Agents are told to use port 18740, but Signalith answers on port 18743.", "http://127.0.0.1:18743"},
 		// HTTPS turned on while the public address says http://, as
 		// signalith init writes it.
 		{"server:\n  listen: 127.0.0.1:18725\n  public_url: http://127.0.0.1:18725" + tlsOn, "Agents are told to use http://, but Signalith answers with https://.", "https://127.0.0.1:18725"},
@@ -559,7 +647,7 @@ func TestPublicURLWarning(t *testing.T) {
 			t.Errorf("%q: %q, suggest %q", c.yaml, w, sg)
 		}
 	}
-	if w, _ := publicURLWarning(load("server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n"), true); !strings.Contains(w, "will answer on port 18743") {
+	if w, _ := publicURLWarning(load("server:\n  listen: 127.0.0.1:18743\n  public_url: http://127.0.0.1:18740\n  tls:\n    mode: off\n"), true); !strings.Contains(w, "will answer on port 18743") {
 		t.Errorf("before the restart: %q", w)
 	}
 }
