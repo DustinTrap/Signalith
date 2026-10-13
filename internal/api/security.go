@@ -52,6 +52,12 @@ type SecurityChecker struct {
 	mu      sync.Mutex
 	report  *security.Report
 	lastRun time.Time
+	// runs counts the runs started, and ended is the number of the last
+	// run that ended, whether or not it made a report. A fresh request is
+	// met only by a run that started after it asked: counting, not
+	// comparing times, because Windows clocks can give two moments the
+	// same time.
+	runs, ended int
 	// running is closed when the run in progress ends; nil when none is.
 	running chan struct{}
 	// logged are the ids at risk that were logged last; nil before the
@@ -87,7 +93,9 @@ func (c *SecurityChecker) notePlain(a netip.Addr) { c.plain.note(a) }
 // recheckEvery ago is enough. It returns the newest report, nil if none
 // came within ctx.
 func (c *SecurityChecker) run(ctx context.Context, gather func(context.Context) *security.Report, fresh bool) *security.Report {
-	asked := time.Now()
+	c.mu.Lock()
+	asked := c.runs
+	c.mu.Unlock()
 	for {
 		c.mu.Lock()
 		if ch := c.running; ch != nil {
@@ -102,17 +110,24 @@ func (c *SecurityChecker) run(ctx context.Context, gather func(context.Context) 
 			}
 			continue
 		}
-		if c.report != nil && (fresh && !c.lastRun.Before(asked) || !fresh && time.Since(c.lastRun) < recheckEvery) {
+		if fresh && c.ended > asked {
+			r := c.report
+			c.mu.Unlock()
+			return r
+		}
+		if c.report != nil && !fresh && time.Since(c.lastRun) < recheckEvery {
 			r := c.report
 			c.mu.Unlock()
 			return r
 		}
 		ch := make(chan struct{})
+		c.runs++
 		c.running, c.lastRun = ch, time.Now()
+		run := c.runs
 		c.mu.Unlock()
 		// The run is shared, so it does not end with the request that
 		// started it; it has its own time limit.
-		go c.once(context.WithoutCancel(ctx), gather, ch)
+		go c.once(context.WithoutCancel(ctx), gather, ch, run)
 		select {
 		case <-ch:
 			return c.Report()
@@ -123,7 +138,7 @@ func (c *SecurityChecker) run(ctx context.Context, gather func(context.Context) 
 }
 
 // once runs the checks and keeps their report.
-func (c *SecurityChecker) once(ctx context.Context, gather func(context.Context) *security.Report, done chan struct{}) {
+func (c *SecurityChecker) once(ctx context.Context, gather func(context.Context) *security.Report, done chan struct{}, run int) {
 	var r *security.Report
 	defer func() {
 		if p := recover(); p != nil {
@@ -139,6 +154,7 @@ func (c *SecurityChecker) once(ctx context.Context, gather func(context.Context)
 		if r != nil {
 			c.report = r
 		}
+		c.ended = run
 		c.running = nil
 		c.mu.Unlock()
 		close(done)
