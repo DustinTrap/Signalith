@@ -1,6 +1,8 @@
 package api
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -112,6 +114,27 @@ func limitBodies(next http.Handler) http.Handler {
 // only once the client has proved who it is.
 func allowSlowUpload(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(uploadTimeout))
+}
+
+// maxUploadBytes caps an uploaded file (asset lists, indicators).
+const maxUploadBytes = 16 << 20
+
+// uploadBody gives a signed-in upload uploadTimeout to arrive and caps it
+// at maxUploadBytes; a larger body fails to read with *http.MaxBytesError.
+func uploadBody(w http.ResponseWriter, r *http.Request) io.Reader {
+	allowSlowUpload(w)
+	return http.MaxBytesReader(w, r.Body, maxUploadBytes)
+}
+
+// uploadFailed answers an upload that could not be read: 413 when it is
+// too large, 400 otherwise.
+func uploadFailed(w http.ResponseWriter, err error) {
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Errorf("the file is larger than %d MB, the most one upload takes; split it into smaller files", maxUploadBytes>>20))
+		return
+	}
+	writeError(w, http.StatusBadRequest, err)
 }
 
 // deadlineBody lifts the read deadline once the whole body has arrived.

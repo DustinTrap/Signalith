@@ -82,6 +82,10 @@ func splitMulti(s string) []string {
 	return out
 }
 
+// maxRows caps one list, so a wrong or huge file cannot fill memory.
+// Tests lower it.
+var maxRows = 1_000_000
+
 // readCSV returns rows as maps keyed by lower-case header, checking that
 // every header is known and the required one is present.
 func readCSV(data []byte, known []string, required string) ([]map[string]string, []int, error) {
@@ -126,6 +130,9 @@ func readCSV(data []byte, known []string, required string) ([]map[string]string,
 			}
 		}
 		if !empty {
+			if len(rows) >= maxRows {
+				return nil, nil, fmt.Errorf("the file has more than %d rows, the most a list takes", maxRows)
+			}
 			rows = append(rows, m)
 			lines = append(lines, line)
 		}

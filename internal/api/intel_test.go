@@ -87,6 +87,11 @@ func TestIntelAPI(t *testing.T) {
 	if code != 200 || !strings.Contains(body, `"count":2`) {
 		t.Fatalf("upload = %d %s", code, body)
 	}
+	// A file over the upload limit is refused, not cut short.
+	code, body = post(t, ts.URL+"/api/intel/upload", "text/csv", strings.Repeat(" ", maxUploadBytes+1))
+	if code != 413 || !strings.Contains(body, "larger than 16 MB") {
+		t.Fatalf("oversized upload = %d %s", code, body)
+	}
 
 	code, out = do(t, ts, "GET", "/api/intel/indicators?source=manual", "", true)
 	if code != 200 || out["total"] != float64(3) {
