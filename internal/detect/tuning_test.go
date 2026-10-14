@@ -51,26 +51,24 @@ func TestExceptionsSuppressResults(t *testing.T) {
 		{"src": "198.51.100.1", "dest": "web1", "count": int64(12), "users": int64(1)},
 	}}
 	s := &Scheduler{Library: lib, Engine: run, Findings: findings.NewMemory(), Now: func() time.Time { return now }}
-	until := now.Add(time.Hour)
+	until := now.Add(30 * time.Minute)
 	d, err := lib.UpdateExceptions("auth-brute-force", func(es []Exception) ([]Exception, error) {
 		return append(es, Exception{ID: "ex-scanner", Match: map[string]string{"src": "203.0.113.9"}, Until: &until, Added: now}), nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.Run(context.Background(), d)
+	res, err := s.RunManual(context.Background(), d, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res.Findings) != 1 || res.Suppressed != 1 || res.Findings[0].Entities["src"] != "198.51.100.1" {
 		t.Fatalf("run = %+v", res)
 	}
-	if st := s.Status()["auth-brute-force"]; st.LastSuppressed != 1 {
-		t.Errorf("state = %+v", st)
-	}
-	// Once the exception ends, the source raises a finding again.
+	// Once the exception ends, the source raises a finding again (the
+	// other source is still throttled).
 	now = until
-	res, _ = s.Run(context.Background(), d)
+	res, _ = s.RunManual(context.Background(), d, "")
 	if res.Suppressed != 0 || len(res.Findings) != 1 || res.Findings[0].Entities["src"] != "203.0.113.9" {
 		t.Fatalf("after the exception = %+v", res)
 	}

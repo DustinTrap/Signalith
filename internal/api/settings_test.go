@@ -573,9 +573,13 @@ func TestApplyLiveComparesTwoConfigs(t *testing.T) {
 	next.Search.MaxEvents = 777
 	next.Server.Listen = "0.0.0.0:9999" // waits for a restart
 	next.Detections.MaxFindingsPerRun = 9
+	next.Detections.CatchUp = "0"
 	applied := srv.applyLive(old, &next)
-	if strings.Join(applied, ",") != "search.max_events,detections.max_findings_per_run" {
+	if strings.Join(applied, ",") != "search.max_events,detections.max_findings_per_run,detections.catch_up" {
 		t.Errorf("applied %v", applied)
+	}
+	if srv.Scheduler.CatchUpLimit() != 0 {
+		t.Errorf("catching up still goes back %v", srv.Scheduler.CatchUpLimit())
 	}
 	if srv.conf().Search.MaxEvents != 777 || srv.Engine.Opt.MaxEvents != 777 || srv.Scheduler.MaxFindingsPerRun != 9 {
 		t.Errorf("not live: %d %d %d", srv.conf().Search.MaxEvents, srv.Engine.Opt.MaxEvents, srv.Scheduler.MaxFindingsPerRun)

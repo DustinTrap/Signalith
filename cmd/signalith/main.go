@@ -1110,7 +1110,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Library: lib, Engine: eng, Findings: fstore, Log: log,
 		Risk: &risk.Store{Client: cl, Prefix: c.OpenSearch.IndexPrefix}, Assets: lists,
 		MaxFindingsPerRun: c.Detections.MaxFindingsPerRun,
+		Runtime:           cl, RuntimeIndex: cluster.RuntimeIndex(c.OpenSearch.IndexPrefix),
 	}
+	sched.SetCatchUp(c.DetectionsCatchUp())
 	if saved, err := ret.Store.Get(); err != nil {
 		log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
 	} else if saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
@@ -1390,6 +1392,10 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		// run, download or message, so a server that lost the job lease
 		// stops at once, even before its jobs' context ends.
 		sched.Allowed, feeds.Allowed, dispatcher.Allowed, pbRunner.Allowed = r.node.RunsJobs, r.node.RunsJobs, r.node.RunsJobs, r.node.RunsJobs
+		// Detection run state carries the lease epoch, so a server that
+		// lost the lease cannot write over a newer one's, and slots are
+		// worked out on OpenSearch's clock, which every server shares.
+		sched.Epoch, sched.NodeID, sched.ClusterNow = r.node.Lease().Epoch, r.node.ID(), r.node.ClusterNow
 		srv.Cluster = r.node
 		in.node = r.node
 	}

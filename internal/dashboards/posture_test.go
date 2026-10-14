@@ -277,3 +277,57 @@ func TestPostureTopDetectionsRemovedDetection(t *testing.T) {
 		t.Errorf("titles = %v", got)
 	}
 }
+
+// Health comes from the run state every server shares: a server that
+// does not run the detections still counts the ones that never ran or
+// fail, lists the ones behind, and merges the runs that were skipped.
+func TestPostureHealthOnAnotherServer(t *testing.T) {
+	lib, _, err := detect.NewLibrary("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gapFrom, gapTo := now.Add(-10*time.Hour), now.Add(-6*time.Hour)
+	status := map[string]detect.RunState{
+		"auth-password-spray": {LastRun: now.Add(-time.Minute), LastError: "unknown field", ErrorKind: detect.ErrorQuery},
+		"auth-brute-force": {LastRun: now.Add(-time.Minute), NextRun: now.Add(time.Minute),
+			Skipped: &detect.Skipped{From: gapFrom, To: gapTo.Add(-time.Hour), At: now.Add(-time.Hour), Count: 48}},
+		"endpoint-encoded-powershell": {LastRun: now.Add(-time.Minute), NextRun: now.Add(-3 * time.Hour),
+			Skipped: &detect.Skipped{From: gapFrom.Add(time.Hour), To: gapTo, At: now.Add(-2 * time.Hour), Count: 12}},
+		// Skipped long ago: not shown.
+		"endpoint-shadow-copy-delete": {LastRun: now.Add(-time.Minute),
+			Skipped: &detect.Skipped{From: now.Add(-80 * time.Hour), To: now.Add(-79 * time.Hour), At: now.Add(-72 * time.Hour), Count: 5}},
+	}
+	p := &Posture{Engine: postureExec(t, ""), Findings: seedFindings(t), Detections: lib, Status: func() map[string]detect.RunState { return status },
+		SchedulerOn: true, Elsewhere: true, RunsOn: "siem-a", StaleAfter: 2 * time.Hour, Now: func() time.Time { return now }}
+	h := p.Report(context.Background(), 24*time.Hour, "24h").Health
+	if !h.RunsElsewhere || h.RunsOn != "siem-a" || h.SchedulerOn {
+		t.Errorf("label = %+v", h)
+	}
+	if h.NotRun != h.Enabled-len(status) {
+		t.Errorf("not run = %d of %d enabled", h.NotRun, h.Enabled)
+	}
+	if len(h.Erroring) != 1 || h.Erroring[0].ID != "auth-password-spray" {
+		t.Errorf("erroring = %+v", h.Erroring)
+	}
+	behind := false
+	for _, b := range h.Behind {
+		behind = behind || b.ID == "endpoint-encoded-powershell"
+		if b.ID == "auth-brute-force" {
+			t.Errorf("brute force is not behind: %+v", h.Behind)
+		}
+	}
+	if !behind {
+		t.Errorf("behind = %+v", h.Behind)
+	}
+	g := h.Skipped
+	if g == nil || g.Runs != 60 || g.Detections != 2 || g.Title != "" || !g.From.Equal(gapFrom) || !g.To.Equal(gapTo) {
+		t.Errorf("skipped = %+v", g)
+	}
+
+	// One rule: the gap names it.
+	status = map[string]detect.RunState{"auth-brute-force": status["auth-brute-force"]}
+	g = p.Report(context.Background(), 24*time.Hour, "24h").Health.Skipped
+	if g == nil || g.Runs != 48 || g.Detections != 1 || g.Title == "" {
+		t.Errorf("one skipped = %+v", g)
+	}
+}

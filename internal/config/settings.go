@@ -300,6 +300,9 @@ var Registry = []Setting{
 		Confirm: "This server will stop running detections, threat intel downloads, notifications and retention. If no other server shares its OpenSearch, none of them run until this is turned on again.", ConfirmWhen: "off"},
 	{Key: "detections.max_findings_per_run", Scope: ScopeCluster, Section: "detections", Label: "Most findings per run", Type: TypeNumber, Min: intp(1), Max: intp(10000),
 		Help: "The most findings one detection run can raise, so a noisy rule cannot flood the queue."},
+	{Key: "detections.catch_up", Scope: ScopeCluster, Section: "detections", Label: "Make up missed runs", Type: TypeDuration,
+		Help:        "When detections could not run, for example while every server was stopped, how far back the missed runs are made up once they run again. Older ones are skipped and shown on the Detections page. 0 turns this off.",
+		Placeholder: "6h", EmptyMeans: "6h"},
 	{Key: "detections.content_updates", Scope: ScopeServer, Section: "detections", Label: "Content pack updates", Type: TypeChoice,
 		Help: "Newer SigmaHQ and Splunk rules, tested and signed by the Signalith project, without a new Signalith release. " +
 			"Manual: an admin checks for them on the Detections page, or uploads them on a computer without internet access. " +

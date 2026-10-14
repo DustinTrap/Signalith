@@ -63,17 +63,52 @@ Rules of thumb:
   starts with a `$field$`.
 - Use `stats ... by` to raise one finding per entity instead of one per event.
 - Up to four detections run at once. A run is stopped when it takes longer than its
-  schedule (at least 1 minute, at most 5); the Detections page then shows **Timed out**,
-  and the next run starts on schedule. Narrow the query or shorten `lookback` so it
-  finishes in time.
-- When every worker is busy, a due detection waits. Its next run then searches on from
-  where its last successful run stopped, not just its `lookback`, so the events in
-  between are still searched; failed and timed-out runs are made up the same way. It
-  catches up at most ten lookbacks back (at least 1 hour, at most 24 hours); anything
-  older is counted as not searched. The Detections page shows late runs, timeouts and
-  time not searched under **Behind schedule**, and the Health page warns while a
-  detection waits longer than its schedule. Where a detection stopped is kept in
-  memory, so after a restart, or once it is turned back on, it searches its `lookback`.
+  schedule (at least 1 minute, at most 5); the Detections page then shows **Timed out**.
+  Narrow the query or shorten `lookback` so it finishes in time.
+
+## Schedules and missed runs
+
+- **Fixed times.** Each detection runs at fixed times: every `schedule`, at a moment
+  Signalith picks for that rule, so that rules with the same schedule do not all
+  start together. Every server works these times out the same way, from
+  OpenSearch's clock.
+- **What a run searches.** Each run searches the `lookback` that ends at its scheduled
+  time, even when it starts a little late.
+- **Missed runs are made up.** When runs are missed, because every worker was busy or
+  no server was running detections, they are run later, oldest first, so nothing in
+  between goes unsearched. They are made up as far back as `detections.catch_up`
+  (default `6h`, at most `7d`; `0` turns this off and runs only the latest time).
+  Older missed runs are skipped: the Detections page marks the detection
+  **Skipped**, and its details and the posture dashboard say for which times, for
+  example "Signalith was not running detections from 02:10 to 09:40; 90 runs of this
+  detection were skipped." Search that time by hand if it matters. Set
+  `detections.catch_up` on the Settings page, or see the
+  [configuration table](https://github.com/jrsamsanchez/Signalith/blob/main/README.md#configuration).
+- **Failed runs.** A run that failed because OpenSearch did not answer, or was too
+  busy, is tried again: the detection waits until it works. A run whose query has an
+  error is not tried again; fix the query and the next run uses it. A run that times
+  out is tried up to three times, then the next one goes on.
+- **New, turned on again, or rescheduled.** A new detection, one turned back on, and
+  one whose `schedule` changed start at their next scheduled time; they do not make up
+  the time before it. Changing only the query or `lookback` keeps the place in the
+  schedule.
+- **After upgrading.** The first time this version starts, each detection that is on
+  runs once straight away, over the `lookback` up to its latest scheduled time, as
+  every start did before. From then on it keeps to its schedule.
+- **Times on findings.** A finding's **Detected** time is the scheduled time of the run
+  that raised it, so a run made up later still sorts where it belongs. A finding raised
+  more than a few minutes after that time also says how much later it was raised (hold
+  the pointer over it for the exact time).
+- **No duplicates.** A run that is repeated, for example after a restart or when
+  another server takes the detections over, finds what it raised before and does not
+  raise it again. Throttling also holds across servers and restarts.
+- **Run now** searches the `lookback` up to this moment, on the server you are using,
+  whichever server runs the schedule. It respects throttling and its findings throttle
+  the scheduled runs in turn, but it does not change the schedule. The detection's
+  details show it as **Last run now**, with who ran it and where.
+- The Detections page shows late runs and skipped runs under **Behind schedule**, and
+  the Health page warns while a detection waits longer than its schedule, and for a day
+  after runs were skipped.
 
 ## Risk
 
@@ -463,12 +498,12 @@ Imported rules start disabled with a 5 minute schedule and 10 minute lookback.
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/detections` | All detections with last-run state |
+| `GET /api/detections` | All detections with their run state: last run, next run, errors, skipped runs and the last Run now. Every server returns the same state |
 | `POST /api/detections` | Create (400 lists every problem) |
 | `GET`, `PUT`, `DELETE /api/detections/{id}` | Read, save, delete or revert |
 | `GET /api/detections/{id}/yaml` | Export as YAML |
 | `POST /api/detections/test` | Run an unsaved detection; returns rows and titles, raises nothing |
-| `POST /api/detections/{id}/run` | Run now and raise findings |
+| `POST /api/detections/{id}/run` | Run now on this server and raise findings (admin). Searches the lookback up to now, does not change the schedule, and is recorded as the detection's last Run now with who ran it |
 | `POST /api/detections/sigma` | Convert a Sigma rule (YAML body, or JSON `{"rule": "..."}`) |
 | `GET /api/detections/packs` | Content packs with their rule IDs, how many are on, and counts by severity |
 | `GET /api/detections/content` | Content update status: the version in use, whether it is an update, the last check and the `content_updates` mode |

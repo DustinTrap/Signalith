@@ -1027,9 +1027,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if p := s.dir().Problem(); p != "" {
 		warnings = append(warnings, p)
 	}
-	if w := s.behindWarning(time.Now()); w != "" {
-		warnings = append(warnings, w)
-	}
+	warnings = append(warnings, s.behindWarnings(time.Now())...)
 	warnings = append(warnings, s.notifyWarnings(ctx)...)
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
@@ -1037,28 +1035,50 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// behindWarning names the detections falling behind their schedule
-// (see detect.Behind), on the server that runs them; "" when none are.
-func (s *Server) behindWarning(now time.Time) string {
-	if s.Scheduler == nil || s.Detections == nil || !s.conf().Detections.Scheduler || (s.Cluster != nil && !s.Cluster.RunsJobs()) {
-		return ""
+// behindWarnings names the detections falling behind their schedule
+// (see detect.Behind), and those that had missed runs skipped in the
+// last day; none when there are none. With several servers the run
+// state is shared, so every server warns the same, whether or not it
+// would run the detections itself.
+func (s *Server) behindWarnings(now time.Time) []string {
+	if s.Scheduler == nil || s.Detections == nil || (s.Cluster == nil && !s.conf().Detections.Scheduler) {
+		return nil
 	}
 	states := s.Scheduler.Status()
-	var late []string
+	var late, skipped []string
+	runs := 0
 	for _, d := range s.Detections.List() {
-		if detect.Behind(d, states[d.ID], now) {
-			late = append(late, d.ID)
+		st := states[d.ID]
+		if detect.Behind(d, st, now) {
+			late = append(late, "‘"+d.BaseTitle()+"’")
+		}
+		if sk := st.Skipped; d.Enabled && sk != nil && sk.Count > 0 && now.Sub(sk.At) < 24*time.Hour {
+			skipped = append(skipped, "‘"+d.BaseTitle()+"’")
+			runs += sk.Count
 		}
 	}
-	if len(late) == 0 {
-		return ""
+	short := func(ids []string) []string {
+		if len(ids) > 10 {
+			return append(ids[:10:10], fmt.Sprintf("%d more", len(ids)-10))
+		}
+		return ids
 	}
-	if len(late) > 10 {
-		late = append(late[:10], fmt.Sprintf("%d more", len(late)-10))
+	var out []string
+	if len(late) > 0 {
+		out = append(out, "Detections are running behind schedule. "+joinAnd(short(late))+" waited more than their schedule interval, "+
+			"because slower detections held every worker or detections were not running. Missed runs are made up in order, up to "+
+			"the Make up missed runs limit on the Settings page, so findings arrive late but nothing is searched twice. On the Detections page, narrow or "+
+			"reschedule the slow or timed-out detections.")
 	}
-	return "Detections are running behind schedule. " + joinAnd(late) + " waited more than their schedule interval for a free worker, " +
-		"because slower detections held every worker. Each run searches on from where the last one stopped, up to a limit, so events are not skipped, " +
-		"but findings arrive late. On the Detections page, narrow or reschedule the slow or timed-out detections."
+	if len(skipped) > 0 {
+		noun, verb := "runs", "were"
+		if runs == 1 {
+			noun, verb = "run", "was"
+		}
+		out = append(out, fmt.Sprintf("Detections were not running for longer than the Make up missed runs limit on the Settings page, so %d missed %s of %s %s skipped "+
+			"and never searched. The Detections page shows the times; search those times by hand if they matter.", runs, noun, joinAnd(short(skipped)), verb))
+	}
+	return out
 }
 
 // tlsInfo says how Signalith serves HTTPS, the names its certificate

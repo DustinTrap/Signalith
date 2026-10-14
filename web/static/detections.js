@@ -954,7 +954,7 @@ function renderFindingDetail(box, data, opts = {}) {
       el('div', { class: 'row dx-tags' }, sev, statusBadge(f.status), detBadge),
       el('div', { class: 'inspector__meta' }, ...dxDots(
         el('span', { title: fmtTime(f.created) }, 'Detected ' + ago(f.created)),
-        el('span', { class: 'tabular' }, dxClock(f.created)), caseLink))),
+        el('span', { class: 'tabular' }, dxClock(f.created)), raisedLater(f), caseLink))),
     dxTabs(prefix, tabs, fnd.tab, setTab),
     el('div', { class: 'inspector__body' },
       dxPanel(prefix, 'overview', fnd.tab,
@@ -1088,6 +1088,7 @@ async function loadDetections() {
     schedulerOn = res.scheduler;
     runsOn = typeof res.runs_on === 'string' ? res.runs_on : null;
     schedulerHere = res.scheduler_here !== false;
+    det.stateError = res.state_error || '';
     det.counts24 = null;
     if (f24) {
       det.counts24 = {};
@@ -1131,7 +1132,7 @@ function schedulerNote() {
   let tone = 'info', ic = 'info', title = 'The scheduler is off on this server.', text = ['Detections only run when you choose Run now.'];
   if (runsOn) {
     title = `Detections run on ${runsOn}.`;
-    text = [offHere + 'Their run times and errors are shown there. Run now runs one here.'];
+    text = [offHere + 'Their runs, errors and missed runs show here just as they do there. Run now runs one on this server.'];
   } else if (runsOn === '') {
     tone = 'danger'; ic = 'circle-alert';
     title = 'No server runs detections right now.';
@@ -1145,27 +1146,83 @@ function schedulerNote() {
   note.classList.toggle('hidden', schedulerOn);
 }
 
-function lastRunCell(st) {
+function lastRunCell(st, d) {
   if (st.running) return [el('div', { class: 'dx-line' }, 'Running…')];
-  // Scheduled runs happen on another server: their times are there.
-  if (!st.last_run && runsOn != null) return [el('div', { class: 'dx-line muted' }, el('span', { 'aria-hidden': 'true' }, '–'), el('span', { class: 'sr-only' }, 'Runs on another server'))];
-  if (!st.last_run) return [el('div', { class: 'dx-line muted' }, 'Not yet')];
-  const second = st.last_error ? el('span', { class: 'dx-meta dx-fail', title: st.last_error }, st.timed_out ? 'Timed out' : 'Failed')
-    : el('span', { class: 'dx-meta' }, st.last_findings ? dxPlural(st.last_findings, 'new finding') : st.last_results ? dxPlural(st.last_results, 'result') : 'No results');
+  // The run state is shared, so the next run shows on every server while
+  // any server runs the detections.
+  const next = d && d.enabled && (schedulerOn !== false || runsOn) && st.next_run ? 'next ' + dxUntil(st.next_run) : '';
+  const skip = dxSkipped(st) ? el('span', { class: 'badge badge--warning dx-skipchip', title: skippedText(st) }, 'Skipped') : null;
+  if (!st.last_run) return [el('div', { class: 'dx-line muted' }, 'Not yet'), next || skip ? el('span', { class: 'dx-meta' }, skip, next) : null];
+  const second = st.last_error ? el('span', { class: 'dx-meta dx-fail', title: st.last_error }, errorKindLabel(st))
+    : el('span', { class: 'dx-meta', title: next }, skip, st.last_findings ? dxPlural(st.last_findings, 'new finding') : st.last_results ? dxPlural(st.last_results, 'result') : 'No results');
   return [el('div', { class: 'dx-line', title: fmtTime(st.last_run) }, ago(st.last_run)), second];
 }
 
-// lagText says how far the detection fell behind since the server
-// started: runs that waited longer than its schedule for a free worker,
-// runs stopped at their timeout, and time no run searched because it fell
-// further behind than its catch-up limit. '' when none.
+// errorKindLabel names what went wrong in the last scheduled run, short.
+function errorKindLabel(st) {
+  return st.timed_out || st.error_kind === 'timeout' ? 'Timed out' : st.error_kind === 'transient' ? 'Retrying' : st.error_kind === 'query' ? 'Query error' : 'Failed';
+}
+
+// errorKindText says, in a sentence, what a failed run means and what
+// happens next.
+function errorKindText(st) {
+  switch (st.error_kind) {
+    case 'query': return 'The query has an error; fix it and the next run uses it.';
+    case 'transient': return 'OpenSearch did not answer; this run is retried.';
+    case 'timeout': return 'The run took longer than its time limit. It is tried up to three times, then the next run goes on.';
+  }
+  return '';
+}
+
+// dxSkipped is true when missed runs of a detection were skipped in the
+// last 24 hours, because they were older than detections.catch_up (Make
+// up missed runs on the Settings page).
+function dxSkipped(st) {
+  const sk = st.skipped;
+  return !!(sk && sk.count > 0 && Date.now() - new Date(sk.at).getTime() < 864e5);
+}
+
+// dxSpan is "from 02:10 to 09:40" in the viewer's time zone, with dates
+// when the times are not both today.
+function dxSpan(from, to) {
+  const f = new Date(from), t = new Date(to);
+  const hm = { hour: '2-digit', minute: '2-digit' };
+  const today = new Date().toDateString();
+  const one = f.toDateString() === today && t.toDateString() === today;
+  const fmt = (x) => (one ? x.toLocaleTimeString(undefined, hm) : x.toLocaleString(undefined, { month: 'short', day: 'numeric', ...hm }));
+  return `from ${fmt(f)} to ${fmt(t)}`;
+}
+
+// skippedText is the sentence about skipped runs; '' when there were none.
+function skippedText(st) {
+  if (!st.skipped || !st.skipped.count) return '';
+  const sk = st.skipped;
+  return `Signalith was not running detections ${dxSpan(sk.from, sk.to)}; ${sk.count.toLocaleString()} ${sk.count === 1 ? 'run' : 'runs'} of this detection ${sk.count === 1 ? 'was' : 'were'} skipped, because ${sk.count === 1 ? 'it was' : 'they were'} older than the Make up missed runs limit on the Settings page. Search that time by hand if it matters.`;
+}
+
+// lagText says how far the detection fell behind: runs that started
+// more than one schedule interval after their time. '' when none.
 function lagText(st) {
-  const mins = (ms) => Math.max(1, Math.round(ms / 60e3));
-  const parts = [];
-  if (st.late_runs) parts.push(`${dxPlural(st.late_runs, 'late run')}, last ${ago(st.last_late)}`);
-  if (st.timeouts) parts.push(dxPlural(st.timeouts, 'timeout'));
-  if (st.unsearched_ms) parts.push(`${mins(st.unsearched_ms)} min not searched`);
-  return parts.join(' · ');
+  return st.late_runs ? `${dxPlural(st.late_runs, 'late run')}, last ${ago(st.last_late)}. Missed runs are made up in order, so findings arrived late but nothing was left out.` : '';
+}
+
+// raisedLater says when a finding was actually raised, for one raised
+// well after its scheduled time (a missed run made up later). Its
+// Detected time is the scheduled time, so findings sort by when the
+// activity was searched for.
+function raisedLater(f) {
+  if (!f.raised_at || !f.created) return null;
+  const s = (new Date(f.raised_at).getTime() - new Date(f.created).getTime()) / 1000;
+  if (!isFinite(s) || s < 300) return null;
+  const late = s < 3600 ? Math.round(s / 60) + ' min' : s < 86400 ? Math.round(s / 3600) + ' h' : Math.round(s / 86400) + ' d';
+  return el('span', { title: 'Raised ' + fmtTime(f.raised_at) }, `raised ${late} after its scheduled time (the run was made up later)`);
+}
+
+// manualText is the last "Run now", on any server.
+function manualText(m) {
+  const who = [m.by ? 'by ' + m.by : '', m.node ? 'on ' + m.node : ''].filter(Boolean).join(' ');
+  const what = m.error ? 'it failed: ' + m.error : `${dxPlural(m.results, 'result')}, ${dxPlural(m.findings, 'new finding')}${m.throttled ? `, ${m.throttled} held back as repeats` : ''}${m.risk ? `, ${dxPlural(m.risk, 'risk event')}` : ''}`;
+  return el('span', { title: fmtTime(m.at) }, `Run now${who ? ' ' + who : ''}, ${ago(m.at)}: ${what}`);
 }
 
 function detectionRow(d) {
@@ -1186,7 +1243,7 @@ function detectionRow(d) {
       el('div', { class: 'cell-title', title: plainTitle(d.title) }, el('button', { class: 'dx-rowlink', type: 'button' }, ...detTitle(d.title))),
       el('div', { class: 'cell-sub' }, ...sub)),
     el('td', { 'data-col': 'sched' }, el('div', { class: 'dx-line' }, 'Every ' + d.schedule), el('span', { class: 'dx-meta' }, 'looks back ' + d.lookback)),
-    el('td', { 'data-col': 'last' }, ...lastRunCell(st)),
+    el('td', { 'data-col': 'last' }, ...lastRunCell(st, d)),
     el('td', { 'data-col': 'n24', class: 'num', title: n24 == null ? 'Couldn’t count findings' : `${dxPlural(n24, 'finding')} in the last 24 hours` }, n24 == null ? '–' : String(n24)),
     // Only admins turn detections on and off; others see On or Off.
     can('admin') ? el('td', { 'data-col': 'on' }, el('label', { class: 'switch', title: d.enabled ? 'On: runs on schedule' : 'Off' }, sw))
@@ -1507,7 +1564,7 @@ function renderDetectionInspector() {
       const n = res.findings.length;
       det.msg = {
         id: d.id, tone: 'success', title: n ? `${dxPlural(n, 'new finding')} raised.` : 'Run finished. No new findings.',
-        text: `${dxPlural(res.results, 'result')}, ${res.throttled} held back as repeats${res.suppressed ? `, ${res.suppressed} matched an exception` : ''}${res.risk_events ? `, ${dxPlural(res.risk_events, 'risk event')}` : ''}.`,
+        text: `${dxPlural(res.results, 'result')}, ${res.throttled} held back as repeats${res.duplicates ? `, ${res.duplicates} already raised` : ''}${res.suppressed ? `, ${res.suppressed} matched an exception` : ''}${res.risk_events ? `, ${dxPlural(res.risk_events, 'risk event')}` : ''}. The schedule is not changed.`,
         action: n ? { label: 'View findings', run: () => viewDetectionFindings(d.id) } : null,
       };
     } catch (e) {
@@ -1548,7 +1605,7 @@ function renderDetectionInspector() {
     testOut = det.test.busy ? el('div', { class: 'callout dx-test' }, icon('scan-search'), el('div', {}, `Searching the last ${d.lookback}…`))
       : det.test.error ? dxAlert('danger', 'The test failed.', det.test.error) : testResult(det.test.res, d.lookback);
   }
-  const next = d.enabled && schedulerOn && st.next_run ? dxUntil(st.next_run) : null;
+  const next = d.enabled && (schedulerOn || runsOn) && st.next_run ? dxUntil(st.next_run) : null;
 
   dxRedraw(box, 'dd-title', () => fill(box,
     dxInspectorBar({ id: d.id, index: idx, count: det.list.length, noun: 'detection', step: stepDetection, close: () => closeDetectionInspector() }),
@@ -1562,7 +1619,9 @@ function renderDetectionInspector() {
         next ? el('span', {}, 'next run ' + next) : null))),
     el('div', { class: 'inspector__body dx-detbody' },
       msg,
-      st.last_error ? dxAlert('danger', st.timed_out ? 'The last run timed out.' : 'The last run failed.', st.last_error) : null,
+      det.stateError ? dxAlert('warning', 'The run state could not be read just now.', 'What is shown may be out of date. It is read again when the page reloads.') : null,
+      st.last_error ? dxAlert(st.error_kind === 'transient' ? 'warning' : 'danger', st.timed_out || st.error_kind === 'timeout' ? 'The last run timed out.' : st.error_kind === 'transient' ? 'The last run could not finish.' : 'The last run failed.',
+        [errorKindText(st), st.last_error].filter(Boolean).join(' ')) : null,
       d.description ? el('p', { class: 'dx-lede' }, d.description) : null,
       d.guidance ? el('div', { class: 'callout' }, icon('lightbulb'), el('div', {}, el('b', {}, 'How to triage. '), d.guidance)) : null,
       (d.mitre || []).length ? techRow(d.mitre) : null,
@@ -1572,9 +1631,18 @@ function renderDetectionInspector() {
           dxBtn('ghost', 'Open in Search', () => openSearch(d.query, '-' + (d.lookback || '24h')), { sm: true, icon: 'search' })),
         el('pre', { class: 'dx-code' }, d.query)),
       dxSection('Last run', dxKv([
-        ['When', st.last_run ? el('span', { title: fmtTime(st.last_run) }, ago(st.last_run) + (st.last_duration_ms ? ` · took ${st.last_duration_ms} ms` : '')) : runsOn ? `Not here: it runs on ${runsOn}` : runsOn === '' ? 'Not here' : 'Not run yet'],
-        st.last_run ? ['Results', `${dxPlural(st.last_results, 'result')}, ${dxPlural(st.last_findings, 'new finding')}${st.last_suppressed ? `, ${st.last_suppressed} matched an exception` : ''}`] : null,
-        lagText(st) ? ['Behind schedule', lagText(st)] : null,
+        ['When', st.last_run ? el('span', { title: fmtTime(st.last_run) }, ago(st.last_run) + (st.last_duration_ms ? ` · took ${st.last_duration_ms} ms` : '') + (st.node ? ` · on ${st.node}` : '')) : 'Not run on schedule yet'],
+        st.last_slot ? ['Searched up to', el('span', {}, fmtTime(st.last_slot))] : null,
+        st.last_run ? ['Results', [
+          dxPlural(st.last_results, 'result'), dxPlural(st.last_findings, 'new finding'),
+          st.last_duplicates ? `${st.last_duplicates} already raised` : '',
+          st.last_throttled ? `${st.last_throttled} held back as repeats` : '',
+          st.last_risk ? dxPlural(st.last_risk, 'risk event') : '',
+          st.last_suppressed ? `${st.last_suppressed} matched an exception` : '',
+        ].filter(Boolean).join(', ') + (st.capped ? '. Stopped at the most findings one run may raise.' : '')] : null,
+        st.last_error ? ['Problem', errorKindLabel(st)] : null,
+        lagText(st) || dxSkipped(st) ? ['Behind schedule', [lagText(st), dxSkipped(st) ? skippedText(st) : ''].filter(Boolean).join(' ')] : null,
+        st.manual ? ['Last run now', manualText(st.manual)] : null,
         n24 != null ? ['Last 24 hours', n24 ? el('button', { class: 'link-btn', type: 'button' }, dxPlural(n24, 'finding')) : 'No findings'] : null,
         schedulerOn && d.enabled ? null : ['Schedule', schedulerOn || runsOn != null && !d.enabled ? 'Off, so it does not run'
           : runsOn ? `Runs on ${runsOn}` : runsOn === '' ? 'No server runs detections right now' : 'Scheduler off; runs only with Run now'],
