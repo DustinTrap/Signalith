@@ -299,7 +299,10 @@ func TestNotSentIsTriedElsewhere(t *testing.T) {
 	ctx := context.Background()
 	for i, do := range []func() error{
 		func() error { return c.PutIndexTemplate(ctx, "t", map[string]any{"index_patterns": []string{"x-*"}}) },
-		func() error { _, err := c.Bulk(ctx, []IndexedDoc{{Index: "e", Doc: map[string]any{"a": 1}}}); return err },
+		func() error {
+			_, err := c.Bulk(ctx, []IndexedDoc{{Index: "e", Doc: map[string]any{"a": 1}}})
+			return err
+		},
 		func() error {
 			return c.Do(ctx, http.MethodPost, "/e/_delete_by_query", map[string]any{"query": map[string]any{"match_all": map[string]any{}}}, nil)
 		},
