@@ -110,6 +110,12 @@ func TestLevelRaise(t *testing.T) {
 			t.Error("did not raise the level to the next one every server reads")
 		}
 		wantLevel(t, e, 3)
+		for level := 4; level <= LevelMax; level++ {
+			if !a.rt.RaiseLevel(context.Background()) {
+				t.Errorf("did not raise the level to %d", level)
+			}
+			wantLevel(t, e, level)
+		}
 		if a.rt.RaiseLevel(context.Background()) {
 			t.Error("raised the level above what this version reads")
 		}
@@ -122,7 +128,7 @@ func TestLevelRaise(t *testing.T) {
 		select {
 		case err := <-pr4.rt.Fatal():
 			var le *LevelError
-			if !errors.As(err, &le) || le.Level != 3 || !strings.Contains(err.Error(), "reads up to level 1") {
+			if !errors.As(err, &le) || le.Level != LevelMax || !strings.Contains(err.Error(), "reads up to level 1") {
 				t.Errorf("fatal = %v", err)
 			}
 		default:
