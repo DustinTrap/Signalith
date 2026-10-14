@@ -118,15 +118,15 @@ in; consoles send over TCP when it is on, otherwise UDP.
 
 | Product | Format | Where to turn it on |
 | --- | --- | --- |
-| Symantec Endpoint Protection | Symantec's own (`SymantecServer`) | Endpoint Protection Manager: Admin › Servers › Local Site › Configure External Logging; tick **Risk** on the Log Filter tab |
+| Symantec Endpoint Protection | Symantec's own (`SymantecServer`) | Endpoint Protection Manager: Admin › Servers › Local Site › Configure External Logging; tick **Risk** on the Log Filter tab, and **Client System** for failed definition updates |
 | Trend Micro Apex One | CEF | Apex Central: Administration › Settings › Syslog Settings; log format CEF, log type **Detections** |
 | Trend Micro Deep Security | CEF | Deep Security Manager: a syslog configuration in CEF format, used for the policy's anti-malware events |
 | Sophos Central | CEF | Sophos's SIEM script ([Sophos-Central-SIEM-Integration](https://github.com/sophos/Sophos-Central-SIEM-Integration)), run every 5 minutes on a Linux server |
 | Trellix (McAfee) ePO | Trellix's own (XML) | ePO: Menu › Configuration › Registered Servers › New Server › Syslog Server. **Needs syslog over TLS** |
-| ESET PROTECT | LEEF | More › Settings › Advanced Settings › Syslog server, then **Export logs to Syslog** in LEEF with **Detections** ticked |
+| ESET PROTECT | JSON or LEEF | More › Settings › Advanced Settings › Syslog server, then **Export logs to Syslog** in JSON or LEEF with **Detections** ticked |
 | CrowdStrike Falcon | CEF | The Falcon SIEM Connector on a Linux server, with `output_format = cef` |
 | SentinelOne | CEF | Settings › Integrations › Syslog, then tick Syslog for the threat notifications |
-| Kaspersky Security Center | CEF | Administration Server properties › SIEM (ArcSight, CEF format), then **Export to SIEM system using Syslog** on the threat events of the policy |
+| Kaspersky Security Center | CEF, or Kaspersky's own syslog format | Administration Server properties › SIEM (ArcSight, CEF format), then **Export to SIEM system using Syslog** on the threat events of the policy |
 | Bitdefender GravityZone | CEF | Bitdefender's Event Push connector, with syslog output in CEF |
 | Anything else | CEF or LEEF | The product's syslog or SIEM export |
 
@@ -145,6 +145,11 @@ Zscaler, which sends `threatname=None` with every web request) stay where they
 are, and so do web requests from products that don't call themselves
 antivirus. Everything else stays searchable in Network_Traffic or Other, with
 `sourcetype=cef` or `sourcetype=leef`.
+
+The parsers are tested against real logs these products published or other
+projects collected (Symantec, Trellix ePO, ESET, CrowdStrike, Trend Micro Deep
+Security, Kaspersky, Sophos and ClamAV), kept in the repository under
+`internal/syslog/testdata`.
 
 For console events, `dest` is the computer the event is about (from the
 event's destination or computer name), not the console that sent it.

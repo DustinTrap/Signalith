@@ -6,10 +6,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -458,6 +462,58 @@ func TestOTLPWindowsDefender(t *testing.T) {
 		"datamodel": "Malware", "action": "detected", "signature": "Trojan:Win32/Wacatac.B!ml", "file_path": `C:\Temp\a.exe`,
 		"user": `CORP\alice`, "category": "trojan", "message": msg,
 	})
+}
+
+// eventXML is the part of a Windows event's XML the Collector reads.
+type eventXML struct {
+	System struct {
+		EventID  int    `xml:"EventID"`
+		Channel  string `xml:"Channel"`
+		Computer string `xml:"Computer"`
+	} `xml:"System"`
+	Data []struct {
+		Name  string `xml:"Name,attr"`
+		Value string `xml:",chardata"`
+	} `xml:"EventData>Data"`
+}
+
+// TestOTLPDefenderSamples sends real Defender events (testdata/defender)
+// as the Collector's windowseventlog receiver does, without a rendered
+// message, in both event_data formats.
+func TestOTLPDefenderSamples(t *testing.T) {
+	for _, c := range []struct {
+		id   string
+		want map[string]any
+	}{
+		{"1116", map[string]any{"type": "threat", "action": "detected", "signature": "Virus:DOS/EICAR_Test_File", "severity": "critical",
+			"user": `EC2AMAZ-FKEOM7G\Administrator`, "detection_source": "User", "signature_version": "1.457.160.0", "threat_id": "2147519003"}},
+		{"1117", map[string]any{"type": "threat", "action": "quarantined", "signature": "Virus:DOS/EICAR_Test_File", "vendor_action": "Quarantine"}},
+		{"1121", map[string]any{"type": "rule", "action": "blocked", "rule": "Office app created executable content",
+			"user": `researchvmhaa\research`, "process_name": "WINWORD.EXE", "file_name": "script.vbs"}},
+		{"5007", map[string]any{"type": "health", "action": "modified", "signature": "Antivirus setting changed",
+			"old_value": `HKLM\SOFTWARE\Microsoft\Windows Defender\Features\Controls\48 = 0x1`}},
+	} {
+		b, err := os.ReadFile(filepath.Join("testdata", "defender", c.id+".xml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var e eventXML
+		if err := xml.Unmarshal(b, &e); err != nil {
+			t.Fatal(err)
+		}
+		var data []tKV
+		for _, d := range e.Data {
+			data = append(data, tKV{d.Name, d.Value})
+		}
+		for _, array := range []bool{false, true} {
+			body := windowsBody(e.System.Channel, e.System.EventID, data, array, "")
+			body[1] = tKV{"computer", e.System.Computer}
+			docs := otlpDocs(t, tRes{recs: []tRec{{body: body}}})
+			want := map[string]any{"datamodel": "Malware", "host": e.System.Computer, "signature_id": c.id, "vendor_product": DefenderProduct}
+			maps.Copy(want, c.want)
+			t.Run(fmt.Sprintf("%s/array=%v", c.id, array), func(t *testing.T) { expect(t, docs[0], want) })
+		}
+	}
 }
 
 func TestOTLPEmptyAndMultipleResources(t *testing.T) {

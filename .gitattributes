@@ -8,3 +8,7 @@ internal/detect/packs/** -text
 deploy/docker/opensearch/*.sh text eol=lf
 deploy/docker/opensearch/*.yml text eol=lf
 deploy/docker/opensearch/security/*.yml text eol=lf
+
+# Test fixtures keep their bytes on every system.
+internal/syslog/testdata/** -text
+internal/ingest/testdata/** -text

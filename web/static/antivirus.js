@@ -224,7 +224,7 @@
         text('In Symantec Endpoint Protection Manager, go to ', slMenu('Admin', 'Servers'), ', select ', b('Local Site'), ', and click ', b('Configure External Logging'), '.'),
         text('On the ', b('General'), ' tab, tick ', b('Enable Transmission of Logs to a Syslog Server'), '. Set ', b('Syslog Server'), ' to ', hostC(),
           ', ', b('Destination Port'), ' to ', portC(), ' and the protocol to ', protoC(), '.'),
-        text('On the ', b('Log Filter'), ' tab, tick ', b('Risk'), ', then click ', b('OK'), '.'))),
+        text('On the ', b('Log Filter'), ' tab, tick ', b('Risk'), ', and ', b('Client System'), ' for failed definition updates, then click ', b('OK'), '.'))),
       syslogProduct('trend', 'Trend Micro', 'Trend Micro Apex One, through Apex Central (CEF)', () => steps(
         text('In Apex Central, go to ', slMenu('Administration', 'Settings', 'Syslog Settings'), '.'),
         text('Tick ', b('Enable syslog forwarding'), '. Set ', b('Server address'), ' to ', hostC(), ', ', b('Port'), ' to ', portC(), ', ', b('Protocol'), ' to ', protoC(),
@@ -247,10 +247,10 @@
           text('Set ', b('Server name'), ' to ', hostC(), ' and ', b('Port'), ' to ', code(d.tls), '. Turn on ', b('Enable event forwarding'), ', click ',
             b('Test Connection'), ', then click ', b('Save'), '.')) };
       } },
-      syslogProduct('eset', 'ESET', 'ESET PROTECT (LEEF)', () => steps(
+      syslogProduct('eset', 'ESET', 'ESET PROTECT (JSON or LEEF)', () => steps(
         text('In ESET PROTECT, go to ', slMenu('More', 'Settings', 'Advanced Settings', 'Syslog server'), '. Turn on ', b('Use Syslog server'), ' and set ',
           b('Host'), ' to ', hostC(), ', ', b('Port'), ' to ', portC(), ' and ', b('Transport'), ' to ', protoC(), '.'),
-        text('In the same page under ', b('Logging'), ', turn on ', b('Export logs to Syslog'), ', set ', b('Exported logs format'), ' to ', code('LEEF'),
+        text('In the same page under ', b('Logging'), ', turn on ', b('Export logs to Syslog'), ', set ', b('Exported logs format'), ' to ', code('JSON'), ' or ', code('LEEF'),
           ', tick ', b('Detections'), ', and click ', b('Save'), '.'))),
       syslogProduct('crowdstrike', 'CrowdStrike', 'CrowdStrike Falcon, through the Falcon SIEM Connector (CEF)', () => steps(
         text('In the Falcon console, go to ', slMenu('Support and resources', 'API clients and keys'), ', click ', b('Add new API client'), ', tick ',
