@@ -48,11 +48,19 @@ consoles. It opens on the last 7 days. Until antivirus events arrive it shows a
 **Set up antivirus logs** button (for admins) that opens Add data. See
 [antivirus.md](antivirus.md#the-malware-dashboard) for each panel.
 
+## Vulnerabilities
+
+A built-in panel dashboard for the scans on the [Vulnerabilities page](vulnerabilities.md):
+hosts with known exploited and critical CVEs, the known exploited CVEs to patch first,
+the top CVEs, the most vulnerable hosts and software, open services, remote access and
+cleartext services left open, and the hosts found on each network. It opens on the last
+7 days. Until a scan has run it shows an **Open Vulnerabilities** button.
+
 ## Built-in dashboards are read-only
 
 Built-in dashboards are part of Signalith and change only with it, so they have
 no Settings, Add panel or panel editing, and the panel menu has only **Open in
-Search**. **Download YAML** saves the Malware dashboard's definition, and works
+Search**. **Download YAML** saves a built-in dashboard's definition, and works
 without `dashboards.dir`.
 
 To change one, choose **Make a copy** (analysts and admins, when custom dashboards
@@ -60,7 +68,7 @@ are on). It saves *Malware (copy)* as a custom dashboard with the same panels an
 opens it, ready to edit. **Add to dashboard** on the Search page lists custom
 dashboards only.
 
-The ids `posture` and `malware` belong to the built-in dashboards. A file
+The ids `posture`, `malware` and `vulnerabilities` belong to the built-in dashboards. A file
 `malware.yaml` in `dashboards.dir` is ignored and listed as a problem: rename the
 file and change its `id` to keep it.
 
@@ -146,7 +154,7 @@ panels:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `id` | from the title | File name without `.yaml`. `posture` and `malware` are reserved for the built-in dashboards |
+| `id` | from the title | File name without `.yaml`. `posture`, `malware` and `vulnerabilities` are reserved for the built-in dashboards |
 | `title` | required | Shown in the dashboard list |
 | `description` | none | Shown under the title |
 | `time_range` | `24h` | Default time range for panels |
@@ -169,7 +177,7 @@ Every endpoint needs the admin sign-in, like the rest of the API.
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/posture?range=24h` | The security posture report (range 1m to 90d) |
-| `GET /api/dashboards` | List: the built-in dashboards (posture, then malware, each with `"builtin": true`, even when custom dashboards are off), every custom one, and files with problems |
+| `GET /api/dashboards` | List: the built-in dashboards (posture, then malware and vulnerabilities, each with `"builtin": true`, even when custom dashboards are off), every custom one, and files with problems |
 | `POST /api/dashboards` | Create; without `id`, one is made from the title. 409 if the id exists or belongs to a built-in dashboard |
 | `GET /api/dashboards/{id}` | One dashboard as JSON |
 | `GET /api/dashboards/{id}/yaml` | Download its YAML file |
@@ -181,6 +189,6 @@ Every endpoint needs the admin sign-in, like the rest of the API.
 
 Validation errors return 400 with a `problems` list naming each field to fix.
 
-`GET`, `/yaml` and `/run` also work for the built-in `malware` dashboard, without
+`GET`, `/yaml` and `/run` also work for the built-in `malware` and `vulnerabilities` dashboards, without
 `dashboards.dir`. `PUT`, `DELETE` and adding a panel to it return 400: *The Malware
 dashboard is built in and can’t be changed. Make a copy to change it.*

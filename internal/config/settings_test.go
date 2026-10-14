@@ -83,7 +83,7 @@ func TestRegistryCoversEveryConfigSetting(t *testing.T) {
 			t.Errorf("Excluded has %s, which is not a setting of Config", k)
 		}
 	}
-	if len(Sections) != 9 {
+	if len(Sections) != 10 {
 		t.Errorf("sections: %d", len(Sections))
 	}
 }
@@ -99,6 +99,7 @@ func TestRegistryEnvMatchesTheEnvironment(t *testing.T) {
 		"SIGNALITH_OPENSEARCH_PASSWORD": "p", "SIGNALITH_LISTEN": "0.0.0.0:8081",
 		"SIGNALITH_PUBLIC_URL": "http://siem.example:8081", "SIGNALITH_ASSISTANT_API_KEY": "k",
 		"SIGNALITH_SYSLOG_UDP": "0.0.0.0:5514", "SIGNALITH_SYSLOG_TCP": "0.0.0.0:5514",
+		"SIGNALITH_NVD_API_KEY": "nvd-key", "SIGNALITH_NVD_URL": "https://nvd-mirror.example/rest/json/cves/2.0",
 	}
 	for k, v := range values {
 		t.Setenv(k, v)

@@ -1058,6 +1058,9 @@ func (s *Server) applyLive(old, saved *config.Config) []string {
 		a := next.Assistant
 		s.liveAI.Store(&liveModel{c: assistant.New(a.Provider, a.URL, a.Model, a.APIKey)})
 	}
+	if changed("vulns.") && s.Vulns != nil {
+		s.Vulns.useNVD(next.NVDURL(), next.Vulns.NVDAPIKey)
+	}
 	if changed("server.public_url") {
 		s.coverPublicURL(&next)
 	}

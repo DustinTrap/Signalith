@@ -192,7 +192,7 @@ func TestSecretsStatusAndEncrypt(t *testing.T) {
 func TestSecretsSet(t *testing.T) {
 	path, _ := secretsSetup(t)
 	if _, err := runCmd(t, "", "set", "server.listen", "-c", path); err == nil ||
-		!strings.Contains(err.Error(), "opensearch.password, assistant.api_key, auth.ldap.bind_password, ingest.tokens") {
+		!strings.Contains(err.Error(), "opensearch.password, assistant.api_key, vulns.nvd_api_key, auth.ldap.bind_password, ingest.tokens") {
 		t.Errorf("unknown setting: %v", err)
 	}
 	if _, err := runCmd(t, "", "set", "-c", path); err == nil {
@@ -751,5 +751,21 @@ func TestEncryptMovesTheURLPassword(t *testing.T) {
 	c, err := config.Load(path)
 	if err != nil || c.OpenSearch.Username != "admin" || c.OpenSearch.Password != "Plain OS pw#1" || len(c.PlainSecrets()) != 0 {
 		t.Errorf("load: %v %+v %v", err, c.OpenSearch, c.PlainSecrets())
+	}
+}
+
+// The NVD API key can be stored encrypted in a file with no vulns section.
+func TestSecretsSetNVDKey(t *testing.T) {
+	path, _ := secretsSetup(t)
+	if _, err := runCmd(t, "nvd-key-0123\n", "set", "vulns.nvd_api_key", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "nvd-key-0123") || !strings.Contains(string(data), "nvd_api_key: enc:v1:") {
+		t.Errorf("file after set:\n%s", data)
+	}
+	c, err := config.Load(path)
+	if err != nil || c.Vulns.NVDAPIKey != "nvd-key-0123" {
+		t.Errorf("loaded %v %q", err, c.Vulns.NVDAPIKey)
 	}
 }

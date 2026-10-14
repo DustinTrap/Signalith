@@ -50,6 +50,7 @@ type Config struct {
 	Dashboards Dashboards `yaml:"dashboards"`
 	Assistant  Assistant  `yaml:"assistant"`
 	Intel      Intel      `yaml:"intel"`
+	Vulns      Vulns      `yaml:"vulns,omitempty"`
 	Notify     Notify     `yaml:"notify,omitempty"`
 	Response   Response   `yaml:"response,omitempty"`
 	Playbooks  Playbooks  `yaml:"playbooks,omitempty"`
@@ -960,6 +961,16 @@ type Assistant struct {
 	MaskFields []string `yaml:"mask_fields,omitempty"`
 }
 
+// Vulns configures the CVE lookups of vulnerability scans (the
+// Vulnerabilities page keeps its networks in OpenSearch).
+type Vulns struct {
+	// NVDURL is a mirror of the NVD's CVE API 2.0, in place of
+	// https://services.nvd.nist.gov/rest/json/cves/2.0.
+	NVDURL string `yaml:"nvd_url,omitempty"`
+	// NVDAPIKey is a free NVD API key, which allows faster lookups.
+	NVDAPIKey string `yaml:"nvd_api_key,omitempty"`
+}
+
 // Intel configures threat intel feeds. Nothing is downloaded until a
 // feed is listed here or added on the Threat intel page.
 type Intel struct {
@@ -1651,6 +1662,16 @@ func (c *Config) applyEnv() error {
 		c.Assistant.APIKey = v[0]
 		c.fromEnv("assistant.api_key", from)
 	}
+	if v := strings.TrimSpace(os.Getenv("SIGNALITH_NVD_URL")); v != "" {
+		c.Vulns.NVDURL = v
+		c.fromEnv("vulns.nvd_url", "SIGNALITH_NVD_URL")
+	}
+	if v, from, err := envSecret("SIGNALITH_NVD_API_KEY"); err != nil {
+		return err
+	} else if len(v) > 0 {
+		c.Vulns.NVDAPIKey = strings.TrimSpace(v[0])
+		c.fromEnv("vulns.nvd_api_key", from)
+	}
 	if v, from, err := envSecret("SIGNALITH_INGEST_TOKEN"); err != nil {
 		return err
 	} else if len(v) > 0 {
@@ -1870,6 +1891,11 @@ func (c *Config) Validate() error {
 			p = append(p, fmt.Sprintf("assistant.url %q must be http(s)://host[:port][/path]", redact.URL(c.Assistant.URL)))
 		}
 	}
+	if c.Vulns.NVDURL != "" {
+		if u, err := url.Parse(c.Vulns.NVDURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			p = append(p, fmt.Sprintf("vulns.nvd_url %q must be http(s)://host[:port][/path]", redact.URL(c.Vulns.NVDURL)))
+		}
+	}
 	p = append(p, c.Intel.problems()...)
 	if c.Detections.MaxFindingsPerRun < 1 || c.Detections.MaxFindingsPerRun > 10000 {
 		p = append(p, "detections.max_findings_per_run must be between 1 and 10000")
@@ -1921,6 +1947,9 @@ func (c *Config) Warnings() []string {
 	}
 	if u, err := url.Parse(c.Assistant.URL); err == nil && c.Assistant.Provider != "" && u.Scheme == "http" && c.Assistant.APIKey != "" && !isLoopback(u.Hostname()) {
 		w = append(w, "assistant.url is plain http to "+u.Host+", so the AI model's API key crosses the network unencrypted. Use https://.")
+	}
+	if u, err := url.Parse(c.Vulns.NVDURL); err == nil && u.Scheme == "http" && c.Vulns.NVDAPIKey != "" && !isLoopback(u.Hostname()) {
+		w = append(w, "vulns.nvd_url is plain http to "+u.Host+", so the NVD API key crosses the network unencrypted. Use https://.")
 	}
 	if c.PublicAdminPassword() {
 		w = append(w, "The built-in admin's password is "+publicAdminPassword+", the example in an older docker-compose.yml, which anyone can look up. "+
@@ -2138,7 +2167,7 @@ const header = `# Signalith configuration.
 # Run "signalith validate" after editing. Secrets can come from environment
 # variables instead of this file: SIGNALITH_OPENSEARCH_PASSWORD,
 # SIGNALITH_ADMIN_PASSWORD, SIGNALITH_INGEST_TOKEN, SIGNALITH_ASSISTANT_API_KEY,
-# SIGNALITH_LDAP_BIND_PASSWORD, or from files named by the same variables with
+# SIGNALITH_NVD_API_KEY, SIGNALITH_LDAP_BIND_PASSWORD, or from files named by the same variables with
 # _FILE added (such as SIGNALITH_ADMIN_PASSWORD_FILE). Passwords and keys
 # below are encrypted (enc:v1:...) with Signalith's master key; a plain value
 # pasted in works too, and "signalith secrets encrypt" encrypts it (see
@@ -2200,6 +2229,8 @@ const header = `# Signalith configuration.
 #                      - name: feodo-tracker
 #                        url: https://feodotracker.abuse.ch/downloads/ipblocklist.txt
 #                    format: lines, csv (with column:), stix or auto; see docs/threat-intel.md
+# vulns.nvd_api_key  optional free NVD API key for faster CVE lookups on the
+#                    Vulnerabilities page (SIGNALITH_NVD_API_KEY); see docs/vulnerabilities.md
 # notify.file        where the Notifications page keeps its channels and rules
 #                    (default notifications.yaml in lookups.dir); see docs/notifications.md
 # response.file      where the Response actions page keeps its actions (default

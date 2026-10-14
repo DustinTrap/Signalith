@@ -179,7 +179,7 @@ Docker commands).
 
 ### Try it with sample data
 
-No logs to hand? On the **Add data** page (under Configure, admins only), **Load
+No logs to hand? On the **Add data** page (under Data, admins only), **Load
 sample data** fills Signalith with a week of made-up activity for a fictional company,
 with a handful of attacks hidden in it, so detections fire, the triage queue fills,
 risk builds up, threat intel matches and the dashboards light up. Everything is
@@ -201,9 +201,10 @@ sudo dnf install ./signalith-0.1.0-1.x86_64.rpm     # Red Hat, Rocky, Alma, Fedo
 sudo signalith initial-password                     # the first admin password
 ```
 
-On Windows, double-click `signalith-0.1.0-x64.msi`. See
-[docs/install-packages.md](docs/install-packages.md) for what they set up, upgrades, and
-how to check a download's signature and SBOM. The steps below install by hand.
+On Windows, double-click `signalith-0.1.0-x64.msi`. On Linux you can instead add
+Signalith's signed apt or dnf repository, so `apt upgrade` and `dnf upgrade` bring new
+releases. See [docs/install-packages.md](docs/install-packages.md) for the repositories,
+what the packages set up, upgrades, and how to check a download's signature and SBOM. The steps below install by hand.
 
 ### Linux
 
@@ -449,7 +450,7 @@ them. All of this, with the commands to trust the CA on Windows, macOS and Linux
 
 ### Hardening built in
 
-- **Security check**: the Security page (**Configure > Security**) and `signalith security`
+- **Security check**: the Security page (**Settings > Security**) and `signalith security`
   check how this server is set up and what to fix first. See
   [docs/security.md](docs/security.md).
 - **Encryption in transit**: HTTPS by default, TLS 1.2 or newer, for the UI, API and
@@ -748,7 +749,7 @@ changes and more, plus two risk incident rules); 19 are on by default.
   Signalith query and lists anything it had to approximate. Imported rules start
   disabled so you can test them first.
 - **Content packs** add community rules, off until you turn them on: 1,805 tested
-  [SigmaHQ](https://github.com/SigmaHQ/sigma) Windows and Linux rules and 801 Windows and Linux detections
+  [SigmaHQ](https://github.com/SigmaHQ/sigma) Windows and Linux rules and 822 Windows and Linux detections
   from Splunk's open source
   [security_content](https://github.com/splunk/security_content) (Apache 2.0). With
   both packs on, detections cover 147 ATT&CK techniques. Newer tested rules arrive as
@@ -855,6 +856,18 @@ Context changes three things:
 
 Risk events are stored under the Risk data model (`datamodel=Risk`) in
 `<prefix>-risk-YYYY.MM.DD` indices, which ordinary searches leave out.
+
+## Vulnerability scanning
+
+The **Vulnerabilities** page scans the networks you list with [Nmap](https://nmap.org),
+on a schedule or with **Scan now**, and matches the software it finds to known CVEs from
+the U.S. National Vulnerability Database, marking the ones in CISA's Known Exploited
+Vulnerabilities catalog. Before the first scan, **Scanner setup** checks the server and
+says what is needed, why, and how to fix anything missing. Only product names are sent
+for CVE lookups. Results go to the Vulnerabilities data model and three built-in
+detections, and the hosts join the asset list. The Docker image includes Nmap; on
+Windows and Linux installs, install Nmap from your package manager or nmap.org. See
+[docs/vulnerabilities.md](docs/vulnerabilities.md).
 
 ## Threat intel
 

@@ -91,6 +91,12 @@ var knownFields = func() map[string]string {
 		// keyword indexes, and rules match words inside them, so the text is
 		// a wildcard field (see IndexTemplate).
 		"script_part": long, "script_parts": long, "script_block_text": "wildcard",
+		// A scheduled task (Security 4698): its name and its definition,
+		// XML that rules search for words inside, as for script blocks.
+		"task_name": kw, "task_content": "wildcard", "task_command": kw, "task_arguments": kw,
+		// An object access (Security 4663): what kind of object, its path
+		// and name whatever the kind, and the access asked for.
+		"object_type": kw, "object_path": kw, "object_name": kw, "access_list": kw, "access_mask": kw,
 		// An sshd line whose client address cannot be told from text the
 		// client sent (see ambiguousSSH).
 		"src_ambiguous": kw,
@@ -119,6 +125,10 @@ var knownFields = func() map[string]string {
 
 		// Risk events.
 		"group_key": kw, "risk_score": double, "risk_base_score": double,
+
+		// Vulnerability scans: a CVSS score has a decimal (9.8), which a
+		// long would cut to 9 in sorts, charts and stats.
+		"cvss": double,
 	}
 	add := func(fs []datamodel.Field) {
 		for _, f := range fs {

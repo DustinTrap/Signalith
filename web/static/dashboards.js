@@ -40,7 +40,7 @@
 
   // The three kinds of dashboard: posture (computed), built-in panel
   // dashboards and custom ones.
-  const BUILTIN_ICON = { posture: 'shield', malware: 'bug' };
+  const BUILTIN_ICON = { posture: 'shield', malware: 'bug', vulnerabilities: 'scan-search' };
   const kindOf = (id) => {
     if (id === 'posture') return 'posture';
     const meta = dash.list.find((d) => d.id === id);
@@ -968,8 +968,15 @@
   // none of them found anything: what data it needs and where to set it up.
   function renderNoData(slot, d, results) {
     const none = results.length && results.every((pr, i) => d.panels[i] && panelEmpty(d.panels[i], pr));
-    if (!none || d.id !== 'malware') { put(slot); return; }
+    if (!none || (d.id !== 'malware' && d.id !== 'vulnerabilities')) { put(slot); return; }
     const admin = typeof can === 'function' && can('admin');
+    if (d.id === 'vulnerabilities') {
+      put(slot, el('div', { class: 'card db-nodata' }, emptyState('scan-search', 'No vulnerability scans yet',
+        'Scans of your networks on the Vulnerabilities page fill this dashboard: hosts, open ports, and known vulnerabilities in the software on them.',
+        el('a', { class: 'btn btn--primary btn--sm', href: '#vulns' }, icon('scan-search'), 'Open Vulnerabilities'),
+        null, admin ? null : 'An admin adds the networks to scan there.')));
+      return;
+    }
     put(slot, el('div', { class: 'card db-nodata' }, emptyState('shield-check', 'No antivirus events yet',
       'Collect Microsoft Defender events with the Windows agent, ClamAV with the Linux agent, or send your antivirus console’s syslog to Signalith.',
       admin ? el('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => openAntivirusSetup() }, icon('shield-check'), 'Set up antivirus logs') : null,
