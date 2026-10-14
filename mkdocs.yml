@@ -141,6 +141,7 @@ nav:
       - Agent tokens: agent-tokens.md
       - Servers: servers.md
       - signalith cluster: cluster-cli.md
+      - Performance and sizing: performance.md
       - Data retention: retention.md
   - Security:
       - Security checks: security.md
