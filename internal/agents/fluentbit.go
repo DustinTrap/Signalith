@@ -75,6 +75,12 @@ type Options struct {
 	Version   string
 	CAPin     string
 	NextCAPin string
+	// Recycle, when above zero, closes each kept-alive connection to the
+	// server after that many batches (Fluent Bit's
+	// net.keepalive_max_recycle), so agents behind a load balancer spread
+	// over the servers again after one comes back. Set only with several
+	// servers; zero leaves the configuration as before.
+	Recycle int
 }
 
 // ConfigHeader is the value of the X-Signalith-Config header for a
@@ -499,6 +505,9 @@ func Generate(o Options) (*Agent, error) {
 		if name := verifyName(host, o); name != "" {
 			out = append(out, [2]string{"tls.vhost", name}, [2]string{"tls.verify_hostname", "On"})
 		}
+	}
+	if o.Recycle > 0 {
+		out = append(out, [2]string{"net.keepalive_max_recycle", strconv.Itoa(o.Recycle)})
 	}
 	out = append(out, [2]string{"Retry_Limit", "False"})
 	b.WriteString(section("OUTPUT", out))
