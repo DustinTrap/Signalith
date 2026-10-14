@@ -84,7 +84,7 @@ or directory user can have the built-in admin's name.
 
 ## Managing local users
 
-Admins manage users on the **Users** page.
+Admins manage users on the **Users** page (**Settings > Users**).
 
 **Add a user.** Enter a username, optionally a name and email address, and pick a
 role (Viewer if you don't). Usernames are 1 to 64 lower-case letters, digits, dots,

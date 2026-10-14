@@ -179,7 +179,7 @@ Docker commands).
 
 ### Try it with sample data
 
-No logs to hand? On the **Add data** page (under Configure, admins only), **Load
+No logs to hand? On the **Add data** page (under Data, admins only), **Load
 sample data** fills Signalith with a week of made-up activity for a fictional company,
 with a handful of attacks hidden in it, so detections fire, the triage queue fills,
 risk builds up, threat intel matches and the dashboards light up. Everything is
@@ -450,7 +450,7 @@ them. All of this, with the commands to trust the CA on Windows, macOS and Linux
 
 ### Hardening built in
 
-- **Security check**: the Security page (**Configure > Security**) and `signalith security`
+- **Security check**: the Security page (**Settings > Security**) and `signalith security`
   check how this server is set up and what to fix first. See
   [docs/security.md](docs/security.md).
 - **Encryption in transit**: HTTPS by default, TLS 1.2 or newer, for the UI, API and

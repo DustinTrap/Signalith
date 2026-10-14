@@ -256,6 +256,7 @@ kbd {
 .nav__count[data-critical]::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--sev-critical); }
 
 .sidebar__foot { margin-top: auto; display: grid; gap: var(--sp-2); }
+.sidebar__links { display: grid; gap: 1px; }
 .health { display: grid; gap: 4px; padding: 10px 12px; border-radius: var(--r-md); background: var(--hover); font-size: var(--fs-sm); color: var(--text-2); }
 .health__row { display: flex; align-items: center; gap: 8px; }
 .health__row b { font-weight: 500; color: var(--text); }
@@ -1126,6 +1127,30 @@ dialog.modal::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 .cluster-banner .alert p { color: var(--text-2); overflow-wrap: anywhere; }
 .cluster-banner .alert a { white-space: nowrap; }
 @media (max-width: 720px) { .cluster-banner { padding: var(--sp-4) var(--sp-4) 0; } }
+/* the tabs between the Settings pages, above whichever is open: pills, so
+   they read as a level above the underlined tabs inside a page */
+.set-tabs { padding: var(--sp-5) var(--sp-5) 0; }
+.set-tabs__list {
+  display: flex; align-items: center; gap: 4px; padding-bottom: var(--sp-4);
+  box-shadow: inset 0 -1px 0 var(--line-subtle); overflow-x: auto; scrollbar-width: none;
+}
+.set-tabs__list::-webkit-scrollbar { display: none; }
+.set-tab {
+  position: relative; flex: none; display: inline-flex; align-items: center; gap: 8px; height: var(--h-md); padding: 0 12px;
+  border-radius: var(--r-md); color: var(--text-2); font-weight: 500; white-space: nowrap; text-decoration: none;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.set-tab > .icon { color: var(--text-3); transition: color var(--t-fast); }
+.set-tab:hover { background: var(--hover); color: var(--text); text-decoration: none; }
+.set-tab:hover > .icon { color: var(--text-2); }
+.set-tab[aria-current="page"] { background: var(--accent-soft); color: var(--text); }
+.set-tab[aria-current="page"] > .icon { color: var(--accent); }
+.set-tab .nav__count { height: 16px; padding: 0 5px; }
+@media (max-width: 720px) {
+  .set-tabs { padding: var(--sp-4) 0 0; }
+  .set-tabs__list { padding: 0 var(--sp-4) var(--sp-3); scroll-padding-inline: var(--sp-4); }
+  .set-tab { padding: 0 10px; }
+}
 .nav__empty { padding: 2px 10px; color: var(--text-3); font-size: var(--fs-sm); }
 /* the sidebar health card links to the Health page */
 a.health { color: var(--text-2); text-decoration: none; transition: background var(--t-fast); }
