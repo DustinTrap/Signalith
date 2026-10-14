@@ -1584,8 +1584,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			srv.Cluster = sharedCluster{Node: r.node, rt: r.shared}
 			srv.Shared = sharedAPI{rt: r.shared, on: sharedOn}
 			srv.ConfigToken = configToken{rt: r.shared}
+			// A start that keeps the settings in settings.yaml has the
+			// store too, so a save there holds off the move of this
+			// server's own settings into the shared settings, and goes
+			// there once they moved (settingsStore.HoldFile).
+			srv.Settings = settingsStore{r: r, files: !settingsOn}
 			if settingsOn {
-				srv.Settings = settingsStore{r: r}
 				// The shared settings and this server's own are followed
 				// while this start runs: what applies at once is applied,
 				// and the rest waits for a restart. The settings set aside

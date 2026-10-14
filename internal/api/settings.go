@@ -869,6 +869,18 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		s.handlePutSharedSettings(w, r, raw)
 		return
 	}
+	if s.Settings != nil {
+		// This server's own settings may be moving into the shared
+		// settings right now: the save waits for the move, and goes to
+		// the shared settings once they are there.
+		moved, release := s.Settings.HoldFile()
+		if moved {
+			release()
+			s.handlePutSharedSettings(w, r, raw)
+			return
+		}
+		defer release()
+	}
 	var req settingsRequest
 	if err := decodeJSON(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
