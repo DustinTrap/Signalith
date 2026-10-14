@@ -4820,3 +4820,8 @@ details[open] > summary .inv-exact__chev { transform: rotate(90deg); }
   .inv-timeline li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .inv-dialog .modal__foot .spacer { display: none; }
 }
+
+/* Settings: the AI address and model pickers, a list with Other's box below. */
+#page-settings .st-picker { display: grid; gap: 8px; min-width: 0; }
+#page-settings .st-picker .input[hidden] { display: none; }
+#page-settings .st-hint .icon--xs { vertical-align: -1px; }
