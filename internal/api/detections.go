@@ -137,6 +137,10 @@ func (s *Server) handleListDetections(w http.ResponseWriter, r *http.Request) {
 	// run on another one, runs_on names it. The run state is shared, so
 	// it is the same on every server.
 	resp := map[string]any{"detections": out, "scheduler": s.conf().Detections.Scheduler}
+	if s.Detections.Shared() {
+		// Every server of the cluster reads and changes the same ones.
+		resp["shared"] = true
+	}
 	if serr != nil {
 		resp["state_error"] = "The run state of the detections could not be read just now, so what is shown may be out of date: " + serr.Error()
 	}

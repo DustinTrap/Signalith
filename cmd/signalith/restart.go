@@ -348,7 +348,8 @@ func (r *runner) followShared(ctx context.Context) {
 		} else if tried != nil && *tried == wantSettings {
 			settingsFlip = false
 		}
-		if want == r.sharedContent.on.Load() && wantUsers == r.sharedContent.users.on.Load() && !settingsFlip {
+		wantLib := want && r.shared.SharedLibrary()
+		if want == r.sharedContent.on.Load() && wantUsers == r.sharedContent.users.on.Load() && !settingsFlip && wantLib == r.sharedContent.lib.on.Load() {
 			continue
 		}
 		why := "this server now takes the threat intel feeds and retention policies from the shared settings"
@@ -359,6 +360,10 @@ func (r *runner) followShared(ctx context.Context) {
 			why = "the users and sign-in are now shared by every server of the cluster; everyone signs in once more"
 		case want == r.sharedContent.on.Load() && wantUsers != r.sharedContent.users.on.Load():
 			why = "this server now keeps the users and sign-in in its own files"
+		case want == r.sharedContent.on.Load() && wantLib != r.sharedContent.lib.on.Load() && wantLib:
+			why = "the detections and dashboards are now shared by every server of the cluster"
+		case want == r.sharedContent.on.Load() && wantLib != r.sharedContent.lib.on.Load() && !settingsFlip:
+			why = "this server now keeps the detections and dashboards in its own folders"
 		case want == r.sharedContent.on.Load() && wantSettings:
 			why = "this server now takes the settings of the Settings page from the shared settings"
 		case want == r.sharedContent.on.Load():

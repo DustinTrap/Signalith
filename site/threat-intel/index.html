@@ -1,0 +1,3201 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for Signalith, the open-source SIEM for Windows and Linux.">
+      
+      
+        <meta name="author" content="Samuel Sanchez Jr.">
+      
+      
+        <link rel="canonical" href="https://signalith.io/docs/threat-intel/">
+      
+      
+        <link rel="prev" href="../ai-tools/">
+      
+      
+        <link rel="next" href="../dashboards/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Threat intel - Signalith</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#threat-intel" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Signalith" class="md-header__button md-logo" aria-label="Signalith" data-md-component="logo">
+      <img class="sg-logo sg-logo--light" src="../assets/logo-mark.svg" alt="Signalith logo" width="32" height="32">
+<img class="sg-logo sg-logo--dark" src="../assets/logo-mark-dark.svg" alt="" aria-hidden="true" width="32" height="32">
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Signalith
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Threat intel
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jrsamsanchez/Signalith" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jrsamsanchez/Signalith
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../sending-data/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Data intake
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../query-language/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Using Signalith
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../settings/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Administration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../security/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Security
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../roadmap/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Roadmap
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../releasing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Project
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Signalith" class="md-nav__button md-logo" aria-label="Signalith" data-md-component="logo">
+      <img class="sg-logo sg-logo--light" src="../assets/logo-mark.svg" alt="Signalith logo" width="32" height="32">
+<img class="sg-logo sg-logo--dark" src="../assets/logo-mark-dark.svg" alt="" aria-hidden="true" width="32" height="32">
+    </a>
+    Signalith
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jrsamsanchez/Signalith" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jrsamsanchez/Signalith
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install-packages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install from packages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data intake
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Data intake
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sending-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agents and syslog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opentelemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenTelemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../endpoints/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Endpoints (osquery)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wazuh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wazuh alerts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../antivirus/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Antivirus
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../vulnerabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vulnerability scanning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sample-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sample data
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Using Signalith
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Using Signalith
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../query-language/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Query language
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../detections/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detections
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../investigate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Investigate with AI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ai-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AI tools (MCP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Threat intel
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Threat intel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#indicators" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Indicators
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feeds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feeds
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Feeds">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adding-a-feed-on-the-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a feed on the page
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-catalog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The catalog
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#testing-a-feed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing a feed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#taxii-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TAXII 2.1
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Formats
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schedule-and-aging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schedule and aging
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#turning-off-and-deleting-feeds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Turning off and deleting feeds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#where-feeds-are-stored" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where feeds are stored
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#several-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several servers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#network-access-and-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network access and safety
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#feeds-in-signalithyaml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feeds in signalith.yaml
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manual-indicators-and-uploads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual indicators and uploads
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Matching
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Matching">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-threat-intel-match-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The threat intel match detection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#threatmatch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        threatmatch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#intel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        intel
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-and-scale" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage and scale
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dashboards/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboards
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../response-actions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Response actions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Notifications
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../playbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Playbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Administration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Administration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../users/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Users and sign-in
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent-tokens/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent tokens
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../servers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Servers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cluster-cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    signalith cluster
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../retention/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Security
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../https/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../encryption/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Encryption
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opensearch-security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Securing OpenSearch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../code-signing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code signing policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releasing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releasing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#indicators" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Indicators
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#feeds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feeds
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Feeds">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#adding-a-feed-on-the-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a feed on the page
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-catalog" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The catalog
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#testing-a-feed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing a feed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#taxii-21" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        TAXII 2.1
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#formats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Formats
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schedule-and-aging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Schedule and aging
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#turning-off-and-deleting-feeds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Turning off and deleting feeds
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#where-feeds-are-stored" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where feeds are stored
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#several-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several servers
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#network-access-and-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Network access and safety
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#feeds-in-signalithyaml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Feeds in signalith.yaml
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manual-indicators-and-uploads" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manual indicators and uploads
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#matching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Matching
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Matching">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-threat-intel-match-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The threat intel match detection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#threatmatch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        threatmatch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#intel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        intel
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#storage-and-scale" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Storage and scale
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/jrsamsanchez/Signalith/edit/main/docs/threat-intel.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="threat-intel">Threat intel<a class="headerlink" href="#threat-intel" title="Permanent link">&para;</a></h1>
+<p>Signalith matches events against threat intel <strong>indicators</strong>, like the Splunk ES
+threat intelligence framework. Indicators come from feeds that the server downloads,
+from indicators you add by hand, and from uploaded lists.</p>
+<h2 id="indicators">Indicators<a class="headerlink" href="#indicators" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Example</th>
+<th>Matched against</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ip</code></td>
+<td><code>203.0.113.9</code></td>
+<td><code>src</code>, <code>dest</code>, <code>src_ip</code>, <code>dest_ip</code></td>
+</tr>
+<tr>
+<td><code>cidr</code></td>
+<td><code>198.51.100.0/24</code></td>
+<td>The same fields, for any address in the network</td>
+</tr>
+<tr>
+<td><code>domain</code></td>
+<td><code>evil.example</code></td>
+<td><code>dest</code>, <code>dest_host</code>, <code>domain</code>, <code>query</code>, <code>url_domain</code>, and the host of <code>url</code> (with <code>| intel</code>)</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td><code>http://evil.example/a.exe</code></td>
+<td><code>url</code></td>
+</tr>
+<tr>
+<td><code>md5</code>, <code>sha1</code>, <code>sha256</code></td>
+<td><code>d41d8cd9...</code></td>
+<td><code>process_md5</code>, <code>process_sha1</code>, <code>process_sha256</code>, <code>process_hash</code>, <code>file_hash</code>, <code>file_md5</code>, <code>file_sha1</code>, <code>file_sha256</code>, <code>hash</code>, <code>md5</code>, <code>sha1</code>, <code>sha256</code></td>
+</tr>
+<tr>
+<td><code>email</code></td>
+<td><code>ceo@spoofed.example</code></td>
+<td><code>sender</code>, <code>recipient</code>, <code>src_user</code>, <code>user</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each indicator has a source (the feed name, or <code>manual</code>), description, weight,
+tags, first and last seen times, and an optional expiry. The same value from two
+feeds is two indicators, and a match lists every source.</p>
+<p>Values are normalized: IPs and hashes are lower-cased and canonical, domains and
+email addresses lower-cased, URL schemes and hosts lower-cased. Defanged values
+such as <code>hxxp://evil[.]example</code> are accepted. Domain matches are exact, so
+<code>evil.example</code> does not match <code>www.evil.example</code>; list both if you need both.</p>
+<p>Sysmon process events get <code>process_md5</code>, <code>process_sha1</code> and <code>process_sha256</code> (lower
+case) split out of <code>Hashes</code> at ingest, so hashes match exactly. Events ingested
+before this version have only <code>process_hash</code>; <code>| intel</code> still reads it.</p>
+<p><strong>Weight</strong> multiplies the risk a match adds: 1 is normal, 2 doubles it, 0.5 halves
+it, up to 10.</p>
+<h2 id="feeds">Feeds<a class="headerlink" href="#feeds" title="Permanent link">&para;</a></h2>
+<p>A feed is a list of indicators on the internet, or on a server of your own, that
+Signalith downloads on a schedule. Nothing is downloaded until you add a feed.</p>
+<h3 id="adding-a-feed-on-the-page">Adding a feed on the page<a class="headerlink" href="#adding-a-feed-on-the-page" title="Permanent link">&para;</a></h3>
+<p>On the <strong>Threat intel</strong> page, <strong>Add feed</strong> offers three ways:</p>
+<ul>
+<li><strong>From the catalog</strong>: free public feeds that Signalith already knows how to read,
+  with suggested settings. Add the recommended set in one go, or pick feeds one by
+  one.</li>
+<li><strong>From a URL</strong>: paste the address of a list, CSV file or STIX 2.1 bundle. The
+  format is detected (<code>auto</code>), and <strong>Test</strong> shows what Signalith found before you
+  save: the format and CSV column it picked, the indicator types and counts, a few
+  samples, lines it skipped, or why the download failed.</li>
+<li><strong>From a TAXII 2.1 server</strong> such as MISP, OpenCTI or a commercial provider: enter
+  the server's address and its user name and password (or API key header), list its
+  collections and pick one. See <a href="#taxii-21">TAXII 2.1</a>.</li>
+</ul>
+<p>A new or changed feed downloads at once; after that, every <code>interval</code>. Feeds from
+signalith.yaml show on the page as read-only and are changed in the file.
+Only admins add, change, test and refresh feeds. Viewers and analysts see the feeds and
+their status, with the address cut at <code>?</code> (a query can hold an API key) and no TAXII
+user name.</p>
+<p>Feed settings are the same wherever a feed is defined:</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>name</code></td>
+<td>required</td>
+<td>2-64 lowercase letters, digits, <code>-</code>, <code>_</code> or <code>.</code>; shown as the indicators' source. <code>manual</code> is reserved. It cannot be changed after the feed is added</td>
+</tr>
+<tr>
+<td><code>kind</code></td>
+<td><code>url</code></td>
+<td><code>url</code> downloads a file; <code>taxii</code> reads a TAXII 2.1 collection</td>
+</tr>
+<tr>
+<td><code>url</code></td>
+<td>required</td>
+<td>http(s) address. For <code>taxii</code>, the API root, such as <code>https://cti.example.com/api1/</code>. A user name or password in the URL is refused; use <code>username</code> and <code>password</code></td>
+</tr>
+<tr>
+<td><code>collection</code></td>
+<td>none</td>
+<td>For <code>taxii</code>: the collection ID</td>
+</tr>
+<tr>
+<td><code>format</code></td>
+<td><code>lines</code> in signalith.yaml, <code>auto</code> on the page</td>
+<td><code>lines</code>, <code>csv</code>, <code>stix</code> or <code>auto</code> (detected at each download). <code>taxii</code> feeds are always <code>stix</code></td>
+</tr>
+<tr>
+<td><code>type</code></td>
+<td><code>auto</code></td>
+<td><code>auto</code>, <code>ip</code>, <code>cidr</code>, <code>domain</code>, <code>url</code>, <code>hash</code>, <code>md5</code>, <code>sha1</code>, <code>sha256</code> or <code>email</code>. Values of other types are skipped and counted</td>
+</tr>
+<tr>
+<td><code>column</code></td>
+<td>none</td>
+<td>For <code>csv</code> (or <code>auto</code> that turns out to be CSV): a header name or a column number starting at 1. With <code>auto</code> and no column, the column with the most indicators is used</td>
+</tr>
+<tr>
+<td><code>interval</code></td>
+<td><code>1h</code></td>
+<td>How often to download, at least <code>5m</code>. Units: <code>m</code>, <code>h</code>, <code>d</code>, <code>w</code></td>
+</tr>
+<tr>
+<td><code>max_age</code></td>
+<td><code>7d</code></td>
+<td>How long indicators last if downloads keep failing; at least the interval</td>
+</tr>
+<tr>
+<td><code>weight</code></td>
+<td><code>1</code></td>
+<td>Risk multiplier for matches, 0 to 10</td>
+</tr>
+<tr>
+<td><code>description</code>, <code>tags</code></td>
+<td>none</td>
+<td>Added to every indicator from the feed (a STIX indicator keeps its own description; tags are combined)</td>
+</tr>
+<tr>
+<td><code>headers</code></td>
+<td>none</td>
+<td>Sent with each request, for feeds that need an API key</td>
+</tr>
+<tr>
+<td><code>username</code>, <code>password</code></td>
+<td>none</td>
+<td>HTTP basic sign-in, as TAXII servers usually use. A password needs a user name</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td><code>true</code></td>
+<td><code>false</code> stops the feed and removes its indicators</td>
+</tr>
+</tbody>
+</table>
+<h3 id="the-catalog">The catalog<a class="headerlink" href="#the-catalog" title="Permanent link">&para;</a></h3>
+<p>Only long-standing, publicly documented feeds are listed, with intervals that
+respect each provider's update rate. Check each provider's terms of use, especially
+for commercial use.</p>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Provider</th>
+<th>Contents</th>
+<th>Type</th>
+<th>Interval</th>
+<th>Weight</th>
+<th>Key</th>
+<th>Recommended</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>feodo-tracker</code></td>
+<td>abuse.ch</td>
+<td>Botnet command-and-control servers</td>
+<td>ip</td>
+<td>1h</td>
+<td>1.5</td>
+<td>optional</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>urlhaus</code></td>
+<td>abuse.ch</td>
+<td>URLs that served malware in the last 30 days</td>
+<td>url</td>
+<td>1h</td>
+<td>1</td>
+<td>optional</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>malwarebazaar</code></td>
+<td>abuse.ch</td>
+<td>SHA-256 hashes of malware shared in the last 48 hours</td>
+<td>sha256</td>
+<td>1h</td>
+<td>1</td>
+<td>optional</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>et-compromised</code></td>
+<td>Proofpoint Emerging Threats</td>
+<td>Compromised hosts attacking others</td>
+<td>ip</td>
+<td>12h</td>
+<td>1</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>spamhaus-drop</code></td>
+<td>Spamhaus</td>
+<td>Hijacked and criminal networks (DROP)</td>
+<td>cidr</td>
+<td>12h</td>
+<td>1.5</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>openphish</code></td>
+<td>OpenPhish</td>
+<td>Active phishing URLs (community feed)</td>
+<td>url</td>
+<td>12h</td>
+<td>1</td>
+<td>no</td>
+<td></td>
+</tr>
+<tr>
+<td><code>cins-army</code></td>
+<td>Sentinel IPS</td>
+<td>Addresses with a poor reputation from scanning and brute force</td>
+<td>ip</td>
+<td>6h</td>
+<td>0.5</td>
+<td>no</td>
+<td></td>
+</tr>
+<tr>
+<td><code>blocklist-de</code></td>
+<td>blocklist.de</td>
+<td>Addresses reported for brute force in the last 48 hours</td>
+<td>ip</td>
+<td>6h</td>
+<td>0.5</td>
+<td>no</td>
+<td></td>
+</tr>
+<tr>
+<td><code>firehol-level1</code></td>
+<td>FireHOL</td>
+<td>Combined blocklist of attack sources and criminal networks</td>
+<td>ip</td>
+<td>12h</td>
+<td>1</td>
+<td>no</td>
+<td></td>
+</tr>
+<tr>
+<td><code>tor-exits</code></td>
+<td>The Tor Project</td>
+<td>Tor exit relays; Tor use is not malicious by itself</td>
+<td>ip</td>
+<td>3h</td>
+<td>0.25</td>
+<td>no</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>abuse.ch bulk downloads work without a key today. A free key (sign in at
+<a href="https://auth.abuse.ch/">https://auth.abuse.ch/</a>) can be sent in the <code>Auth-Key</code> header; it lifts rate limits
+and keeps the feed working if abuse.ch starts to require one. Lists of noisy
+sources (scanners, brute force, Tor) have a weight below 1, so a match adds less
+risk.</p>
+<p>Feeds that were considered and left out: AlienVault OTX (its API needs a key and
+returns only the pulses you subscribe to, through its own paginated format),
+ThreatFox (its exports list <code>ip:port</code> pairs and change format often), the abuse.ch
+SSL blacklist (deprecated), and DShield's block list (start and end addresses
+rather than indicators). Any of them can still be added from a URL if the format
+suits you.</p>
+<h3 id="testing-a-feed">Testing a feed<a class="headerlink" href="#testing-a-feed" title="Permanent link">&para;</a></h3>
+<p><strong>Test</strong> downloads the feed without saving it, with a 1-minute time limit and at
+most 4 MB (a larger feed is checked from its first 4 MB, and the result says so; a
+STIX bundle larger than that cannot be checked in part, but can still be added);
+for TAXII, only the first page of the collection is read. It reports what a
+download would store, or why it failed, in plain words, for example:</p>
+<ul>
+<li><em>The server answered 403 Forbidden. This feed may need an API key.</em></li>
+<li><em>The server sent a web page, not a feed. Check the URL: a feed's address is
+  usually a download link on that page.</em></li>
+<li><em>None of the 120 values were valid indicators (the first was "lorem"). Check the
+  feed's format, type and column.</em></li>
+<li><em>Signalith does not download feeds from 169.254.169.254, a link-local address,
+  such as a cloud metadata service.</em></li>
+</ul>
+<p>When testing a saved feed, its saved API key and password are used, unless you
+enter new ones. A test shows counts and up to 10 examples, and keeps only those in
+memory. A server runs at most two tests (or TAXII collection lookups) at a time; a
+third is refused with <em>try again in a moment</em>.</p>
+<p>Test, like a feed, can reach servers on your local network (MISP and OpenCTI often
+live there), and shows a few values from what it reads. Only the admin can use it.
+It never reaches Signalith's own OpenSearch (<code>opensearch.url</code>), loopback addresses
+or the other addresses listed under <a href="#network-access-and-safety">Network access and safety</a>.</p>
+<h3 id="taxii-21">TAXII 2.1<a class="headerlink" href="#taxii-21" title="Permanent link">&para;</a></h3>
+<p>A <code>taxii</code> feed reads one collection of a TAXII 2.1 server.</p>
+<ol>
+<li>Enter the server's address. It can be the API root
+   (<code>https://cti.example.com/api1/</code>), the discovery address
+   (<code>https://cti.example.com/taxii2/</code>) or just <code>https://cti.example.com</code>; Signalith
+   asks the API root for its collections, and otherwise uses discovery to find the
+   API roots (at most 10).</li>
+<li>Enter the credentials: a user name and password (basic sign-in), or a header
+   such as <code>Authorization: Token …</code> for servers that use API keys.</li>
+<li>Pick a collection you can read. The feed stores the collection's API root as its
+   URL and the collection ID.</li>
+</ol>
+<p>Each download is a <strong>full pull</strong>: Signalith requests
+<code>&lt;api root&gt;/collections/&lt;id&gt;/objects/?match[type]=indicator&amp;limit=1000</code> with
+<code>Accept: application/taxii+json;version=2.1</code>, follows the <code>next</code> value page by page
+(or <code>X-TAXII-Date-Added-Last</code> with <code>added_after</code>, for servers that page by date),
+and replaces the feed's indicators with what it read. A full pull is used rather
+than an incremental one (<code>added_after</code> from the last run) because an incremental
+pull never learns that the server revoked or deleted an indicator, which would then
+keep matching until <code>max_age</code>. A pull stops after 1,000 pages, 500,000 objects or
+256 MB in all, and the feed's status then says that only part of the collection was
+read; the feed then holds those indicators.</p>
+<p>A pull has 30 minutes in all, and 2 minutes for each page. If a slow server runs out
+of time after the first page, the pages read so far are stored, nothing is removed
+(the rest of the collection was not seen, so indicators from earlier pulls stay until
+<code>max_age</code>), and the status says how much was read. If the first page does not come
+in time, the download fails and the previous indicators are kept. <strong>Refresh now</strong>
+waits at most 5 minutes, so a large collection may be read in part that way.
+Only <code>indicator</code> objects with STIX patterns are used, as described under
+<a href="#formats">Formats</a>.</p>
+<p>In signalith.yaml:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">intel</span><span class="p">:</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">feeds</span><span class="p">:</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">our-cti</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">taxii</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">      </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://cti.example.com/taxii2/api1/</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">      </span><span class="nt">collection</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">91a7b528-80eb-42ed-a74d-c6fbd5a26116</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">      </span><span class="nt">username</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">signalith</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">      </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${CTI_PASSWORD}</span>
+</span></code></pre></div>
+<h3 id="formats">Formats<a class="headerlink" href="#formats" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong>auto</strong> (the default on the page): a STIX bundle or TAXII envelope is read as
+  <code>stix</code>; a CSV file with a header row is read as <code>csv</code>, from the column that holds
+  the most indicators of the feed's type (or <code>column</code> if the header has it);
+  anything else is read as <code>lines</code>. The detected format and column are shown by
+  <strong>Test</strong>, and in the feed's details after each download (for example <em>CSV, column
+  dst_ip (detected)</em>). Dotted column names such as <code>source.ip</code> or <code>url.domain</code>
+  (Elastic ECS, OpenCTI exports) are recognized as a header.</li>
+<li><strong>lines</strong>: one indicator per line. Lines starting with <code>#</code>, <code>;</code> or <code>//</code> are
+  comments. The first word is the indicator, so <code>1.2.3.0/24 ; SBL123</code> and
+  <code>1.2.3.4 # note</code> work, and hosts files (<code>0.0.0.0 evil.example</code>) use the second word.</li>
+<li><strong>csv</strong>: <code>column</code> picks the value, by number or header name. The header can be the
+  first row, or the last <code>#</code> comment line before the data, which is how abuse.ch
+  publishes its CSV files.</li>
+<li><strong>stix</strong>: a STIX 2.1 bundle (<code>{"type": "bundle", "objects": [...]}</code>), a TAXII 2.1
+  envelope (<code>{"objects": [...]}</code>) or an array of objects. Each <code>indicator</code> with a STIX
+  pattern contributes every comparison it contains, such as
+  <code>[ipv4-addr:value = '203.0.113.9']</code>, <code>[domain-name:value = '...']</code>,
+  <code>[url:value = '...']</code>, <code>[file:hashes.'SHA-256' = '...']</code> and
+  <code>[email-addr:value = '...']</code>. The indicator's name and description become the
+  description, <code>indicator_types</code> and <code>labels</code> become tags, and <code>valid_until</code> becomes
+  the expiry. Revoked and expired indicators and other pattern languages are skipped.</li>
+</ul>
+<p>Addresses and networks in private, loopback, link-local, multicast and other
+reserved ranges (<code>10.0.0.0/8</code>, <code>172.16.0.0/12</code>, <code>192.168.0.0/16</code>, <code>100.64.0.0/10</code>,
+<code>127.0.0.0/8</code>, <code>169.254.0.0/16</code>, <code>0.0.0.0/8</code>, <code>224.0.0.0/4</code>, <code>240.0.0.0/4</code>, <code>fc00::/7</code>,
+<code>fe80::/10</code>, <code>ff00::/8</code>), and networks broader than /8 (IPv4) or /16 (IPv6), are
+skipped in feeds and counted as reserved, so a feed such as FireHOL level 1, which
+lists the bogon ranges for firewalls, never matches your own network. Add an
+internal address by hand if you need to.</p>
+<h3 id="schedule-and-aging">Schedule and aging<a class="headerlink" href="#schedule-and-aging" title="Permanent link">&para;</a></h3>
+<p>The server that runs the background jobs downloads each enabled feed when it
+starts running them (unless it downloaded it within the interval, which survives
+restarts in <code>lookups.dir/intel_feeds.json</code>) and then every <code>interval</code>. Each download replaces the
+feed's indicators: new ones are added, existing ones get a new last-seen time, and
+ones no longer listed are removed. A failed download, or one with no valid
+indicators, keeps the previous indicators and is retried within 15 minutes; if it
+keeps failing, indicators expire <code>max_age</code> after the last good download. Expired
+indicators stop matching at once and are deleted hourly.</p>
+<p>The Threat intel page lists each feed with its status, indicator count and last
+download. Open a row for its settings, the last download's changes, skipped and
+reserved values, notes and last error. The row's menu has <strong>Refresh now</strong> and, for
+feeds added on the page, <strong>Edit</strong>, <strong>Turn off</strong> and <strong>Delete</strong>.</p>
+<h3 id="turning-off-and-deleting-feeds">Turning off and deleting feeds<a class="headerlink" href="#turning-off-and-deleting-feeds" title="Permanent link">&para;</a></h3>
+<p>Turning a feed off stops its downloads and removes its indicators. Deleting a feed
+added on the page asks what to do with its indicators:</p>
+<ul>
+<li><strong>Remove them</strong> (the default): they stop matching at once.</li>
+<li><strong>Keep them</strong>: they stay until they age out, <code>max_age</code> after the feed's last
+  download, and can be deleted one by one before that. Adding a feed with the same
+  name again takes them over.</li>
+</ul>
+<p>Feeds from signalith.yaml are removed by editing the file and restarting.</p>
+<h3 id="where-feeds-are-stored">Where feeds are stored<a class="headerlink" href="#where-feeds-are-stored" title="Permanent link">&para;</a></h3>
+<p>When several servers share one OpenSearch and form a cluster, the feeds are stored in
+OpenSearch and shared by every server; see <a href="#several-servers">Several servers</a>. The
+rest of this section is about a server on its own.</p>
+<p>Feeds added on the page are saved in <code>intel_feeds.yaml</code> in <code>lookups.dir</code>, or in
+<code>intel.feeds_file</code> (environment: <code>SIGNALITH_INTEL_FEEDS_FILE</code>); a relative path is
+relative to the folder of signalith.yaml. Signalith writes the file atomically
+(a new file renamed over the old one) with mode 0600. It holds API keys and
+passwords in plain text, so keep it and its backups private. Feeds from signalith.yaml
+are never written to it.</p>
+<p>API keys and passwords are write-only: the page and the API show only whether each
+is set, never its value. Leaving a secret empty when changing a feed keeps the saved
+value; clear it to remove it. A saved key or password is only sent to the server it
+was entered for: when a change or test points the feed at another server (scheme,
+host or port), each saved secret must be entered again or cleared. <code>${ENV_VAR}</code>
+references are expanded only in signalith.yaml; on the page, <code>${...}</code> is sent as
+typed.</p>
+<p>If <code>intel_feeds.yaml</code> cannot be read (for example after a bad hand edit), the page
+shows the error, changes on the page are refused until it is fixed or deleted, and
+the feeds in it are not downloaded; indicators already stored are kept and age out
+normally. Signalith reads the file again each time the page loads, so after fixing
+or deleting it, reload the page; no restart is needed. <code>signalith validate</code> reports
+problems in both files.</p>
+<p>A name used in both files belongs to the signalith.yaml feed; the page's feed is
+shown with the problem and not downloaded.</p>
+<h3 id="several-servers">Several servers<a class="headerlink" href="#several-servers" title="Permanent link">&para;</a></h3>
+<p>When several servers share one OpenSearch, they form a cluster and share the feeds
+(see <a href="../servers/#shared-feeds-and-retention-policies">Shared feeds and retention policies</a>):
+every server's Threat intel page lists the same feeds, and a feed added, changed or
+deleted on any of them changes for all of them at once. API keys and passwords are
+stored in OpenSearch encrypted with the cluster key, which OpenSearch never holds.</p>
+<ul>
+<li><strong>Downloads.</strong> The server that runs the background jobs (one with
+  <code>detections.scheduler: true</code>; another takes over if it stops) downloads every feed,
+  and the page says which server that is. <strong>Refresh now</strong> on another server asks it
+  to: the page shows "Queued on siem-a", then "Downloading…", then what the download
+  found. Each feed's status (last download, error, indicators) is shared too, and
+  reaches the other servers within a few seconds.</li>
+<li><strong>Where a feed came from.</strong> When the cluster is made, the feeds of the server that
+  founds it, from its <code>intel_feeds.yaml</code> and from <code>intel.feeds</code> in signalith.yaml,
+  become the shared feeds. Feeds from signalith.yaml then work like feeds added on the
+  page: they can be changed and deleted on the page, and show a badge and a line
+  saying where they came from, such as "Applied from signalith.yaml on siem-b". A
+  feed in a server's signalith.yaml applies again only when it changes there (see
+  <a href="../servers/#shared-feeds-and-retention-policies">Shared feeds and retention policies</a>).
+  The other servers' own <code>intel_feeds.yaml</code> files are no longer used.</li>
+<li><strong>Changes at the same moment.</strong> If someone changed a feed since you opened the
+  page, your change to it is refused, and the page says so and shows theirs.</li>
+<li>While a server cannot use the shared settings (it cannot reach OpenSearch, or
+  misses the cluster key), changes there are refused and the page says why.</li>
+</ul>
+<p>Indicators are stored in OpenSearch, so matching works on every server.</p>
+<p><strong>Servers that are not part of the cluster</strong> (an older version, or a server without
+the cluster key) use their own <code>intel_feeds.yaml</code> and download nothing while another
+server runs the jobs: their page lists the feeds read-only and says which server
+downloads them, and <strong>Refresh now</strong> works only for feeds from signalith.yaml. Give
+them the cluster key (see <a href="../cluster-cli/#export-key-and-import-key">signalith cluster</a>).</p>
+<h3 id="network-access-and-safety">Network access and safety<a class="headerlink" href="#network-access-and-safety" title="Permanent link">&para;</a></h3>
+<p>Every server that may run the background jobs needs outbound HTTP(S) to each feed: for the catalog, port 443
+(and port 80 for <code>cins-army</code>) to the hosts in the catalog URLs. Downloads use the
+proxy in <code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code> and <code>NO_PROXY</code>, like the rest of Signalith; set
+them in the service's environment if your network requires a proxy.</p>
+<p>Because anyone who can add a feed chooses where the server connects, downloads
+follow these rules:</p>
+<ul>
+<li>Only <code>http</code> and <code>https</code> URLs, without a user name or password in the URL.</li>
+<li>Addresses are checked when connecting, after DNS, on every redirect and for
+  every address a name resolves to. Never allowed: loopback (<code>127.0.0.0/8</code>, <code>::1</code>),
+  unspecified (<code>0.0.0.0/8</code>, <code>::</code>), link-local (<code>169.254.0.0/16</code>, <code>fe80::/10</code>, which
+  includes the <code>169.254.169.254</code> cloud metadata service), multicast and broadcast,
+  and the metadata addresses <code>fd00:ec2::254</code> and <code>100.100.100.200</code>. IPv4 addresses
+  written as IPv6 (<code>::ffff:127.0.0.1</code>, <code>64:ff9b::7f00:1</code>) are checked as IPv4.
+  Private ranges (<code>10.0.0.0/8</code>, <code>192.168.0.0/16</code> and so on) are allowed, since
+  MISP and OpenCTI servers often live there.</li>
+<li><code>intel.allow_loopback_feeds: true</code> allows loopback, for a feed server on the same
+  machine. It never allows link-local or metadata addresses. A proxy from the
+  environment may be on this machine either way.</li>
+<li>Signalith's own OpenSearch (the host and port of <code>opensearch.url</code>) is never
+  allowed, by name or by any address the name resolves to, even with
+  <code>allow_loopback_feeds</code>. An OpenSearch without its security plugin answers anyone
+  who reaches it, so this keeps a feed URL from reading it.</li>
+<li>Through a proxy, the proxy looks up host names and connects, so only addresses
+  written in the URL are checked; limit what the proxy may reach if that matters.
+  Only the connection to the proxy itself skips the check: a feed URL that names
+  the proxy's own address (such as <code>http://localhost:3128/</code>, which Go never sends
+  through a proxy) is checked like any other.</li>
+<li>At most 5 redirects, each checked by the same rules. No <code>Referer</code> is sent, since
+  the feed URL's query may hold a key. API key headers and the password are only
+  sent on a redirect that stays on the same host and port (or only moves from http
+  to https).</li>
+<li>Downloads stop at 256 MB and 2 million indicators and time out after 5 minutes
+  (TAXII: 30 minutes, 2 minutes a page); a test stops at 4 MB and 1 minute, and at
+  most two run at once; listing TAXII collections times out after 30 seconds.</li>
+<li>Logs and error messages never show API keys, passwords or the query part of a
+  URL (which often holds a key); URLs are logged as <code>https://host/path?…</code>, and a
+  server's error text is shown with any secret replaced by <code>[hidden]</code>.</li>
+</ul>
+<h3 id="feeds-in-signalithyaml">Feeds in signalith.yaml<a class="headerlink" href="#feeds-in-signalithyaml" title="Permanent link">&para;</a></h3>
+<p>Feeds can also be listed in signalith.yaml, for example when the file is managed by
+configuration tools. They use the settings above, and header and password values
+may use <code>${ENV_VAR}</code> so keys stay out of the file:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">intel</span><span class="p">:</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="nt">feeds</span><span class="p">:</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="c1"># Botnet command-and-control servers</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">feodo-tracker</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">      </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://feodotracker.abuse.ch/downloads/ipblocklist.txt</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">      </span><span class="nt">weight</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1.5</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="c1"># Malware download URLs from the last 30 days</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">urlhaus</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">      </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://urlhaus.abuse.ch/downloads/text_recent/</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">url</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">    </span><span class="c1"># Recent malware file hashes</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">malwarebazaar</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">      </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://bazaar.abuse.ch/export/txt/sha256/recent/</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sha256</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="w">    </span><span class="c1"># Your own platform exporting STIX 2.1 over HTTPS</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">our-export</span>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="w">      </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://cti.example.com/export/signalith.json</span>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="w">      </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">stix</span>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="w">      </span><span class="nt">headers</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt">Authorization</span><span class="p">:</span><span class="w"> </span><span class="s">"Bearer</span><span class="nv"> </span><span class="s">${CTI_API_KEY}"</span><span class="p p-Indicator">}</span>
+</span><span id="__span-1-20"><a id="__codelineno-1-20" name="__codelineno-1-20" href="#__codelineno-1-20"></a><span class="w">  </span><span class="c1"># feeds_file: lookups/intel_feeds.yaml</span>
+</span><span id="__span-1-21"><a id="__codelineno-1-21" name="__codelineno-1-21" href="#__codelineno-1-21"></a><span class="w">  </span><span class="c1"># allow_loopback_feeds: false</span>
+</span></code></pre></div>
+<h2 id="manual-indicators-and-uploads">Manual indicators and uploads<a class="headerlink" href="#manual-indicators-and-uploads" title="Permanent link">&para;</a></h2>
+<p>Add one indicator on the Threat intel page, or upload a file:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>value,type,description,weight,expires,tags
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>203.0.113.9,,Scanner seen in incident 42,2,30d,scanner|ssh
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>login-bank.example,domain,Phishing site,,2026-12-31,phishing
+</span></code></pre></div>
+<p>Only <code>value</code> is required; <code>type</code> is detected when empty. <code>expires</code> is a date, an
+RFC 3339 time or a duration such as <code>30d</code>. A plain list with one value per line also
+works. Every bad line is reported and nothing is saved unless the whole file is
+valid. Uploads add to the manual indicators (a value already present is updated).
+One file can be up to 16 MB and 2,000,000 indicators; split a larger one. Delete
+manual indicators on the page; feed indicators come back with the next download,
+so turn the feed off instead. Indicators kept from a deleted feed can be deleted
+one by one.</p>
+<h2 id="matching">Matching<a class="headerlink" href="#matching" title="Permanent link">&para;</a></h2>
+<h3 id="the-threat-intel-match-detection">The threat intel match detection<a class="headerlink" href="#the-threat-intel-match-detection" title="Permanent link">&para;</a></h3>
+<p><code>threat-activity</code> is built in and enabled. Every 5 minutes it runs</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>* | threatmatch
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>| head 1000
+</span></code></pre></div>
+<p>over the last 10 minutes and raises one finding per indicator and target system per
+24 hours, titled for example <em>Threat intel match on src 203.0.113.9 (feodo-tracker)</em>.
+The finding's result has the matched field and value, the indicator, its sources,
+weight and description. Risk is 60 times the indicator's weight, added to
+<code>threat_target</code> (system) and <code>user</code>. It does nothing until there are indicators.
+Matching is forward-looking; to check older events, search with a longer time range.</p>
+<h3 id="threatmatch">threatmatch<a class="headerlink" href="#threatmatch" title="Permanent link">&para;</a></h3>
+<p><code>| threatmatch [fields]</code> keeps only events where a field equals an active indicator.
+It runs inside OpenSearch: the server sends the indicator values as <code>terms</code> filters
+(10,000 values per clause, upper- and lower-case for hashes) and IPv4 networks as
+prefix filters, so events are never streamed through Signalith. It must come right
+after the search. Up to about 800 network clauses are used (a /24 or /16 is one;
+a /20 is 16); networks beyond that are matched only by <code>| intel</code>. IPv6 networks
+match only with <code>| intel</code>.</p>
+<p>Each event gets:</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>threat_match_field</code>, <code>threat_match_value</code></td>
+<td>The event field and value that matched (the highest-weight match if several did)</td>
+</tr>
+<tr>
+<td><code>threat_indicator</code>, <code>threat_type</code></td>
+<td>The indicator, such as the network the address is in</td>
+</tr>
+<tr>
+<td><code>threat_source</code></td>
+<td>Every source listing it</td>
+</tr>
+<tr>
+<td><code>threat_weight</code>, <code>threat_description</code></td>
+<td>From the strongest indicator</td>
+</tr>
+<tr>
+<td><code>threat_target</code></td>
+<td>The system on your side: the destination when the source matched, otherwise the source or reporting host</td>
+</tr>
+</tbody>
+</table>
+<h3 id="intel">intel<a class="headerlink" href="#intel" title="Permanent link">&para;</a></h3>
+<p><code>| intel [fields]</code> checks any result in the Signalith server and adds
+<code>&lt;field&gt;_intel_source</code>, <code>&lt;field&gt;_intel_type</code>, <code>&lt;field&gt;_intel_weight</code> and
+<code>&lt;field&gt;_intel_description</code> where a value is an indicator. It also matches URLs by
+host against domain indicators and Sysmon <code>process_hash</code> lists. Use it after <code>stats</code>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>datamodel=Network_Traffic | stats count, sum(bytes) as bytes by dest | intel dest | where dest_intel_source=*
+</span></code></pre></div>
+<h2 id="storage-and-scale">Storage and scale<a class="headerlink" href="#storage-and-scale" title="Permanent link">&para;</a></h2>
+<p>Indicators are stored in the <code>&lt;prefix&gt;_intel</code> OpenSearch index, which event searches
+never read, and every server keeps the active ones in memory (about 200 bytes each),
+reloading within a minute when another server changes them. A few hundred thousand
+indicators are fine; the threatmatch filter for 200,000 IP indicators is a few
+megabytes per search.</p>
+<h2 id="api">API<a class="headerlink" href="#api" title="Permanent link">&para;</a></h2>
+<p>Every change needs a signed-in session (or basic sign-in) and is refused from other
+sites, like the rest of the API. Secret values are never returned: headers come back
+as <code>{"name": "X-Api-Key", "set": true}</code> and the password as <code>{"set": true}</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Method and path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/intel</code></td>
+<td>Counts by type and source, and every feed with its status</td>
+</tr>
+<tr>
+<td><code>GET /api/intel/feeds</code></td>
+<td>Every feed with its settings and status, plus <code>downloads</code> (whether this server downloads feeds), <code>manage</code> (whether feeds can be changed here), <code>shared</code> (whether the feeds are shared), <code>feeds_file</code> (empty when shared), <code>formats</code>, <code>types</code>, <code>file_error</code> when the feeds file cannot be read, and for admins <code>etags</code>, each feed's version by name. A shared feed that was not added on the page has <code>from</code>, such as <code>"applied from signalith.yaml on siem-b"</code></td>
+</tr>
+<tr>
+<td><code>POST /api/intel/feeds</code></td>
+<td>Add a feed (body below); it downloads at once</td>
+</tr>
+<tr>
+<td><code>PUT /api/intel/feeds/{name}</code></td>
+<td>Change a feed added on the page. Settings left out stay as they are; an empty secret keeps the saved one. 409 for a feed from signalith.yaml, unless the feeds are shared. With <code>If-Match</code> and the feed's etag, 412 when it changed meanwhile; the answer's <code>ETag</code> is its new version</td>
+</tr>
+<tr>
+<td><code>DELETE /api/intel/feeds/{name}?indicators=remove\|keep</code></td>
+<td>Delete a feed added on the page; <code>remove</code> (default) deletes its indicators, <code>keep</code> lets them age out. Takes <code>If-Match</code> like <code>PUT</code></td>
+</tr>
+<tr>
+<td><code>POST /api/intel/feeds/{name}/refresh</code></td>
+<td>Download a feed now. With shared feeds, on a server that does not download them: <code>202 {"feed","request_id","queued_on"}</code>, followed with <code>GET /api/requests/{id}</code> (see <a href="../retention/#api">the retention API</a>), whose <code>result</code> is the feed's status, or <code>{"already_running":true}</code> when it was downloading already</td>
+</tr>
+<tr>
+<td><code>POST /api/intel/feeds/test</code></td>
+<td>Download without saving; the body is a feed, or <code>{"feed": "&lt;name&gt;"}</code> plus any settings to try on a saved feed with its saved secrets</td>
+</tr>
+<tr>
+<td><code>GET /api/intel/catalog</code></td>
+<td>The catalog, each entry with <code>added</code> and the <code>feed</code> made from it</td>
+</tr>
+<tr>
+<td><code>POST /api/intel/catalog</code></td>
+<td>Add catalog feeds: <code>{"ids": ["feodo-tracker", "spamhaus-drop"]}</code> returns <code>{"added": [feeds], "skipped": [{"id", "reason"}]}</code></td>
+</tr>
+<tr>
+<td><code>POST /api/intel/taxii/collections</code></td>
+<td>A TAXII server's collections: <code>{"url", "username", "password", "headers"}</code> or <code>{"feed": "&lt;name&gt;"}</code></td>
+</tr>
+<tr>
+<td><code>GET /api/intel/indicators?q=&amp;type=&amp;source=&amp;limit=&amp;offset=</code></td>
+<td>List indicators, newest first</td>
+</tr>
+<tr>
+<td><code>POST /api/intel/indicators</code></td>
+<td>Add one: <code>{"value": "...", "type": "auto", "description": "...", "weight": "1", "expires": "30d", "tags": []}</code></td>
+</tr>
+<tr>
+<td><code>DELETE /api/intel/indicators/{id}</code></td>
+<td>Delete a manual indicator, or one kept from a deleted feed</td>
+</tr>
+<tr>
+<td><code>POST /api/intel/upload</code></td>
+<td>Add manual indicators from CSV or a list; returns <code>{"lines": [{"line", "msg"}]}</code> on errors</td>
+</tr>
+<tr>
+<td><code>GET /api/intel/lookup?value=</code></td>
+<td>Check one value against every indicator</td>
+</tr>
+</tbody>
+</table>
+<p>Adding a feed:</p>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="err">POST</span><span class="w"> </span><span class="err">/api/i</span><span class="kc">ntel</span><span class="err">/</span><span class="kc">fee</span><span class="err">ds</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="p">{</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"partner"</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://feeds.partner.example/ips.txt"</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"auto"</span><span class="p">,</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">  </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"auto"</span><span class="p">,</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span><span class="nt">"interval"</span><span class="p">:</span><span class="w"> </span><span class="s2">"30m"</span><span class="p">,</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">  </span><span class="nt">"max_age"</span><span class="p">:</span><span class="w"> </span><span class="s2">"7d"</span><span class="p">,</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">  </span><span class="nt">"weight"</span><span class="p">:</span><span class="w"> </span><span class="mf">1.5</span><span class="p">,</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">  </span><span class="nt">"description"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Partner list"</span><span class="p">,</span>
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">  </span><span class="nt">"tags"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"partner"</span><span class="p">],</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="w">  </span><span class="nt">"enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a><span class="w">  </span><span class="nt">"headers"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"X-Api-Key"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="s2">"the key"</span><span class="p">}]</span>
+</span><span id="__span-5-14"><a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Only <code>name</code> and <code>url</code> are required (<code>kind</code>, <code>collection</code>, <code>column</code>, <code>username</code>,
+<code>password</code> and <code>catalog</code> are optional; <code>catalog</code> fills empty settings from that
+catalog entry). On a change, a header <code>{"name": "X-Api-Key"}</code> without a value keeps
+the saved value, <code>{"name": "X-Api-Key", "clear": true}</code> removes it, and
+<code>"clear_password": true</code> removes the password. The answer is the feed:</p>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"partner"</span><span class="p">,</span><span class="w"> </span><span class="nt">"source"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ui"</span><span class="p">,</span><span class="w"> </span><span class="nt">"kind"</span><span class="p">:</span><span class="w"> </span><span class="s2">"url"</span><span class="p">,</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://feeds.partner.example/ips.txt"</span><span class="p">,</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"auto"</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"auto"</span><span class="p">,</span><span class="w"> </span><span class="nt">"interval"</span><span class="p">:</span><span class="w"> </span><span class="s2">"30m"</span><span class="p">,</span><span class="w"> </span><span class="nt">"max_age"</span><span class="p">:</span><span class="w"> </span><span class="s2">"7d"</span><span class="p">,</span><span class="w"> </span><span class="nt">"weight"</span><span class="p">:</span><span class="w"> </span><span class="mf">1.5</span><span class="p">,</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">  </span><span class="nt">"description"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Partner list"</span><span class="p">,</span><span class="w"> </span><span class="nt">"tags"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"partner"</span><span class="p">],</span><span class="w"> </span><span class="nt">"enabled"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span><span class="nt">"headers"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"X-Api-Key"</span><span class="p">,</span><span class="w"> </span><span class="nt">"set"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">}],</span><span class="w"> </span><span class="nt">"password"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"set"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">},</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">  </span><span class="nt">"has_headers"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"indicators"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"status"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"count"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"added"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"removed"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">}</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="p">}</span>
+</span></code></pre></div>
+<p><code>source</code> is <code>ui</code> for feeds added on the page and <code>config</code> for feeds from
+signalith.yaml; <code>problem</code> explains why a feed is not downloaded. Invalid settings
+answer 400 with every problem and the setting it belongs to:</p>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="p">{</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span><span class="nt">"error"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Please fix these settings: interval must be at least 5m; feeds update far less often"</span><span class="p">,</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">  </span><span class="nt">"problems"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"interval must be at least 5m; feeds update far less often"</span><span class="p">],</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">  </span><span class="nt">"fields"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"interval"</span><span class="p">:</span><span class="w"> </span><span class="s2">"interval must be at least 5m; feeds update far less often"</span><span class="p">}</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>A test answers 200 whether or not the download worked:</p>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="p">{</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span><span class="nt">"ok"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"csv"</span><span class="p">,</span><span class="w"> </span><span class="nt">"column"</span><span class="p">:</span><span class="w"> </span><span class="s2">"dst_ip"</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ip"</span><span class="p">,</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span><span class="nt">"total"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"by_type"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"ip"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">},</span><span class="w"> </span><span class="nt">"skipped"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">  </span><span class="nt">"samples"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ip"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="s2">"203.0.113.9"</span><span class="p">},</span><span class="w"> </span><span class="p">{</span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"ip"</span><span class="p">,</span><span class="w"> </span><span class="nt">"value"</span><span class="p">:</span><span class="w"> </span><span class="s2">"198.51.100.4"</span><span class="p">}],</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">  </span><span class="nt">"bytes"</span><span class="p">:</span><span class="w"> </span><span class="mi">187</span><span class="p">,</span><span class="w"> </span><span class="nt">"duration_ms"</span><span class="p">:</span><span class="w"> </span><span class="mi">412</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="p">}</span>
+</span></code></pre></div>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="p">{</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span><span class="nt">"ok"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nt">"http_status"</span><span class="p">:</span><span class="w"> </span><span class="mi">403</span><span class="p">,</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span><span class="nt">"error"</span><span class="p">:</span><span class="w"> </span><span class="s2">"The server answered 403 Forbidden. This feed may need an API key. It said: \"missing or wrong API key\""</span><span class="p">,</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span><span class="nt">"total"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"by_type"</span><span class="p">:</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="nt">"skipped"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"samples"</span><span class="p">:</span><span class="w"> </span><span class="p">[],</span><span class="w"> </span><span class="nt">"bytes"</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">"duration_ms"</span><span class="p">:</span><span class="w"> </span><span class="mi">95</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Other fields: <code>skipped_example</code> (the first value that was not an indicator),
+<code>reserved</code> (private and reserved addresses skipped), <code>truncated</code> and <code>note</code> (only
+part of the feed was read). Listing TAXII collections answers
+<code>{"ok": true, "title": "...", "collections": [{"api_root", "id", "title", "description", "can_read", "media_types"}]}</code>,
+or <code>{"ok": false, "error": "...", "collections": []}</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../ai-tools/" class="md-footer__link md-footer__link--prev" aria-label="Previous: AI tools (MCP)">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                AI tools (MCP)
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../dashboards/" class="md-footer__link md-footer__link--next" aria-label="Next: Dashboards">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Dashboards
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Signalith is open source under the Apache License 2.0.
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/jrsamsanchez/Signalith" target="_blank" rel="noopener" title="Signalith on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://signalith.io/" target="_blank" rel="noopener" title="signalith.io" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M16.36 14c.08-.66.14-1.32.14-2s-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2m-5.15 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56M14.34 14H9.66c-.1-.66-.16-1.32-.16-2s.06-1.35.16-2h4.68c.09.65.16 1.32.16 2s-.07 1.34-.16 2M12 19.96c-.83-1.2-1.5-2.53-1.91-3.96h3.82c-.41 1.43-1.08 2.76-1.91 3.96M8 8H5.08A7.92 7.92 0 0 1 9.4 4.44C8.8 5.55 8.35 6.75 8 8m-2.92 8H8c.35 1.25.8 2.45 1.4 3.56A8 8 0 0 1 5.08 16m-.82-2C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2s.06 1.34.14 2M12 4.03c.83 1.2 1.5 2.54 1.91 3.97h-3.82c.41-1.43 1.08-2.77 1.91-3.97M18.92 8h-2.95a15.7 15.7 0 0 0-1.38-3.56c1.84.63 3.37 1.9 4.33 3.56M12 2C6.47 2 2 6.5 2 12a10 10 0 0 0 10 10 10 10 0 0 0 10-10A10 10 0 0 0 12 2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.indexes", "navigation.footer", "navigation.tracking", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

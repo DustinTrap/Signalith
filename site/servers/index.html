@@ -1,0 +1,3127 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for Signalith, the open-source SIEM for Windows and Linux.">
+      
+      
+        <meta name="author" content="Samuel Sanchez Jr.">
+      
+      
+        <link rel="canonical" href="https://signalith.io/docs/servers/">
+      
+      
+        <link rel="prev" href="../agent-tokens/">
+      
+      
+        <link rel="next" href="../cluster-cli/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Servers - Signalith</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#servers" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Signalith" class="md-header__button md-logo" aria-label="Signalith" data-md-component="logo">
+      <img class="sg-logo sg-logo--light" src="../assets/logo-mark.svg" alt="Signalith logo" width="32" height="32">
+<img class="sg-logo sg-logo--dark" src="../assets/logo-mark-dark.svg" alt="" aria-hidden="true" width="32" height="32">
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Signalith
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Servers
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9zM20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12zm-9.15 3.96h2.3L12 9z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_2" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to system preference"  type="radio" name="__palette" id="__palette_2">
+    
+      <label class="md-header__button md-icon" title="Switch to system preference" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/jrsamsanchez/Signalith" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jrsamsanchez/Signalith
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Getting started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../sending-data/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Data intake
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../query-language/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Using Signalith
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../settings/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Administration
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../security/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Security
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../roadmap/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Roadmap
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../releasing/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Project
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Signalith" class="md-nav__button md-logo" aria-label="Signalith" data-md-component="logo">
+      <img class="sg-logo sg-logo--light" src="../assets/logo-mark.svg" alt="Signalith logo" width="32" height="32">
+<img class="sg-logo sg-logo--dark" src="../assets/logo-mark-dark.svg" alt="" aria-hidden="true" width="32" height="32">
+    </a>
+    Signalith
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/jrsamsanchez/Signalith" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    jrsamsanchez/Signalith
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install-packages/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Install from packages
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data intake
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Data intake
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sending-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agents and syslog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opentelemetry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenTelemetry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../endpoints/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Endpoints (osquery)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../wazuh/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Wazuh alerts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../antivirus/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Antivirus
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../vulnerabilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vulnerability scanning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sample-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sample data
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Using Signalith
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Using Signalith
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../query-language/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Query language
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../detections/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Detections
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../investigate/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Investigate with AI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ai-tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AI tools (MCP)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../threat-intel/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Threat intel
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dashboards/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dashboards
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../response-actions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Response actions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notifications/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Notifications
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../playbooks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Playbooks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Administration
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Administration
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Server settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../users/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Users and sign-in
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../agent-tokens/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Agent tokens
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Servers
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Servers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-servers-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Servers page
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-this-server-cant-use-opensearch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When this server can't use OpenSearch
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-background-jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The background jobs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-a-server-will-not-take-over" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a server will not take over
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-opensearchs-disk-is-full" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When OpenSearch's disk is full
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#clocks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Clocks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Identity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#adding-a-server-by-hand" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a server by hand
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-settings-and-the-cluster-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared settings and the cluster key
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-feeds-and-retention-policies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared feeds and retention policies
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-users-and-sign-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared users and sign-in
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-detections-dashboards-and-asset-lists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared detections, dashboards and asset lists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#field-names-when-several-servers-receive-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Field names when several servers receive events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agents-across-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agents across servers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrading-servers-you-set-up-by-hand" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrading servers you set up by hand
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#load-balancers-readyz-and-livez" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Load balancers: /readyz and /livez
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#several-servers-behind-one-address" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several servers behind one address
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cluster-cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    signalith cluster
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../retention/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data retention
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Security
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../https/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HTTPS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../encryption/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Encryption
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../opensearch-security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Securing OpenSearch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../code-signing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code signing policy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Project
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../releasing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Releasing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-servers-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Servers page
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-this-server-cant-use-opensearch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When this server can't use OpenSearch
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-background-jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The background jobs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-a-server-will-not-take-over" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a server will not take over
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#when-opensearchs-disk-is-full" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When OpenSearch's disk is full
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#clocks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Clocks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#identity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Identity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#adding-a-server-by-hand" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adding a server by hand
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-settings-and-the-cluster-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared settings and the cluster key
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-feeds-and-retention-policies" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared feeds and retention policies
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-users-and-sign-in" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared users and sign-in
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#shared-detections-dashboards-and-asset-lists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Shared detections, dashboards and asset lists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#field-names-when-several-servers-receive-events" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Field names when several servers receive events
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#agents-across-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Agents across servers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrading-servers-you-set-up-by-hand" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrading servers you set up by hand
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#load-balancers-readyz-and-livez" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Load balancers: /readyz and /livez
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#several-servers-behind-one-address" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Several servers behind one address
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/jrsamsanchez/Signalith/edit/main/docs/servers.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="servers">Servers<a class="headerlink" href="#servers" title="Permanent link">&para;</a></h1>
+<p>Several Signalith servers can share one OpenSearch, for example two servers
+behind a load balancer. Each one is a whole Signalith: it serves the web pages,
+receives agent and syslog data, and searches. They find each other through
+OpenSearch, so there is nothing to connect between them.</p>
+<p>One thing they do not all do: the <strong>background jobs</strong>. Exactly one server at a
+time runs them. The <strong>Servers</strong> page shows which one.</p>
+<h2 id="the-servers-page">The Servers page<a class="headerlink" href="#the-servers-page" title="Permanent link">&para;</a></h2>
+<p>Open <strong>Servers</strong> in the navigation, under Health, or press Ctrl+K and type
+"servers". The page is for admins. When something stops for everyone, such as no
+server running detections or OpenSearch's disk being full, every signed-in person
+sees a red banner at the top of every page, and the Health card in the sidebar
+turns red.</p>
+<p>The line above the list says how many servers there are, which one runs the jobs,
+which version they run and how OpenSearch is doing. The page updates itself every
+few seconds.</p>
+<table>
+<thead>
+<tr>
+<th>Column</th>
+<th>What it shows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Server</td>
+<td>The server's name (<code>cluster.node_name</code>), <strong>This server</strong> on the one you are signed in to, and its address (<code>server.node_url</code>)</td>
+</tr>
+<tr>
+<td>Status</td>
+<td><strong>Running</strong>, <strong>Starting</strong>, <strong>Stopping</strong>, <strong>Stopped</strong> (shut down on purpose), <strong>Not answering</strong> (no sign of life for 30 seconds), <strong>Couldn't start</strong> (a restart after a settings change failed with the new settings and the old ones: it receives nothing, runs no jobs and tries again every 30 seconds; its log says why), <strong>Identity in use</strong> (see <a href="#identity">Identity</a>), or, on this server only, what keeps it from using OpenSearch, such as <strong>Can't reach OpenSearch</strong> (see <a href="#when-this-server-cant-use-opensearch">When this server can't use OpenSearch</a>). Below it: how long it has been up, or when it was last seen, counted by the server that answered the page, so neither the other server's clock nor yours matters. A clock more than 2 seconds off is shown here too</td>
+</tr>
+<tr>
+<td>Background jobs</td>
+<td><strong>Runs jobs</strong> on the server that runs them. <strong>Standby</strong> on a server that would take them over, or why it would not. <strong>Doesn't run them</strong> on a server that may not, with the reason</td>
+</tr>
+<tr>
+<td>Settings</td>
+<td>How it uses the <a href="#shared-settings-and-the-cluster-key">shared settings</a>: <strong>Shared</strong> when it uses the settings every server shares; <strong>Its own files</strong> when it is not part of the cluster (amber when it misses the cluster key, or could not reach OpenSearch when it started); <strong>Saved copy</strong> when it cannot read the shared settings now and works from its copy; <strong>Missed a key change</strong> or <strong>Settings gone</strong> when it needs <code>signalith cluster</code> (see <a href="../cluster-cli/">signalith cluster</a>). Hover over it for what to do. Below it, a shared setting that was changed outside Signalith or by a newer version (the server keeps its last good copy), the settings in its signalith.yaml or environment that differ from the shared ones, how many settings wait for its restart, and how many shared values it could not use</td>
+</tr>
+<tr>
+<td>Version</td>
+<td>The Signalith version it runs</td>
+</tr>
+</tbody>
+</table>
+<p>A server's name opens a panel with its settings: those that wait for its restart, the
+shared values it could not use (it keeps its own value of each, see
+<a href="../settings/#when-a-server-cannot-use-a-shared-value">Settings on several servers</a>), how
+its last restart went, what differs in its own files, and, for 7 days after the
+settings became shared, the values its own Settings page had that differ from the
+shared ones. <strong>Open its settings</strong> opens the Settings page at that server.</p>
+<p>With one server, the page shows that server and nothing to set up. To add one, see
+<a href="#adding-a-server-by-hand">Adding a server by hand</a>. Servers that run a version of
+Signalith from before this one are not listed: they do not write a sign of life
+(see <a href="#upgrading-servers-you-set-up-by-hand">Upgrading servers you set up by hand</a>).</p>
+<p>A server stopped on purpose stays in the list, after the running ones, as
+<strong>Stopped</strong> with when it stopped, and is not counted. It leaves the list 7 days
+after it stopped. A server that got a new identity shows up once under its new
+identity and once, stopped, under its old one until then.</p>
+<p>Alerts above the list appear only when something needs attention: amber when it
+should be looked at, red when something is not running. Each one names the server
+and says what to do. Problems another server finds with itself, such as a state
+folder that was moved from another computer, are shown here too.</p>
+<p>While this server cannot use OpenSearch, its status says why, a red alert says what to
+do, and the other servers stay as it last saw them.</p>
+<h2 id="when-this-server-cant-use-opensearch">When this server can't use OpenSearch<a class="headerlink" href="#when-this-server-cant-use-opensearch" title="Permanent link">&para;</a></h2>
+<p>A server that can't use OpenSearch runs no background jobs. On its own Servers page,
+its status says why and a red alert says what to do. It tries again by itself every few
+seconds, so it never needs a restart once the cause is fixed. The Health page shows the
+same for OpenSearch itself.</p>
+<p>Some of the steps below send you to OpenSearch's log. With the Docker quick start, show
+it from the Signalith folder with
+<code>docker compose -f deploy/docker/docker-compose.yml logs opensearch</code>. Otherwise it is in
+<code>/var/log/opensearch</code>, or in the <code>logs</code> folder where you unpacked OpenSearch.</p>
+<table>
+<thead>
+<tr>
+<th>Status</th>
+<th>What it means</th>
+<th>What to do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Can't reach OpenSearch</strong></td>
+<td>Nothing answers at OpenSearch's address: OpenSearch is stopped, the address is wrong, or a firewall is in the way</td>
+<td>Check that OpenSearch is running. <strong>Test connection</strong> on the Settings page says what is wrong with the address</td>
+</tr>
+<tr>
+<td><strong>OpenSearch didn't answer in time</strong></td>
+<td>OpenSearch took the request but answered too late, usually because its computer is short of memory or CPU</td>
+<td>Nothing at first: Signalith keeps trying. If it lasts more than a few minutes, check that OpenSearch's computer has enough memory and CPU, and what OpenSearch's log says</td>
+</tr>
+<tr>
+<td><strong>OpenSearch security not loaded</strong></td>
+<td>OpenSearch runs its security plugin, but its security settings (who may sign in, and what each may do) aren't loaded, so it refuses every request. OpenSearch loads them by itself only as it starts with none stored yet, and tries just once, which can fail on a slow computer; they then stay unloaded, also after OpenSearch restarts</td>
+<td>If OpenSearch started only a few minutes ago, wait. Otherwise, with the Docker quick start, run <code>docker compose -f deploy/docker/docker-compose.yml up -d</code> again from the Signalith folder: it re-runs the step that loads OpenSearch's security settings. If that doesn't load them, follow <a href="../opensearch-security/#if-opensearchs-security-settings-arent-loaded">If OpenSearch's security settings aren't loaded</a>. Without Docker, load them with <code>securityadmin.sh</code>, as <a href="../opensearch-security/#3-load-the-security-settings">Load the security settings</a> shows</td>
+</tr>
+<tr>
+<td><strong>OpenSearch too busy</strong></td>
+<td>OpenSearch answered that it could not do the request in time</td>
+<td>Nothing at first: Signalith keeps trying. If it lasts more than a few minutes, check that OpenSearch's computer has enough memory and CPU, and what OpenSearch's log says</td>
+</tr>
+<tr>
+<td><strong>OpenSearch refuses the sign-in</strong></td>
+<td>OpenSearch does not accept the user name and password, or the client certificate, Signalith signs in with</td>
+<td>Check them on the Settings page</td>
+</tr>
+<tr>
+<td><strong>OpenSearch refuses Signalith</strong></td>
+<td>Signalith's OpenSearch user may not use <code>&lt;prefix&gt;_runtime</code></td>
+<td>Give it the right to create, read and write <code>&lt;prefix&gt;_runtime</code> (or <code>&lt;prefix&gt;_*</code>)</td>
+</tr>
+<tr>
+<td><strong>OpenSearch refuses writes</strong></td>
+<td>A block stops OpenSearch from taking writes. OpenSearch sets one by itself when its disk is full, and an admin can set one, such as <code>cluster.blocks.read_only</code></td>
+<td>Give OpenSearch more disk, or remove the block</td>
+</tr>
+<tr>
+<td><strong>OpenSearch not ready</strong></td>
+<td>OpenSearch is starting, or its nodes can't find each other</td>
+<td>Wait a few minutes. If it lasts, OpenSearch's log says why</td>
+</tr>
+<tr>
+<td><strong>OpenSearch answers with an error</strong></td>
+<td>Any other error, such as a closed <code>&lt;prefix&gt;_runtime</code> index. The alert quotes it</td>
+<td>OpenSearch's log may say more</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-background-jobs">The background jobs<a class="headerlink" href="#the-background-jobs" title="Permanent link">&para;</a></h2>
+<p>These run on one server only:</p>
+<ul>
+<li>detections on their schedule,</li>
+<li>threat intel feed downloads,</li>
+<li><a href="../notifications/#which-server-sends">notifications</a> about new findings,</li>
+<li><a href="../playbooks/#which-server-runs-playbooks">playbooks</a> for new findings, and the approved steps,</li>
+<li>data retention, including the disk guard and archiving,</li>
+<li>index upgrades after a new version.</li>
+</ul>
+<p>Searching, dashboards, investigations and receiving data work on every server, and
+so does loading or removing the <a href="../sample-data/#several-servers">sample data</a>.</p>
+<p><strong>Working on the same finding or case from two servers.</strong> Analysts on different
+servers (or in two browser tabs) can comment on, triage and add to the same finding
+or investigation at the same moment: each change is saved on top of the others, so
+none is lost. In the rare case that many people change one item in the same instant,
+one of them sees "Someone else changed this investigation at the same moment. Try
+again." Nothing was saved for that person; doing it again works.</p>
+<p><strong>How they move.</strong> The server that runs the jobs confirms every 10 seconds, in
+OpenSearch, that it still does. If it stops confirming (it crashed, its computer
+stopped, or it lost OpenSearch), another server takes the jobs over within about
+40 seconds. When a server is stopped on purpose, it hands them over first, so
+another server has them within seconds. Two servers do not run them at once: a
+server that cannot confirm for 20 seconds stops its jobs by itself, on a timer of
+its own, before anyone else may start them after 30 seconds. Detections, feed
+downloads, notifications and playbooks also check, before each run, send or step, that their server still
+runs the jobs.</p>
+<p><strong>Detections after a takeover.</strong> The server that takes the jobs over makes up the
+detection runs that were missed while no server ran them, oldest first and up to
+<code>detections.catch_up</code> back (6 hours unless changed). A run the previous server had
+already done, or started, does not raise its findings or risk a second time. See
+<a href="../detections/#schedules-and-missed-runs">Schedules and missed runs</a>. The run state
+is kept in OpenSearch, so every server shows the same Detections page, detection
+health and warnings, and <strong>Run now</strong> works on any of them.</p>
+<p><strong>Which servers may run them.</strong> Every server, unless <strong>Run detections on schedule</strong>
+(<code>detections.scheduler</code>) is turned off on its Settings page; once the servers share
+their settings it is called <strong>May run background jobs</strong> (<code>cluster.leader_eligible</code>,
+or <code>SIGNALITH_LEADER_ELIGIBLE</code>), one of each server's own settings. Leave it on: the
+servers take turns by themselves. Turn it off only on a server that should never
+run the jobs, for example one that only receives data. A change applies at the
+server's next restart.</p>
+<p><strong>Changing retention and feeds.</strong> Once the servers are a cluster (see
+<a href="#shared-feeds-and-retention-policies">Shared feeds and retention policies</a>), the Data retention
+and Threat intel feed settings can be changed on any server. Notifications and Playbooks settings,
+and both on a server that is not part of the cluster yet, can be changed only on the server that
+runs the jobs.</p>
+<h2 id="when-a-server-will-not-take-over">When a server will not take over<a class="headerlink" href="#when-a-server-will-not-take-over" title="Permanent link">&para;</a></h2>
+<p>Notifications, playbooks and custom detections are still kept in files on each server, and so are
+retention policies and threat intel feeds on a server that is not part of the cluster yet (on
+the servers of the cluster they are shared, so they never differ). A server whose files differ from those of the server that
+runs the jobs does not take the jobs over by itself: it would delete, download or
+alert differently. The list shows it as <strong>Standby</strong> with "Won't take over" and the
+reason, and an alert says what to copy:</p>
+<table>
+<thead>
+<tr>
+<th>What differs</th>
+<th>What to make the same</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Retention policies</td>
+<td><code>retention.yaml</code> in the lookups folder, and <code>retention</code> in signalith.yaml</td>
+</tr>
+<tr>
+<td>Threat intel feeds</td>
+<td><code>intel_feeds.yaml</code> in the lookups folder, and <code>intel</code> in signalith.yaml</td>
+</tr>
+<tr>
+<td>Notification channels</td>
+<td><code>notifications.yaml</code> in the lookups folder (only once a channel or rule is set up)</td>
+</tr>
+<tr>
+<td>Playbooks</td>
+<td><code>playbooks.yaml</code> in the lookups folder (only once a playbook is set up)</td>
+</tr>
+<tr>
+<td>Detections folder</td>
+<td>The custom detection files in <code>detections.dir</code></td>
+</tr>
+<tr>
+<td>Archive folder</td>
+<td>Only while a retention policy archives: every server must use one shared archive folder. Set <code>retention.archive_dir</code> to the same shared folder on each server. Signalith names the folder with a small file in it, <code>.signalith-archive-id</code>; leave it there</td>
+</tr>
+</tbody>
+</table>
+<p>Copy the files from the server that runs the jobs, then restart the server you
+copied them to. The alert goes away within a minute.</p>
+<p>If the server that runs the jobs stops while no other server may take over, a red
+alert says that nothing runs detections, threat intel downloads or retention.
+Start the server that ran them again, or fix the other server's files and restart
+it.</p>
+<h2 id="when-opensearchs-disk-is-full">When OpenSearch's disk is full<a class="headerlink" href="#when-opensearchs-disk-is-full" title="Permanent link">&para;</a></h2>
+<p>When OpenSearch runs out of disk, it refuses new events. The page shows a red
+alert, and the server that runs the jobs keeps only the <strong>disk guard</strong> running:
+unless it was turned off on the Data retention page, it deletes the oldest days
+until there is room. Detections and feed downloads wait. New events are stored
+again by themselves once there is room; agents keep theirs until then. To make room
+sooner, give OpenSearch more disk.</p>
+<p>While the disk is full, servers cannot write their sign of life, so the list keeps
+showing them as they were last seen instead of marking them all as not answering.</p>
+<h2 id="clocks">Clocks<a class="headerlink" href="#clocks" title="Permanent link">&para;</a></h2>
+<p>Detections are scheduled by the clock. The list warns when a server's clock is more
+than 2 seconds off OpenSearch's. A server more than 30 seconds off leaves the jobs
+to a server whose clock is right while one is up; a server on its own runs them
+anyway, with the warning. Keep every server's clock in sync with NTP (Windows Time
+on Windows).</p>
+<h2 id="identity">Identity<a class="headerlink" href="#identity" title="Permanent link">&para;</a></h2>
+<p>Each server keeps its identity in its state folder (<code>node.id</code>). Never copy a state
+folder to another server, for example by cloning a virtual machine. Two servers with
+one identity are found out within seconds. The one that started last stops (it
+refuses to start), and the one that was running goes on and shows an alert. A
+server that finds another one using its identity later shows <strong>Identity in use</strong>,
+runs no jobs, and tells load balancers to send it nothing.</p>
+<p>To give a server a new identity, stop it, delete <code>node.id</code> from its state folder
+and start it again. In Docker the state folder is the data volume, and the image
+has no shell, so, from the folder you cloned Signalith into:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>docker compose -f deploy/docker/docker-compose.yml stop signalith
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>docker run --rm -v docker_signalith-data:/d busybox rm /d/node.id
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>docker compose -f deploy/docker/docker-compose.yml up -d
+</span></code></pre></div>
+<p><code>docker volume ls</code> shows the volume's name (here <code>docker_signalith-data</code>).</p>
+<p><strong>The state folder.</strong> Signalith keeps the files it makes for itself in one folder:
+its master key (<code>keys</code>), its HTTPS certificate and certificate authority (<code>tls</code>),
+<code>admin-password-hash</code> when the admin password was changed with <code>signalith passwd</code>
+(not used while the server shares the users of its cluster), <code>admin-password-local</code>
+with the break-glass password <code>signalith passwd -local</code> sets on a member of a cluster,
+the key for the cookie that recognizes browsers that signed in before
+(<code>signin.key</code>, see <a href="../users/#signing-in">failed sign-in limits</a>), and this server's
+identity (<code>node.id</code>, and <code>cluster/lock</code> while it runs). The
+server and every command (<code>signalith secrets</code>, <code>signalith initial-password</code>,
+<code>signalith settings</code> and the others) pick the same folder:</p>
+<ol>
+<li><code>SIGNALITH_STATE_DIR</code> when it is set. The systemd unit and the Docker image set
+   it to <code>/var/lib/signalith</code>.</li>
+<li>Otherwise a local folder Signalith used before instead of the folder that holds
+   <code>lookups.dir</code> (it notes this in a <code>used_instead_of</code> file there). If files turn
+   up in the usual folder later, for example from a command run without the
+   service's settings, the server stays where it is, and <code>signalith validate</code> and
+   the log name the files it does not use.</li>
+<li>Otherwise the folder that holds <code>lookups.dir</code>, when it already holds any of those
+   files. An upgrade therefore keeps using the folder it used before, wherever that
+   is, and leaves nothing behind.</li>
+<li>Otherwise the folder that holds <code>lookups.dir</code>, when it is on a local disk and the
+   service's user can write in it.</li>
+<li>Otherwise a local folder: the systemd <code>StateDirectory</code>, then <code>/var/lib/signalith</code>
+   on Linux, <code>C:\ProgramData\Signalith</code> on Windows. A folder that already holds
+   another install's identity, certificate or admin password, or that another
+   install noted as its own, is skipped, so two installs never share one. The log
+   says why, and Signalith keeps using that folder from then on. Signalith makes the
+   folder private when it creates it (on Windows only SYSTEM, Administrators, the
+   Signalith service and the account that made it can open it).</li>
+<li>Otherwise the folder that holds <code>lookups.dir</code> anyway. The server then does not
+   start, and says what is wrong: set <code>SIGNALITH_STATE_DIR</code> to a local folder.</li>
+</ol>
+<p>Only the server, and <code>signalith passwd</code> when it keeps the password there, write the
+<code>used_instead_of</code> note. Commands that only look (<code>signalith validate</code>,
+<code>signalith secrets status</code> and the others) change nothing. Commands run by hand read
+the service's settings (<code>systemctl show signalith</code>, including its <code>StateDirectory</code>)
+so they find the same folder.</p>
+<p>The folder should be on a local disk, never on a network share, since the identity's
+lock cannot be trusted there. A folder on a network share that already holds a master
+key or a certificate is still used, so nothing is lost, and the log warns: move its
+files to a local folder and set <code>SIGNALITH_STATE_DIR</code> to it. Servers that share
+<code>lookups.dir</code> on a network share must each set their own <code>SIGNALITH_STATE_DIR</code>. On
+Docker Desktop and WSL bind mounts, which may not lock files, Signalith starts with a
+warning. <code>signalith validate</code> says when the folder is not the usual one, and what is wrong
+with it, if anything.</p>
+<h2 id="adding-a-server-by-hand">Adding a server by hand<a class="headerlink" href="#adding-a-server-by-hand" title="Permanent link">&para;</a></h2>
+<p>Until servers can be added from the Servers page:</p>
+<ol>
+<li>Install Signalith on the new computer as usual.</li>
+<li>Give it the same OpenSearch settings as the first server: <code>opensearch.url</code>, its
+   user and password, and <code>opensearch.index_prefix</code>.</li>
+<li>Agent tokens made on <strong>Add data</strong> are kept in OpenSearch, so the new server
+   accepts them as soon as it starts, and a token revoked on one server is refused by
+   all of them within seconds (see <a href="../agent-tokens/">agent-tokens.md</a>). Shared tokens
+   from older setups (<code>ingest.tokens</code>) are in each server's own configuration: give the
+   new server the same ones, so agents that still use them can send to either server. Each server has its own master key, so passwords and tokens stored
+   encrypted (<code>enc:</code> values) cannot be copied as they are: set them on the new
+   server with <code>signalith secrets set</code>, or put them there in plain text and run
+   <code>signalith secrets encrypt</code> (see <a href="../encryption/">docs/encryption.md</a>).</li>
+<li>Give it the cluster key (see
+   <a href="#shared-settings-and-the-cluster-key">Shared settings and the cluster key</a>):
+   <code>signalith cluster export-key</code> on a server that has it, <code>signalith cluster
+   import-key</code> on the new one. If the cluster was made with a key file
+   (<code>SIGNALITH_CLUSTER_KEY_FILE</code>), the same file on the new one does it too.
+   It then uses the shared feeds and retention policies, and can take the jobs over.
+   Without the key it runs no background jobs. Copy the notification, playbook and
+   detection files listed above too. Never copy <code>node.id</code>, the <code>cluster</code> folder or the <code>keys</code> folder. In
+   Docker they are in the data volume; copy files into the new server's volume
+   rather than copying the whole volume.</li>
+<li>Set up its users. Each server keeps users in <code>users.json</code> in its lookups folder.</li>
+<li><strong>Separate lookups folders</strong> (the usual case): add the same users on its
+     <strong>Users</strong> page, and set up directory sign-in there again.</li>
+<li><strong>One lookups folder shared by the servers</strong>: skip adding users, because they
+     already share <code>users.json</code>. A user added, changed, disabled or deleted on one
+     server is the same on the others within a second or so, and a changed password
+     signs that user out on every server. For directory sign-in, put the settings
+     under <code>auth.ldap</code> in each server's <code>signalith.yaml</code> (see
+     <a href="../users/#setting-it-in-signalithyaml">Setting it in signalith.yaml</a>) instead of
+     using the Users page: the Users page saves them in <code>directory.json</code> in the same
+     folder, with the service account password encrypted by that one server's master
+     key, so the other servers could not use it.</li>
+<li>Give it its own name with <code>cluster.node_name</code>. In Docker, set
+   <code>SIGNALITH_NODE_NAME</code> in the compose file (it is <code>signalith-1</code> there), and set
+   its address with <code>SIGNALITH_NODE_URL</code>, since a container cannot know it. Two
+   running servers with one name get an amber alert.</li>
+<li>Give the OpenSearch user the right to create, read and write
+   <code>&lt;prefix&gt;_runtime</code> (or <code>&lt;prefix&gt;_*</code>), where the servers find each other.</li>
+<li>If OpenSearch has only one node, consider adding a second one too. With one
+   node, every server's events, findings and investigations are on that one
+   computer. With <strong>Replicas</strong> at <code>auto</code> (the default; see
+   <a href="../settings/#using-the-page">Server settings</a>), OpenSearch keeps a copy of each
+   new day's events on a second node as soon as there is one, and a copy of
+   findings, investigations and threat intel too. Days stored before then keep the
+   copies they had. Set Replicas the same on every server: the servers share one
+   index template, and the setting of the server that started last is used.</li>
+</ol>
+<p>When it starts, it appears on the Servers page of every server.</p>
+<h2 id="shared-settings-and-the-cluster-key">Shared settings and the cluster key<a class="headerlink" href="#shared-settings-and-the-cluster-key" title="Permanent link">&para;</a></h2>
+<p>The servers that share one OpenSearch also share settings there, in the
+<code>&lt;prefix&gt;_config</code> index. Each one is signed with the <strong>cluster key</strong>, which every
+server keeps in its state folder (<code>keys/cluster-&lt;id&gt;.key</code>, encrypted with that
+server's master key) and never in OpenSearch, so someone who can write to OpenSearch
+cannot change them unnoticed. They share what makes them one cluster (its name, the
+list of servers and their keys), the threat intel feeds and the retention policies
+(see <a href="#shared-feeds-and-retention-policies">Shared feeds and retention policies</a>),
+the users and sign-in (see <a href="#shared-users-and-sign-in">Shared users and sign-in</a>), and
+the Settings page (see <a href="../settings/#settings-on-several-servers">Settings on several servers</a>).</p>
+<p>The server that runs the background jobs makes the cluster by itself, the first
+time it runs this version: it makes the cluster key and writes the shared settings.
+Give the OpenSearch user the right to create, read and write <code>&lt;prefix&gt;_config</code> too
+(or <code>&lt;prefix&gt;_*</code>). Every other server then needs the cluster key:</p>
+<ul>
+<li>on a server that has it, run <code>signalith cluster export-key -o cluster-key.txt</code>
+  and choose a passphrase;</li>
+<li>copy the file to the other server and run <code>signalith cluster import-key
+  cluster-key.txt</code> there, with that passphrase. It joins within seconds.</li>
+</ul>
+<p>Or, <strong>before the cluster is made</strong>, choose the key yourself: 32 random bytes as
+one line of base64 (lines starting with <code>#</code> are comments), in a file only Signalith
+can read, named in <code>SIGNALITH_CLUSTER_KEY_FILE</code> on every server. The server that
+makes the cluster then uses that key, and every server that has the file joins by
+itself. To make such a file:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>openssl<span class="w"> </span>rand<span class="w"> </span>-base64<span class="w"> </span><span class="m">32</span><span class="w"> </span>&gt;<span class="w"> </span>cluster-key
+</span></code></pre></div>
+<div class="language-powershell highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nv">$b</span> <span class="p">=</span> <span class="nb">New-Object</span> <span class="n">byte</span><span class="p">[]</span> <span class="n">32</span><span class="p">;</span> <span class="no">[Security.Cryptography.RandomNumberGenerator]</span><span class="p">::</span><span class="n">Create</span><span class="p">().</span><span class="n">GetBytes</span><span class="p">(</span><span class="nv">$b</span><span class="p">)</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="no">[Convert]</span><span class="p">::</span><span class="n">ToBase64String</span><span class="p">(</span><span class="nv">$b</span><span class="p">)</span> <span class="p">|</span> <span class="nb">Set-Content</span> <span class="n">-NoNewline</span> <span class="n">cluster-key</span>
+</span></code></pre></div>
+<p>A key file only joins a cluster made with that very key: no command writes the key
+of an existing cluster in plain form, so for a cluster made without a key file use
+<code>export-key</code> and <code>import-key</code>. Until a server has the key, it keeps working from its
+own files but runs no background jobs, and the Servers page says so.</p>
+<p>Each server keeps its last copy of the shared settings in <code>cluster/cache.enc</code> in
+its state folder, encrypted with its master key, so it can start while OpenSearch
+cannot be reached (it then answers <code>/readyz</code> with <code>degraded</code> and pauses changes).
+<code>signalith cluster</code> helps when something went wrong (see
+<a href="../cluster-cli/">signalith cluster</a> for each command and its options):</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>signalith cluster status</code></td>
+<td>This server's place in the cluster, the servers with the key, and any problem</td>
+</tr>
+<tr>
+<td><code>signalith cluster found</code></td>
+<td>Makes the cluster from this server's files when no server that runs the background jobs is up</td>
+</tr>
+<tr>
+<td><code>signalith cluster export</code></td>
+<td>Prints the shared settings as YAML; stored passwords stay encrypted. <code>-settings</code> writes the settings of all servers as a file <code>apply</code> takes</td>
+</tr>
+<tr>
+<td><code>signalith cluster apply -f</code></td>
+<td>Changes the settings of all servers to those of a file, such as one kept in version control</td>
+</tr>
+<tr>
+<td><code>signalith cluster import -from-cache</code></td>
+<td>Writes this server's copy back after the <code>&lt;prefix&gt;_config</code> index was deleted; the other servers resume by themselves</td>
+</tr>
+<tr>
+<td><code>signalith cluster export-key</code>, <code>import-key</code></td>
+<td>Gives another server the cluster key, encrypted with a passphrase</td>
+</tr>
+<tr>
+<td><code>signalith cluster reset-key</code></td>
+<td>When every copy of the key is lost: with every server stopped, shows the shared settings, makes a new key and signs them with it. Passwords stored with the old key must be entered again</td>
+</tr>
+<tr>
+<td><code>signalith cluster accept-restore</code></td>
+<td>After you restore an OpenSearch snapshot on purpose: makes every server accept the older shared settings, which they would otherwise refuse as changed outside Signalith</td>
+</tr>
+</tbody>
+</table>
+<p>Each change is written to the log as an audit record.</p>
+<h2 id="shared-feeds-and-retention-policies">Shared feeds and retention policies<a class="headerlink" href="#shared-feeds-and-retention-policies" title="Permanent link">&para;</a></h2>
+<p>On the servers of the cluster, the threat intel feeds and the retention policies are
+shared: a change on any server's Threat intel or Data retention page applies to all of them
+at once, and feed passwords and API keys are stored encrypted with the cluster key. The
+server that founds the cluster brings its own: the feeds from <code>intel_feeds.yaml</code> and
+<code>intel.feeds</code> in signalith.yaml, their download status, and the retention policies from
+<code>retention.yaml</code> and <code>retention</code> in signalith.yaml. The other servers' own files are no
+longer used for them. A server switches to the shared ones by itself, with a quick restart
+in place, when it founds or joins the cluster. While the founder is still moving its files
+into OpenSearch, the other servers keep using their own and the Servers page says they wait
+for it; if that takes more than 30 minutes, it turns red: the founder finishes only while
+it runs the background jobs.</p>
+<p><strong>When the servers' policies differed.</strong> If another server that ran in the last 7 days had
+retention policies of its own that differ from the founder's, the shared policies wait to be
+confirmed: until an admin confirms them on the Data retention page (or with
+<code>POST /api/retention/policies/confirm</code>), retention runs only the disk guard and freezes,
+archives and deletes nothing else.</p>
+<p><strong>signalith.yaml.</strong> <code>retention.days</code>, <code>retention.default</code>, <code>retention.policies</code>,
+<code>retention.guard</code> and the feeds in <code>intel.feeds</code> still work, but only when they change: a
+server that starts with a changed value applies it to the shared one, and the log says so
+("retention.days applied from signalith.yaml on siem-b"). An unchanged file never undoes a
+change made on a page, and removing a setting from the file changes nothing. A value that
+differs from the shared one without having changed is only noted, for information, in that
+server's heartbeat (<code>settings_drift</code>).</p>
+<p><strong>Downloads and runs.</strong> The server that runs the background jobs downloads the feeds and runs
+retention. <strong>Refresh</strong> on a feed, and <strong>Run now</strong> or a policy change on the Data retention
+page, on another server ask it to: the request answers <code>202</code> with a <code>request_id</code>, which
+<code>GET /api/requests/{id}</code> follows until it is <code>done</code> or <code>failed</code>. Restoring archived days is
+still done on the server that runs the jobs.</p>
+<p><strong>Changes at the same moment.</strong> <code>GET /api/retention</code> and <code>GET /api/intel/feeds</code> (for
+admins) give each item's version (<code>ETag</code>, and <code>etags</code> for the feeds). A change sent with
+<code>If-Match</code> and that version is refused with <code>412</code> when someone changed the item meanwhile.
+While a server cannot use the shared settings (OpenSearch cannot be reached, or it misses
+the cluster key), changes there answer <code>503</code>.</p>
+<h2 id="shared-users-and-sign-in">Shared users and sign-in<a class="headerlink" href="#shared-users-and-sign-in" title="Permanent link">&para;</a></h2>
+<p>Once every server runs this version, the servers also share their users, the built-in
+admin's password, the directory sign-in settings and the sign-in sessions, in
+OpenSearch (<code>&lt;prefix&gt;_config</code> and <code>&lt;prefix&gt;_sessions</code>; give the OpenSearch user the
+right to create, read and write those too). A user added or changed on any server's
+Users page is the same everywhere within a couple of seconds, and a session made on
+one server works on every server: a load balancer needs no sticky sessions, and when a
+server stops, the people it served carry on on the others without signing in again.
+<code>signalith passwd</code> on any server changes the built-in admin's password for all of
+them, with no restart. See <a href="../users/#users-on-several-servers">Users on several servers</a>
+for how the users are brought in, the built-in admin, directory settings and
+failed sign-in limits across servers, and what works while OpenSearch cannot be used.</p>
+<p>While some servers still run an earlier version, each server keeps its own users and
+sessions as before, and the Servers page and the Users page name the servers to
+upgrade.</p>
+<h2 id="shared-detections-dashboards-and-asset-lists">Shared detections, dashboards and asset lists<a class="headerlink" href="#shared-detections-dashboards-and-asset-lists" title="Permanent link">&para;</a></h2>
+<p>Once every server runs this version, the servers also share their custom detections, the
+choices made for built-in and content pack detections (on or off, and their
+<a href="../detections/#exceptions">exceptions</a>), and their custom dashboards. A detection saved
+on any server runs on the server that runs the background jobs at its next scheduled run,
+and a dashboard saved anywhere is the same everywhere within a couple of seconds.</p>
+<p>The server that founds the cluster brings its own: the files in its detections folder
+(and its <code>state</code> folder) and its dashboards folder. From then on, each server's folders
+are an <strong>inbox</strong>:</p>
+<ul>
+<li>A file added or changed in a folder, by hand or by a <code>git pull</code>, is shared with every
+  server within 15 seconds. A file that is not valid is logged and left out until it is
+  fixed.</li>
+<li>A change made on any server is written back into every server's folders, so the
+  folders keep showing what runs and can still be backed up or kept in Git.</li>
+<li>The files a server has when it joins are only its starting point: a stale copy left
+  on one server never undoes a change made on another. To share one of them, change or
+  save it again.</li>
+<li>Removing a file changes nothing by default; the shared copy is written back. Set
+  <strong>Detection and dashboard folders</strong> (<code>detections.sync</code>) to <strong>Mirror</strong> on a server to
+  have a file removed from its folders remove that detection or dashboard from every
+  server.</li>
+</ul>
+<p>Each server records what it last saw of its files in <code>library-seen.json</code> in its state
+folder. Content pack updates stay per server (<code>detections.content_updates</code>), so give
+every server the same content update setting.</p>
+<p><strong>Changes at the same moment.</strong> <code>GET /api/detections</code> and <code>GET /api/dashboards</code> give
+each item's version (<code>etag</code>). A change sent with <code>If-Match</code> and that version is refused
+with <code>412</code> when someone changed the item meanwhile, naming who did it, on which server
+and when; the Detections and Dashboards pages then offer to reload or overwrite.
+Changes sent without <code>If-Match</code>, such as from scripts, apply to the latest version.
+While a server cannot use the shared settings, changes there answer <code>503</code>.</p>
+<p>While some servers still run an earlier version, each server keeps its own detections
+and dashboards in its folders, as before. Asset and identity lists are still kept by
+each server for now.</p>
+<h2 id="field-names-when-several-servers-receive-events">Field names when several servers receive events<a class="headerlink" href="#field-names-when-several-servers-receive-events" title="Permanent link">&para;</a></h2>
+<p>Each day's events go to one index per data model, and OpenSearch allows at most 2,000
+fields in one index. Signalith's own fields always fit; the names senders choose (JSON
+keys, syslog structured data, CEF extensions) share what is left (see
+<a href="../sending-data/#ingest-limits">Ingest limits</a>). With several servers:</p>
+<ul>
+<li>The budget of new names per daily index (1,000, and 600 for syslog vendor fields) is
+  shared out equally among the servers that stored events in the last 10 minutes, with
+  at least 100 for each. Each server's heartbeat says when it last stored an event, so
+  the shares follow servers as they start and stop.</li>
+<li>Before adding new names to an index, a server also looks at how many fields the index
+  really has (checked at most every 30 seconds) and adds none once it has 1,600.</li>
+</ul>
+<p>Fields over the limit are not lost: their values stay in the event's raw message
+(<code>_raw</code>), and the event says how many were left out in <code>dropped_fields</code>. Fields
+Signalith produces itself are always kept.</p>
+<h2 id="agents-across-servers">Agents across servers<a class="headerlink" href="#agents-across-servers" title="Permanent link">&para;</a></h2>
+<p>The <a href="../endpoints/#log-agents">Endpoints page</a> lists every log agent once, whichever
+servers it sends to: each server notes the agents it hears from and saves that in
+OpenSearch once a minute. Agents that need a new configuration, for example because they
+trust a certificate authority the servers no longer use, are marked there.</p>
+<h2 id="upgrading-servers-you-set-up-by-hand">Upgrading servers you set up by hand<a class="headerlink" href="#upgrading-servers-you-set-up-by-hand" title="Permanent link">&para;</a></h2>
+<p>Versions before this one do not take turns: each server with <strong>Run detections on
+schedule</strong> on runs the jobs itself, so two of them run detections, threat intel
+downloads and retention twice. They also do not appear on the Servers page.</p>
+<p>The Servers page says this too, until an admin dismisses the note. When you
+upgrade servers that share one OpenSearch, either:</p>
+<ul>
+<li>upgrade them all at the same time, or</li>
+<li>first turn off <strong>Run detections on schedule</strong> (<code>detections.scheduler: false</code>) on
+  every server except one, upgrade them one by one, and turn it back on once all of
+  them run this version.</li>
+</ul>
+<p>While servers of different versions share one OpenSearch, the newest one decides
+how new days' events are stored (the index template): a server of this version or
+later leaves a newer server's template as it is. A server from before this version
+does not know to do that and puts its older template back when it starts; the next
+start of a newer server puts the newer one back. Upgrade all servers to finish
+this.</p>
+<p><strong>The cluster key.</strong> The first server of this version to run the jobs founds the
+cluster and makes the cluster key (see
+<a href="#shared-settings-and-the-cluster-key">Shared settings and the cluster key</a>). Every
+other server needs that key, with <code>signalith cluster import-key</code> or
+<code>SIGNALITH_CLUSTER_KEY_FILE</code>: until it has it, it keeps using its own files and
+never takes the jobs over, so if the server that runs them stops, nothing runs them.
+Setting <code>SIGNALITH_CLUSTER_KEY_FILE</code> to one key file on every server before the
+upgrade avoids this step: the first server then makes the cluster with that key (see
+<a href="#shared-settings-and-the-cluster-key">Shared settings and the cluster key</a> for how to
+make the file). Upgrade
+every server, not only some: a server of an older version reads and writes its own
+files and does not see changes made on the pages of the others.</p>
+<p>The first server of this version to run the jobs runs each detection that is on once
+straight away, over its lookback, so the time since the old version's last run is
+searched. Findings and risk events the old version raised keep holding back repeats
+for each detection's throttle window. See
+<a href="../detections/#schedules-and-missed-runs">Schedules and missed runs</a>.</p>
+<p><strong>Users and sign-in.</strong> The servers start sharing their users once every server that
+ran in the last 24 hours runs this version (see
+<a href="../users/#when-the-users-become-shared">When the users become shared</a>). Until then
+nothing changes for users; the Servers page names the servers still to upgrade. When
+the users become shared, each server restarts in place by itself and <strong>everyone signs
+in once more</strong>, on a single server too. From then on:</p>
+<ul>
+<li>The directory sign-in settings can be changed on the Users page even when they come
+  from <code>auth.ldap</code> in signalith.yaml; the file applies again only when it changes.</li>
+<li><code>signalith passwd</code> changes the built-in admin's password for every server, with no
+  restart. <code>signalith passwd -local</code> is the break-glass password of one server, used
+  only while OpenSearch cannot be used.</li>
+<li>A server of an earlier version can no longer start on this OpenSearch.</li>
+</ul>
+<p><strong>Settings.</strong> The servers start sharing their Settings page in the same way, once every
+server that ran in the last 24 hours runs this version: the founder brings in its
+settings, then each server restarts in place by itself and brings in its own, and
+nobody needs to sign in again. Settings for all servers then have one value on every
+server, each server's own settings can be changed on any server's page, and
+<code>settings.yaml</code> keeps only each server's connection and folder settings. See
+<a href="../settings/#when-the-settings-become-shared">When the settings become shared</a> for what
+changes, and how a value one server's page had is shown for a week.</p>
+<h2 id="load-balancers-readyz-and-livez">Load balancers: /readyz and /livez<a class="headerlink" href="#load-balancers-readyz-and-livez" title="Permanent link">&para;</a></h2>
+<p>Every server answers two addresses without signing in. They say nothing else about
+the server.</p>
+<table>
+<thead>
+<tr>
+<th>Address</th>
+<th>Answer</th>
+<th>Use it for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /readyz</code></td>
+<td><code>200 {"ready":true}</code> when the server should get traffic; <code>503 {"ready":false,"reason":"…"}</code> when it should not</td>
+<td>Load balancer health checks, Kubernetes readiness probes</td>
+</tr>
+<tr>
+<td><code>GET /livez</code></td>
+<td><code>200 {"live":true}</code> while the process runs</td>
+<td>Restarting a process that hangs, Kubernetes liveness probes</td>
+</tr>
+</tbody>
+</table>
+<p>The reasons <code>/readyz</code> gives:</p>
+<table>
+<thead>
+<tr>
+<th>Reason</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>starting</code></td>
+<td>The server has not finished starting</td>
+</tr>
+<tr>
+<td><code>restarting</code></td>
+<td>It is applying changed settings; it answers again in a few seconds</td>
+</tr>
+<tr>
+<td><code>down</code></td>
+<td>It could not start, and tries again every 30 seconds; its log says why</td>
+</tr>
+<tr>
+<td><code>opensearch</code></td>
+<td>It cannot reach OpenSearch, or OpenSearch refuses its sign of life (the Servers page and the log say why)</td>
+</tr>
+<tr>
+<td><code>identity</code></td>
+<td>Another server uses its identity (see <a href="#identity">Identity</a>)</td>
+</tr>
+<tr>
+<td><code>degraded</code></td>
+<td>It is part of the cluster but cannot use the shared settings in OpenSearch now (see <a href="#shared-settings-and-the-cluster-key">Shared settings and the cluster key</a>)</td>
+</tr>
+<tr>
+<td><code>gone</code></td>
+<td>The shared settings in OpenSearch are gone: their index was deleted or replaced</td>
+</tr>
+<tr>
+<td><code>key_missing</code></td>
+<td>The shared settings are signed with a cluster key this server does not have</td>
+</tr>
+<tr>
+<td><code>stopping</code></td>
+<td>It is shutting down and handing its jobs over. This takes up to a minute while jobs finish: the systemd unit allows 100 seconds, the compose file 90, and the Windows service waits 90</td>
+</tr>
+</tbody>
+</table>
+<p>Do not use <code>/readyz</code> to restart a server: a server that waits for OpenSearch is
+fine, and restarting it does not help. Use <code>/livez</code> for that.</p>
+<p>HAProxy, for example (with source address affinity, which only servers that do not
+share their users yet need; see below):</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>backend signalith
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    balance source
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    option httpchk GET /readyz
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    http-check expect status 200
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    server siem-a 10.0.0.11:8080 check
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    server siem-b 10.0.0.12:8080 check
+</span></code></pre></div>
+<p>Both addresses answer over HTTPS and also over plain <code>http://</code> on the same port
+(everything else on plain HTTP is sent to HTTPS), so the plain <code>check</code> above works
+while Signalith serves HTTPS, which it does by default. To check over HTTPS instead,
+add <code>check-ssl</code> and the certificate authority to check it with (<code>ca-file</code>, the
+server's <code>tls/ca.pem</code>; see <a href="../https/">docs/https.md</a>) to each <code>server</code> line. A
+Kubernetes container:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">readinessProbe</span><span class="p">:</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">httpGet</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> path</span><span class="p">:</span><span class="w"> </span><span class="nv">/readyz</span><span class="p p-Indicator">,</span><span class="nt"> port</span><span class="p">:</span><span class="w"> </span><span class="nv">8080</span><span class="p p-Indicator">,</span><span class="nt"> scheme</span><span class="p">:</span><span class="w"> </span><span class="nv">HTTPS</span><span class="w"> </span><span class="p p-Indicator">}</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="nt">livenessProbe</span><span class="p">:</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="nt">httpGet</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">{</span><span class="nt"> path</span><span class="p">:</span><span class="w"> </span><span class="nv">/livez</span><span class="p p-Indicator">,</span><span class="nt"> port</span><span class="p">:</span><span class="w"> </span><span class="nv">8080</span><span class="p p-Indicator">,</span><span class="nt"> scheme</span><span class="p">:</span><span class="w"> </span><span class="nv">HTTPS</span><span class="w"> </span><span class="p p-Indicator">}</span>
+</span></code></pre></div>
+<p>Kubernetes does not check the certificate of a probe, and without <code>scheme: HTTPS</code>
+the probe uses plain HTTP, which works too.</p>
+<p><strong>Each server has its own HTTPS certificate.</strong> With <code>server.tls.mode: auto</code>, each
+server makes its own certificate authority, so browsers and agents that reach
+several servers through one name must trust each server's <code>ca.pem</code>. To have one
+certificate for all of them, give every server the same certificate with
+<code>server.tls.mode: files</code> (see <a href="../https/">docs/https.md</a>), or let the load balancer
+add HTTPS and pass the connection on to Signalith.</p>
+<p><strong>No sticky sessions needed.</strong> Once the servers share their users (see
+<a href="#shared-users-and-sign-in">Shared users and sign-in</a>), a sign-in made on one server
+works on every server, so the load balancer may send each request anywhere, and a
+server that stops loses nobody's session. Until then, while some servers still run an
+earlier version, a sign-in is kept by the server it was made on: set the load balancer
+to send each person to the same server (sticky sessions, or source address affinity),
+and people sign in again on another server when theirs stops. Agents and syslog need
+no such setting: any server takes any agent's data.</p>
+<p><strong>Sign in once per address.</strong> The session cookie is a <code>__Host-</code> cookie, which a
+browser keeps for exactly the address it used. Through one load balancer address,
+people sign in once; opening <code>siem-a.example.com</code> and <code>siem-b.example.com</code> directly
+takes a sign-in on each.</p>
+<h2 id="several-servers-behind-one-address">Several servers behind one address<a class="headerlink" href="#several-servers-behind-one-address" title="Permanent link">&para;</a></h2>
+<p>The shared settings are read by every server from OpenSearch, and a change made on one
+server reaches the others within a second or so. So that a page never shows the
+settings as they were before a change you just made, even when the load balancer sends
+the next request to another server, Signalith uses a few headers. Load balancers and
+proxies must pass them on unchanged; they need no other setting.</p>
+<table>
+<thead>
+<tr>
+<th>Header</th>
+<th>Sent by</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>X-Signalith-Version</code></td>
+<td>Every answer</td>
+<td>The Signalith version of the server that answered</td>
+</tr>
+<tr>
+<td><code>X-Signalith-Config</code></td>
+<td>Every answer to a signed-in request, and to a successful sign-in, once the server has read the shared settings</td>
+<td>How far it has read them, as <code>&lt;id&gt;.&lt;number&gt;</code>. The answer to a change says how far a server must have read them to see that change</td>
+</tr>
+<tr>
+<td><code>X-Signalith-Config-Min</code></td>
+<td>The web pages, on each request to <code>/api/</code></td>
+<td>The highest <code>X-Signalith-Config</code> the page has seen. A server that has not read that far reads the shared settings once before it answers</td>
+</tr>
+<tr>
+<td><code>X-Signalith-Stale</code></td>
+<td>A server that is still behind after that</td>
+<td><code>1</code>. The page asks again once for a read; a change is checked against OpenSearch anyway, so it is never made on old settings</td>
+</tr>
+</tbody>
+</table>
+<p>Scripts that use the API can do the same: send the <code>X-Signalith-Config</code> of the answer
+to a change as <code>X-Signalith-Config-Min</code> on the next request. Only signed-in requests
+wait.</p>
+<p><strong>Upgrading behind a load balancer.</strong> While servers of two versions share one
+address, a page from one version can ask a server of the other for its scripts. The
+pages therefore load their scripts and stylesheets from paths that name the version,
+<code>/v/&lt;version&gt;/…</code>, which only a server of that version serves, and which browsers may
+keep for a year. If one does not load, the page reloads itself, a few times with
+growing pauses, until it gets a server of the version it came from or a page of the
+new one; after 5 tries it says that Signalith is being upgraded. A page that sees
+another version in <code>X-Signalith-Version</code> reloads once to get that version's pages;
+if a server of the other version answers again within 2 minutes, the page says that
+Signalith is being upgraded instead of reloading again. The plain
+paths (<code>/app.js</code> and so on) keep working, for pages of earlier versions.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../agent-tokens/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Agent tokens">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Agent tokens
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../cluster-cli/" class="md-footer__link md-footer__link--next" aria-label="Next: signalith cluster">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                signalith cluster
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Signalith is open source under the Apache License 2.0.
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/jrsamsanchez/Signalith" target="_blank" rel="noopener" title="Signalith on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://signalith.io/" target="_blank" rel="noopener" title="signalith.io" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M16.36 14c.08-.66.14-1.32.14-2s-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2m-5.15 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56M14.34 14H9.66c-.1-.66-.16-1.32-.16-2s.06-1.35.16-2h4.68c.09.65.16 1.32.16 2s-.07 1.34-.16 2M12 19.96c-.83-1.2-1.5-2.53-1.91-3.96h3.82c-.41 1.43-1.08 2.76-1.91 3.96M8 8H5.08A7.92 7.92 0 0 1 9.4 4.44C8.8 5.55 8.35 6.75 8 8m-2.92 8H8c.35 1.25.8 2.45 1.4 3.56A8 8 0 0 1 5.08 16m-.82-2C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2s.06 1.34.14 2M12 4.03c.83 1.2 1.5 2.54 1.91 3.97h-3.82c.41-1.43 1.08-2.77 1.91-3.97M18.92 8h-2.95a15.7 15.7 0 0 0-1.38-3.56c1.84.63 3.37 1.9 4.33 3.56M12 2C6.47 2 2 6.5 2 12a10 10 0 0 0 10 10 10 10 0 0 0 10-10A10 10 0 0 0 12 2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.top", "navigation.indexes", "navigation.footer", "navigation.tracking", "toc.follow", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

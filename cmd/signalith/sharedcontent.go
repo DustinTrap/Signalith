@@ -62,6 +62,9 @@ type sharedContent struct {
 	// applyMu keeps the changes of the files from being applied twice at
 	// once: by a start, and before the next one (runner.applyFiles).
 	applyMu sync.Mutex
+	// lib links the shared detections and dashboards (see
+	// sharedlibrary.go).
+	lib *sharedLibrary
 }
 
 type osTarget struct {
@@ -76,6 +79,7 @@ func newSharedContent(c *config.Config, node *cluster.Node, log *slog.Logger) *s
 	// signalith.yaml reach the users' documents.
 	ct.docs.UseAuth(ct.users.docs)
 	ct.cfg.Store(c)
+	ct.lib = newSharedLibrary(node, func() *config.Config { return ct.cfg.Load() }, log)
 	return ct
 }
 
@@ -83,6 +87,7 @@ func newSharedContent(c *config.Config, node *cluster.Node, log *slog.Logger) *s
 func (ct *sharedContent) track(h *shared.Hub) {
 	ct.docs.Track(h)
 	ct.users.docs.Track(h)
+	ct.lib.track(h)
 }
 
 // files is what the importers read: this server's files and settings.
@@ -262,6 +267,9 @@ func sharedFingerprints(fp cluster.Fingerprints, rt *shared.Runtime, on bool) cl
 		fp.Retention, fp.Feeds = cluster.SharedFingerprint(id), cluster.SharedFingerprint(id)
 		if rt.SharedUsers() {
 			fp.Users = cluster.SharedFingerprint(id)
+		}
+		if rt.SharedLibrary() {
+			fp.Detections = cluster.SharedFingerprint(id)
 		}
 	}
 	return fp
