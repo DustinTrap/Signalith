@@ -2451,6 +2451,9 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 #page-data .agent-addr { display: grid; gap: var(--sp-2); padding-bottom: var(--sp-4); box-shadow: inset 0 -1px 0 var(--line-subtle); }
 #page-data .agent-addr__row { display: flex; align-items: center; gap: 12px; }
 #page-data .agent-addr__row .label { flex: none; }
+#page-data .agent-dest { display: grid; gap: var(--sp-2); }
+#page-data .agent-dest__seg { flex-wrap: wrap; height: auto; min-height: var(--h-md); }
+#page-data .agent-dest .alert { margin-top: 0; }
 #page-data #agent-server { max-width: 340px; font-family: var(--font-mono); }
 #page-data .agent-addr .alert { margin-top: var(--sp-1); overflow-wrap: anywhere; }
 #page-data .agent-addr .alert code { font-size: var(--fs-sm); color: var(--text); }
@@ -4820,3 +4823,7 @@ details[open] > summary .inv-exact__chev { transform: rotate(90deg); }
   .inv-timeline li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .inv-dialog .modal__foot .spacer { display: none; }
 }
+
+/* Health: totals for every server behind one address */
+#page-health .hp-cluster .num { text-align: right; font-variant-numeric: tabular-nums; }
+#page-health .hp-cluster .hp-total th, #page-health .hp-cluster .hp-total td { font-weight: 600; box-shadow: inset 0 1px 0 var(--line-subtle); }
