@@ -633,7 +633,8 @@ page itself.
 [response actions](response-actions.md)), `GET /api/playbooks/runs`,
 `POST /api/playbooks/runs/{id}/approve`, `POST /api/playbooks/runs/{id}/reject`
 (the Approvals page; see [playbooks.md](playbooks.md)), `GET /api/agent-tokens` (the names,
-status and use of the [agent tokens](agent-tokens.md), never a secret).
+status and use of the [agent tokens](agent-tokens.md), never a secret), `GET /api/agents` (the
+agents that send events, shown on the [Endpoints page](endpoints.md)).
 
 **Admin:** `GET /api/agents/config`, `POST /api/agent-tokens`,
 `PATCH /api/agent-tokens/{id}`, `POST /api/agent-tokens/{id}/revoke`,
