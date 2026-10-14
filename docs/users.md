@@ -819,7 +819,9 @@ request, so a server that has not yet read that change reads it first (see
 `GET /api/risk`, `GET /api/risk/object`, `GET /api/intel`, `GET /api/intel/feeds`,
 `GET /api/intel/catalog`, `GET /api/intel/indicators`, `GET /api/intel/lookup`, `GET /api/posture`,
 `GET /api/dashboards`, `GET /api/dashboards/{id}`, `GET /api/dashboards/{id}/yaml`,
-`POST /api/dashboards/{id}/run`, `POST /api/panels/run`, and the web UI.
+`POST /api/dashboards/{id}/run`, `POST /api/panels/run`, `GET /api/compliance`,
+`GET /api/compliance/export` (the [Compliance page](compliance.md) and its evidence reports,
+so an auditor can work with a Viewer account), and the web UI.
 
 **Analyst:** `POST /api/ask`, `POST /api/findings`, `POST /api/findings/bulk`,
 `PATCH /api/findings/{id}`, `POST /api/cases`, `PATCH /api/cases/{id}`,
@@ -859,6 +861,8 @@ agents that send events, shown on the [Endpoints page](endpoints.md)), `GET /api
 `POST /api/endpoints/queries`, `GET /api/endpoints/queries/{id}` (the [Endpoints page](endpoints.md)),
 `GET /api/vulns/setup`, `PUT /api/vulns/settings`, `POST /api/vulns/networks/{id}/scan`,
 `POST /api/vulns/scans/{id}/stop` (setting up and running [vulnerability scans](vulnerabilities.md)),
+`PUT /api/compliance/notes` (marking a [compliance](compliance.md) control as handled outside
+Signalith or not applicable),
 `GET /api/cluster` (the Servers page; see [servers.md](servers.md)), `GET /api/requests/{id}`
 (work asked of the server that runs the background jobs, such as a feed download or a retention
 run; see [servers.md](servers.md#shared-feeds-and-retention-policies)), every
