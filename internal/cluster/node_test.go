@@ -532,6 +532,15 @@ func TestLiveCopyWithLastBootStops(t *testing.T) {
 		t.Errorf("a: ready %v (%s), runs jobs %v", ok, why, a.RunsJobs())
 	}
 	until(t, 5*time.Second, "a's heartbeat back", func() bool { return heartbeatOf(t, fos, a.ID()).BootID == a.local.BootID })
+	// a can only tell that a copy was started when the copy wrote its
+	// heartbeat. The copy may see a's heartbeat first and stop before it
+	// writes one; then there is nothing to warn about.
+	cp.mu.Lock()
+	wrote := !cp.hb.ver.IsZero()
+	cp.mu.Unlock()
+	if !wrote {
+		return
+	}
 	found := false
 	for _, w := range a.Status().Warnings {
 		found = found || strings.Contains(w.Text, "A copy of this server's state folder was started")
