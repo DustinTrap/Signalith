@@ -20,6 +20,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -316,6 +317,64 @@ func TestSecretsRotateAndPrune(t *testing.T) {
 	}
 	if c, err := config.Load(path); err != nil || c.Assistant.APIKey != "sk-ant-lab-key" {
 		t.Errorf("load after rotation: %v", err)
+	}
+}
+
+// TestSecretsRotateResealsClusterFiles checks that rotate-master seals the
+// node key, the cluster keys and the copy of the shared settings in the
+// state folder again with the new master key, as it does the other files.
+func TestSecretsRotateResealsClusterFiles(t *testing.T) {
+	path, _ := secretsSetup(t)
+	state := filepath.Dir(path)
+	t.Setenv("SIGNALITH_STATE_DIR", state)
+	if _, err := runCmd(t, "", "encrypt", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	master := secrets.NewKeyring(state)
+	oldID := master.KeyID()
+	ks := shared.KeyStore{Dir: state, Master: master}
+	node, err := ks.NodeKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, _ := shared.NewClusterKey()
+	if err := ks.SaveClusterKey(ck); err != nil {
+		t.Fatal(err)
+	}
+	cache := shared.Cache{Path: shared.CachePath(state), Master: master, ClusterID: "c_1", Prefix: "signalith"}
+	if err := cache.Write(shared.CacheData{WrittenAt: time.Now(), MaxRev: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := runCmd(t, "", "status", "-c", path); !strings.Contains(out, "cluster key "+ck.ID()) || !strings.Contains(out, "copy of the shared settings") {
+		t.Errorf("status:\n%s", out)
+	}
+	out, err := runCmd(t, "", "rotate-master", "-c", path)
+	if err != nil {
+		t.Fatalf("rotate (%v):\n%s", err, out)
+	}
+	files := []string{shared.NodeKeyPath(state), shared.ClusterKeyPath(state, ck.ID()), shared.CachePath(state)}
+	for _, f := range files {
+		if !strings.Contains(out, "Encrypted 1 value again in "+f) {
+			t.Errorf("rotate output does not name %s:\n%s", f, out)
+		}
+	}
+	// Without the previous key, everything opens with the new one.
+	if _, err := runCmd(t, "", "rotate-master", "-prune", "-c", path); err != nil {
+		t.Fatal(err)
+	}
+	master = secrets.NewKeyring(state)
+	if master.KeyID() == oldID {
+		t.Fatal("same master key")
+	}
+	ks.Master, cache.Master = master, master
+	if n, err := ks.LoadNodeKey(); err != nil || n.Fingerprint() != node.Fingerprint() {
+		t.Errorf("node key after rotation: %v", err)
+	}
+	if keys, err := ks.ClusterKeys(); err != nil || len(keys) != 1 || keys[0].ID() != ck.ID() {
+		t.Errorf("cluster key after rotation: %v", err)
+	}
+	if d, err := cache.Read(time.Now()); err != nil || d.MaxRev != 7 {
+		t.Errorf("cache after rotation: %+v %v", d, err)
 	}
 }
 

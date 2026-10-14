@@ -223,7 +223,7 @@
   async function copyReport() {
     $('sc-export').removeAttribute('open');
     const fetchText = async () => {
-      const resp = await fetch('api/security?format=text');
+      const resp = await apiRaw('api/security?format=text');
       if (resp.status === 401) { toSignIn(); throw new Error('Your session ended. Sign in again.'); }
       if (!resp.ok) {
         const d = await resp.json().catch(() => ({}));

@@ -187,6 +187,45 @@ func (o *OpenSearch) All(ctx context.Context) ([]Indicator, error) {
 	}
 }
 
+// SourceIDs lists the IDs of every stored indicator of a source, a page
+// at a time.
+func (o *OpenSearch) SourceIDs(ctx context.Context, source string) ([]string, error) {
+	var out []string
+	var after []any
+	for {
+		body := map[string]any{
+			"size":             10000,
+			"query":            map[string]any{"term": map[string]any{"source": source}},
+			"_source":          []string{"id"},
+			"sort":             []any{map[string]any{"id": "asc"}},
+			"track_total_hits": false,
+		}
+		if after != nil {
+			body["search_after"] = after
+		}
+		var resp struct {
+			Hits struct {
+				Hits []struct {
+					ID   string `json:"_id"`
+					Sort []any  `json:"sort"`
+				} `json:"hits"`
+			} `json:"hits"`
+		}
+		path := "/" + url.PathEscape(o.Index) + "/_search?ignore_unavailable=true&allow_no_indices=true"
+		if err := o.Client.Do(ctx, http.MethodPost, path, body, &resp); err != nil {
+			return nil, err
+		}
+		hits := resp.Hits.Hits
+		for _, h := range hits {
+			out = append(out, h.ID)
+		}
+		if len(hits) < 10000 {
+			return out, nil
+		}
+		after = hits[len(hits)-1].Sort
+	}
+}
+
 // Version is the indicator count and the latest update time.
 func (o *OpenSearch) Version(ctx context.Context) (string, error) {
 	body := map[string]any{

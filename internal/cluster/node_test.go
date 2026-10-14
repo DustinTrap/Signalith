@@ -1187,3 +1187,38 @@ func TestClusterNowFollowsOpenSearch(t *testing.T) {
 		t.Errorf("a step of the wall clock moved the cluster time: %v", n.ClusterNow().Sub(time.Now()))
 	}
 }
+
+// The shared configuration's state goes into the heartbeat, and a server
+// it keeps out (not part of the cluster yet) does not run the jobs.
+func TestSharedStatusInHeartbeatAndEligibility(t *testing.T) {
+	fos := ostest.New(t)
+	c := store.New(store.Config{URL: fos.URL})
+	l, err := OpenLocal(t.TempDir(), testOptions("siem-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := New(Options{Local: l, Version: "1.0.0", Timing: fast})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		n.Close()
+	})
+	var why atomic.Value
+	why.Store("it is not part of the cluster yet")
+	n.Start(ctx)
+	n.Use(c, "s", Settings{Eligible: true, Shared: func() SharedStatus {
+		return SharedStatus{Mode: "legacy_b", LevelMin: 1, LevelMax: 1, ConfigSeq: 7, MaxRev: 3, Tamper: []string{"feeds"}, NotEligible: why.Load().(string)}
+	}})
+	waitReady(t, n, 5*time.Second)
+	until(t, 5*time.Second, "the heartbeat carries the shared status", func() bool {
+		hb := heartbeatOf(t, fos, n.ID())
+		return hb.Mode == "legacy_b" && hb.LevelMax == 1 && hb.ConfigSeq == 7 && hb.MaxRev == 3 && len(hb.Tamper) == 1 &&
+			!hb.LeaderEligible && hb.NotEligible == "it is not part of the cluster yet"
+	})
+	time.Sleep(3 * fast.Renew)
+	if n.RunsJobs() {
+		t.Fatal("a server kept out by the shared configuration took the jobs")
+	}
+	why.Store("")
+	until(t, 5*time.Second, "it takes the jobs once it may", n.RunsJobs)
+}

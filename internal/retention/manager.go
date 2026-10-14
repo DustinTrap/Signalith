@@ -69,9 +69,11 @@ const maxGuardPasses = 3
 type Manager struct {
 	Cluster Cluster
 	Prefix  string
-	// Config is what signalith.yaml says; Store holds what the page saved.
+	// Config is what signalith.yaml says; Store holds what the page saved
+	// (or, when servers share their settings, the shared policies, with
+	// Config left empty).
 	Config  Config
-	Store   *Store
+	Store   PolicyStore
 	Archive *Archive
 	// HistoryFile keeps the last run and recent actions.
 	HistoryFile string
@@ -94,6 +96,18 @@ type Manager struct {
 	// OpenSearch; the step runs only when it returns nil. It confirms that
 	// this server still holds the background jobs.
 	Fence func(ctx context.Context) error
+	// Shared is set when the policies are the servers' shared ones: then
+	// any server may change them (ReadOnly and Leader only keep it from
+	// running retention and restoring).
+	Shared bool
+	// Hold, when set, says whether the policies wait to be confirmed, and
+	// why: until they are, runs only take the disk guard's steps, and
+	// freeze, archive and delete nothing else. ConfirmHold confirms them.
+	Hold        func() (held bool, why string)
+	ConfirmHold func(ctx context.Context, by string) error
+	// OnSettings, when set, is called with the settings in effect after
+	// this server changed them.
+	OnSettings func(Settings)
 
 	initOnce sync.Once
 	hist     *history
@@ -121,6 +135,55 @@ type queuedRun struct{ trigger, by string }
 
 // maxRestores is how many restores the archive view remembers.
 const maxRestores = 50
+
+// PolicyStore keeps the policies changed on the page: *Store in a file,
+// or the shared policies of servers that share one OpenSearch.
+type PolicyStore interface {
+	// Get returns the saved settings, and an error when they cannot be
+	// used (runs then do nothing until it is fixed).
+	Get() (Saved, error)
+	// Update changes them with change, checking the result.
+	Update(change func(*Saved)) error
+}
+
+// VersionedStore is a PolicyStore whose changes can be made only if
+// nobody changed the policies since a page read them.
+type VersionedStore interface {
+	PolicyStore
+	// ETag is the version of the policies now, "" when unknown.
+	ETag() string
+	// UpdateIf is Update, refused when the version is no longer etag.
+	UpdateIf(etag string, change func(*Saved)) error
+}
+
+// ErrNoHold is a confirmation when nothing waits for one.
+var ErrNoHold = errors.New("the retention policies do not wait to be confirmed")
+
+// held reports whether the policies wait to be confirmed, and why.
+func (m *Manager) held() (bool, string) {
+	if m.Hold == nil {
+		return false, ""
+	}
+	return m.Hold()
+}
+
+// ETag is the version of the saved policies, for a page that changes
+// them only if nobody else did meanwhile; "" when the store has none.
+func (m *Manager) ETag() string {
+	if v, ok := m.Store.(VersionedStore); ok {
+		return v.ETag()
+	}
+	return ""
+}
+
+// Confirm confirms policies that wait to be confirmed, so runs enforce
+// them in full again.
+func (m *Manager) Confirm(ctx context.Context, by string) error {
+	if held, _ := m.held(); !held || m.ConfirmHold == nil {
+		return ErrNoHold
+	}
+	return m.ConfirmHold(ctx, by)
+}
 
 // readOnly returns why this server cannot change retention now, or nil.
 func (m *Manager) readOnly() error {
@@ -494,12 +557,17 @@ func (m *Manager) run(ctx context.Context, trigger, by string) (*Run, error) {
 		}
 		wanted := m.stillWanted(s, st.snap)
 		guardFailed = false
+		hold, why := m.held()
+		if hold && pass == 0 {
+			m.Log.Info("retention: the policies wait to be confirmed, so only the disk guard acts", "why", why)
+		}
 		for _, d := range plan.Steps() {
 			if ctx.Err() != nil {
 				break
 			}
-			// Later passes only let the guard pick other days.
-			if attempted[d.Index] || (pass > 0 && d.Rule != RuleGuard) {
+			// Later passes only let the guard pick other days, and so do
+			// policies that wait to be confirmed.
+			if attempted[d.Index] || ((pass > 0 || hold) && d.Rule != RuleGuard) {
 				continue
 			}
 			d, ok, why := wanted(d)
@@ -531,7 +599,7 @@ func (m *Manager) run(ctx context.Context, trigger, by string) (*Run, error) {
 				run.Deleted++
 			}
 		}
-		if pass == 0 {
+		if pass == 0 && !hold {
 			m.deleteRecords(ctx, run, plan.Records)
 		}
 		if !guardFailed || ctx.Err() != nil {
@@ -891,8 +959,13 @@ func (m *Manager) guardPause() (time.Time, bool) {
 
 // SetPolicy saves a category's own policy, or with nil goes back to the
 // default.
-func (m *Manager) SetPolicy(id string, p *Policy) error {
-	return m.change(Change{Category: id, Policy: p}, func(sv *Saved) {
+func (m *Manager) SetPolicy(id string, p *Policy) error { return m.SetPolicyIf(id, p, "") }
+
+// SetPolicyIf is SetPolicy, refused when the policies are no longer at
+// version etag ("" saves whatever their version).
+func (m *Manager) SetPolicyIf(id string, p *Policy, etag string) error {
+	return m.change(Change{Category: id, Policy: p}, etag, func(sv *Saved) {
+		delete(sv.From, "policies."+id)
 		if p == nil {
 			delete(sv.Policies, id)
 			return
@@ -905,19 +978,35 @@ func (m *Manager) SetPolicy(id string, p *Policy) error {
 }
 
 // SetDefault saves the default policy for event categories.
-func (m *Manager) SetDefault(p Policy) error {
-	return m.change(Change{Default: &p}, func(sv *Saved) { sv.Default = &p })
+func (m *Manager) SetDefault(p Policy) error { return m.SetDefaultIf(p, "") }
+
+// SetDefaultIf is SetDefault at version etag (see SetPolicyIf).
+func (m *Manager) SetDefaultIf(p Policy, etag string) error {
+	return m.change(Change{Default: &p}, etag, func(sv *Saved) {
+		sv.Default = &p
+		delete(sv.From, "default")
+	})
 }
 
 // SetGuard saves the disk guard settings.
-func (m *Manager) SetGuard(g Guard) error {
+func (m *Manager) SetGuard(g Guard) error { return m.SetGuardIf(g, "") }
+
+// SetGuardIf is SetGuard at version etag (see SetPolicyIf).
+func (m *Manager) SetGuardIf(g Guard, etag string) error {
 	g = g.Normalized()
-	return m.change(Change{Guard: &g}, func(sv *Saved) { sv.Guard = &g })
+	return m.change(Change{Guard: &g}, etag, func(sv *Saved) {
+		sv.Guard = &g
+		delete(sv.From, "guard")
+	})
 }
 
-func (m *Manager) change(ch Change, save func(*Saved)) error {
-	if err := m.readOnly(); err != nil {
-		return err
+func (m *Manager) change(ch Change, etag string, save func(*Saved)) error {
+	if !m.Shared {
+		// A server's own files are only used by it, so only the server
+		// that runs retention may change them.
+		if err := m.readOnly(); err != nil {
+			return err
+		}
 	}
 	if m.Store == nil {
 		return errors.New("retention settings cannot be saved on this server")
@@ -929,7 +1018,20 @@ func (m *Manager) change(ch Change, save func(*Saved)) error {
 	if _, err := cur.apply(ch); err != nil {
 		return err
 	}
-	return m.Store.Update(save)
+	if v, ok := m.Store.(VersionedStore); ok && etag != "" {
+		err = v.UpdateIf(etag, save)
+	} else {
+		err = m.Store.Update(save)
+	}
+	if err != nil {
+		return err
+	}
+	if m.OnSettings != nil {
+		if s, err := m.Settings(); err == nil {
+			m.OnSettings(s)
+		}
+	}
+	return nil
 }
 
 // ---- previews ----
@@ -1034,6 +1136,35 @@ type Overview struct {
 	Error string `json:"error,omitempty"`
 	// SettingsError says retention.yaml has errors; runs are paused.
 	SettingsError string `json:"settings_error,omitempty"`
+	// Hold is set while the policies wait to be confirmed: runs only take
+	// the disk guard's steps until they are.
+	Hold *HoldView `json:"hold,omitempty"`
+	// ETag is the version of the saved policies, for If-Match.
+	ETag string `json:"etag,omitempty"`
+	// Shared is set when the policies are the servers' shared ones: any
+	// server changes them, and the one that runs retention enforces them.
+	Shared bool `json:"shared,omitempty"`
+}
+
+// HoldView says why the policies wait to be confirmed.
+type HoldView struct {
+	Reason string `json:"reason"`
+}
+
+// FromView is where a shared setting's value came from, for the page.
+type FromView struct {
+	Provenance
+	Note string `json:"note"`
+}
+
+// from returns where the first of keys that has a record came from.
+func (s Settings) from(keys ...string) *FromView {
+	for _, k := range keys {
+		if p, ok := s.From[k]; ok {
+			return &FromView{Provenance: p, Note: p.Note()}
+		}
+	}
+	return nil
 }
 
 // CategoryView is one row of the page's table.
@@ -1052,18 +1183,20 @@ type CategoryView struct {
 	Policy        Policy `json:"policy"`
 	// Source is default, ui, config or feeds; Editable is false for
 	// policies from signalith.yaml and for threat intel.
-	Source   string  `json:"source"`
-	Editable bool    `json:"editable"`
-	Note     string  `json:"note,omitempty"`
-	Pending  Summary `json:"pending"`
+	Source   string    `json:"source"`
+	Editable bool      `json:"editable"`
+	Note     string    `json:"note,omitempty"`
+	From     *FromView `json:"from,omitempty"`
+	Pending  Summary   `json:"pending"`
 }
 
 // DefaultView is the default policy for event categories.
 type DefaultView struct {
-	Policy   Policy `json:"policy"`
-	Source   string `json:"source"` // days, ui or config
-	Editable bool   `json:"editable"`
-	Note     string `json:"note,omitempty"`
+	Policy   Policy    `json:"policy"`
+	Source   string    `json:"source"` // days, ui or config
+	Editable bool      `json:"editable"`
+	Note     string    `json:"note,omitempty"`
+	From     *FromView `json:"from,omitempty"`
 }
 
 // GuardView is the disk guard's settings and what it sees.
@@ -1074,6 +1207,7 @@ type GuardView struct {
 	Source         string      `json:"source"` // builtin, ui or config
 	Editable       bool        `json:"editable"`
 	Note           string      `json:"note,omitempty"`
+	From           *FromView   `json:"from,omitempty"`
 	Status         GuardStatus `json:"status"`
 	// PausedUntil is set while the disk check waits for the next scheduled
 	// run, after a run in which the guard could not get the disk under its
@@ -1142,22 +1276,33 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 		ov.SettingsError = serr.Error()
 	}
 	roErr := m.readOnly()
-	canEdit := m.Store != nil && roErr == nil
+	canEdit := m.Store != nil && (roErr == nil || m.Shared)
+	if held, why := m.held(); held {
+		ov.Hold = &HoldView{Reason: why}
+	}
 	ov.Default = DefaultView{Policy: s.Default, Source: s.DefaultSource, Editable: s.DefaultSource != SourceConfig && canEdit}
 	if s.DefaultSource == SourceConfig {
 		ov.Default.Note = fromConfig
+	}
+	// retention.days gives the default policy only until one is saved.
+	if s.DefaultSource == SourceDays {
+		ov.Default.From = s.from("days")
+	} else {
+		ov.Default.From = s.from("default")
 	}
 	ov.Guard = GuardView{Enabled: s.Guard.IsEnabled(), MaxDiskPercent: s.Guard.MaxDiskPercent, MinDays: s.Guard.MinDays,
 		Source: s.GuardSource, Editable: s.GuardSource != SourceConfig && canEdit}
 	if s.GuardSource == SourceConfig {
 		ov.Guard.Note = fromConfig
 	}
+	ov.Guard.From = s.from("guard")
 	if until, paused := m.guardPause(); paused {
 		ov.Guard.PausedUntil = &until
 		m.mu.Lock()
 		ov.Guard.PauseReason = m.guardPausedWhy
 		m.mu.Unlock()
 	}
+	ov.ETag, ov.Shared = m.ETag(), m.Shared
 	ov.LastRun, ov.Recent = m.hist.get()
 	ov.Archive = ArchiveSummary{Dir: m.Archive.Dir, Problems: []string{}, Free: -1}
 	iv := m.interval()
@@ -1230,6 +1375,9 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 			cv.Note = fromConfig
 		case c.Kind == KindManaged:
 			cv.Note = "Managed by feeds"
+		}
+		if _, own := s.Policies[c.ID]; own {
+			cv.From = s.from("policies." + c.ID)
 		}
 		var cs []Decision
 		for _, d := range steps {

@@ -145,6 +145,12 @@ type Server struct {
 	// says which one runs the background jobs. nil means this server runs
 	// them when detections.scheduler is on, and lists no servers.
 	Cluster Cluster
+	// Shared is the shared configuration in OpenSearch; nil on a server
+	// that keeps every setting in its own files.
+	Shared Shared
+	// ConfigToken is how far this server has read the shared settings,
+	// for the X-Signalith-Config headers; nil sends none.
+	ConfigToken ConfigToken
 	// Security runs the Security page's checks and keeps the last
 	// report; it carries over a restart in place. nil makes one.
 	Security *SecurityChecker
@@ -168,6 +174,7 @@ type Server struct {
 	settingsMu   sync.Mutex     // serializes saves on the Settings page
 	testMu       sync.Mutex     // one connection test at a time
 	sampleJob    sampleJob      // the one running sample-data load or remove
+	pageCache    pages          // index.html and login.html, rendered
 	// live holds Config with the settings saved on the Settings page that
 	// apply at once, and liveAI the assistant they give.
 	live   atomic.Pointer[config.Config]
@@ -253,6 +260,7 @@ func (s *Server) Handler() http.Handler {
 	s.routePlaybooks(api)
 	s.routeUsers(api)
 	s.routeRetention(api)
+	s.routeRequests(api)
 	s.routeSample(api)
 	s.routeEndpoints(api)
 	s.routeVulns(api)
@@ -261,19 +269,24 @@ func (s *Server) Handler() http.Handler {
 	s.routeTokens(api)
 	s.routeAgents(api)
 	if s.UI != nil {
-		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(staticFiles(s.UI, true)))
+		api.add(route{Pattern: "GET /", Role: users.Viewer}, revalidate(s.indexPage(staticFiles(s.UI, true))))
+		if v := versionSegment(s.Version); v != "" {
+			// The same files under /v/<version>/, which pages name.
+			api.add(route{Pattern: "GET /v/" + v + "/", Role: users.Viewer},
+				versionedFiles(s.Version, true, http.StripPrefix("/v/"+v, staticFiles(s.UI, false))))
+		}
 	}
 	s.routes = api.routes
 	s.routeLogin(mux)
-	mux.Handle("/", s.requireUser(api.mux))
-	return limitBodies(s.securityHeaders(s.guardAPI(mux)))
+	mux.Handle("/", s.requireUser(s.configToken(false, s.awaitConfig(api.mux))))
+	return limitBodies(s.securityHeaders(s.configHeaders(s.guardAPI(mux))))
 }
 
 // guardAPI makes sure no /api/ route escapes sign-in: a route registered
 // straight on the outer mux, rather than with a role on the router, is
 // admin-only unless it is one of publicRoutes.
 func (s *Server) guardAPI(mux *http.ServeMux) http.Handler {
-	guarded := s.requireUser(s.allow(route{Pattern: "(outer mux)", Role: users.Admin, Unclassified: true}, mux))
+	guarded := s.requireUser(s.configToken(false, s.allow(route{Pattern: "(outer mux)", Role: users.Admin, Unclassified: true}, mux)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			if _, pattern := mux.Handler(r); pattern != "" && pattern != "/" && !slices.Contains(publicRoutes, pattern) {

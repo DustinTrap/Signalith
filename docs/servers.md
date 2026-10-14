@@ -25,6 +25,7 @@ few seconds.
 | Server | The server's name (`cluster.node_name`), **This server** on the one you are signed in to, and its address (`server.node_url`) |
 | Status | **Running**, **Starting**, **Stopping**, **Stopped** (shut down on purpose), **Not answering** (no sign of life for 30 seconds), **Couldn't start** (a restart after a settings change failed with the new settings and the old ones: it receives nothing, runs no jobs and tries again every 30 seconds; its log says why), **Identity in use** (see [Identity](#identity)), or, on this server only, what keeps it from using OpenSearch, such as **Can't reach OpenSearch** (see [When this server can't use OpenSearch](#when-this-server-cant-use-opensearch)). Below it: how long it has been up, or when it was last seen, counted by the server that answered the page, so neither the other server's clock nor yours matters. A clock more than 2 seconds off is shown here too |
 | Background jobs | **Runs jobs** on the server that runs them. **Standby** on a server that would take them over, or why it would not. **Doesn't run them** on a server that may not, with the reason |
+| Settings | How it uses the [shared settings](#shared-settings-and-the-cluster-key): **Shared** when it uses the settings every server shares; **Its own files** when it is not part of the cluster (amber when it misses the cluster key, or could not reach OpenSearch when it started); **Saved copy** when it cannot read the shared settings now and works from its copy; **Missed a key change** or **Settings gone** when it needs `signalith cluster` (see [signalith cluster](cluster-cli.md)). Hover over it for what to do. Below it, a shared setting that was changed outside Signalith or by a newer version (the server keeps its last good copy), and the settings in its signalith.yaml or environment that differ from the shared ones |
 | Version | The Signalith version it runs |
 
 With one server, the page shows that server and nothing to set up. To add one, see
@@ -113,14 +114,17 @@ health and warnings, and **Run now** works on any of them.
 servers take turns by themselves. Turn it off only on a server that should never
 run the jobs, for example one that only receives data.
 
-**Changing retention and feeds.** Until settings are shared between servers, the
-Data retention, Threat intel feed, Notifications and Playbooks settings can be changed only on
-the server that runs the jobs.
+**Changing retention and feeds.** Once the servers are a cluster (see
+[Shared feeds and retention policies](#shared-feeds-and-retention-policies)), the Data retention
+and Threat intel feed settings can be changed on any server. Notifications and Playbooks settings,
+and both on a server that is not part of the cluster yet, can be changed only on the server that
+runs the jobs.
 
 ## When a server will not take over
 
-Retention policies, threat intel feeds, notifications, playbooks and custom detections are still kept in
-files on each server. A server whose files differ from those of the server that
+Notifications, playbooks and custom detections are still kept in files on each server, and so are
+retention policies and threat intel feeds on a server that is not part of the cluster yet (on
+the servers of the cluster they are shared, so they never differ). A server whose files differ from those of the server that
 runs the jobs does not take the jobs over by itself: it would delete, download or
 alert differently. The list shows it as **Standby** with "Won't take over" and the
 reason, and an alert says what to copy:
@@ -244,9 +248,15 @@ Until servers can be added from the Servers page:
    encrypted (`enc:` values) cannot be copied as they are: set them on the new
    server with `signalith secrets set`, or put them there in plain text and run
    `signalith secrets encrypt` (see [docs/encryption.md](encryption.md)).
-4. Copy the retention, feed and detection files listed above, so it can take the
-   jobs over. Copy only those files: never `node.id` or the `cluster` folder. In
-   Docker they are in the data volume; copy them into the new server's volume
+4. Give it the cluster key (see
+   [Shared settings and the cluster key](#shared-settings-and-the-cluster-key)):
+   `signalith cluster export-key` on a server that has it, `signalith cluster
+   import-key` on the new one. If the cluster was made with a key file
+   (`SIGNALITH_CLUSTER_KEY_FILE`), the same file on the new one does it too.
+   It then uses the shared feeds and retention policies, and can take the jobs over.
+   Without the key it runs no background jobs. Copy the notification, playbook and
+   detection files listed above too. Never copy `node.id`, the `cluster` folder or the `keys` folder. In
+   Docker they are in the data volume; copy files into the new server's volume
    rather than copying the whole volume.
 5. Set up its users. Each server keeps users in `users.json` in its lookups folder.
    - **Separate lookups folders** (the usual case): add the same users on its
@@ -276,6 +286,104 @@ Until servers can be added from the Servers page:
    index template, and the setting of the server that started last is used.
 
 When it starts, it appears on the Servers page of every server.
+
+## Shared settings and the cluster key
+
+The servers that share one OpenSearch also share settings there, in the
+`<prefix>_config` index. Each one is signed with the **cluster key**, which every
+server keeps in its state folder (`keys/cluster-<id>.key`, encrypted with that
+server's master key) and never in OpenSearch, so someone who can write to OpenSearch
+cannot change them unnoticed. They share what makes them one cluster (its name, the
+list of servers and their keys), the threat intel feeds and the retention policies;
+see [Shared feeds and retention policies](#shared-feeds-and-retention-policies).
+
+The server that runs the background jobs makes the cluster by itself, the first
+time it runs this version: it makes the cluster key and writes the shared settings.
+Give the OpenSearch user the right to create, read and write `<prefix>_config` too
+(or `<prefix>_*`). Every other server then needs the cluster key:
+
+- on a server that has it, run `signalith cluster export-key -o cluster-key.txt`
+  and choose a passphrase;
+- copy the file to the other server and run `signalith cluster import-key
+  cluster-key.txt` there, with that passphrase. It joins within seconds.
+
+Or, **before the cluster is made**, choose the key yourself: 32 random bytes as
+one line of base64 (lines starting with `#` are comments), in a file only Signalith
+can read, named in `SIGNALITH_CLUSTER_KEY_FILE` on every server. The server that
+makes the cluster then uses that key, and every server that has the file joins by
+itself. To make such a file:
+
+```bash
+openssl rand -base64 32 > cluster-key
+```
+
+```powershell
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+[Convert]::ToBase64String($b) | Set-Content -NoNewline cluster-key
+```
+
+A key file only joins a cluster made with that very key: no command writes the key
+of an existing cluster in plain form, so for a cluster made without a key file use
+`export-key` and `import-key`. Until a server has the key, it keeps working from its
+own files but runs no background jobs, and the Servers page says so.
+
+Each server keeps its last copy of the shared settings in `cluster/cache.enc` in
+its state folder, encrypted with its master key, so it can start while OpenSearch
+cannot be reached (it then answers `/readyz` with `degraded` and pauses changes).
+`signalith cluster` helps when something went wrong (see
+[signalith cluster](cluster-cli.md) for each command and its options):
+
+| Command | What it does |
+| --- | --- |
+| `signalith cluster status` | This server's place in the cluster, the servers with the key, and any problem |
+| `signalith cluster found` | Makes the cluster from this server's files when no server that runs the background jobs is up |
+| `signalith cluster export` | Prints the shared settings as YAML; stored passwords stay encrypted |
+| `signalith cluster import -from-cache` | Writes this server's copy back after the `<prefix>_config` index was deleted; the other servers resume by themselves |
+| `signalith cluster export-key`, `import-key` | Gives another server the cluster key, encrypted with a passphrase |
+| `signalith cluster reset-key` | When every copy of the key is lost: with every server stopped, shows the shared settings, makes a new key and signs them with it. Passwords stored with the old key must be entered again |
+| `signalith cluster accept-restore` | After you restore an OpenSearch snapshot on purpose: makes every server accept the older shared settings, which they would otherwise refuse as changed outside Signalith |
+
+Each change is written to the log as an audit record.
+
+## Shared feeds and retention policies
+
+On the servers of the cluster, the threat intel feeds and the retention policies are
+shared: a change on any server's Threat intel or Data retention page applies to all of them
+at once, and feed passwords and API keys are stored encrypted with the cluster key. The
+server that founds the cluster brings its own: the feeds from `intel_feeds.yaml` and
+`intel.feeds` in signalith.yaml, their download status, and the retention policies from
+`retention.yaml` and `retention` in signalith.yaml. The other servers' own files are no
+longer used for them. A server switches to the shared ones by itself, with a quick restart
+in place, when it founds or joins the cluster. While the founder is still moving its files
+into OpenSearch, the other servers keep using their own and the Servers page says they wait
+for it; if that takes more than 30 minutes, it turns red: the founder finishes only while
+it runs the background jobs.
+
+**When the servers' policies differed.** If another server that ran in the last 7 days had
+retention policies of its own that differ from the founder's, the shared policies wait to be
+confirmed: until an admin confirms them on the Data retention page (or with
+`POST /api/retention/policies/confirm`), retention runs only the disk guard and freezes,
+archives and deletes nothing else.
+
+**signalith.yaml.** `retention.days`, `retention.default`, `retention.policies`,
+`retention.guard` and the feeds in `intel.feeds` still work, but only when they change: a
+server that starts with a changed value applies it to the shared one, and the log says so
+("retention.days applied from signalith.yaml on siem-b"). An unchanged file never undoes a
+change made on a page, and removing a setting from the file changes nothing. A value that
+differs from the shared one without having changed is only noted, for information, in that
+server's heartbeat (`settings_drift`).
+
+**Downloads and runs.** The server that runs the background jobs downloads the feeds and runs
+retention. **Refresh** on a feed, and **Run now** or a policy change on the Data retention
+page, on another server ask it to: the request answers `202` with a `request_id`, which
+`GET /api/requests/{id}` follows until it is `done` or `failed`. Restoring archived days is
+still done on the server that runs the jobs.
+
+**Changes at the same moment.** `GET /api/retention` and `GET /api/intel/feeds` (for
+admins) give each item's version (`ETag`, and `etags` for the feeds). A change sent with
+`If-Match` and that version is refused with `412` when someone changed the item meanwhile.
+While a server cannot use the shared settings (OpenSearch cannot be reached, or it misses
+the cluster key), changes there answer `503`.
 
 ## Field names when several servers receive events
 
@@ -323,6 +431,19 @@ does not know to do that and puts its older template back when it starts; the ne
 start of a newer server puts the newer one back. Upgrade all servers to finish
 this.
 
+**The cluster key.** The first server of this version to run the jobs founds the
+cluster and makes the cluster key (see
+[Shared settings and the cluster key](#shared-settings-and-the-cluster-key)). Every
+other server needs that key, with `signalith cluster import-key` or
+`SIGNALITH_CLUSTER_KEY_FILE`: until it has it, it keeps using its own files and
+never takes the jobs over, so if the server that runs them stops, nothing runs them.
+Setting `SIGNALITH_CLUSTER_KEY_FILE` to one key file on every server before the
+upgrade avoids this step: the first server then makes the cluster with that key (see
+[Shared settings and the cluster key](#shared-settings-and-the-cluster-key) for how to
+make the file). Upgrade
+every server, not only some: a server of an older version reads and writes its own
+files and does not see changes made on the pages of the others.
+
 The first server of this version to run the jobs runs each detection that is on once
 straight away, over its lookback, so the time since the old version's last run is
 searched. Findings and risk events the old version raised keep holding back repeats
@@ -348,6 +469,9 @@ The reasons `/readyz` gives:
 | `down` | It could not start, and tries again every 30 seconds; its log says why |
 | `opensearch` | It cannot reach OpenSearch, or OpenSearch refuses its sign of life (the Servers page and the log say why) |
 | `identity` | Another server uses its identity (see [Identity](#identity)) |
+| `degraded` | It is part of the cluster but cannot use the shared settings in OpenSearch now (see [Shared settings and the cluster key](#shared-settings-and-the-cluster-key)) |
+| `gone` | The shared settings in OpenSearch are gone: their index was deleted or replaced |
+| `key_missing` | The shared settings are signed with a cluster key this server does not have |
 | `stopping` | It is shutting down and handing its jobs over. This takes up to a minute while jobs finish: the systemd unit allows 100 seconds, the compose file 90, and the Windows service waits 90 |
 
 Do not use `/readyz` to restart a server: a server that waits for OpenSearch is
@@ -393,3 +517,34 @@ server it was made on, so set the load balancer to send each person to the same
 server (sticky sessions, or source address affinity). If that server stops, people
 sign in again on the other one. Agents and syslog need no such setting: any server
 takes any agent's data.
+
+## Several servers behind one address
+
+The shared settings are read by every server from OpenSearch, and a change made on one
+server reaches the others within a second or so. So that a page never shows the
+settings as they were before a change you just made, even when the load balancer sends
+the next request to another server, Signalith uses a few headers. Load balancers and
+proxies must pass them on unchanged; they need no other setting.
+
+| Header | Sent by | Meaning |
+| --- | --- | --- |
+| `X-Signalith-Version` | Every answer | The Signalith version of the server that answered |
+| `X-Signalith-Config` | Every answer to a signed-in request, and to a successful sign-in, once the server has read the shared settings | How far it has read them, as `<id>.<number>`. The answer to a change says how far a server must have read them to see that change |
+| `X-Signalith-Config-Min` | The web pages, on each request to `/api/` | The highest `X-Signalith-Config` the page has seen. A server that has not read that far reads the shared settings once before it answers |
+| `X-Signalith-Stale` | A server that is still behind after that | `1`. The page asks again once for a read; a change is checked against OpenSearch anyway, so it is never made on old settings |
+
+Scripts that use the API can do the same: send the `X-Signalith-Config` of the answer
+to a change as `X-Signalith-Config-Min` on the next request. Only signed-in requests
+wait.
+
+**Upgrading behind a load balancer.** While servers of two versions share one
+address, a page from one version can ask a server of the other for its scripts. The
+pages therefore load their scripts and stylesheets from paths that name the version,
+`/v/<version>/…`, which only a server of that version serves, and which browsers may
+keep for a year. If one does not load, the page reloads itself, a few times with
+growing pauses, until it gets a server of the version it came from or a page of the
+new one; after 5 tries it says that Signalith is being upgraded. A page that sees
+another version in `X-Signalith-Version` reloads once to get that version's pages;
+if a server of the other version answers again within 2 minutes, the page says that
+Signalith is being upgraded instead of reloading again. The plain
+paths (`/app.js` and so on) keep working, for pages of earlier versions.

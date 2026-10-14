@@ -350,20 +350,53 @@ retention:
 
 ## More than one server
 
-When several Signalith servers share one OpenSearch, one of them runs the background
-jobs, retention among them, with the settings saved on that server (page settings
-live in its own `lookups.dir`). Only servers with `detections.scheduler: true` take
-part, and another one takes over if that server stops. The other servers show the
-page read-only, say which server runs retention, and refuse changes, **Run now** and
-restores. Make retention changes on the server that runs it.
+When several Signalith servers share one OpenSearch, they form a cluster and share
+the retention policies, the default and the disk guard (see
+[Shared feeds and retention policies](servers.md#shared-feeds-and-retention-policies)).
+A change on the Data retention page of any server applies to all of them at once,
+and every server shows the same page. One of the servers runs the background jobs,
+retention among them; only servers with `detections.scheduler: true` and the cluster
+key take part, and another one takes over if that server stops. The page says which
+server runs retention.
 
-A server whose retention settings differ from those of the server that runs
-retention does not take retention over by itself, so it can never delete what the
-other keeps: the list of servers (`GET /api/cluster`) says why. While any policy
-archives, the same goes for a server that uses a different archive folder: set
-`retention.archive_dir` to the same shared folder on every server. Signalith names
-that folder with a small file in it, `.signalith-archive-id`; leave it there. Copy
-`retention.yaml` across to let it take over.
+- **Run now** on another server asks the server that runs retention to run: the
+  page shows "Asked siem-a to run retention", then whether siem-a started the run
+  or queued it behind one already going. The run is made there, and its result shows
+  on siem-a's Data retention page, as each server keeps its own run history. Saving a
+  change asks siem-a in the same way to apply it now. Restores of archived days are
+  still made on the server that runs retention.
+- **Where each value came from.** Under a policy, the default and the guard, the
+  page says where a value that was not set on the page came from, such as
+  "Applied from signalith.yaml on siem-b, 2026-10-01" or "Imported from the files
+  on siem-a".
+- **Changes at the same moment.** If someone else changed the retention settings
+  (any policy, the default or the guard) since you opened the page, your change is
+  refused: the page says so and shows theirs.
+- **When the shared settings cannot be used** on a server, for example while it
+  cannot reach OpenSearch or misses the cluster key, changes there are refused and
+  the page says why.
+
+**Policies that wait to be confirmed.** When the cluster is made, the retention
+policies of the server that founds it become the shared ones. If another server that
+ran in the last 7 days had policies of its own that differ, the page shows an amber
+alert, and retention runs only the disk guard and freezes, archives and deletes
+nothing else until an admin looks at the policies and selects **Confirm these
+policies**. Change any of them first if they should be another server's.
+
+**signalith.yaml.** `retention.days`, `retention.default`, `retention.policies` and
+`retention.guard` apply to the shared settings only when they change: a server that
+starts with a changed value applies it to every server, and the page says so. An
+unchanged file never undoes a change made on the page, so these settings no longer
+make the page read-only. The Servers page lists a value that differs from the shared
+one. `retention.archive_dir`, `retention.schedule` and the archive settings are still
+each server's own.
+
+Archives are written on the server that runs retention, in its archive folder. While
+any policy archives, set `retention.archive_dir` to the same shared folder on every
+server: a server that uses a different folder does not take retention over by
+itself. Signalith names that folder with a small file in it, `.signalith-archive-id`;
+leave it there. Restore from the server that runs retention, or with the CLI after
+copying the files to where you run it.
 
 Before every step that deletes or changes data, retention checks with OpenSearch
 that its server still runs the background jobs, and stops if not. When OpenSearch's
@@ -372,9 +405,12 @@ The server that runs the jobs then keeps them, as long as it can read that nothi
 changed, and runs only retention, so the disk guard can delete the oldest days and
 free space. Detections and feed downloads wait until OpenSearch accepts writes again.
 
-Archives are written on the server that runs retention, in its archive folder.
-Restore from that server, or with the CLI after copying the files to where you run
-it.
+**Servers that are not part of the cluster** (an older version, or a server without
+the cluster key) keep using their own files: page settings in their own
+`lookups.dir`, and `retention` in signalith.yaml. They show the page read-only, say
+which server runs retention, and refuse changes, **Run now** and restores, and they
+never take retention over. Give them the cluster key (see
+[signalith cluster](cluster-cli.md#export-key-and-import-key)).
 
 ### Upgrading
 
@@ -384,6 +420,11 @@ it.
   runs the jobs. Or first set `detections.scheduler: false` on the servers you
   upgrade last.
 - The disk guard is on by default; see [The disk guard](#the-disk-guard).
+- With shared settings, the first server of this version to run the jobs brings its
+  own retention policies to every server, and another server's differing policies
+  wait to be confirmed (see [More than one server](#more-than-one-server)). Every
+  other server needs the cluster key to take part (see
+  [Upgrading servers you set up by hand](servers.md#upgrading-servers-you-set-up-by-hand)).
 
 ## API
 
@@ -392,28 +433,45 @@ error rather than a setting that does nothing.
 
 | Method and path | Body | Response |
 | --- | --- | --- |
-| `GET /api/retention` | | Categories with sizes, days and policies; the default; the guard and disk; the archive; the schedule; pending actions; the last run and recent actions |
+| `GET /api/retention` | | Categories with sizes, days and policies; the default; the guard and disk; the archive; the schedule; pending actions; the last run and recent actions. With shared settings also `shared: true`, `etag` (also in the `ETag` header), `hold` when the policies wait to be confirmed (`{"reason"}`), and `from` on the default, the guard and each category whose value was applied from a signalith.yaml or imported (`{"source","node","at","note"}`) |
 | `PUT /api/retention/policies/{id}` | `{"keep_days":30,"max_size_gb":0,"compact_after_days":14,"archive":true}` | `{"category","policy","source":"ui","run_started","run_queued"}` |
 | `DELETE /api/retention/policies/{id}` | | Back to the default: `{"category","policy","source","run_started","run_queued"}` |
 | `PUT /api/retention/default` | A policy | `{"policy","source":"ui","run_started","run_queued"}` |
 | `PUT /api/retention/guard` | `{"enabled":true,"max_disk_percent":85,"min_days":7}` | The guard plus `source`, `run_started` and `run_queued` |
 | `POST /api/retention/preview` | `{"category":"endpoint","policy":{...}}`, `{"category":"endpoint","policy":null}`, `{"default":{...}}` or `{"guard":{...}}` | What the run that saving starts would do: `summary` and `steps` for the change, `due`, `due_steps` and `due_records` for what is already due, `records`, `deletes_data`, `guard`, `notes` |
-| `POST /api/retention/run` | | `202 {"started":true}`; `409` while a run or restore is going |
+| `POST /api/retention/run` | | `202 {"started":true}`; `409` while a run or restore is going. On a server that does not run retention, with shared settings: `202 {"request_id","queued_on"}` (see below) |
+| `POST /api/retention/policies/confirm` | | Confirms shared policies that wait to be confirmed: `{"confirmed":true,"run_started","run_queued"}`; `409` when none wait |
 | `GET /api/retention/archive` | | Archived days, with whether each is searchable and its latest restore |
 | `POST /api/retention/archive/preview` | `{"ids":[...],"keep_days":14}` | What the restore does to the disk: `bytes`, `percent_after`, `over_limit`, `flood`, the live days the guard would delete (`steps`, `deletes`, `unarchived`), `needs_confirm` and `message` |
 | `POST /api/retention/archive/restore` | `{"ids":["signalith-endpoint-2026.07.01"],"keep_days":14,"confirm":false}` | `202 {"restores":[...]}` with each restore's state; `409 {"error","check"}` when the restore needs `"confirm":true` |
 
 `run_started` is true when saving started a run; `run_queued` when a run or restore
-was going and a new run starts as soon as it ends.
+was going and a new run starts as soon as it ends. With shared settings, saving on a
+server that does not run retention asks the one that does to run: both are then
+false, and the answer adds `request_id` and `queued_on` (the server asked).
+`GET /api/requests/{id}` then has `"result":{"result":"started"}`, or `"queued"`
+when a run or restore was going there.
+
+**Requests.** `GET /api/requests/{id}` follows a request: `state` is `queued`,
+`running`, `done` or `failed`, with `claimed_by` (the server doing it), `started`,
+`finished` and the result. Finished requests are kept for 7 days.
+
+**Changes at the same moment.** With shared settings, send the `etag` of `GET
+/api/retention` as `If-Match` on a change: when someone changed the settings
+meanwhile, the change is refused with `412` and the error says who changed them and
+when. Without `If-Match` the change is made whatever happened meanwhile.
 
 Errors:
 
 - An invalid setting returns `400` with `error`, `problems` and `fields` (the
   settings at fault).
 - A setting that comes from signalith.yaml returns `409`.
-- On a server that does not run the background jobs (with `detections.scheduler:
-  false`, or while another server runs them), every change, **Run now** and restore
-  returns `409` with an `error` that says which server runs retention; `GET
-  /api/retention` has `schedule.read_only` and `schedule.read_only_why`.
+- On a server that keeps its own settings and does not run the background jobs
+  (with `detections.scheduler: false`, or while another server runs them), every
+  change, **Run now** and restore returns `409` with an `error` that says which
+  server runs retention; `GET /api/retention` has `schedule.read_only` and
+  `schedule.read_only_why`. With shared settings only restores are refused there.
+- With shared settings, a change made while this server cannot use them (it cannot
+  reach OpenSearch, or misses the cluster key) returns `503`.
 - An unknown category or archive ID returns `404`.
 - When OpenSearch cannot be reached, previews and restore checks return `503`.

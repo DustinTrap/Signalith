@@ -604,6 +604,13 @@ token; the others take the node key a host got when it enrolled; see
 [endpoints.md](endpoints.md)). Requests from a browser that change something must come from the Signalith
 page itself.
 
+Every answer carries the server's version in `X-Signalith-Version`. Answers to
+signed-in requests (and to a successful sign-in) also carry `X-Signalith-Config`,
+once the server has read the shared settings. Behind a load balancer, send the
+`X-Signalith-Config` of a change's answer as `X-Signalith-Config-Min` on the next
+request, so a server that has not yet read that change reads it first (see
+[Several servers behind one address](servers.md#several-servers-behind-one-address)).
+
 ### Roles of every route
 
 **Every role** (also allowed while a password change is pending): `GET /api/me`,
@@ -659,7 +666,9 @@ agents that send events, shown on the [Endpoints page](endpoints.md)), `GET /api
 `POST /api/endpoints/queries`, `GET /api/endpoints/queries/{id}` (the [Endpoints page](endpoints.md)),
 `GET /api/vulns/setup`, `PUT /api/vulns/settings`, `POST /api/vulns/networks/{id}/scan`,
 `POST /api/vulns/scans/{id}/stop` (setting up and running [vulnerability scans](vulnerabilities.md)),
-`GET /api/cluster` (the Servers page; see [servers.md](servers.md)), every
+`GET /api/cluster` (the Servers page; see [servers.md](servers.md)), `GET /api/requests/{id}`
+(work asked of the server that runs the background jobs, such as a feed download or a retention
+run; see [servers.md](servers.md#shared-feeds-and-retention-policies)), every
 `/api/notify` route (the Notifications page; see [notifications.md](notifications.md)), every
 `/api/retention` route (see [retention.md](retention.md)), every
 `/api/users` and `/api/auth/directory` route below, and every `/api/settings` route

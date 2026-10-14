@@ -18,6 +18,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 )
 
 // eventually waits up to 20 seconds for ok.
@@ -39,14 +40,16 @@ func TestRestartKeepsTheJobLease(t *testing.T) {
 	node := rs.r.node
 	eventually(t, "this server runs the jobs", node.RunsJobs)
 	epoch := node.Lease().Epoch()
-	eventually(t, "the detection scheduler starts", func() bool {
-		return strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 1
+	// The server founds the cluster and restarts its components in place
+	// to take their content from it: the jobs start a second time.
+	eventually(t, "the detection scheduler starts with the shared settings", func() bool {
+		return rs.r.sharedContent.on.Load() && strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 2
 	})
 	if _, res := rs.restart(); !res.OK {
 		t.Fatalf("restart %+v\n%s", res, rs.logs.String())
 	}
 	eventually(t, "the jobs start again", func() bool {
-		return strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 2
+		return strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 3
 	})
 	if !node.RunsJobs() || node.Lease().Epoch() != epoch || rs.r.node != node {
 		t.Errorf("after the restart: runs %v epoch %d (was %d)", node.RunsJobs(), node.Lease().Epoch(), epoch)
@@ -314,5 +317,52 @@ func TestDetectionsFingerprintIgnoresLineEnds(t *testing.T) {
 	}
 	if detectionsFingerprint(unix) == detectionsFingerprint(win) {
 		t.Error("a changed rule has the same fingerprint")
+	}
+}
+
+// U26: the server that runs the background jobs founds the cluster; an
+// in-process restart keeps the shared settings' runtime, its watcher (not
+// started twice) and cache.enc, and the server stays a member.
+func TestRestartKeepsTheSharedSettings(t *testing.T) {
+	rs := startRunnerWith(t, runOptions{scheduler: true, server: plainHTTP})
+	rt := rs.r.shared
+	eventually(t, "the server founds the cluster", func() bool { m, _ := rt.Mode(); return m == shared.ModeMember })
+	id := rt.Status().ClusterID
+	cache := shared.CachePath(rs.dir)
+	eventually(t, "cache.enc is written", func() bool { _, err := os.Stat(cache); return err == nil })
+	if _, res := rs.restart(); !res.OK {
+		t.Fatalf("restart %+v\n%s", res, rs.logs.String())
+	}
+	if rs.r.shared != rt {
+		t.Fatal("the restart made a new runtime")
+	}
+	if m, why := rt.Mode(); m != shared.ModeMember || rt.Status().ClusterID != id {
+		t.Errorf("after the restart: %s (%s), cluster %s (was %s)", m, why, rt.Status().ClusterID, id)
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Errorf("cache.enc after the restart: %v", err)
+	}
+	l := rs.logs.String()
+	if n := strings.Count(l, `msg="shared settings watcher started"`); n != 1 {
+		t.Errorf("the watcher started %d times", n)
+	}
+	if n := strings.Count(l, `msg="founded the cluster`); n != 1 {
+		t.Errorf("founded %d times:\n%s", n, l)
+	}
+	node := rs.r.node
+	eventually(t, "the heartbeat says member", func() bool {
+		hb := rs.os.Source("signalith_runtime", "node:"+node.ID())
+		return hb["mode"] == string(shared.ModeMember) && hb["cluster_kid"] == rt.Status().ClusterKID
+	})
+	resp, err := http.Get("http://" + rs.addr + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("/readyz = %d", resp.StatusCode)
+	}
+	if !node.RunsJobs() {
+		t.Error("the member does not run the jobs")
 	}
 }

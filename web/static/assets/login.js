@@ -19,6 +19,26 @@
   const params = new URLSearchParams(location.search);
   let lockTimer = null;
 
+  // send is fetch with the headers of api() in app.js: it sends back how
+  // far the servers had read the shared settings when this browser last
+  // saw them, and keeps the newest such token, so behind a load balancer
+  // a password just changed is known to the next server too.
+  const CONFIG_KEY = 'signalith.config';
+  async function send(path, opts) {
+    let seen = {};
+    try { seen = JSON.parse(sessionStorage.getItem(CONFIG_KEY)) || {}; } catch (_) { /* storage may be blocked */ }
+    const headers = new Headers((opts && opts.headers) || {});
+    if (seen.id) headers.set('X-Signalith-Config-Min', seen.id + '.' + seen.seq);
+    const resp = await fetch(path, { ...(opts || {}), headers });
+    const t = resp.headers.get('X-Signalith-Config') || '';
+    const i = t.lastIndexOf('.');
+    const seq = Number(t.slice(i + 1));
+    if (i > 0 && Number.isFinite(seq) && (t.slice(0, i) !== seen.id || seq > seen.seq)) {
+      try { sessionStorage.setItem(CONFIG_KEY, JSON.stringify({ id: t.slice(0, i), seq })); } catch (_) { /* storage may be blocked */ }
+    }
+    return resp;
+  }
+
   // Only a path on this site is allowed as the return address, so a crafted
   // link cannot send someone to another site after signing in. The check
   // compares the resolved origin, because browsers drop tabs and newlines
@@ -144,7 +164,7 @@
     setBusy(true);
     let resp;
     try {
-      resp = await fetch('api/login', {
+      resp = await send('api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: user.value.trim(), password: pass.value, remember: remember.checked }),
@@ -240,7 +260,7 @@
     cLabel.textContent = 'Saving…';
     let resp;
     try {
-      resp = await fetch('api/me/password', {
+      resp = await send('api/me/password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ current_password: current, new_password: cNew.value }),
@@ -266,13 +286,13 @@
   });
 
   $('change-signout').addEventListener('click', async () => {
-    try { await fetch('api/logout', { method: 'POST' }); } catch (_) { /* signing out locally is enough */ }
+    try { await send('api/logout', { method: 'POST' }); } catch (_) { /* signing out locally is enough */ }
     showSignIn();
   });
 
   // A session that still needs a new password is sent here from the app
   // with ?change=1. Asking api/me without a session would log a 401.
-  if (params.has('change')) fetch('api/me', { headers: { Accept: 'application/json' } })
+  if (params.has('change')) send('api/me', { headers: { Accept: 'application/json' } })
     .then((r) => (r.ok ? r.json() : null))
     .then((me) => { if (me && me.must_change_password && change.hidden) showChange(me, ''); })
     .catch(() => { /* not signed in */ });

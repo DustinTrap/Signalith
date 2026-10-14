@@ -184,6 +184,27 @@ type Heartbeat struct {
 	// the first, and from versions before it was kept, which do not list
 	// FeatureIndexedAt (see Node.IndexingServers).
 	IndexedAt *time.Time `json:"indexed_at,omitempty"`
+	// Mode is how the server uses the shared configuration (shared.Mode),
+	// "" from versions before it; ClusterKID the cluster key it signs
+	// with; ConfigSeq how far it has read the config index; MaxRev the
+	// highest revision of a shared document it applied (accept-restore
+	// goes above every server's).
+	Mode       string `json:"mode,omitempty"`
+	ClusterKID string `json:"cluster_kid,omitempty"`
+	ConfigSeq  int64  `json:"config_seq,omitempty"`
+	MaxRev     int64  `json:"max_rev,omitempty"`
+	// NeedsUpgrade lists the shared documents a newer version wrote, and
+	// Tamper those changed in OpenSearch outside Signalith: the server
+	// keeps its last good copy of each.
+	NeedsUpgrade []string `json:"needs_upgrade,omitempty"`
+	Tamper       []string `json:"tamper,omitempty"`
+	// SettingsDrift lists, per source, the shared settings whose value in
+	// the server's file or environment differs from the one in use.
+	SettingsDrift map[string][]string `json:"settings_drift,omitempty"`
+	// LevelMin and LevelMax are the levels of the stored formats the
+	// server's version reads.
+	LevelMin int `json:"level_min,omitempty"`
+	LevelMax int `json:"level_max,omitempty"`
 }
 
 // SecuritySummary is a server's last security check, as its heartbeat
@@ -281,16 +302,36 @@ func (f Fingerprints) Combined() string {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
+// SharedPrefix starts the fingerprint of the parts a member of the
+// cluster takes from the shared settings rather than its files:
+// "shared:<cluster id>". Two members of one cluster always match on
+// them; a server that keeps them in its own files (an older version, or
+// one not part of the cluster yet) never matches a member.
+const SharedPrefix = "shared:"
+
+// SharedFingerprint is the fingerprint of the shared parts of a member
+// of the cluster clusterID.
+func SharedFingerprint(clusterID string) string { return SharedPrefix + clusterID }
+
+// differWords names a part that differs, saying so when one of the two
+// servers keeps it in its own files and the other shares it.
+func differWords(what, a, b string) string {
+	if strings.HasPrefix(a, SharedPrefix) != strings.HasPrefix(b, SharedPrefix) {
+		return what + " (one server keeps them in its own files: an older version, or not part of the cluster yet)"
+	}
+	return what
+}
+
 // Differ lists the parts that differ between f and o, in words: "retention
 // policies", "threat intel feeds", "detections folder", "notification
 // channels", "playbooks", "archive folder".
 func (f Fingerprints) Differ(o Fingerprints) []string {
 	var out []string
 	if f.Retention != o.Retention {
-		out = append(out, "retention policies")
+		out = append(out, differWords("retention policies", f.Retention, o.Retention))
 	}
 	if f.Feeds != o.Feeds {
-		out = append(out, "threat intel feeds")
+		out = append(out, differWords("threat intel feeds", f.Feeds, o.Feeds))
 	}
 	if f.Detections != o.Detections {
 		out = append(out, "detections folder")

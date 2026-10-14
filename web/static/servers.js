@@ -205,10 +205,40 @@
     return el('td', { 'data-col': 'jobs' }, ...body);
   }
 
+  // CONFIG names how a server uses the shared settings (its mode), and
+  // whether that needs a look: [label, tone, explanation].
+  const CONFIG = {
+    member: ['Shared', '', 'Uses the settings every server shares'],
+    importing: ['Importing', '', 'Copies its files into the shared settings'],
+    starting: ['Starting', '', ''],
+    legacy_a: ['Its own files', 'warn', 'OpenSearch couldn’t be reached when it started; it joins once it can'],
+    legacy_b: ['Its own files', 'warn', 'Not joined: it has no cluster key. Run signalith cluster import-key on it, or set SIGNALITH_CLUSTER_KEY_FILE'],
+    legacy_c: ['Its own files', '', 'There are no shared settings yet: the server that runs the jobs makes them'],
+    degraded: ['Saved copy', 'warn', 'Can’t read the shared settings, so it uses its saved copy; changes wait until it can'],
+    key_missing: ['Missed a key change', 'warn', 'It missed a cluster key change and must get the new key (signalith cluster import-key)'],
+    gone: ['Settings gone', 'warn', 'The shared settings are missing from OpenSearch; restore them with signalith cluster import -from-cache'],
+  };
+  function configCell(s) {
+    const sh = s.shared;
+    if (gone(s)) return el('td', { 'data-col': 'config' }, none());
+    if (!sh) return el('td', { 'data-col': 'config' }, el('span', { class: 'sv-standby', title: 'An older version keeps every setting in its own files' }, 'Its own files'));
+    const [label, tone, why] = CONFIG[sh.mode] || [cap(sh.mode), '', ''];
+    const out = [el('span', { class: tone ? 'sv-state sv-warn' : 'sv-standby', title: why }, label)];
+    const odd = [...(sh.tamper || []).map((t) => 'changed outside Signalith: ' + t), ...(sh.needs_upgrade || []).map((t) => 'written by a newer version: ' + t)];
+    if (odd.length) out.push(el('div', { class: 'sv-sub sv-warn' }, icon('triangle-alert', 'icon--sm'), el('span', {}, 'Keeps its last good copy of ' + odd.join('; '))));
+    const drift = Object.entries(sh.settings_drift || {}).filter(([, keys]) => keys && keys.length);
+    for (const [src, keys] of drift) {
+      const file = src === 'yaml' ? 'signalith.yaml' : src === 'env' ? 'environment' : src;
+      out.push(el('div', { class: 'sv-sub', title: `Its ${file} differs from the shared value. A change there applies to every server when it is made; until then the shared value is used.` },
+        `${cap(file)} differs: ${keys.join(', ')}`));
+    }
+    return el('td', { 'data-col': 'config' }, ...out);
+  }
+
   function row(s, d) {
     const attrs = { 'data-server': s.node_id || s.name };
     if (gone(s)) attrs.class = 'sv-gone';
-    return el('tr', attrs, serverCell(s), statusCell(s), jobsCell(s, d),
+    return el('tr', attrs, serverCell(s), statusCell(s), jobsCell(s, d), configCell(s),
       el('td', { 'data-col': 'version' }, s.version ? el('span', { class: 'mono' }, s.version) : none()));
   }
 
@@ -218,6 +248,7 @@
         el('th', { scope: 'col', 'data-col': 'server' }, 'Server'),
         el('th', { scope: 'col', 'data-col': 'status' }, 'Status'),
         el('th', { scope: 'col', 'data-col': 'jobs' }, 'Background jobs'),
+        el('th', { scope: 'col', 'data-col': 'config' }, 'Settings'),
         el('th', { scope: 'col', 'data-col': 'version' }, 'Version'))),
       el('tbody', {}, ...rows));
   }
@@ -305,7 +336,8 @@
     const lease = d.lease || {};
     return JSON.stringify([d.warnings, d.writes_refused, lease.frozen, lease.holder_name, (d.opensearch || {}).status, (d.opensearch || {}).problem, noteHidden(),
       servers.map((s) => [s.node_id, s.name, s.self, s.state, (s.opensearch || {}).problem, s.jobs, s.version, s.node_url, s.listen, s.cannot_take_over, s.not_eligible,
-        clockOff(s), s.problems, s.seen_seconds_ago == null, s.uptime_seconds == null])]);
+        clockOff(s), s.problems, s.seen_seconds_ago == null, s.uptime_seconds == null,
+        s.shared && [s.shared.mode, s.shared.tamper, s.shared.needs_upgrade, s.shared.settings_drift]])]);
   }
 
   function render(d) {

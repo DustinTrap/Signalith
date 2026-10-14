@@ -651,13 +651,21 @@ detection runs missed in between, up to `detections.catch_up` back, without rais
 any finding twice, and every server shows the same detection run state (see
 [Schedules and missed runs](docs/detections.md#schedules-and-missed-runs)).
 
-Until shared settings arrive, retention policies, feeds and custom detections are
-still kept in files on each server. A server whose files differ from those of the
-server that runs the jobs does not take them over by itself, and the list of servers
-says why. Copy the files across to fix it. When a retention policy archives, every
-server must set `retention.archive_dir` to the same shared folder (Signalith names it
-with a `.signalith-archive-id` file; leave it there). The Data retention and feed
-settings can be changed only on the server that runs the jobs.
+The servers share the threat intel feeds and the retention policies through
+OpenSearch, in the `<prefix>_config` index (give the OpenSearch user the right to
+create, read and write it too): a change on any server's Threat intel or Data
+retention page applies to all of them at once. The shared settings are signed with a
+**cluster key** that the server running the jobs makes the first time; every other
+server needs it, with `signalith cluster export-key` and `import-key` or a file named
+in `SIGNALITH_CLUSTER_KEY_FILE`, and until it has it, it keeps using its own files
+and never takes the jobs over (see
+[Shared settings and the cluster key](docs/servers.md#shared-settings-and-the-cluster-key)
+and [signalith cluster](docs/cluster-cli.md)). Custom detections are still kept in
+files on each server: a server whose detection files differ from those of the server
+that runs the jobs does not take them over by itself, and the list of servers says
+why. When a retention policy archives, every server must set `retention.archive_dir`
+to the same shared folder (Signalith names it with a `.signalith-archive-id` file;
+leave it there).
 
 Each server keeps its identity in its state folder (`node.id`, and `cluster/lock`
 while it runs), next to its master key (`keys`) and its HTTPS certificate (`tls`).
@@ -677,17 +685,23 @@ why. To give a server a new identity, stop it, delete `node.id` and start it aga
 
 Load balancers and container platforms can ask `GET /readyz` (200
 `{"ready":true}`, or 503 with a one-word `reason`: `starting`, `restarting`, `down`,
-`opensearch`, `identity` or `stopping`) and `GET /livez` (200 while the process
+`opensearch`, `identity`, `degraded`, `gone`, `key_missing` or `stopping`) and `GET /livez` (200 while the process
 runs). Both answer without signing in and say nothing else, over HTTPS and also over
 plain `http://` on the same port, where everything else is sent to HTTPS, so a
 health check works either way.
 
 Until sessions are shared, a web sign-in is kept by the server it was made on: set
-the load balancer to keep each person on one server (sticky sessions).
+the load balancer to keep each person on one server (sticky sessions). The pages
+still see their own changes when a request reaches another server, and keep working
+while servers of two versions share one address during an upgrade (see
+[Several servers behind one address](docs/servers.md#several-servers-behind-one-address)).
 
 **Upgrading servers that share one OpenSearch:** older versions ignore the shared
 job lease, so upgrade them all together, or first set `detections.scheduler: false`
-on every server but one and turn it back on once all of them run this version.
+on every server but one and turn it back on once all of them run this version. Give
+every server the cluster key once the first one has made it, and upgrade them all:
+an older version keeps using its own feed and retention files (see
+[Upgrading servers you set up by hand](docs/servers.md#upgrading-servers-you-set-up-by-hand)).
 
 See [docs/servers.md](docs/servers.md) for the Servers page, how the jobs move,
 adding a server by hand, and load balancer examples.
@@ -1037,7 +1051,7 @@ space. A server upgraded while its OpenSearch disk is already above 85% trims ol
 days at its first run. To avoid that, set `retention.guard` in signalith.yaml first.
 
 Retention runs every hour on the server that runs the background jobs (see
-[More than one server](#more-than-one-server)); other servers show the page read-only. It never deletes today's data or indices that are not
+[More than one server](#more-than-one-server)); with several servers, the policies are shared and can be changed on any of them. It never deletes today's data or indices that are not
 Signalith daily indices. The page keeps the last 200 actions with the reason for each.
 
 Page settings are saved in `retention.yaml` in `lookups.dir`. Anything set under

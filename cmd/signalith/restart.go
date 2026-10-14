@@ -24,6 +24,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/security"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
@@ -95,6 +96,13 @@ type runner struct {
 	// identity and lock, heartbeat and job lease. A restart keeps it and
 	// points it at the new OpenSearch client; nil in some tests.
 	node *cluster.Node
+	// shared is this server's place in the shared configuration: its
+	// watcher, its copy of the settings and cache.enc. A restart keeps it
+	// and points it at the new OpenSearch client; nil in some tests.
+	shared *shared.Runtime
+	// sharedContent links the shared settings' content (feeds, retention
+	// policies) to the components of each start; nil with shared.
+	sharedContent *sharedContent
 	// security runs the Security page's checks and keeps the last
 	// report, which a restart keeps.
 	security *api.SecurityChecker
@@ -142,6 +150,10 @@ type restartRequest struct {
 	// localOnly is true when the admin agreed that the web page answers
 	// on the server itself only: a move is then not undone.
 	localOnly bool
+	// keep restarts with the settings in use rather than the saved ones:
+	// the components are built again for another reason (see
+	// followShared).
+	keep bool
 }
 
 // move is a restart that moved the web page, waiting for someone to reach
@@ -183,7 +195,10 @@ func (r *runner) ready() (bool, string) {
 	if r.node == nil {
 		return true, ""
 	}
-	return r.node.Ready()
+	if ok, why := r.node.Ready(); !ok {
+		return ok, why
+	}
+	return sharedReady(r.shared)
 }
 
 // fatal receives an error when this server must not run at all.
@@ -192,6 +207,15 @@ func (r *runner) fatal() <-chan error {
 		return nil
 	}
 	return r.node.Fatal()
+}
+
+// sharedFatal receives an error when the shared configuration in
+// OpenSearch is of a level this version cannot use.
+func (r *runner) sharedFatal() <-chan error {
+	if r.shared == nil {
+		return nil
+	}
+	return r.shared.Fatal()
 }
 
 // Restart implements api.Restarter.
@@ -210,6 +234,60 @@ func (r *runner) Restart(by, client string, localOnly bool) error {
 		r.requests <- restartRequest{by: by, client: client, localOnly: localOnly}
 	}()
 	return nil
+}
+
+// restartInPlace builds the components again with the settings in use,
+// for why; it returns api.ErrRestarting while a restart is going.
+func (r *runner) restartInPlace(why string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.busy || r.awaiting != nil {
+		return api.ErrRestarting
+	}
+	r.busy = true
+	go func() { r.requests <- restartRequest{by: "signalith", client: why, keep: true} }()
+	return nil
+}
+
+// sharedCheck is how often followShared looks again without being told.
+var sharedCheck = 30 * time.Second
+
+// followShared restarts the components in place when the shared
+// configuration changes where their content comes from: this server
+// founded or joined the cluster (its files to the shared settings), or
+// left it. Each start decides once, so the switch takes a restart.
+func (r *runner) followShared(ctx context.Context) {
+	if r.shared == nil || r.sharedContent == nil {
+		return
+	}
+	changed := make(chan struct{}, 1)
+	r.shared.OnMode(func(_, _ shared.Mode) {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	})
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-time.After(sharedCheck):
+		}
+		want := r.shared.SharedContent()
+		if want == r.sharedContent.on.Load() {
+			continue
+		}
+		why := "this server now takes the threat intel feeds and retention policies from the shared settings"
+		if !want {
+			why = "this server now takes the threat intel feeds and retention policies from its own files"
+		}
+		if err := r.restartInPlace(why); err != nil {
+			// Another restart is going; it decides again, and so does the
+			// next look.
+			continue
+		}
+	}
 }
 
 // RestartStatus implements api.Restarter.
@@ -283,6 +361,7 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 	r.cur, r.good = in, c
 	r.front.resume(in.handler, in.plain)
 	r.web = r.serveWeb(c, ln, in.certs)
+	go r.followShared(ctx)
 	logListening(r.log, c, ln.Addr().String())
 	var retry <-chan time.Time
 	for {
@@ -297,6 +376,9 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 			r.shutdown()
 			return err
 		case err := <-r.fatal():
+			r.shutdown()
+			return err
+		case err := <-r.sharedFatal():
 			r.shutdown()
 			return err
 		case req := <-r.requests:
@@ -513,6 +595,7 @@ func (r *runner) shutdown() error {
 		// are handed over, so another server takes them within seconds.
 		r.node.Stop()
 	}
+	flushShared(r.shared, r.log)
 	var err error
 	if r.web != nil {
 		err = r.web.close(10 * time.Second)
@@ -555,6 +638,11 @@ func (r *runner) restart(ctx context.Context, req restartRequest) {
 	// The settings in use, including those applied at once from the
 	// Settings page since the last start.
 	prev := r.cur.srv.Running()
+	if req.keep {
+		r.log.Info("restarting in place: " + req.client)
+		r.switchTo(ctx, prev, prev, res, false)
+		return
+	}
 	next, err := config.Load(r.path)
 	if err != nil {
 		res.Error = fmt.Sprintf("The saved settings could not be loaded (%v). Signalith kept running with the previous settings.", err)
@@ -584,6 +672,8 @@ func (r *runner) done(res *api.RestartResult, req restartRequest, start time.Tim
 	switch {
 	case res.OK && res.Reverted:
 		r.log.Warn("went back to the previous web address", "audit", true, "by", req.by, "settings", strings.Join(res.Keys, ","), "reason", res.Error)
+	case res.OK && req.keep:
+		r.log.Info("restarted in place", "reason", req.client, "took_ms", res.TookMS)
 	case res.OK:
 		r.log.Info("restarted with the saved settings", "audit", true, "by", req.by, "client", req.client, "settings", strings.Join(res.Keys, ","), "took_ms", res.TookMS)
 	default:

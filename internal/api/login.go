@@ -28,7 +28,9 @@ var publicRoutes = append([]string{"POST /api/ingest", otlpLogsRoute, "POST /api
 // routeLogin adds the routes that work without signing in: the sign-in
 // page, its static assets, and sign-in and sign-out.
 func (s *Server) routeLogin(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/login", s.handleLogin)
+	// A successful sign-in says how far this server has read the shared
+	// settings, as a signed-in answer does.
+	mux.Handle("POST /api/login", s.configToken(true, http.HandlerFunc(s.handleLogin)))
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/tls/ca.pem", s.handleCAPEM)
 	if s.UI != nil {
@@ -38,6 +40,10 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 		// Only the assets folder, never the app's own pages and scripts.
 		if assets, err := fs.Sub(s.UI, "assets"); err == nil {
 			mux.Handle("GET /assets/", http.StripPrefix("/assets", staticFiles(assets, false)))
+			if v := versionSegment(s.Version); v != "" {
+				prefix := "/v/" + v + "/assets"
+				mux.Handle("GET "+prefix+"/", versionedFiles(s.Version, false, http.StripPrefix(prefix, staticFiles(assets, false))))
+			}
 		}
 		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/assets/favicon.svg", http.StatusMovedPermanently)
@@ -212,7 +218,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	page, err := fs.ReadFile(s.UI, "login.html")
+	page, err := s.page("login.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return
