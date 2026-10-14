@@ -38,6 +38,10 @@ func (s *Server) routeLogin(mux *http.ServeMux) {
 		// Only the assets folder, never the app's own pages and scripts.
 		if assets, err := fs.Sub(s.UI, "assets"); err == nil {
 			mux.Handle("GET /assets/", http.StripPrefix("/assets", staticFiles(assets, false)))
+			if v := versionSegment(s.Version); v != "" {
+				prefix := "/v/" + v + "/assets"
+				mux.Handle("GET "+prefix+"/", versionedFiles(s.Version, false, http.StripPrefix(prefix, staticFiles(assets, false))))
+			}
 		}
 		mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/assets/favicon.svg", http.StatusMovedPermanently)
@@ -212,7 +216,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	page, err := fs.ReadFile(s.UI, "login.html")
+	page, err := s.page("login.html")
 	if err != nil {
 		http.NotFound(w, r)
 		return

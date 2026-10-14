@@ -1360,7 +1360,7 @@ async function uploadContent(pick, btn) {
   form.append('bundle', bundle);
   form.append('signature', sig);
   await contentAction(btn, async () => {
-    const resp = await fetch('api/detections/content/upload', { method: 'POST', body: form });
+    const resp = await apiRaw('api/detections/content/upload', { method: 'POST', body: form });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || resp.statusText);
     return data;

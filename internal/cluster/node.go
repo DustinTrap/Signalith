@@ -960,9 +960,17 @@ func (n *Node) fpStartLocked() chan struct{} {
 			fp = f()
 		}
 		n.mu.Lock()
+		changed := n.fpSet && fp.Combined() != n.fp.Combined()
 		n.fp, n.fpSet, n.fpDone = fp, true, nil
 		n.mu.Unlock()
 		close(done)
+		if changed {
+			// A held lease carries the new ones at once, not at the next
+			// renewal: a server that takes over after this one died
+			// compares its own with the lease's (as after founding the
+			// cluster, when the shared parts change).
+			n.pokeLease()
+		}
 	}()
 	return done
 }

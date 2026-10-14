@@ -1,0 +1,164 @@
+# signalith cluster
+
+The servers that share one OpenSearch keep the settings they share in it, in the
+`<prefix>_config` index, signed with the cluster key that each of them keeps in its
+state folder (see [Shared settings and the cluster key](servers.md#shared-settings-and-the-cluster-key)).
+The server that runs the background jobs makes the cluster by itself, so most setups
+only ever need `export-key` and `import-key`, to give another server the key. The
+other commands are for when something went wrong.
+
+Run the commands as the user Signalith runs as (on Linux packages, `sudo -u
+signalith`), on a server whose `signalith.yaml` names the OpenSearch the servers
+share. Every command takes `-c <file>` for another configuration file. Each change is
+written to the log as an audit record, with who ran it.
+
+`found` and `reset-key` change the cluster without a running server's help; the
+others may run while Signalith runs on the same computer.
+
+| Command | What it does |
+| --- | --- |
+| [`status`](#status) | This server's place in the cluster, the servers with the key, and any problem |
+| [`export-key`](#export-key-and-import-key) | Writes the cluster key, encrypted with a passphrase, for another server |
+| [`import-key`](#export-key-and-import-key) | Gives this server the cluster key that `export-key` wrote |
+| [`export`](#export) | Prints the shared settings as YAML |
+| [`import -from-cache`](#import-from-cache) | Writes this server's copy of the shared settings back to OpenSearch |
+| [`found`](#found) | Makes the cluster from this server's files |
+| [`reset-key`](#reset-key) | Makes a new cluster key when every copy of it is lost |
+| [`accept-restore`](#accept-restore) | Accepts the shared settings after an OpenSearch snapshot was restored |
+
+## status
+
+```
+signalith cluster status [-c file] [-json]
+```
+
+Shows this server's name and identity, its mode, the cluster's name, identity and
+level, the cluster key it uses, the servers in the keyring and any problem, such as a
+shared setting that does not check out. `-json` prints the same as JSON, with the
+mode and the cluster under `shared`, and `problems` and `warnings` when there are any:
+
+```json
+{
+  "server": "siem-a",
+  "node_id": "…",
+  "shared": {"mode": "member", "cluster_id": "…", "cluster_name": "Signalith", "…": "…"},
+  "keyring": {"…": {"name": "siem-a", "fingerprint": "…", "added_at": "…", "added_by": "…"}},
+  "keys": ["…"]
+}
+```
+
+The modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `member` | This server is a member of the cluster and reads the shared settings from OpenSearch |
+| `importing` | It founded the cluster and is moving its files into OpenSearch |
+| `legacy_b` | It is not part of the cluster yet, so it uses its own files and runs no background jobs: give it the cluster key |
+| `legacy_c` | No cluster exists yet; it uses its own files until the server that runs the background jobs founds it |
+| `legacy_a` | OpenSearch could not be reached and it has no copy of the shared settings, so it uses its own files |
+| `degraded` | It cannot use the shared settings in OpenSearch now; it keeps the copy it has, and changes are paused |
+| `key_missing` | The shared settings are signed with a cluster key this server does not have |
+| `gone` | The shared settings in OpenSearch are gone: their index was deleted or replaced |
+
+## export-key and import-key
+
+```
+signalith cluster export-key [-c file] [-o file]
+signalith cluster import-key [-c file] <file>
+```
+
+`export-key` asks for a passphrase of at least 12 characters and writes the cluster
+key, encrypted with it, to `-o` (readable by you only) or to the standard output.
+Copy the file to the other server and run `import-key` there with the same
+passphrase. The key is kept in that server's state folder, encrypted with its master
+key, and a running server joins the cluster within seconds. Delete the file
+afterwards.
+
+When the standard input is not a terminal, both read the passphrase from its first
+line, so a script can pipe it in.
+
+Instead of `import-key`, the key can be given to a server in a file: put the key
+(base64, as one line) in a file only Signalith can read and name it in
+`SIGNALITH_CLUSTER_KEY_FILE`.
+
+## export
+
+```
+signalith cluster export [-c file] [-o file]
+```
+
+Prints every shared document as YAML: its kind, revision, who changed it last and
+its content. Stored passwords and API keys stay encrypted with the cluster key.
+Use it to look at the shared settings, or to keep a copy next to your backups.
+Documents in `<prefix>_config` that Signalith did not write are named in a comment
+and left out.
+
+## import -from-cache
+
+```
+signalith cluster import [-c file] -from-cache
+```
+
+Each server keeps its last copy of the shared settings in `cluster/cache.enc` in its
+state folder, encrypted with its master key. When the `<prefix>_config` index was
+deleted, every server says the shared settings are `gone` (and `/readyz` answers
+`gone`). Run this on the server whose copy is the newest: it writes the copy back,
+with the same cluster identity, and the other servers resume by themselves.
+Documents still in OpenSearch are left as they are. If OpenSearch holds another
+cluster by then, nothing is written.
+
+A copy older than 30 days is not used.
+
+## found
+
+```
+signalith cluster found [-c file] [-force] [-name name]
+```
+
+Makes the servers sharing this OpenSearch a cluster, from this server's files: its
+feeds and retention policies become the shared ones, and it makes the cluster key.
+The server that runs the background jobs does this by itself, so `found` refuses
+while a server that may run them is up (it watches the servers' heartbeats for 12
+seconds to tell); `-force` founds anyway. `-name` names the cluster (`Signalith` by
+default).
+
+If this server was a member of a cluster whose shared settings are gone, use
+`import -from-cache` instead, which keeps the cluster. When no server keeps a copy,
+`found -force` makes the cluster again from this server's files.
+
+Give the other servers the new key afterwards (`export-key`, then `import-key`).
+
+## reset-key
+
+```
+signalith cluster reset-key [-c file] [-yes]
+```
+
+When every copy of the cluster key is lost, nobody can check the shared settings any
+more. Stop every server first: `reset-key` refuses while one is up. It shows each
+shared document, with its revision, who changed it last and how it compares to this
+server's copy, asks you to confirm (`-yes` skips the question), makes a new key and
+signs the documents with it. Passwords and API keys stored with the old key cannot
+be read and are emptied; the command lists them, so you can enter them again on the
+Threat intel page. Then give the other servers the new key.
+
+## accept-restore
+
+```
+signalith cluster accept-restore [-c file] [-yes]
+```
+
+Each server remembers how far the shared settings had got, and refuses older ones as
+changed outside Signalith. After you restore an OpenSearch snapshot on purpose, run
+this on a member of the cluster: every server accepts the shared settings now in
+OpenSearch within seconds.
+
+## When to use which
+
+| What happened | What to do |
+| --- | --- |
+| A new server says it is not part of the cluster | `export-key` on a member, `import-key` on it |
+| Someone deleted the `<prefix>_config` index | `import -from-cache` on the server with the newest copy |
+| OpenSearch was restored from a snapshot | `accept-restore` |
+| Every copy of the cluster key is lost | Stop every server, `reset-key`, then `export-key` and `import-key` |
+| No server can run the background jobs, and you need the cluster now | `found` |

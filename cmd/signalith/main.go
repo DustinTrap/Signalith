@@ -1478,6 +1478,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		if r.shared != nil {
 			srv.Cluster = sharedCluster{Node: r.node, rt: r.shared}
 			srv.Shared = sharedAPI{rt: r.shared, on: sharedOn}
+			srv.ConfigToken = configToken{rt: r.shared}
 		}
 		in.node = r.node
 	}

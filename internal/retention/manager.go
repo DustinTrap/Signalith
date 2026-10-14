@@ -1141,6 +1141,9 @@ type Overview struct {
 	Hold *HoldView `json:"hold,omitempty"`
 	// ETag is the version of the saved policies, for If-Match.
 	ETag string `json:"etag,omitempty"`
+	// Shared is set when the policies are the servers' shared ones: any
+	// server changes them, and the one that runs retention enforces them.
+	Shared bool `json:"shared,omitempty"`
 }
 
 // HoldView says why the policies wait to be confirmed.
@@ -1281,7 +1284,12 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 	if s.DefaultSource == SourceConfig {
 		ov.Default.Note = fromConfig
 	}
-	ov.Default.From = s.from("default", "days")
+	// retention.days gives the default policy only until one is saved.
+	if s.DefaultSource == SourceDays {
+		ov.Default.From = s.from("days")
+	} else {
+		ov.Default.From = s.from("default")
+	}
 	ov.Guard = GuardView{Enabled: s.Guard.IsEnabled(), MaxDiskPercent: s.Guard.MaxDiskPercent, MinDays: s.Guard.MinDays,
 		Source: s.GuardSource, Editable: s.GuardSource != SourceConfig && canEdit}
 	if s.GuardSource == SourceConfig {
@@ -1294,7 +1302,7 @@ func (m *Manager) Overview(ctx context.Context) *Overview {
 		ov.Guard.PauseReason = m.guardPausedWhy
 		m.mu.Unlock()
 	}
-	ov.ETag = m.ETag()
+	ov.ETag, ov.Shared = m.ETag(), m.Shared
 	ov.LastRun, ov.Recent = m.hist.get()
 	ov.Archive = ArchiveSummary{Dir: m.Archive.Dir, Problems: []string{}, Free: -1}
 	iv := m.interval()

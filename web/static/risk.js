@@ -591,7 +591,7 @@ $('l-form').addEventListener('submit', async (ev) => {
   btn.disabled = true;
   try {
     const text = await file.text();
-    const resp = await fetch('api/lookups/' + kind, { method: 'PUT', headers: { 'Content-Type': 'text/csv' }, body: text });
+    const resp = await apiRaw('api/lookups/' + kind, { method: 'PUT', headers: { 'Content-Type': 'text/csv' }, body: text });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       msg.replaceChildren(riAlert('danger', riCap(data.error || resp.statusText) + '.', riLineErrors(data.lines)));

@@ -604,6 +604,12 @@ token; the others take the node key a host got when it enrolled; see
 [endpoints.md](endpoints.md)). Requests from a browser that change something must come from the Signalith
 page itself.
 
+Every answer carries the server's version in `X-Signalith-Version` and, once it has
+read the shared settings, `X-Signalith-Config`. Behind a load balancer, send the
+`X-Signalith-Config` of a change's answer as `X-Signalith-Config-Min` on the next
+request, so a server that has not yet read that change reads it first (see
+[Several servers behind one address](servers.md#several-servers-behind-one-address)).
+
 ### Roles of every route
 
 **Every role** (also allowed while a password change is pending): `GET /api/me`,

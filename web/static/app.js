@@ -139,14 +139,89 @@ for (const ev of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'
   addEventListener(ev, () => { lastInput = Date.now(); }, { capture: true, passive: true });
 }
 const backgroundAfter = 10000;
-async function api(path, body, method) {
-  const headers = {};
+
+// Behind a load balancer, each request may reach another server. Every
+// answer says how far its server has read the shared settings
+// (X-Signalith-Config, "<index id>.<number>"); the page keeps the highest
+// it has seen, also across reloads, and sends it back, so a server that is
+// behind catches up before it answers, and a change saved through one
+// server is never shown as the old value by the next. A server that could
+// not catch up in time says so (X-Signalith-Stale), and a read is asked
+// again once. Every answer also carries the server's version: a page from
+// another version reloads once to match it (see apiVersion).
+const PAGE_VERSION = (document.querySelector('meta[name="signalith-version"]') || {}).content || '';
+const CONFIG_KEY = 'signalith.config';
+const configSeen = (() => {
+  try { return JSON.parse(sessionStorage.getItem(CONFIG_KEY)) || {}; } catch (_) { return {}; }
+})(); // { id: the config index's id, seq: the highest number seen in it }
+function noteConfig(resp) {
+  const t = resp.headers.get('X-Signalith-Config') || '';
+  const i = t.lastIndexOf('.');
+  if (i <= 0) return;
+  const id = t.slice(0, i);
+  const seq = Number(t.slice(i + 1));
+  if (!Number.isFinite(seq)) return;
+  // Another id: the shared settings' index was made again, so the
+  // numbers start over.
+  if (id === configSeen.id && seq <= configSeen.seq) return;
+  configSeen.id = id;
+  configSeen.seq = seq;
+  try { sessionStorage.setItem(CONFIG_KEY, JSON.stringify(configSeen)); } catch (_) { /* storage may be blocked */ }
+}
+
+// apiVersion reloads the page once when a server of another version
+// answered, so the page and the API match. A second mismatch within 2
+// minutes of that reload means servers of both versions answer (an
+// upgrade under way): the page says so once instead of reloading again.
+const VERSION_KEY = 'signalith.versionReload';
+let versionNoted = false;
+function apiVersion(resp) {
+  const v = resp.headers.get('X-Signalith-Version');
+  if (!v || !PAGE_VERSION || v === PAGE_VERSION || versionNoted) return;
+  versionNoted = true;
+  let last = 0;
+  try { last = Number(sessionStorage.getItem(VERSION_KEY)) || 0; } catch (_) { last = Date.now(); }
+  if (Date.now() - last > 120000) {
+    try { sessionStorage.setItem(VERSION_KEY, String(Date.now())); } catch (_) { /* no reload without a guard */ }
+    location.reload();
+    return;
+  }
+  if (typeof toast === 'function') {
+    toast(`Some pages may not work until every server runs the same version. This page is ${PAGE_VERSION}; a server answered with ${v}.`, null,
+      { tone: 'warning', title: 'Signalith is being upgraded' });
+  }
+}
+
+// apiRaw makes a request with the headers every page sends and returns
+// the response as it is: for uploads, streams and text that api() does
+// not handle. Paths are relative to the page.
+async function apiRaw(path, opts) {
+  opts = opts || {};
+  const method = (opts.method || 'GET').toUpperCase();
+  const send = () => {
+    const headers = new Headers(opts.headers || {});
+    if (configSeen.id) headers.set('X-Signalith-Config-Min', configSeen.id + '.' + configSeen.seq);
+    return fetch(path.replace(/^\//, ''), { ...opts, headers });
+  };
+  let resp = await send();
+  noteConfig(resp);
+  // Only a read is asked again: a change was made already.
+  if (resp.headers.get('X-Signalith-Stale') === '1' && (method === 'GET' || method === 'HEAD') && !(opts.signal && opts.signal.aborted)) {
+    resp = await send();
+    noteConfig(resp);
+  }
+  apiVersion(resp);
+  return resp;
+}
+
+async function api(path, body, method, extraHeaders) {
+  const headers = { ...(extraHeaders || {}) };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   if (document.hidden || Date.now() - lastInput > backgroundAfter) headers['X-Signalith-Background'] = '1';
   const opts = body === undefined ? { method: method || 'GET', headers } : {
     method: method || 'POST', headers, body: JSON.stringify(body),
   };
-  const resp = await fetch(path.replace(/^\//, ''), opts);
+  const resp = await apiRaw(path, opts);
   const data = await resp.json().catch(() => ({}));
   if (resp.status === 401) toSignIn();
   // A temporary password must be replaced first; the sign-in page asks for it.
@@ -165,9 +240,35 @@ async function api(path, body, method) {
     err.code = data.code;
     err.field = data.field;
     err.fields = data.fields; // setting name -> problem, to mark form fields
+    err.data = data;
     throw err;
   }
   return data;
+}
+
+// followRequest follows work this server asked of the server that runs
+// the background jobs (a feed download, a retention run): api/requests/
+// <id> every 1.5 seconds, calling onState with each new state (queued,
+// running), until it is done or failed, or after 10 minutes. It returns
+// the request as last read.
+async function followRequest(id, onState) {
+  const until = Date.now() + 10 * 60000;
+  let last = '';
+  let req = null;
+  while (Date.now() < until) {
+    try {
+      req = await api('api/requests/' + encodeURIComponent(id));
+    } catch (e) {
+      if (e.status === 404) return null;
+    }
+    if (req && req.state !== last) {
+      last = req.state;
+      if (onState) onState(req);
+    }
+    if (req && (req.state === 'done' || req.state === 'failed')) return req;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  return req;
 }
 
 // ---------- the signed-in user and roles ----------
@@ -567,7 +668,7 @@ function showUser(m) {
 $('sign-out').addEventListener('click', async () => {
   $('sign-out').disabled = true;
   clearUserStorage();
-  try { await fetch('api/logout', { method: 'POST' }); } catch (_) { /* the session ends when it expires */ }
+  try { await apiRaw('api/logout', { method: 'POST' }); } catch (_) { /* the session ends when it expires */ }
   location.replace('login?signedout');
 });
 
@@ -3024,7 +3125,7 @@ async function syslogLoadCA(h) {
   const next = h.tls.next_ca_sha256 || '';
   if (st.ca && st.ca.fp === fp && st.ca.next === next) return;
   try {
-    const resp = await fetch(next ? 'api/tls/ca.pem?which=both' : 'api/tls/ca.pem');
+    const resp = await apiRaw(next ? 'api/tls/ca.pem?which=both' : 'api/tls/ca.pem');
     if (!resp.ok) throw new Error(resp.statusText);
     st.ca = { fp, next, own: !!h.tls.own_ca, pem: await resp.text() };
   } catch (_) {

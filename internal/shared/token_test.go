@@ -245,3 +245,34 @@ func TestWaitGivesUpOnASlowCycle(t *testing.T) {
 		t.Error("stale once the cycle is free")
 	}
 }
+
+// Written follows this server's own writes of tracked documents and
+// watch documents, for the token of the answer to a change.
+func TestWrittenFollowsOwnWrites(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	da := NewDoc[testBody](a, "settings", "settings", 1)
+	NewDoc[testBody](b, "settings", "settings", 1)
+	cycle(t, a)
+	cycle(t, b)
+	if a.Written() != -1 {
+		t.Errorf("written before any write: %d", a.Written())
+	}
+	seq, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "x"; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Written() != seq {
+		t.Errorf("written %d, want %d", a.Written(), seq)
+	}
+	bump, err := a.Bump(ctx, "intel")
+	if err != nil || bump <= seq || a.Written() != bump {
+		t.Errorf("bump %d %v, written %d", bump, err, a.Written())
+	}
+	// Another server's writes are not this one's.
+	if b.Written() != -1 {
+		t.Errorf("b written %d", b.Written())
+	}
+}

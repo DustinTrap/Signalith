@@ -156,6 +156,11 @@ type Hub struct {
 	// watcher moves it; -1 before any (the first document of an index has
 	// 0).
 	applied int64
+	// written is the highest _seq_no of this server's own writes of
+	// tracked or watch documents in the index of writtenUUID, for the
+	// token of the answer to a request that wrote (Written).
+	written     int64
+	writtenUUID string
 	// seen is the last version read of each tracked document; a missing
 	// entry was never read, a zero version was read missing.
 	seen     map[string]store.Version
@@ -501,6 +506,7 @@ func (h *Hub) bump(ctx context.Context, id string) (int64, error) {
 	v := store.Version{SeqNo: out.SeqNo, PrimaryTerm: out.PrimaryTerm, Version: out.Version}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.wroteLocked(h.uuid, v.SeqNo)
 	if last, ok := h.seen[id]; ok && last.Version+1 == v.Version && last.PrimaryTerm == v.PrimaryTerm {
 		h.seen[id] = v
 	}

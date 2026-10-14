@@ -316,3 +316,14 @@ func (a sharedAPI) Submit(ctx context.Context, typ string, args any, by string) 
 func (a sharedAPI) Request(ctx context.Context, id string) (*shared.Request, bool, error) {
 	return a.rt.Requests().Get(ctx, id)
 }
+
+// configToken is how far this server has read the shared settings
+// (api.ConfigToken), from the runtime's hub of the moment.
+type configToken struct{ rt *shared.Runtime }
+
+func (t configToken) Token() string               { return t.rt.Hub().Token() }
+func (t configToken) Written() int64              { return t.rt.Hub().Written() }
+func (t configToken) TokenAfter(seq int64) string { return t.rt.Hub().TokenAfter(seq) }
+func (t configToken) Wait(ctx context.Context, min string) bool {
+	return t.rt.Hub().Wait(ctx, min)
+}

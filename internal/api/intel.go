@@ -81,6 +81,7 @@ func (s *Server) handleIntelOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Feeds != nil {
 		feeds = s.feedsFor(r)
+		s.addFeedETags(r, feeds, out)
 		// A broken feeds file blocks changes on the page until it is fixed.
 		if err := s.Feeds.Load(); err != nil {
 			out["file_error"] = err.Error()
@@ -362,21 +363,26 @@ func (s *Server) handleIntelFeeds(w http.ResponseWriter, r *http.Request) {
 	if s.sharedContent() {
 		out["feeds_file"] = ""
 	}
-	if p := principalOf(r); p != nil && p.Role.AtLeast(users.Admin) {
-		// Each feed's version, for If-Match on a change: a hash of its
-		// settings, secrets included, so only admins get it.
-		etags := map[string]string{}
-		for _, f := range feeds {
-			if tag, ok := s.Feeds.ETag(f.Name); ok {
-				etags[f.Name] = tag
-			}
-		}
-		out["etags"] = etags
-	}
+	s.addFeedETags(r, feeds, out)
 	if err := s.Feeds.Load(); err != nil {
 		out["file_error"] = err.Error()
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// addFeedETags adds each feed's version to out, for If-Match on a change:
+// a hash of its settings, secrets included, so only admins get it.
+func (s *Server) addFeedETags(r *http.Request, feeds []intel.FeedView, out map[string]any) {
+	if p := principalOf(r); p == nil || !p.Role.AtLeast(users.Admin) {
+		return
+	}
+	etags := map[string]string{}
+	for _, f := range feeds {
+		if tag, ok := s.Feeds.ETag(f.Name); ok {
+			etags[f.Name] = tag
+		}
+	}
+	out["etags"] = etags
 }
 
 func (s *Server) handleIntelFeedAdd(w http.ResponseWriter, r *http.Request) {

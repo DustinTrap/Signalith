@@ -98,6 +98,21 @@ type clusterServer struct {
 	OpenSearch     *cluster.OSInfo       `json:"opensearch,omitempty"`
 	MachineMoved   bool                  `json:"machine_moved,omitempty"`
 	Problems       []string              `json:"problems,omitempty"`
+	// Shared is how the server uses the shared settings; nil for a
+	// version before them.
+	Shared *clusterShared `json:"shared,omitempty"`
+}
+
+// clusterShared is how a server uses the shared settings, from its
+// heartbeat: Mode is a shared.Mode; SettingsDrift lists, by source (yaml,
+// env), the shared settings whose value in that server's file differs
+// from the one in use.
+type clusterShared struct {
+	Mode          string              `json:"mode"`
+	ConfigSeq     int64               `json:"config_seq"`
+	NeedsUpgrade  []string            `json:"needs_upgrade,omitempty"`
+	Tamper        []string            `json:"tamper,omitempty"`
+	SettingsDrift map[string][]string `json:"settings_drift,omitempty"`
 }
 
 // clusterLease is who runs the background jobs.
@@ -135,6 +150,10 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			out.NodeURL, out.Listen, out.Syslog, out.OS, out.Arch, out.Deployment = d.NodeURL, d.Listen, &syslog, d.OS, d.Arch, d.Deployment
 			out.ClockOffsetMS, out.NotEligible, out.Fingerprints, out.OpenSearch = d.ClockOffsetMS, d.NotEligible, &fp, &osInfo
 			out.MachineMoved, out.Problems = d.MachineMoved, d.Problems
+			if d.Mode != "" {
+				out.Shared = &clusterShared{Mode: d.Mode, ConfigSeq: d.ConfigSeq, NeedsUpgrade: d.NeedsUpgrade, Tamper: d.Tamper,
+					SettingsDrift: d.SettingsDrift}
+			}
 		}
 		servers = append(servers, out)
 	}

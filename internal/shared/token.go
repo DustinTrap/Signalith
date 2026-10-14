@@ -88,3 +88,28 @@ func (h *Hub) Wait(ctx context.Context, min string) (stale bool) {
 	}
 	return h.behind(min)
 }
+
+// wroteLocked records a write of this server's, with the _seq_no seq, to
+// a tracked document or a watch document of the index uuid.
+func (h *Hub) wroteLocked(uuid string, seq int64) {
+	if uuid == "" {
+		return
+	}
+	if uuid != h.writtenUUID || seq > h.written {
+		h.written, h.writtenUUID = seq, uuid
+	}
+}
+
+// Written returns the highest _seq_no this server wrote to a tracked
+// document or a watch document of the config index in use, or -1 when
+// none. The API compares it before and after a request that changes
+// something, and answers one that wrote with TokenAfter, so the page
+// waits for its own change on whichever server it reaches next.
+func (h *Hub) Written() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.uuid == "" || h.writtenUUID != h.uuid {
+		return -1
+	}
+	return h.written
+}

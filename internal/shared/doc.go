@@ -55,7 +55,17 @@ func (e *StaleError) Error() string {
 	if e.By == "" && e.Node == "" {
 		return "it was changed since it was read; reload it"
 	}
-	return fmt.Sprintf("it was changed on %s by %s at %s; reload it", e.Node, e.By, e.At)
+	what := "it was changed"
+	if e.Node != "" {
+		what += " on " + e.Node
+	}
+	if e.By != "" {
+		what += " by " + e.By
+	}
+	if e.At != "" {
+		what += " at " + e.At
+	}
+	return what + "; reload it"
 }
 
 // Retry waits between tries of a write that conflicted: random, from 10
@@ -346,6 +356,9 @@ func (d *Doc[T]) write(ctx context.Context, base *entry, e *Envelope) (int64, er
 	}
 	src, _ := json.Marshal(e)
 	d.set(&entry{env: *e, src: src, ver: ver, uuid: uuid})
+	d.h.mu.Lock()
+	d.h.wroteLocked(uuid, ver.SeqNo)
+	d.h.mu.Unlock()
 	return ver.SeqNo, nil
 }
 

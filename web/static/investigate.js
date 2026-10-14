@@ -160,7 +160,7 @@ async function invPreview(f, info, { show, close, alive }) {
 
 // invStream posts and reads one JSON object per line as it arrives.
 async function invStream(path, onEvent, signal) {
-  const resp = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal });
+  const resp = await apiRaw(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', signal });
   if (!resp.ok) {
     const data = await resp.json().catch(() => ({}));
     if (resp.status === 401) toSignIn();
