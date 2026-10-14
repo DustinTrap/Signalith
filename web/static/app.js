@@ -3920,7 +3920,7 @@ function healthClusterCard(c) {
     (t.no_figures ? `; ${t.no_figures} more on an older version ${t.no_figures === 1 ? 'is' : 'are'} not counted.` : '.');
   return [el('div', { class: 'card hp-cluster' },
     el('div', { class: 'card__head' }, el('div', {}, el('h3', { class: 'card__title' }, 'All servers'), el('p', { class: 'card__sub' }, sub))),
-    el('div', { class: 'table-wrap' }, el('table', { class: 'table hp-table hp-cluster__table' }, head, el('tbody', {}, ...rows, total))))];
+    el('div', { class: 'table-wrap' }, el('table', { class: 'table hp-cluster__table' }, head, el('tbody', {}, ...rows, total))))];
 }
 
 // healthSyslogCard shows the syslog receiver: its listeners, what it did

@@ -107,6 +107,11 @@ func destinationsOf(ctx context.Context, publicURL string, st cluster.Status) ([
 		shared.Problem = host + " does not resolve from this server, so this server cannot tell which servers it reaches."
 		return append([]destination{shared}, rest...), ""
 	}
+	if !slices.ContainsFunc(addrs, func(a netip.Addr) bool { return !a.IsLoopback() }) {
+		// This computer only: Add data already says other machines can't
+		// reach it.
+		return append([]destination{shared}, rest...), ""
+	}
 	reached := map[string]bool{}
 	for _, a := range addrs {
 		names := owners[a]
