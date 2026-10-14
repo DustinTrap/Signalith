@@ -46,6 +46,8 @@ func properties() map[string]any {
 		"description": map[string]any{"type": "text"},
 		"created":     map[string]any{"type": "date"},
 		"updated":     map[string]any{"type": "date"},
+		"slot":        map[string]any{"type": "date"},
+		"raised_at":   map[string]any{"type": "date"},
 		"result":      notIndexed, "entities": notIndexed, "comments": notIndexed, "history": notIndexed,
 		"context": notIndexed,
 		"query":   map[string]any{"type": "keyword", "index": false},

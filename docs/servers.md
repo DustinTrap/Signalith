@@ -100,6 +100,14 @@ its own, before anyone else may start them after 30 seconds. Detections, feed
 downloads, notifications and playbooks also check, before each run, send or step, that their server still
 runs the jobs.
 
+**Detections after a takeover.** The server that takes the jobs over makes up the
+detection runs that were missed while no server ran them, oldest first and up to
+`detections.catch_up` back (6 hours unless changed). A run the previous server had
+already done, or started, does not raise its findings or risk a second time. See
+[Schedules and missed runs](detections.md#schedules-and-missed-runs). The run state
+is kept in OpenSearch, so every server shows the same Detections page, detection
+health and warnings, and **Run now** works on any of them.
+
 **Which servers may run them.** Every server, unless **Run detections on schedule**
 (`detections.scheduler`) is turned off on its Settings page. Leave it on: the
 servers take turns by themselves. Turn it off only on a server that should never
@@ -314,6 +322,12 @@ later leaves a newer server's template as it is. A server from before this versi
 does not know to do that and puts its older template back when it starts; the next
 start of a newer server puts the newer one back. Upgrade all servers to finish
 this.
+
+The first server of this version to run the jobs runs each detection that is on once
+straight away, over its lookback, so the time since the old version's last run is
+searched. Findings and risk events the old version raised keep holding back repeats
+for each detection's throttle window. See
+[Schedules and missed runs](detections.md#schedules-and-missed-runs).
 
 ## Load balancers: /readyz and /livez
 

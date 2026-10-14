@@ -583,6 +583,7 @@ are counted for each person's own address, not the proxy's. See
 | `detections.dir` | `detections` | Folder for custom and edited detections, relative to the config file |
 | `detections.scheduler` | `true` | Lets this server run detections, threat intel downloads, notifications and retention. Servers that share one OpenSearch take turns automatically; turn it off only on a server that should never run them. See [More than one server](#more-than-one-server) |
 | `detections.max_findings_per_run` | `100` | Cap on findings one run can raise |
+| `detections.catch_up` | `6h` | When detections could not run, for example while every server was stopped, how far back the missed runs are made up once they run again (at most `7d`). Older ones are skipped and shown on the Detections page. `0` turns this off |
 | `lookups.dir` | `lookups` | Folder for `assets.csv` and `identities.csv`, relative to the config file |
 | `intel.feeds` | none | Threat intel feeds kept in this file (read-only on the page); most people add feeds on the **Threat intel** page instead. See [Threat intel](#threat-intel). Nothing is fetched until a feed is added |
 | `intel.feeds[].name`, `.url` | required | Feed name (shown as the indicator source) and its http(s) address |
@@ -645,7 +646,10 @@ seconds when it is stopped on purpose. Two servers never run them at once: the o
 that runs them stops by itself when it cannot confirm, within 20 seconds, that it
 still may. Only servers with `detections.scheduler: true` take part. A server whose
 clock is more than 30 seconds off leaves the jobs to one whose clock is right; keep
-clocks in sync with NTP.
+clocks in sync with NTP. A server that takes the jobs over makes up the
+detection runs missed in between, up to `detections.catch_up` back, without raising
+any finding twice, and every server shows the same detection run state (see
+[Schedules and missed runs](docs/detections.md#schedules-and-missed-runs)).
 
 Until shared settings arrive, retention policies, feeds and custom detections are
 still kept in files on each server. A server whose files differ from those of the

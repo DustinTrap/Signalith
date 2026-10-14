@@ -299,7 +299,7 @@ func TestDetectionsEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		d.Lookback = "1h" // test data spans the last 16 minutes
-		res, err := sched.Run(ctx, d)
+		res, err := sched.RunManual(ctx, d, "")
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
@@ -328,7 +328,7 @@ func TestDetectionsEndToEnd(t *testing.T) {
 	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-risk-*/_refresh", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := sched.Run(ctx, mustGet(t, lib, "change-account-created", "1h")); err != nil || res.Throttled != 1 || res.Risk != 0 {
+	if res, err := sched.RunManual(ctx, mustGet(t, lib, "change-account-created", "1h"), ""); err != nil || res.Throttled != 1 || res.Risk != 0 {
 		t.Errorf("risk-only rerun = %+v %v", res, err)
 	}
 	ps := run("endpoint-encoded-powershell", 1)
@@ -556,7 +556,7 @@ func TestThreatIntelEndToEnd(t *testing.T) {
 	rs := &risk.Store{Client: cl, Prefix: prefix}
 	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Risk: rs}
 	d := mustGet(t, lib, "threat-activity", "1h")
-	res, err := sched.Run(ctx, d)
+	res, err := sched.RunManual(ctx, d, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func TestThreatIntelEndToEnd(t *testing.T) {
 			}
 		}
 	}
-	if res, err := sched.Run(ctx, d); err != nil || len(res.Findings) != 0 {
+	if res, err := sched.RunManual(ctx, d, ""); err != nil || len(res.Findings) != 0 {
 		t.Errorf("rerun should be throttled: %+v %v", res, err)
 	}
 	if err := cl.Do(ctx, http.MethodPost, "/"+prefix+"-risk-*/_refresh", nil, nil); err != nil {
@@ -632,7 +632,7 @@ func TestDashboardsEndToEnd(t *testing.T) {
 	sched := &detect.Scheduler{Library: lib, Engine: eng, Findings: fs, Risk: &risk.Store{Client: cl, Prefix: prefix}}
 	var bf *findings.Finding
 	for _, id := range []string{"auth-brute-force", "auth-shadow-file-access"} {
-		res, err := sched.Run(ctx, mustGet(t, lib, id, "1h"))
+		res, err := sched.RunManual(ctx, mustGet(t, lib, id, "1h"), "")
 		if err != nil || len(res.Findings) != 1 {
 			t.Fatalf("%s: %v %+v", id, err, res)
 		}
@@ -791,7 +791,7 @@ func TestCasesEndToEnd(t *testing.T) {
 	for _, id := range []string{"auth-brute-force", "auth-shadow-file-access"} {
 		d, _ := lib.Get(id)
 		d.Lookback = "1h"
-		res, err := sched.Run(ctx, d)
+		res, err := sched.RunManual(ctx, d, "")
 		if err != nil || len(res.Findings) != 1 {
 			t.Fatalf("%s: %v %+v", id, err, res)
 		}

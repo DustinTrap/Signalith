@@ -792,29 +792,44 @@
     const issues = (title, count, items) => (items.length ? el('div', { class: 'db-issues' },
       el('div', { class: 'section-title' }, title, el('span', { class: 'count' }, String(count))),
       el('ul', { class: 'db-issue-list', role: 'list' }, ...items)) : null);
-    // On a server that does not run the detections, their run times and
-    // errors are on the one that does.
+    // Every server shares the run state, so the counts are the same on
+    // all of them; away only says which server runs the detections.
     const away = !!h.runs_elsewhere;
+    const behind = h.behind || [];
     const sub = away ? (h.runs_on ? `Run on ${h.runs_on}` : 'Not running') : h.scheduler_on ? 'Scheduler on' : 'Scheduler off';
-    const none = el('span', {}, el('span', { 'aria-hidden': 'true' }, '–'), el('span', { class: 'sr-only' }, 'Not known here'));
     let note = null;
-    if (away && h.runs_on) note = cardAlert('info', `Detections run on ${h.runs_on}. Their run times and errors are shown there.`);
-    else if (away) note = cardAlert('danger', 'No server runs detections right now.' + (can('admin') ? ' The Servers page says why.' : ' An admin needs to look.'));
-    else if (!h.scheduler_on) note = cardAlert('warning', 'The scheduler is off on this server, so detections only run when you click Run now.');
+    if (away && !h.runs_on) note = cardAlert('danger', 'No server runs detections right now.' + (can('admin') ? ' The Servers page says why.' : ' An admin needs to look.'));
+    else if (!away && !h.scheduler_on) note = cardAlert('warning', 'The scheduler is off on this server, so detections only run when you click Run now.');
     return card({ title: 'Detection health', sub, actions: [pageLink('Detections', 'detections')] },
       el('div', { class: 'db-hstats' },
-        stat(String(h.enabled), ` of ${h.total}`, 'detections on', null, h.not_run ? `${h.not_run} enabled detections have not run since the server started` : ''),
-        away ? stat(none, '', 'erroring', null, h.runs_on ? `Shown on ${h.runs_on}` : '') : stat(String(erroring.length), '', 'erroring', erroring.length ? 'danger' : null),
+        stat(String(h.enabled), ` of ${h.total}`, 'detections on', null, h.not_run ? `${h.not_run} enabled detections have not run on schedule yet` : ''),
+        stat(String(erroring.length), '', 'erroring', erroring.length ? 'danger' : null),
         stat(String(silent.length), '', `no match in ${h.silent_window}`, null, 'Enabled detections with no findings and no risk events. They may need tuning, or the data they need may be missing.'),
         stat(String(stale.length), ` of ${h.sources}`, 'sources stopped', stale.length ? 'warning' : null, `Hosts and source types seen in the last ${h.source_lookback} with nothing in the last ${h.stale_after}`)),
       err ? cardAlert('danger', err) : null,
       note,
+      h.skipped ? cardAlert('warning', skippedGapText(h.skipped)) : null,
       issues('Erroring', erroring.length, erroring.map((d) => el('li', {}, detLink(d), el('span', { class: 'db-issue__meta', title: d.error }, d.error)))),
+      issues('Behind schedule', behind.length, behind.map((d) => el('li', {}, detLink(d),
+        el('span', { class: 'db-issue__meta' }, d.last_run ? `last run ${ago(d.last_run)}` : 'not run yet')))),
       issues(`Stopped sending for ${h.stale_after}+`, stale.length, stale.map((s) => el('li', {},
         el('span', { class: 'db-issue__name mono' }, s.host), el('span', { class: 'db-issue__meta' }, `${s.sourcetype} · last event ${ago(s.last_seen)}`)))),
       silent.length ? el('details', { class: 'db-more' },
         el('summary', {}, icon('chevron-right', 'db-more__chev'), el('span', {}, `No match in ${h.silent_window}`), el('span', { class: 'count' }, String(silent.length))),
         el('ul', { class: 'db-issue-list', role: 'list' }, ...silent.map((d) => el('li', {}, detLink(d))))) : null);
+  }
+
+  // skippedGapText says when detections were not running and how many
+  // missed runs were too old to make up, in the viewer's time zone.
+  function skippedGapText(g) {
+    const from = new Date(g.from), to = new Date(g.to);
+    const hm = { hour: '2-digit', minute: '2-digit' };
+    const today = new Date().toDateString();
+    const one = from.toDateString() === today && to.toDateString() === today;
+    const fmt = (d) => (one ? d.toLocaleTimeString(undefined, hm) : d.toLocaleString(undefined, { month: 'short', day: 'numeric', ...hm }));
+    const runs = `${g.runs.toLocaleString()} ${g.runs === 1 ? 'run' : 'runs'}`;
+    const what = g.detections === 1 && g.title ? `of ‘${g.title}’` : `of ${g.detections.toLocaleString()} detections`;
+    return `Signalith was not running detections from ${fmt(from)} to ${fmt(to)}; ${runs} ${what} ${g.runs === 1 ? 'was' : 'were'} skipped, because ${g.runs === 1 ? 'it was' : 'they were'} older than the Make up missed runs limit on the Settings page. Search that time by hand if it matters.`;
   }
 
   function datamodelCard(rep) {

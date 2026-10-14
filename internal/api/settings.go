@@ -1051,6 +1051,9 @@ func (s *Server) applyLive(old, saved *config.Config) []string {
 	if changed("detections.max_findings_per_run") && s.Scheduler != nil {
 		s.Scheduler.SetMaxFindingsPerRun(next.Detections.MaxFindingsPerRun)
 	}
+	if changed("detections.catch_up") && s.Scheduler != nil {
+		s.Scheduler.SetCatchUp(next.DetectionsCatchUp())
+	}
 	if changed("assistant.") {
 		a := next.Assistant
 		s.liveAI.Store(&liveModel{c: assistant.New(a.Provider, a.URL, a.Model, a.APIKey)})

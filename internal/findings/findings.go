@@ -61,11 +61,17 @@ type Finding struct {
 	CaseID string `json:"case_id,omitempty"`
 	// Sample marks a finding the sample-data feature raised, holding the
 	// load's ID, so Remove can delete exactly those; empty for real ones.
-	Sample   string    `json:"sample,omitempty"`
-	Created  time.Time `json:"created"`
-	Updated  time.Time `json:"updated"`
-	Comments []Comment `json:"comments,omitempty"`
-	History  []Change  `json:"history,omitempty"`
+	Sample string `json:"sample,omitempty"`
+	// Slot is the end of the scheduled slot that raised the finding,
+	// which is also its Created time; RaisedAt is when it was actually
+	// raised, later when the slot was run late. Both are empty for
+	// findings raised by "Run now" or before slots existed.
+	Slot     *time.Time `json:"slot,omitempty"`
+	RaisedAt time.Time  `json:"raised_at,omitzero"`
+	Created  time.Time  `json:"created"`
+	Updated  time.Time  `json:"updated"`
+	Comments []Comment  `json:"comments,omitempty"`
+	History  []Change   `json:"history,omitempty"`
 }
 
 // Comment is an analyst note.

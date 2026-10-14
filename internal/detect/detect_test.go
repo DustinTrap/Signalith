@@ -190,7 +190,7 @@ func TestSchedulerRaisesAndThrottles(t *testing.T) {
 	s := &Scheduler{Library: lib, Engine: run, Findings: store, Now: func() time.Time { return now }}
 	d, _ := lib.Get("auth-brute-force")
 
-	res, err := s.Run(context.Background(), d)
+	res, err := s.RunManual(context.Background(), d, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,18 +213,18 @@ func TestSchedulerRaisesAndThrottles(t *testing.T) {
 
 	// Five minutes later the same sources are throttled (window 1h).
 	now = now.Add(5 * time.Minute)
-	res, _ = s.Run(context.Background(), d)
+	res, _ = s.RunManual(context.Background(), d, "")
 	if len(res.Findings) != 0 || res.Throttled != 2 {
 		t.Fatalf("second run = %+v", res)
 	}
 	// After the throttle window they fire again.
 	now = now.Add(time.Hour)
-	res, _ = s.Run(context.Background(), d)
+	res, _ = s.RunManual(context.Background(), d, "")
 	if len(res.Findings) != 2 {
 		t.Fatalf("third run = %+v", res)
 	}
-	st := s.Status()["auth-brute-force"]
-	if st.LastFindings != 2 || !st.NextRun.Equal(now.Add(5*time.Minute)) {
+	// "Run now" leaves the schedule alone, and is recorded on its own.
+	if st := s.Status()["auth-brute-force"]; !st.LastRun.IsZero() || !st.NextRun.IsZero() || st.Manual == nil || st.Manual.Findings != 2 {
 		t.Errorf("state = %+v", st)
 	}
 }
@@ -232,22 +232,31 @@ func TestSchedulerRaisesAndThrottles(t *testing.T) {
 func TestRunDueRespectsScheduleAndEnabled(t *testing.T) {
 	lib, _, _ := NewLibrary("")
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
-	s := &Scheduler{Library: lib, Engine: &fakeRunner{}, Findings: findings.NewMemory(), Now: func() time.Time { return now }}
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	step := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+	s := (&Scheduler{Library: lib, Engine: &fakeRunner{}, Findings: findings.NewMemory(), Now: clock}).AsNew()
+	// At first sight a detection waits for its next slot.
+	s.RunDue(context.Background())
+	if st := s.Status()["auth-brute-force"]; !st.LastRun.IsZero() || st.NextRun.IsZero() {
+		t.Fatalf("ran at first sight: %+v", st)
+	}
+	step(5 * time.Minute)
 	s.RunDue(context.Background())
 	st := s.Status()
-	if _, ran := st["change-account-deleted"]; ran {
+	if st := st["change-account-deleted"]; !st.LastRun.IsZero() {
 		t.Error("disabled detection ran")
 	}
 	first := st["auth-brute-force"].LastRun
 	if first.IsZero() {
 		t.Fatal("enabled detection did not run")
 	}
-	now = now.Add(time.Minute)
+	step(time.Second)
 	s.RunDue(context.Background())
 	if !s.Status()["auth-brute-force"].LastRun.Equal(first) {
 		t.Error("ran again before its schedule")
 	}
-	now = now.Add(5 * time.Minute)
+	step(5 * time.Minute)
 	s.RunDue(context.Background())
 	if s.Status()["auth-brute-force"].LastRun.Equal(first) {
 		t.Error("did not run when due")
@@ -262,7 +271,7 @@ func TestRunCapsFindings(t *testing.T) {
 	}
 	s := &Scheduler{Library: lib, Engine: &fakeRunner{rows: rows}, Findings: findings.NewMemory(), MaxFindingsPerRun: 3}
 	d, _ := lib.Get("auth-brute-force")
-	res, err := s.Run(context.Background(), d)
+	res, err := s.RunManual(context.Background(), d, "")
 	if err != nil || len(res.Findings) != 3 || !res.Capped {
 		t.Fatalf("res = %+v, %v", res, err)
 	}
@@ -432,27 +441,35 @@ func TestSchedulerAsksAllowed(t *testing.T) {
 	store := findings.NewMemory()
 	var allowed atomic.Bool
 	runner := &losingRunner{fakeRunner: fakeRunner{rows: []search.Row{{"src": "203.0.113.9", "dest": "web1"}}}, lose: func() { allowed.Store(false) }}
-	s := &Scheduler{Library: lib, Engine: runner, Findings: store, Now: func() time.Time { return now }, Allowed: allowed.Load}
+	var mu sync.Mutex
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	s := &Scheduler{Library: lib, Engine: runner, Findings: store, Now: clock, Allowed: allowed.Load}
 	s.RunDue(context.Background())
 	if len(s.Status()) != 0 {
 		t.Fatalf("ran while not allowed: %+v", s.Status())
 	}
 	allowed.Store(true)
+	s.RunDue(context.Background()) // first sight: no run
+	before := s.Status()
+	mu.Lock()
+	now = now.Add(time.Hour)
+	mu.Unlock()
 	s.RunDue(context.Background())
-	failed := 0
-	for _, st := range s.Status() {
-		if strings.Contains(st.LastError, "no longer runs the background jobs") {
-			failed++
+	// The run that lost the role wrote nothing, so its slot is run again
+	// by the server that has the role now.
+	for id, st := range s.Status() {
+		if !st.LastRun.IsZero() || !st.LastSlot.Equal(before[id].LastSlot) {
+			t.Errorf("%s: state %+v", id, st)
 		}
 	}
-	if failed == 0 {
-		t.Fatalf("state %+v", s.Status())
+	if len(runner.fakeRunner.rows) == 0 || runner.last == nil {
+		t.Fatal("nothing ran")
 	}
 	if list, _, _ := store.Search(context.Background(), findings.Filter{}); len(list) != 0 {
 		t.Fatalf("%d findings written after the role was lost", len(list))
 	}
 	d, _ := lib.Get("auth-brute-force")
-	if res, err := s.Run(context.Background(), d); err != nil || len(res.Findings) != 1 {
+	if res, err := s.RunManual(context.Background(), d, ""); err != nil || len(res.Findings) != 1 {
 		t.Fatalf("a run by hand: %+v %v", res, err)
 	}
 }
