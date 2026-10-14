@@ -75,7 +75,7 @@ so later scans of the same software ask nothing.
 Without an API key the NVD allows 5 requests every 30 seconds, so a first scan that finds
 a lot of different software takes a few extra minutes. A free key from
 <https://nvd.nist.gov/developers/request-an-api-key> makes it about ten times faster. Enter
-it as **NVD API key** on the [Settings page](settings.md), under **Vulnerability scans**: it
+it as **NVD API key** in [Settings](settings.md), on the **Server** tab under **Vulnerability scans**: it
 is kept encrypted, never shown again, and used from the next lookup with no restart. It
 can also come from the `SIGNALITH_NVD_API_KEY` environment variable of the Signalith
 service (or a file named by `SIGNALITH_NVD_API_KEY_FILE`), or from `vulns.nvd_api_key` in

@@ -163,7 +163,7 @@ func (c *Checker) Run(ctx context.Context, set Settings) (checks []Check, path s
 		key.State, key.Detail = CheckInfo, "No API key is set. That is fine; lookups are just slower."
 		key.Fix = []string{
 			"Request a free key at https://nvd.nist.gov/developers/request-an-api-key.",
-			"Enter it as NVD API key on the Settings page, under Vulnerability scans. It is used from the next lookup, with no restart.",
+			"Enter it as NVD API key in Settings, on the Server tab under Vulnerability scans. It is used from the next lookup, with no restart.",
 		}
 	}
 	checks = append(checks, key)
