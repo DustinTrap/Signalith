@@ -22,8 +22,6 @@ const (
 	SystemChannel        = ingest.SystemChannel
 	ApplicationChannel   = ingest.ApplicationChannel
 	CodeIntegrityChannel = ingest.CodeIntegrityChannel
-	FirewallChannel      = ingest.FirewallChannel
-	BitsChannel          = ingest.BitsChannel
 	PowerShellChannel    = ingest.PowerShellChannel
 	DefenderChannel      = ingest.DefenderChannel
 	// LinuxSysmonChannel is Sysmon for Linux, whose events have Sysmon's
@@ -185,12 +183,13 @@ var sysmonEvents = map[string]string{
 	// Code Integrity log rules name their events; an unsigned driver
 	// loaded is the first.
 	"code_integrity": "3001",
-	// Firewall log rules (service: firewall-as) name their events; a
-	// rule added is the first.
-	"firewall_as": "2004",
-	// BITS log rules (service: bits-client) name their events; a
-	// transfer started is the first.
-	"bits_client": "16403",
+	// Rules about the logs the parser reads by name name their events:
+	// a firewall rule added, a BITS transfer started, an app package
+	// deployed and a WMI operation failed are the first.
+	"firewall_as":           "2004",
+	"bits_client":           "16403",
+	"appxdeployment_server": "400",
+	"wmi":                   "5858",
 	// Defender log rules (service: windefend) name their events; a
 	// threat detected is the first.
 	"windefend": "1116",
@@ -230,8 +229,9 @@ func init() {
 	Bases["system_event"] = map[string]string{}
 	Bases["application"] = map[string]string{}
 	Bases["code_integrity"] = map[string]string{}
-	Bases["firewall_as"] = map[string]string{}
-	Bases["bits_client"] = map[string]string{}
+	for service := range ingest.NamedChannelServices {
+		Bases[ingest.NamedChannelCategory(service)] = map[string]string{}
+	}
 	// A task disabled has the data of a task deleted.
 	Bases[SecurityCategory("4701")] = Bases[SecurityCategory("4699")]
 	for _, id := range SecurityEvents {
@@ -256,12 +256,13 @@ func Channel(category string) string {
 		return ApplicationChannel
 	case "code_integrity":
 		return CodeIntegrityChannel
-	case "firewall_as":
-		return FirewallChannel
-	case "bits_client":
-		return BitsChannel
 	case "windefend":
 		return DefenderChannel
+	}
+	for service, channel := range ingest.NamedChannelServices {
+		if category == ingest.NamedChannelCategory(service) {
+			return channel
+		}
 	}
 	if strings.HasPrefix(category, "security_") {
 		return SecurityChannel

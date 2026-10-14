@@ -223,6 +223,33 @@ func TestWindowsFirewallAndBitsEvents(t *testing.T) {
 	if _, ok := ChannelDataField(BitsChannel, "Nope"); ok {
 		t.Error("ChannelDataField(Nope) is known")
 	}
+	// Names that differ only in case are one field, as Sigma matches
+	// names without case.
+	for ch, c := range namedChannels {
+		seen := map[string]string{}
+		for _, e := range c.events {
+			for _, n := range e.data {
+				if f, ok := seen[strings.ToLower(n)]; ok && f != snakeField(c.prefix, n) {
+					t.Errorf("%s: %s is %s and %s", ch, n, f, snakeField(c.prefix, n))
+				}
+				seen[strings.ToLower(n)] = snakeField(c.prefix, n)
+			}
+		}
+	}
+	// Every log has its Sigma service.
+	for service, ch := range NamedChannelServices {
+		if !IsNamedChannel(ch) {
+			t.Errorf("%s: %s is not read by name", service, ch)
+		}
+	}
+	// An app package file downloaded (AppX 854).
+	rec = map[string]any{"Channel": AppxChannel, "Computer": "WS1", "EventID": "854",
+		"ProviderName": "Microsoft-Windows-AppXDeployment-Server", "StringInserts": []string{"https://example.org/app.msix"}}
+	b, _ = json.Marshal(rec)
+	expect(t, Normalize("win.events", decode(t, string(b)), now).Document(), map[string]any{
+		"datamodel": "Other", "signature_id": "854", "appx_path": "https://example.org/app.msix",
+		"signature": "An app package file was downloaded",
+	})
 }
 
 // The search engine knows every wildcard field, as it takes backslashes

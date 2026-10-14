@@ -9,6 +9,14 @@ import (
 // settings being changed.
 const FirewallChannel = "Microsoft-Windows-Windows Firewall With Advanced Security/Firewall"
 
+// AppxChannel is where Windows logs app packages (MSIX and AppX) being
+// installed, and blocked.
+const AppxChannel = "Microsoft-Windows-AppXDeploymentServer/Operational"
+
+// WmiChannel is where WMI logs failed operations and permanent event
+// subscriptions.
+const WmiChannel = "Microsoft-Windows-WMI-Activity/Operational"
+
 // BitsChannel is where the Background Intelligent Transfer Service logs
 // its download and upload jobs.
 const BitsChannel = "Microsoft-Windows-Bits-Client/Operational"
@@ -26,6 +34,19 @@ var firewallRule = []string{"RuleId", "RuleName", "Origin", "ApplicationPath", "
 	"LocalPorts", "RemotePorts", "Action", "Profiles", "LocalAddresses", "RemoteAddresses", "RemoteMachineAuthorizationList",
 	"RemoteUserAuthorizationList", "EmbeddedContext", "Flags", "Active", "EdgeTraversal", "LooseSourceMapped",
 	"SecurityOptions", "ModifyingUser", "ModifyingApplication", "SchemaVersion", "RuleStatus", "LocalOnlyMapped"}
+
+// appxDeployment is the data of a package deployed (400); a deployment
+// failed (401) adds the error and its details.
+var appxDeployment = []string{"DeploymentOperation", "PackageFullName", "Path", "MountPoint", "TargetPlatform", "SystemVolume",
+	"StorageId", "IsCentennial", "PackageType", "IsPackageEncrypted", "DeploymentOptions", "IsStreamingPackage", "IsInRelatedSet",
+	"IsPackageUsingBDC", "MainPackageFamilyName", "CallingProcess", "IsOptional", "PackageFlags", "PackageFlags2", "HasWin32alacarte",
+	"HasFullTrust", "ExternalLocation", "PackageSourceUri", "PackageDisplayName"}
+
+var appxDeploymentFailed = []string{"DeploymentOperation", "PackageFullName", "Path", "ErrorCode", "MountPoint", "TargetPlatform",
+	"SystemVolume", "StorageId", "IsCentennial", "PackageType", "IsPackageEncrypted", "DeploymentOptions", "IsStreamingPackage",
+	"IsInRelatedSet", "IsPackageUsingBDC", "MainPackageFamilyName", "CallingProcess", "IsInPlaceUpdate", "ErrorFileInfo",
+	"DetailedMessageInfo", "RollbackErrorFileInfo", "RollbackDetailedMessageInfo", "IsOptional", "PackageFlags", "PackageFlags2",
+	"HasWin32alacarte", "HasFullTrust", "ExternalLocation", "PackageSourceUri", "PackageDisplayName"}
 
 // namedChannels are the Windows logs, besides the System log, whose
 // events the parser keeps the data of by name, by channel (lower case):
@@ -50,11 +71,42 @@ var namedChannels = map[string]namedChannel{
 		"2033": {"All firewall rules were deleted", []string{"Store Type", "ModifyingUser", "ModifyingApplication"}},
 		"2059": {"All firewall rules were deleted", []string{"Store Type", "ModifyingUser", "ModifyingApplication", "ErrorCode"}},
 	}},
+	strings.ToLower(AppxChannel): {"appx", map[string]systemEvent{
+		"400": {"An app package was deployed", appxDeployment},
+		"401": {"An app package deployment failed", appxDeploymentFailed},
+		"412": {"AppLocker blocked an app package", []string{"PackageFullName", "ErrorCode"}},
+		"441": {"A policy blocked an app package deployment in a special profile", nil},
+		"442": {"A policy blocked an app package deployment to a non-system volume", []string{"PackageFullName", "MountPoint"}},
+		"453": {"A platform policy blocked an app package", []string{"PackageFullName", "PolicyReason"}},
+		"454": {"A platform policy blocked an app package", []string{"PackageFullName", "PolicyReason"}},
+		"603": {"An app package deployment was started", []string{"DeploymentOperation", "Path", "Flags", "FlagsHigh", "CallingProcess", "ExternalLocation"}},
+		"854": {"An app package file was downloaded", []string{"Path"}},
+	}},
+	strings.ToLower(WmiChannel): {"wmi", map[string]systemEvent{
+		"5858": {"A WMI operation failed", []string{"Id", "ClientMachine", "User", "ClientProcessId", "Component", "Operation", "ResultCode", "PossibleCause"}},
+		"5859": {"A WMI event filter was registered", []string{"NamespaceName", "Query", "User", "processid", "providerName", "queryid", "PossibleCause"}},
+		"5861": {"A WMI permanent event subscription was registered", []string{"Namespace", "ESS", "CONSUMER", "PossibleCause"}},
+	}},
 	strings.ToLower(BitsChannel): {"bits", map[string]systemEvent{
 		"3": {"A BITS job was created", []string{"jobTitle", "jobId", "jobOwner", "processPath", "processId", "ClientProcessStartKey"}},
 		"16403": {"A BITS transfer started", []string{"User", "jobTitle", "jobId", "jobOwner", "fileCount", "RemoteName", "LocalName",
 			"processId", "ClientProcessStartKey"}},
 	}},
+}
+
+// NamedChannelServices are the Sigma log source services of the logs
+// namedChannels lists, and their channels.
+var NamedChannelServices = map[string]string{
+	"firewall-as":           FirewallChannel,
+	"bits-client":           BitsChannel,
+	"appxdeployment-server": AppxChannel,
+	"wmi":                   WmiChannel,
+}
+
+// NamedChannelCategory is the category of the Sigma rules of a log
+// NamedChannelServices lists: its service with _ for - (firewall_as).
+func NamedChannelCategory(service string) string {
+	return strings.ReplaceAll(strings.ToLower(service), "-", "_")
 }
 
 // namedChannelFor is the log of a channel whose events the parser reads

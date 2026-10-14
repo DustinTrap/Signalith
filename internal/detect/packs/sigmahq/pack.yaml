@@ -7897,6 +7897,34 @@ rules:
     rule_id: 6c82cf5c-090d-4d57-9188-533577631108
     file: win_application_msmpeng_crash_wer.yml
     path: rules/windows/builtin/application/windows_error_reporting/win_application_msmpeng_crash_wer.yml
+  - id: sigma-win-appxdeployment-server-applocker-block
+    rule_id: 6ae53108-c3a0-4bee-8f45-c7591a2c337f
+    file: win_appxdeployment_server_applocker_block.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_applocker_block.yml
+  - id: sigma-win-appxdeployment-server-appx-downloaded-from-file-sharin
+    rule_id: 8b48ad89-10d8-4382-a546-50588c410f0d
+    file: win_appxdeployment_server_appx_downloaded_from_file_sharing_domains.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_appx_downloaded_from_file_sharing_domains.yml
+  - id: sigma-win-appxdeployment-server-appx-package-deployment-failed-s
+    rule_id: 898d5fc9-fbc3-43de-93ad-38e97237c344
+    file: win_appxdeployment_server_appx_package_deployment_failed_signing_requirements.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_appx_package_deployment_failed_signing_requirements.yml
+  - id: sigma-win-appxdeployment-server-appx-package-in-staging-director
+    rule_id: 5cdeaf3d-1489-477c-95ab-c318559fc051
+    file: win_appxdeployment_server_appx_package_in_staging_directory.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_appx_package_in_staging_directory.yml
+  - id: sigma-win-appxdeployment-server-mal-appx-names
+    rule_id: 09d3b48b-be17-47f5-bf4e-94e7e75d09ce
+    file: win_appxdeployment_server_mal_appx_names.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_mal_appx_names.yml
+  - id: sigma-win-appxdeployment-server-policy-block
+    rule_id: e021bbb5-407f-41f5-9dc9-1864c45a7a51
+    file: win_appxdeployment_server_policy_block.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_policy_block.yml
+  - id: sigma-win-appxdeployment-server-uncommon-package-locations
+    rule_id: c977cb50-3dff-4a9f-b873-9290f56132f1
+    file: win_appxdeployment_server_uncommon_package_locations.yml
+    path: rules/windows/builtin/appxdeployment_server/win_appxdeployment_server_uncommon_package_locations.yml
   - id: sigma-win-audit-cve
     rule_id: 48d91a3a-2363-43ba-a456-ca71ac3da5c2
     file: win_audit_cve.yml
@@ -8717,3 +8745,7 @@ rules:
     rule_id: a0cb7110-edf0-47a4-9177-541a4083128a
     file: win_system_vul_cve_2020_1472.yml
     path: rules/windows/builtin/system/netlogon/win_system_vul_cve_2020_1472.yml
+  - id: sigma-win-wmi-activity-nteventlogfile-cleareventlog
+    rule_id: d4f1a2b3-7c8e-4d5f-b6a9-1e0c2d3f4e5b
+    file: win_wmi_activity_nteventlogfile_cleareventlog.yml
+    path: rules/windows/builtin/wmi/win_wmi_activity_nteventlogfile_cleareventlog.yml

@@ -409,10 +409,10 @@ func Generate(o Options) (*Agent, error) {
 		// The System and Application logs (services, logs cleared, SQL
 		// Server and installer events), Microsoft Defender, Code
 		// Integrity (unsigned and revoked drivers), Windows Firewall
-		// (rules and settings changed) and BITS (download jobs) are
-		// always collected: they are part of every supported Windows
+		// (rules and settings changed), BITS (download jobs), app
+		// package installs and WMI activity are always collected: they are part of every supported Windows
 		// version, need no install and log little.
-		channels := "Security,System,Application,Microsoft-Windows-Windows Defender/Operational,Microsoft-Windows-CodeIntegrity/Operational,Microsoft-Windows-Windows Firewall With Advanced Security/Firewall,Microsoft-Windows-Bits-Client/Operational"
+		channels := "Security,System,Application,Microsoft-Windows-Windows Defender/Operational,Microsoft-Windows-CodeIntegrity/Operational,Microsoft-Windows-Windows Firewall With Advanced Security/Firewall,Microsoft-Windows-Bits-Client/Operational,Microsoft-Windows-AppXDeploymentServer/Operational,Microsoft-Windows-WMI-Activity/Operational"
 		if o.Sysmon {
 			channels += ",Microsoft-Windows-Sysmon/Operational"
 		}

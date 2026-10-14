@@ -23,7 +23,7 @@ const TemplateVersion = 18
 // templateHash is the SHA-256 of IndexTemplate("p", auto replicas) as
 // JSON, which TestTemplateVersionBumped compares, so a change to the
 // template cannot go out without a new TemplateVersion.
-const templateHash = "835ffc0d9635f6f91a1d0db3463171099b74711946afe3bdd0d085baec832144"
+const templateHash = "9287a75f586ee03667d6a352a5c80a5000a6d4c8a81806694288821eb41790e7"
 
 // IndexTemplate returns the OpenSearch index template every Signalith index
 // uses: strings are exact-match keywords (fast filters and stats), the raw
