@@ -285,6 +285,15 @@ func (l *FeedList) now() time.Time {
 	return time.Now()
 }
 
+// ETagKey implements intel.ETagKeyer: the feeds' versions are keyed with
+// the cluster's MAC key, which every member has.
+func (l *FeedList) ETagKey() []byte {
+	if k := l.Docs.Hub().Keys().Active(); k != nil {
+		return k.MACKey()
+	}
+	return nil
+}
+
 // Load implements intel.FeedList.
 func (l *FeedList) Load() (intel.FeedSet, error) {
 	body, ok := l.Docs.Feeds().Get()
@@ -355,9 +364,20 @@ type StatusStore struct {
 	mu      sync.Mutex
 	cache   map[string]*intel.FeedStatus
 	readAt  time.Time
-	pending map[string]*intel.FeedStatus
+	pending map[string]pendingStatus
 	wake    chan struct{}
 }
+
+// pendingStatus is a status saved but not written yet, with the epoch of
+// the job lease it was saved under.
+type pendingStatus struct {
+	st    *intel.FeedStatus
+	epoch int64
+}
+
+// statusRetry is how long a status whose write failed waits before it is
+// written again.
+const statusRetry = 5 * time.Second
 
 // statusCache is how long a read of every status is used again.
 const statusCache = 2 * time.Second
@@ -392,10 +412,11 @@ func (s *StatusStore) Load() map[string]*intel.FeedStatus {
 		cancel()
 		s.mu.Lock()
 		if err == nil {
-			for name, st := range s.pending {
+			for name, p := range s.pending {
 				// Not written yet: this server's own is newer.
-				if st != nil {
-					all[name] = st
+				if p.st != nil {
+					c := *p.st
+					all[name] = &c
 				} else {
 					delete(all, name)
 				}
@@ -439,21 +460,27 @@ func (s *StatusStore) Save(name string, st *intel.FeedStatus) {
 	if s.Leads != nil && !s.Leads() {
 		return
 	}
+	// The epoch is the one the status was made under: a write after the
+	// lease was let go (the last one, at shutdown) still carries it.
+	var epoch int64
+	if s.Epoch != nil {
+		epoch = s.Epoch()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pending == nil {
-		s.pending = map[string]*intel.FeedStatus{}
+		s.pending = map[string]pendingStatus{}
 	}
 	if s.cache == nil {
 		s.cache = map[string]*intel.FeedStatus{}
 	}
 	if st == nil {
-		s.pending[name] = nil
+		s.pending[name] = pendingStatus{epoch: epoch}
 		delete(s.cache, name)
 	} else {
 		c, k := *st, *st
 		c.Running, k.Running = false, false
-		s.pending[name], s.cache[name] = &c, &k
+		s.pending[name], s.cache[name] = pendingStatus{st: &c, epoch: epoch}, &k
 	}
 	if s.wake == nil {
 		s.wake = make(chan struct{}, 1)
@@ -474,9 +501,11 @@ func (s *StatusStore) wakeCh() chan struct{} {
 }
 
 // Run writes the statuses saved, until ctx ends; what is left is written
-// then, within a few seconds.
+// then, within a few seconds. A write that failed is tried again after
+// statusRetry.
 func (s *StatusStore) Run(ctx context.Context) {
 	wake := s.wakeCh()
+	var retry <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -485,32 +514,47 @@ func (s *StatusStore) Run(ctx context.Context) {
 			cancel()
 			return
 		case <-wake:
-			s.Flush(ctx)
+		case <-retry:
+		}
+		retry = nil
+		if s.Flush(ctx) > 0 {
+			retry = time.After(statusRetry)
 		}
 	}
 }
 
-// Flush writes the statuses saved so far.
-func (s *StatusStore) Flush(ctx context.Context) {
+// Flush writes the statuses saved so far. A status whose write failed is
+// kept for the next flush, unless a newer one was saved meanwhile; it
+// returns how many were kept.
+func (s *StatusStore) Flush(ctx context.Context) int {
 	s.mu.Lock()
 	pending := s.pending
 	s.pending = nil
 	s.mu.Unlock()
-	names := slices.Sorted(maps.Keys(pending))
-	for _, name := range names {
-		if err := s.write(ctx, name, pending[name]); err != nil {
-			s.log().Warn("could not save a threat intel feed's status", "feed", name, "err", err)
+	failed := 0
+	for _, name := range slices.Sorted(maps.Keys(pending)) {
+		p := pending[name]
+		err := s.write(ctx, name, p.st, p.epoch)
+		if err == nil {
+			continue
 		}
+		s.log().Warn("could not save a threat intel feed's status; trying again", "feed", name, "err", err)
+		s.mu.Lock()
+		if s.pending == nil {
+			s.pending = map[string]pendingStatus{}
+		}
+		if _, newer := s.pending[name]; !newer {
+			s.pending[name] = p
+			failed++
+		}
+		s.mu.Unlock()
 	}
+	return failed
 }
 
-// write writes one status, unless a later holder of the job lease wrote
-// it.
-func (s *StatusStore) write(ctx context.Context, name string, st *intel.FeedStatus) error {
-	var epoch int64
-	if s.Epoch != nil {
-		epoch = s.Epoch()
-	}
+// write writes one status made under the lease epoch, unless a later
+// holder of the job lease wrote it.
+func (s *StatusStore) write(ctx context.Context, name string, st *intel.FeedStatus, epoch int64) error {
 	id := StatusID(name)
 	for try := 0; try < 3; try++ {
 		src, ver, found, err := s.Client.Get(ctx, s.Index, id)

@@ -77,9 +77,12 @@ afterwards.
 When the standard input is not a terminal, both read the passphrase from its first
 line, so a script can pipe it in.
 
-Instead of `import-key`, the key can be given to a server in a file: put the key
-(base64, as one line) in a file only Signalith can read and name it in
-`SIGNALITH_CLUSTER_KEY_FILE`.
+Instead of `import-key`, a key you chose before the cluster was made can be given
+in a file named in `SIGNALITH_CLUSTER_KEY_FILE`: 32 random bytes as one line of
+base64, such as `openssl rand -base64 32 > cluster-key`, readable by Signalith only.
+The server that makes the cluster uses that key, so only a cluster made with it can
+be joined this way; no command writes an existing cluster's key in plain form (see
+[Shared settings and the cluster key](servers.md#shared-settings-and-the-cluster-key)).
 
 ## export
 
@@ -135,12 +138,20 @@ signalith cluster reset-key [-c file] [-yes]
 ```
 
 When every copy of the cluster key is lost, nobody can check the shared settings any
-more. Stop every server first: `reset-key` refuses while one is up. It shows each
-shared document, with its revision, who changed it last and how it compares to this
-server's copy, asks you to confirm (`-yes` skips the question), makes a new key and
-signs the documents with it. Passwords and API keys stored with the old key cannot
-be read and are emptied; the command lists them, so you can enter them again on the
-Threat intel page. Then give the other servers the new key.
+more. Stop every server first: `reset-key` refuses while one is up. It also refuses
+while this server still has a key the shared settings check out with (in its state
+folder or in `SIGNALITH_CLUSTER_KEY_FILE`): the key is not lost then, so give it to
+the other servers with `export-key` and `import-key` instead. It shows each shared
+document, with its revision, who changed it last, whether its signature checks out
+with a key this server has and how it compares to this server's copy, asks you to
+confirm (`-yes` skips the question), makes a new key and signs the documents with
+it. A document whose signature fails under a key this server has was changed outside
+Signalith: it is not signed again, so every server keeps ignoring it. Passwords and
+API keys stored with the old key cannot be read and are emptied; the command lists
+them, so you can enter them again on the Threat intel page. Then give the other
+servers the new key. Settings in a server's signalith.yaml that it already applied
+are not applied again because of the new key: each server records them afresh at
+its next start.
 
 ## accept-restore
 

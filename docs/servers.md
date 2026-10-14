@@ -251,7 +251,8 @@ Until servers can be added from the Servers page:
 4. Give it the cluster key (see
    [Shared settings and the cluster key](#shared-settings-and-the-cluster-key)):
    `signalith cluster export-key` on a server that has it, `signalith cluster
-   import-key` on the new one, or the same `SIGNALITH_CLUSTER_KEY_FILE` on both.
+   import-key` on the new one. If the cluster was made with a key file
+   (`SIGNALITH_CLUSTER_KEY_FILE`), the same file on the new one does it too.
    It then uses the shared feeds and retention policies, and can take the jobs over.
    Without the key it runs no background jobs. Copy the notification, playbook and
    detection files listed above too. Never copy `node.id`, the `cluster` folder or the `keys` folder. In
@@ -306,10 +307,25 @@ Give the OpenSearch user the right to create, read and write `<prefix>_config` t
 - copy the file to the other server and run `signalith cluster import-key
   cluster-key.txt` there, with that passphrase. It joins within seconds.
 
-Or put the key (base64, as one line) in a file only Signalith can read, and name
-that file in `SIGNALITH_CLUSTER_KEY_FILE` on every server: a server that has it
-joins by itself. Until a server has the key, it keeps working from its own files
-but runs no background jobs, and the Servers page says so.
+Or, **before the cluster is made**, choose the key yourself: 32 random bytes as
+one line of base64 (lines starting with `#` are comments), in a file only Signalith
+can read, named in `SIGNALITH_CLUSTER_KEY_FILE` on every server. The server that
+makes the cluster then uses that key, and every server that has the file joins by
+itself. To make such a file:
+
+```bash
+openssl rand -base64 32 > cluster-key
+```
+
+```powershell
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+[Convert]::ToBase64String($b) | Set-Content -NoNewline cluster-key
+```
+
+A key file only joins a cluster made with that very key: no command writes the key
+of an existing cluster in plain form, so for a cluster made without a key file use
+`export-key` and `import-key`. Until a server has the key, it keeps working from its
+own files but runs no background jobs, and the Servers page says so.
 
 Each server keeps its last copy of the shared settings in `cluster/cache.enc` in
 its state folder, encrypted with its master key, so it can start while OpenSearch
@@ -338,7 +354,10 @@ server that founds the cluster brings its own: the feeds from `intel_feeds.yaml`
 `intel.feeds` in signalith.yaml, their download status, and the retention policies from
 `retention.yaml` and `retention` in signalith.yaml. The other servers' own files are no
 longer used for them. A server switches to the shared ones by itself, with a quick restart
-in place, when it founds or joins the cluster.
+in place, when it founds or joins the cluster. While the founder is still moving its files
+into OpenSearch, the other servers keep using their own and the Servers page says they wait
+for it; if that takes more than 30 minutes, it turns red: the founder finishes only while
+it runs the background jobs.
 
 **When the servers' policies differed.** If another server that ran in the last 7 days had
 retention policies of its own that differ from the founder's, the shared policies wait to be
@@ -418,8 +437,10 @@ cluster and makes the cluster key (see
 other server needs that key, with `signalith cluster import-key` or
 `SIGNALITH_CLUSTER_KEY_FILE`: until it has it, it keeps using its own files and
 never takes the jobs over, so if the server that runs them stops, nothing runs them.
-Setting `SIGNALITH_CLUSTER_KEY_FILE` to one key on every server before the upgrade
-avoids this step: the first server then makes the cluster with that key. Upgrade
+Setting `SIGNALITH_CLUSTER_KEY_FILE` to one key file on every server before the
+upgrade avoids this step: the first server then makes the cluster with that key (see
+[Shared settings and the cluster key](#shared-settings-and-the-cluster-key) for how to
+make the file). Upgrade
 every server, not only some: a server of an older version reads and writes its own
 files and does not see changes made on the pages of the others.
 
@@ -508,7 +529,7 @@ proxies must pass them on unchanged; they need no other setting.
 | Header | Sent by | Meaning |
 | --- | --- | --- |
 | `X-Signalith-Version` | Every answer | The Signalith version of the server that answered |
-| `X-Signalith-Config` | Every answer, once the server has read the shared settings | How far it has read them, as `<id>.<number>`. The answer to a change says how far a server must have read them to see that change |
+| `X-Signalith-Config` | Every answer to a signed-in request, and to a successful sign-in, once the server has read the shared settings | How far it has read them, as `<id>.<number>`. The answer to a change says how far a server must have read them to see that change |
 | `X-Signalith-Config-Min` | The web pages, on each request to `/api/` | The highest `X-Signalith-Config` the page has seen. A server that has not read that far reads the shared settings once before it answers |
 | `X-Signalith-Stale` | A server that is still behind after that | `1`. The page asks again once for a read; a change is checked against OpenSearch anyway, so it is never made on old settings |
 

@@ -268,6 +268,12 @@ func TestSeenHash(t *testing.T) {
 	if n.Changed("retention.days", SourceEnv, h1, true) {
 		t.Error("first start applies from the environment")
 	}
+	// After a new cluster key (reset-key, rotation) the old hashes cannot
+	// be compared: values are recorded again, not applied.
+	h6, _ := SeenHash(other, "retention.days", 30)
+	if n.Changed("retention.days", SourceYAML, h5, false) || n.Changed("retention.days", SourceYAML, h6, false) {
+		t.Error("a hash under another key applies")
+	}
 	if NodeCfgID("n_4f") != "nodecfg:n_4f" {
 		t.Error(NodeCfgID("n_4f"))
 	}

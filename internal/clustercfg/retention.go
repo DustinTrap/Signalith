@@ -148,14 +148,17 @@ func (p *PolicyStore) UpdateIf(etag string, change func(*retention.Saved)) error
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
 	doc := p.Docs.Retention()
-	body, ok := doc.Get()
-	if !ok {
+	if _, ok := doc.Get(); !ok {
 		return ErrPoliciesUnavailable
 	}
-	s := body.saved()
-	change(&s)
-	body.set(s)
-	_, err := doc.SaveIf(ctx, "", body, etag)
+	// The change applies to the revision the page read, as SaveIf checked
+	// it, not to this server's copy, which may be older.
+	_, err := doc.MutateIf(ctx, "", etag, func(b *RetentionBody) error {
+		s := b.saved()
+		change(&s)
+		b.set(s)
+		return nil
+	})
 	return err
 }
 

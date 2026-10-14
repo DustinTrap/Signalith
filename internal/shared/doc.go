@@ -99,6 +99,10 @@ type Doc[T any] struct {
 	// Validate, when set, checks a body read or about to be written; a
 	// body it refuses is not used.
 	Validate func(*T) error
+	// Local marks a document only this server tracks (its nodecfg): its
+	// writes do not move the token pages wait for, which the other
+	// servers would never reach. Set it before use.
+	Local bool
 
 	// wmu lets one write of this server's run at a time: writers on the
 	// same server queue rather than conflict, and compare-and-set settles
@@ -121,6 +125,8 @@ func NewDoc[T any](h *Hub, id, kind string, format int) *Doc[T] {
 }
 
 func (d *Doc[T]) docID() string { return d.id }
+
+func (d *Doc[T]) local() bool { return d.Local }
 
 func (d *Doc[T]) gen() uint64 {
 	d.mu.Lock()
@@ -356,9 +362,11 @@ func (d *Doc[T]) write(ctx context.Context, base *entry, e *Envelope) (int64, er
 	}
 	src, _ := json.Marshal(e)
 	d.set(&entry{env: *e, src: src, ver: ver, uuid: uuid})
-	d.h.mu.Lock()
-	d.h.wroteLocked(uuid, ver.SeqNo)
-	d.h.mu.Unlock()
+	if !d.Local {
+		d.h.mu.Lock()
+		d.h.wroteLocked(uuid, ver.SeqNo)
+		d.h.mu.Unlock()
+	}
 	return ver.SeqNo, nil
 }
 
@@ -418,6 +426,17 @@ func (d *Doc[T]) Mutate(ctx context.Context, by string, fn func(*T) error) (int6
 // SaveIf replaces the document with v, for a page that read it at etag
 // (ETag). Another change since gives a *StaleError naming who made it.
 func (d *Doc[T]) SaveIf(ctx context.Context, by string, v *T, etag string) (int64, error) {
+	return d.MutateIf(ctx, by, etag, func(cur *T) error {
+		*cur = *v
+		return nil
+	})
+}
+
+// MutateIf changes the document with fn, for a page that read it at etag
+// (ETag). fn gets a copy of the revision etag names, never an older copy
+// this server still holds, so a change made elsewhere is not lost. Another
+// change since gives a *StaleError naming who made it.
+func (d *Doc[T]) MutateIf(ctx context.Context, by, etag string, fn func(*T) error) (int64, error) {
 	d.wmu.Lock()
 	defer d.wmu.Unlock()
 	base, err := d.usable()
@@ -435,6 +454,15 @@ func (d *Doc[T]) SaveIf(ctx context.Context, by string, v *T, etag string) (int6
 	}
 	if base == nil && etag != "" || base != nil && base.etag() != etag {
 		return 0, d.stale(base)
+	}
+	v := new(T)
+	if base != nil {
+		if v, err = decodeBody[T](base.env.Body); err != nil {
+			return 0, err
+		}
+	}
+	if err := fn(v); err != nil {
+		return 0, err
 	}
 	e, err := d.envelope(base, by, v)
 	if err != nil {

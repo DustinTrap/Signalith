@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 )
 
 // A cluster setting set in signalith.yaml or the environment is applied
@@ -41,7 +42,10 @@ type NodeCfg struct {
 }
 
 // SeenHash returns the hash of a setting's value as nodecfg records it:
-// "h1:" and the HMAC of the setting's name and its value as JSON.
+// "h1:", the id of the cluster key, ":" and the HMAC of the setting's
+// name and its value as JSON. The key id lets a hash made under another
+// key (before reset-key or a key rotation) be told apart from a changed
+// value.
 func SeenHash(k *ClusterKey, key string, value any) (string, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
@@ -52,18 +56,34 @@ func SeenHash(k *ClusterKey, key string, value any) (string, error) {
 	h := hmac.New(sha256.New, k.macKey)
 	h.Write([]byte("sgl-seen-v1\x00" + key + "\x00"))
 	h.Write(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
-	return "h1:" + base64.RawURLEncoding.EncodeToString(h.Sum(nil)), nil
+	return "h1:" + k.ID() + ":" + base64.RawURLEncoding.EncodeToString(h.Sum(nil)), nil
+}
+
+// seenKID returns the id of the cluster key a SeenHash was made with.
+func seenKID(hash string) string {
+	rest, _ := strings.CutPrefix(hash, "h1:")
+	kid, _, ok := strings.Cut(rest, ":")
+	if !ok {
+		return ""
+	}
+	return kid
 }
 
 // Changed reports whether the value of setting key from source, whose
 // hash is hash, is to be applied to the shared value: it changed since
 // it was recorded, or it was not set at the previous start. At a server's
-// first start as a member (first), values are only recorded.
+// first start as a member (first), values are only recorded. A hash
+// recorded under another cluster key cannot be compared, so that value is
+// only recorded again too: after a new cluster key, an unchanged file
+// must not undo the changes made on the pages.
 func (n *NodeCfg) Changed(key, source, hash string, first bool) bool {
 	if first {
 		return false
 	}
 	old, ok := n.Seen[key][source]
+	if ok && seenKID(old) != seenKID(hash) {
+		return false
+	}
 	return !ok || old != hash
 }
 

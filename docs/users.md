@@ -604,8 +604,9 @@ token; the others take the node key a host got when it enrolled; see
 [endpoints.md](endpoints.md)). Requests from a browser that change something must come from the Signalith
 page itself.
 
-Every answer carries the server's version in `X-Signalith-Version` and, once it has
-read the shared settings, `X-Signalith-Config`. Behind a load balancer, send the
+Every answer carries the server's version in `X-Signalith-Version`. Answers to
+signed-in requests (and to a successful sign-in) also carry `X-Signalith-Config`,
+once the server has read the shared settings. Behind a load balancer, send the
 `X-Signalith-Config` of a change's answer as `X-Signalith-Config-Min` on the next
 request, so a server that has not yet read that change reads it first (see
 [Several servers behind one address](servers.md#several-servers-behind-one-address)).

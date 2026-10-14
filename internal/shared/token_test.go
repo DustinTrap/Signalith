@@ -275,4 +275,18 @@ func TestWrittenFollowsOwnWrites(t *testing.T) {
 	if b.Written() != -1 {
 		t.Errorf("b written %d", b.Written())
 	}
+	// A document only this server tracks (its nodecfg) does not count:
+	// no other server would ever reach its token.
+	local := NewDoc[testBody](a, "nodecfg:n_a", "nodecfg", 1)
+	local.Local = true
+	if _, err := local.Mutate(ctx, "signalith", func(v *testBody) error { v.Name = "y"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if a.Written() != bump {
+		t.Errorf("written %d after a local write, want %d", a.Written(), bump)
+	}
+	cycle(t, a)
+	if _, applied, _ := ParseToken(a.Token()); applied != seq {
+		t.Errorf("token %s after a local write, want seq %d", a.Token(), seq)
+	}
 }

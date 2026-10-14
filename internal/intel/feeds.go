@@ -171,6 +171,9 @@ type Feeds struct {
 	wake       chan struct{}
 	statusOnce sync.Once
 	statusSt   StatusStore
+	// localETag keys the feeds' versions when the list is not shared.
+	etagOnce  sync.Once
+	localETag []byte
 	// gen changes whenever a feed's settings do, so a download that was
 	// running meanwhile throws its result away.
 	gen    map[string]int

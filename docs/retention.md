@@ -360,15 +360,18 @@ key take part, and another one takes over if that server stops. The page says wh
 server runs retention.
 
 - **Run now** on another server asks the server that runs retention to run: the
-  page shows "Asked siem-a to run retention" and follows the run until it ends.
-  Saving a change does the same. Restores of archived days are still made on the
-  server that runs retention.
+  page shows "Asked siem-a to run retention", then whether siem-a started the run
+  or queued it behind one already going. The run is made there, and its result shows
+  on siem-a's Data retention page, as each server keeps its own run history. Saving a
+  change asks siem-a in the same way to apply it now. Restores of archived days are
+  still made on the server that runs retention.
 - **Where each value came from.** Under a policy, the default and the guard, the
   page says where a value that was not set on the page came from, such as
   "Applied from signalith.yaml on siem-b, 2026-10-01" or "Imported from the files
   on siem-a".
-- **Changes at the same moment.** If someone else changed the same setting since
-  you opened the page, your change is refused: the page says so and shows theirs.
+- **Changes at the same moment.** If someone else changed the retention settings
+  (any policy, the default or the guard) since you opened the page, your change is
+  refused: the page says so and shows theirs.
 - **When the shared settings cannot be used** on a server, for example while it
   cannot reach OpenSearch or misses the cluster key, changes there are refused and
   the page says why.
@@ -444,8 +447,10 @@ error rather than a setting that does nothing.
 
 `run_started` is true when saving started a run; `run_queued` when a run or restore
 was going and a new run starts as soon as it ends. With shared settings, saving on a
-server that does not run retention asks the one that does to run, and the answer has
-`request_id` instead.
+server that does not run retention asks the one that does to run: both are then
+false, and the answer adds `request_id` and `queued_on` (the server asked).
+`GET /api/requests/{id}` then has `"result":{"result":"started"}`, or `"queued"`
+when a run or restore was going there.
 
 **Requests.** `GET /api/requests/{id}` follows a request: `state` is `queued`,
 `running`, `done` or `failed`, with `claimed_by` (the server doing it), `started`,

@@ -235,7 +235,12 @@ func contentHandlers(feeds *intel.Feeds, ret *retention.Manager) map[string]shar
 				return errors.New("the request does not name a feed")
 			}
 			st, err := feeds.Refresh(ctx, a.Feed)
-			if err != nil && !errors.Is(err, intel.ErrFeedRunning) {
+			if errors.Is(err, intel.ErrFeedRunning) {
+				// Its status is the download before; the page says the
+				// download is still going instead.
+				return req.SetResult(map[string]bool{"already_running": true})
+			}
+			if err != nil {
 				return err
 			}
 			return req.SetResult(st)

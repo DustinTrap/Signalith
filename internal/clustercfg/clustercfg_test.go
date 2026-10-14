@@ -196,6 +196,21 @@ func TestFeedsAcrossServers(t *testing.T) {
 	if by, _, _ := a.docs.Feeds().Updated(); by.User != "bob" || by.Node != "siem-b" {
 		t.Errorf("updated by %+v", by)
 	}
+	// A feed's version read on one server holds on the other; it is
+	// keyed, so it cannot be used to test guesses of its secrets.
+	ea, _ := fa.ETag("blocklist")
+	eb, _ := fb.ETag("blocklist")
+	plain := &intel.Feeds{}
+	if _, err := plain.AddFeed(intel.FeedInput{Name: "blocklist", URL: srv.URL, Format: intel.FormatLines, Type: "ip", Interval: "1h", MaxAge: "1d"}); err != nil {
+		t.Fatal(err)
+	}
+	ep, _ := plain.ETag("blocklist")
+	if ea == "" || ea != eb || ea == ep {
+		t.Errorf("etags %s %s, unshared %s", ea, eb, ep)
+	}
+	if _, err := fb.UpdateFeedIf(ctx, "bob", "blocklist", ea, intel.FeedInput{URL: srv.URL, Format: intel.FormatLines, Type: "ip", Interval: "2h", MaxAge: "1d"}); err != nil {
+		t.Fatalf("update with A's version: %v", err)
+	}
 }
 
 // U20: feed secrets are sealed with the cluster key for the address they
@@ -375,6 +390,53 @@ func TestAppliedWhenChanged(t *testing.T) {
 	}
 }
 
+// After reset-key, a restart with the same signalith.yaml applies
+// nothing: the recorded hashes were made with the old key, so the values
+// are only recorded again, and the page's change stays.
+func TestAppliedAfterResetKey(t *testing.T) {
+	o := newOS(t)
+	a := newMember(t, o, "siem-a", "retention:\n  days: 30\n", nil, nil)
+	ctx := context.Background()
+	if _, err := Apply(ctx, a.rt, a.docs, a.cfg.Load(), a.name, a.log); err != nil {
+		t.Fatal(err)
+	}
+	ps := &PolicyStore{Docs: a.docs, Log: a.log}
+	if err := ps.Update(func(s *retention.Saved) { v := 365; s.Days = &v }); err != nil {
+		t.Fatal(err)
+	}
+	docs, _, err := shared.ReadAll(ctx, o.cl, testPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := shared.NewClusterKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := shared.Resign(ctx, o.cl, testPrefix, docs, k2, 100, "sam", a.name, at, "n_"+a.name, shared.KeyringMember{Name: a.name}); err != nil {
+		t.Fatal(err)
+	}
+	a.rt.Hub().SetKeys(shared.NewKeySet(k2))
+	a.cycle()
+	res, err := Apply(ctx, a.rt, a.docs, a.cfg.Load(), a.name, a.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Applied) != 0 {
+		t.Fatalf("applied after reset-key: %v", res.Applied)
+	}
+	a.cycle()
+	if body, ok := a.docs.Retention().Get(); !ok || body.Days == nil || *body.Days != 365 {
+		t.Fatalf("the page's change was undone: %+v", body)
+	}
+	// The file's value is recorded under the new key: a change applies.
+	a.cfg.Store(loadConfig(t, a.dir, "retention:\n  days: 40\n"))
+	a.cycle()
+	if res, err := Apply(ctx, a.rt, a.docs, a.cfg.Load(), a.name, a.log); err != nil || len(res.Applied) != 1 {
+		t.Fatalf("changed file after reset-key: %+v %v", res, err)
+	}
+}
+
 // Feeds in signalith.yaml apply when they change too, with their ${ENV}
 // references filled in on the server whose file it is.
 func TestYAMLFeedApplied(t *testing.T) {
@@ -497,14 +559,45 @@ func TestStatusEpoch(t *testing.T) {
 	ctx := context.Background()
 	newer := &StatusStore{Client: o.cl, Index: cluster.RuntimeIndex(testPrefix), Node: "n_b", Epoch: func() int64 { return 5 }}
 	older := &StatusStore{Client: o.cl, Index: cluster.RuntimeIndex(testPrefix), Node: "n_a", Epoch: func() int64 { return 4 }}
-	if err := newer.write(ctx, "x", &intel.FeedStatus{Count: 2}); err != nil {
+	if err := newer.write(ctx, "x", &intel.FeedStatus{Count: 2}, 5); err != nil {
 		t.Fatal(err)
 	}
-	if err := older.write(ctx, "x", &intel.FeedStatus{Count: 1}); err != nil {
+	if err := older.write(ctx, "x", &intel.FeedStatus{Count: 1}, 4); err != nil {
 		t.Fatal(err)
 	}
 	got := newer.Load()
 	if got["x"] == nil || got["x"].Count != 2 {
 		t.Fatalf("status %+v", got["x"])
+	}
+}
+
+// A status whose write failed is written at the next flush, with the
+// epoch it was saved under even when the lease was let go since.
+func TestStatusWriteFailedIsKept(t *testing.T) {
+	o := newOS(t)
+	ctx := context.Background()
+	epoch := int64(7)
+	s := &StatusStore{Client: o.cl, Index: cluster.RuntimeIndex(testPrefix), Node: "n_a", Epoch: func() int64 { return epoch }}
+	s.Save("x", &intel.FeedStatus{Count: 3})
+	o.fake.FailN(1, http.MethodGet, "feedstatus:x", http.StatusBadRequest, "illegal_argument_exception")
+	if n := s.Flush(ctx); n != 1 {
+		t.Fatalf("%d kept after a failed write", n)
+	}
+	epoch = 0
+	if n := s.Flush(ctx); n != 0 {
+		t.Fatalf("%d kept after the second flush", n)
+	}
+	src := o.fake.Source(cluster.RuntimeIndex(testPrefix), StatusID("x"))
+	if src == nil || fmt.Sprint(src["epoch"]) != "7" {
+		t.Fatalf("stored %v", src)
+	}
+	// A newer status saved after the write failed wins.
+	s.Save("y", &intel.FeedStatus{Count: 1})
+	o.fake.FailN(1, http.MethodGet, "feedstatus:y", http.StatusBadRequest, "illegal_argument_exception")
+	s.Flush(ctx)
+	s.Save("y", &intel.FeedStatus{Count: 2})
+	s.Flush(ctx)
+	if got := s.Load(); got["y"] == nil || got["y"].Count != 2 {
+		t.Fatalf("status %+v", got["y"])
 	}
 }

@@ -278,7 +278,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	s.routes = api.routes
 	s.routeLogin(mux)
-	mux.Handle("/", s.requireUser(s.awaitConfig(api.mux)))
+	mux.Handle("/", s.requireUser(s.configToken(false, s.awaitConfig(api.mux))))
 	return limitBodies(s.securityHeaders(s.configHeaders(s.guardAPI(mux))))
 }
 
@@ -286,7 +286,7 @@ func (s *Server) Handler() http.Handler {
 // straight on the outer mux, rather than with a role on the router, is
 // admin-only unless it is one of publicRoutes.
 func (s *Server) guardAPI(mux *http.ServeMux) http.Handler {
-	guarded := s.requireUser(s.allow(route{Pattern: "(outer mux)", Role: users.Admin, Unclassified: true}, mux))
+	guarded := s.requireUser(s.configToken(false, s.allow(route{Pattern: "(outer mux)", Role: users.Admin, Unclassified: true}, mux)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			if _, pattern := mux.Handler(r); pattern != "" && pattern != "/" && !slices.Contains(publicRoutes, pattern) {

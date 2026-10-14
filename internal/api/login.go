@@ -28,7 +28,9 @@ var publicRoutes = append([]string{"POST /api/ingest", otlpLogsRoute, "POST /api
 // routeLogin adds the routes that work without signing in: the sign-in
 // page, its static assets, and sign-in and sign-out.
 func (s *Server) routeLogin(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/login", s.handleLogin)
+	// A successful sign-in says how far this server has read the shared
+	// settings, as a signed-in answer does.
+	mux.Handle("POST /api/login", s.configToken(true, http.HandlerFunc(s.handleLogin)))
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/tls/ca.pem", s.handleCAPEM)
 	if s.UI != nil {

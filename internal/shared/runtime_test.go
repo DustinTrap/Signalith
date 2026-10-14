@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/cluster/ostest"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
@@ -211,6 +212,137 @@ func TestLegacyAThenFound(t *testing.T) {
 	s.holds.Store(true)
 	s.step()
 	s.wantMode(ModeMember)
+}
+
+// A server that stopped after keeping its new cluster key but before the
+// cluster document was made is not taken for a member that lost its
+// cluster: it founds by itself, with the same key.
+func TestFoundingCutShort(t *testing.T) {
+	e := newEnv(t)
+	a := e.server("siem-a", nil)
+	k, err := NewClusterKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := markFounding(a.dir, k.ID()); err != nil {
+		t.Fatal(err)
+	}
+	a.give(k)
+	a.holds.Store(true)
+	a.step()
+	a.wantMode(ModeMember)
+	if a.key().ID() != k.ID() {
+		t.Errorf("founded with %s, not the key it kept (%s)", a.key().ID(), k.ID())
+	}
+	if _, err := os.Stat(foundingPath(a.dir, k.ID())); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the founding mark stays: %v", err)
+	}
+	// A key kept once a cluster was made is a member's: it never founds.
+	b := e.server("siem-b", nil)
+	b.give(k)
+	e.os.Delete(testIndex, ClusterDocID)
+	b.holds.Store(true)
+	a.holds.Store(false)
+	b.step()
+	b.wantMode(ModeGone)
+}
+
+// A create whose answer was lost, while the document cannot be read
+// either, keeps the key: the document may have been made with it. The
+// next look joins it as the founder.
+func TestFoundingWhoseAnswerWasLost(t *testing.T) {
+	e := newEnv(t)
+	a := e.server("siem-a", nil)
+	var dropped, reads atomic.Bool
+	e.os.SetFault(func(method, path string) *ostest.Fault {
+		switch {
+		case method == http.MethodPut && strings.Contains(path, "/_create/"+ClusterDocID) && !dropped.Load():
+			dropped.Store(true)
+			reads.Store(true)
+			return &ostest.Fault{Drop: true}
+		case method == http.MethodGet && strings.Contains(path, "/_doc/"+ClusterDocID) && reads.Load():
+			return &ostest.Fault{Status: http.StatusServiceUnavailable, Type: "unavailable"}
+		}
+		return nil
+	})
+	a.holds.Store(true)
+	if err := a.rt.found(context.Background(), "signalith", false); err == nil {
+		t.Fatal("founding did not fail")
+	}
+	files := ClusterKeyFiles(a.dir)
+	if len(files) != 1 || e.os.Source(testIndex, ClusterDocID) == nil {
+		t.Fatalf("keys %v after a create whose answer was lost", files)
+	}
+	reads.Store(false)
+	a.step()
+	a.wantMode(ModeMember)
+	env, body := clusterBody(t, e)
+	if macKID(env.MAC) != a.key().ID() || body.Import.State != ImportReady {
+		t.Errorf("cluster %+v signed with %s, key %s", body, macKID(env.MAC), a.key().ID())
+	}
+	if _, err := os.Stat(foundingPath(a.dir, a.key().ID())); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the founding mark stays: %v", err)
+	}
+}
+
+// While the founder moves its files into OpenSearch, a server that joins
+// keeps using its own files and says why; a founder that takes long is
+// reported.
+func TestJoinDuringImport(t *testing.T) {
+	e := newEnv(t)
+	var fail atomic.Bool
+	fail.Store(true)
+	a := e.server("siem-a", func(o *RuntimeOptions) {
+		o.Importers = []Importer{{Name: "feeds", Source: func() (string, error) { return "h", nil },
+			Run: func(context.Context, string) error {
+				if fail.Load() {
+					return errors.New("cut short")
+				}
+				return nil
+			}}}
+	})
+	a.holds.Store(true)
+	if err := a.rt.found(context.Background(), "signalith", false); err == nil {
+		t.Fatal("the import was not cut short")
+	}
+	a.holds.Store(false)
+	b := e.server("siem-b", nil)
+	b.give(a.key())
+	b.step()
+	b.wantMode(ModeMember)
+	if b.rt.SharedContent() {
+		t.Error("a server uses the shared content before the founder moved its files")
+	}
+	warn := func() Warning {
+		t.Helper()
+		for _, w := range b.rt.Warnings() {
+			if strings.Contains(w.Text, "moving its files") {
+				return w
+			}
+		}
+		t.Fatalf("no warning: %+v", b.rt.Warnings())
+		return Warning{}
+	}
+	if w := warn(); w.Level != "amber" || !strings.Contains(w.Text, "siem-a") {
+		t.Errorf("warning %+v", w)
+	}
+	e.clock.Advance(ImportStalled)
+	if w := warn(); w.Level != "red" {
+		t.Errorf("a stalled import: %+v", w)
+	}
+	fail.Store(false)
+	a.holds.Store(true)
+	a.step()
+	a.wantMode(ModeMember)
+	b.step()
+	if !b.rt.SharedContent() {
+		t.Error("the shared content is not used once the import is done")
+	}
+	for _, w := range b.rt.Warnings() {
+		if strings.Contains(w.Text, "moving its files") {
+			t.Errorf("warning after the import: %+v", w)
+		}
+	}
 }
 
 // U12: a member that finds the cluster document gone never founds a new

@@ -617,12 +617,60 @@ func (x *clusterCLI) resetKey(ctx context.Context, yes bool) error {
 			peerMax = max(peerMax, d.MaxRev)
 		}
 	}
-	fmt.Fprintln(x.out, "Nobody can check the shared settings below any more. Look at them (signalith cluster export shows them in full) before you sign them with a new key:")
+	// The keys this server has: when one still checks out the cluster
+	// document, the key is not lost, and other servers get it with
+	// export-key instead. A document that fails under a key this server
+	// has was changed outside Signalith, and is not signed again.
+	held, err := x.keyStore().ClusterKeys()
+	if err != nil {
+		return err
+	}
+	if p := os.Getenv(clusterKeyFileEnv); p != "" {
+		if k, err := shared.KeyFromFile(p); err == nil {
+			held = append(held, k)
+		}
+	}
+	var keys *shared.KeySet
+	if len(held) > 0 {
+		keys = shared.NewKeySet(held[0], held[1:]...)
+	}
+	check := func(e *shared.Envelope, id string) (string, bool) {
+		if keys == nil {
+			return "no key here", true
+		}
+		err := shared.Verify(keys, id, e)
+		var uk *shared.UnknownKeyError
+		switch {
+		case err == nil:
+			return "checks out", true
+		case errors.As(err, &uk):
+			return "no key here", true
+		}
+		return "changed outside Signalith", false
+	}
+	for _, d := range docs {
+		if d.ID != shared.ClusterDocID {
+			continue
+		}
+		if note, _ := check(&d.Envelope, d.ID); note == "checks out" {
+			return errors.New("this server still has the cluster key: the shared settings check out with it, so it is not lost. " +
+				"Give it to the other servers with signalith cluster export-key here and signalith cluster import-key there")
+		}
+	}
+	var sign []shared.StoredDoc
+	var refused []string
+	fmt.Fprintln(x.out, "This server cannot check the shared settings below with a key it has. Look at them (signalith cluster export shows them in full) before you sign them with a new key:")
 	w := tabwriter.NewWriter(x.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "  DOCUMENT\tREVISION\tCHANGED\tBY\tTHIS SERVER'S COPY")
+	fmt.Fprintln(w, "  DOCUMENT\tREVISION\tCHANGED\tBY\tSIGNATURE\tTHIS SERVER'S COPY")
 	for _, d := range docs {
 		e := d.Envelope
 		peerMax = max(peerMax, e.Rev)
+		sig, ok := check(&e, d.ID)
+		if ok {
+			sign = append(sign, d)
+		} else {
+			refused = append(refused, d.ID)
+		}
 		note := "none"
 		if c, ok := copyOf[d.ID]; ok {
 			switch {
@@ -632,12 +680,19 @@ func (x *clusterCLI) resetKey(ctx context.Context, yes bool) error {
 				note = fmt.Sprintf("differs (revision %d there)", c.Rev)
 			}
 		}
-		fmt.Fprintf(w, "  %s\t%d\t%s\t%s on %s\t%s\n", d.ID, e.Rev, e.UpdatedAt, e.UpdatedBy.User, e.UpdatedBy.Node, note)
+		fmt.Fprintf(w, "  %s\t%d\t%s\t%s on %s\t%s\t%s\n", d.ID, e.Rev, e.UpdatedAt, e.UpdatedBy.User, e.UpdatedBy.Node, sig, note)
 	}
 	w.Flush()
 	for _, id := range bad {
 		fmt.Fprintf(x.out, "  %s is not a document Signalith wrote; it is left as it is.\n", id)
 	}
+	for _, id := range refused {
+		fmt.Fprintf(x.out, "  %s was changed outside Signalith: it is not signed with the new key, so every server ignores it.\n", id)
+	}
+	if len(sign) == 0 {
+		return errors.New("none of the shared settings can be signed again")
+	}
+	docs = sign
 	if err := x.confirm("Sign these with a new cluster key? Every other server then needs the new key (export-key, import-key).", yes); err != nil {
 		return err
 	}
@@ -671,7 +726,9 @@ func (x *clusterCLI) resetKey(ctx context.Context, yes bool) error {
 }
 
 func (x *clusterCLI) acceptRestore(ctx context.Context, yes bool) error {
-	rt := x.runtime(false, "")
+	// Read-only: the server may run meanwhile, and only the documents are
+	// signed again here; this server's own files are left to it.
+	rt := x.runtime(true, "")
 	if m, _ := rt.Mode(); m != shared.ModeMember && m != shared.ModeKeyMissing {
 		return fmt.Errorf("this server is not a member of the cluster now (%s)", m.Text())
 	}

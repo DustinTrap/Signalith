@@ -77,6 +77,41 @@ func TestDocMutateIsSeenByAnotherServer(t *testing.T) {
 	}
 }
 
+// MutateIf changes the revision the page read, even when this server's
+// own copy is older: a change made elsewhere in between is kept.
+func TestDocMutateIfOnANewerRevision(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	da := NewDoc[testBody](a, "feeds", "feeds", 1)
+	db := NewDoc[testBody](b, "feeds", "feeds", 1)
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Items = []string{"one"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, b)
+	// A changes it again; B has not read that yet, but the page read it
+	// from A.
+	if _, err := da.Mutate(ctx, "bob", func(v *testBody) error { v.Items = append(v.Items, "two"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	etag := da.ETag()
+	if db.ETag() == etag {
+		t.Fatal("b already has the newer revision")
+	}
+	if _, err := db.MutateIf(ctx, "sam", etag, func(v *testBody) error { v.Name = "edited"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if v, _ := da.Get(); v.Name != "edited" || !slices.Equal(v.Items, []string{"one", "two"}) {
+		t.Errorf("a change was lost: %+v", v)
+	}
+	// An etag older than the stored revision is still refused.
+	if _, err := db.MutateIf(ctx, "sam", etag, func(v *testBody) error { return nil }); !errors.As(err, new(*StaleError)) {
+		t.Errorf("stale: %v", err)
+	}
+}
+
 // U1: a forged document and a changed one are refused; the last good copy
 // stays, Tamper names it, and an audit event is logged.
 func TestDocRefusesForgedAndChanged(t *testing.T) {

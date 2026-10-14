@@ -468,7 +468,7 @@ as `{"name": "X-Api-Key", "set": true}` and the password as `{"set": true}`.
 | `POST /api/intel/feeds` | Add a feed (body below); it downloads at once |
 | `PUT /api/intel/feeds/{name}` | Change a feed added on the page. Settings left out stay as they are; an empty secret keeps the saved one. 409 for a feed from signalith.yaml, unless the feeds are shared. With `If-Match` and the feed's etag, 412 when it changed meanwhile; the answer's `ETag` is its new version |
 | `DELETE /api/intel/feeds/{name}?indicators=remove\|keep` | Delete a feed added on the page; `remove` (default) deletes its indicators, `keep` lets them age out. Takes `If-Match` like `PUT` |
-| `POST /api/intel/feeds/{name}/refresh` | Download a feed now. With shared feeds, on a server that does not download them: `202 {"feed","request_id","queued_on"}`, followed with `GET /api/requests/{id}` (see [the retention API](retention.md#api)) |
+| `POST /api/intel/feeds/{name}/refresh` | Download a feed now. With shared feeds, on a server that does not download them: `202 {"feed","request_id","queued_on"}`, followed with `GET /api/requests/{id}` (see [the retention API](retention.md#api)), whose `result` is the feed's status, or `{"already_running":true}` when it was downloading already |
 | `POST /api/intel/feeds/test` | Download without saving; the body is a feed, or `{"feed": "<name>"}` plus any settings to try on a saved feed with its saved secrets |
 | `GET /api/intel/catalog` | The catalog, each entry with `added` and the `feed` made from it |
 | `POST /api/intel/catalog` | Add catalog feeds: `{"ids": ["feodo-tracker", "spamhaus-drop"]}` returns `{"added": [feeds], "skipped": [{"id", "reason"}]}` |

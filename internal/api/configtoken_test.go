@@ -93,15 +93,37 @@ func TestConfigHeadersAndVersionedFiles(t *testing.T) {
 	if c := resp.Header.Get(headerConfig); c == "" || c != hb.Token() {
 		t.Errorf("config %q, want %q", c, hb.Token())
 	}
-	// Also on an answer to someone not signed in.
-	if resp := get("/api/health", "", false); resp.Header.Get(headerVersion) != "1.5.0" || resp.Header.Get(headerConfig) == "" {
+	// Someone not signed in gets the version (the sign-in page names it
+	// anyway), but nothing about the config index.
+	if resp := get("/api/health", "", false); resp.Header.Get(headerVersion) != "1.5.0" || resp.Header.Get(headerConfig) != "" {
 		t.Errorf("signed out: %v", resp.Header)
+	}
+	if resp := get("/login", "", false); resp.Header.Get(headerConfig) != "" {
+		t.Errorf("sign-in page: %v", resp.Header)
+	}
+	// A failed sign-in tells nothing either; a successful one does.
+	for _, c := range []struct {
+		pass string
+		ok   bool
+	}{{"wrong-password", false}, {adminPass, true}} {
+		body := strings.NewReader(`{"username":"admin","password":"` + c.pass + `"}`)
+		req, _ := http.NewRequest("POST", ts.URL+"/api/login", body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", ts.URL)
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if got := resp.Header.Get(headerConfig) != ""; got != c.ok || (resp.StatusCode < 300) != c.ok {
+			t.Errorf("sign-in (%v): %d, config %q", c.ok, resp.StatusCode, resp.Header.Get(headerConfig))
+		}
 	}
 
 	// A change on A reports the token of its own write.
 	a := &Server{Version: "1.5.0", ConfigToken: ha}
 	var seq int64
-	write := a.configHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	write := a.configToken(false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		if seq, err = da.Mutate(r.Context(), "sam", func(b *tokenBody) error { b.Name = "x"; return nil }); err != nil {
 			t.Error(err)
@@ -116,7 +138,7 @@ func TestConfigHeadersAndVersionedFiles(t *testing.T) {
 	}
 	// A read on A that wrote nothing reports how far A has read.
 	rec = httptest.NewRecorder()
-	a.configHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(rec, httptest.NewRequest("GET", "/api/x", nil))
+	a.configToken(false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})).ServeHTTP(rec, httptest.NewRequest("GET", "/api/x", nil))
 	if got := rec.Header().Get(headerConfig); got != ha.Token() {
 		t.Errorf("read token %q, want %q", got, ha.Token())
 	}

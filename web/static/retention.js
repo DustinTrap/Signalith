@@ -13,6 +13,8 @@ const rtState = {
   // last_run.started before a run we asked for, to tell when it finished
   awaitRun: null,
   edit: null, guard: null, confirm: null,
+  // true while another server is asked for a run (see rtFollowRun)
+  asking: false,
 };
 
 // ---------- formatting ----------
@@ -243,7 +245,7 @@ function rtRender() {
   // A server that only shows retention has no Run now, unless the
   // policies are shared: then it asks the server that runs retention.
   $('rt-run').classList.toggle('hidden', !!ov.schedule.read_only && !ov.shared);
-  $('rt-run').disabled = !!ov.schedule.running || !!ov.settings_error;
+  $('rt-run').disabled = !!ov.schedule.running || !!ov.settings_error || !!rtState.asking;
   $('rt-run').replaceChildren(icon('play'), ov.schedule.running ? (ov.schedule.current === 'restore' ? 'Restoring…' : 'Running…') : 'Run now');
   if (fk) {
     const back = page.querySelector(`[data-fk="${CSS.escape(fk)}"]`);
@@ -1147,7 +1149,11 @@ async function rtSave(req, preview, what, msgBox, dialog, said) {
       dialog.close();
       const msg = said(res);
       const want = { quiet: true, title: msg.replace(/\.$/, '') };
-      if (res.run_started) {
+      if (res.request_id) {
+        // Another server runs retention: it was asked to apply the
+        // change, and its result shows on its own Data retention page.
+        rtFollowRun(res, `${msg} Asked ${res.queued_on || 'the server that runs retention'} to apply it now.`);
+      } else if (res.run_started) {
         rtExpectRun(want, before);
         toast(work ? `${msg} Retention is applying it now.` : msg);
       } else if (res.run_queued) {
@@ -1337,6 +1343,28 @@ for (const d of ['rt-edit', 'rt-guard', 'rt-restore']) {
   });
 }
 
+// rtFollowRun follows a request that asked the server that runs retention
+// (res.queued_on) for a run: the run is made there, and its result shows
+// on that server's Data retention page, as this server keeps its own run
+// history. Run now stays off until the request is taken up.
+function rtFollowRun(res, said) {
+  const on = res.queued_on || 'the server that runs retention';
+  toast(`${said} The run is made there; its result shows on ${on}’s Data retention page.`);
+  rtState.asking = true;
+  $('rt-run').disabled = true;
+  followRequest(res.request_id).then((r) => {
+    if (!r) toastError('Couldn’t follow the retention run', new Error(`The request is gone. ${on}’s Data retention page shows how it went.`));
+    else if (r.state === 'failed') toastError('The retention run didn’t start', new Error(r.error || 'it failed'));
+    else if (r.state === 'done') {
+      const got = (r.result || {}).result;
+      toast(got === 'queued' ? `${on} runs retention as soon as the run or restore going there ends.` : `${on} started the retention run.`);
+    }
+  }).finally(() => {
+    rtState.asking = false;
+    rtLoad(true);
+  });
+}
+
 // ---------- run now ----------
 $('rt-run').addEventListener('click', async () => {
   const btn = $('rt-run');
@@ -1345,13 +1373,7 @@ $('rt-run').addEventListener('click', async () => {
   try {
     const res = await api('api/retention/run', {}, 'POST');
     if (res.request_id) {
-      // Another server runs retention: follow the request made of it.
-      const on = res.queued_on || 'the server that runs retention';
-      toast(`Asked ${on} to run retention. The result shows here when it finishes.`);
-      followRequest(res.request_id).then((r) => {
-        if (r && r.state === 'failed') toastError('The retention run didn’t start', new Error(r.error || 'it failed'));
-        rtLoad(true);
-      });
+      rtFollowRun(res, `Asked ${res.queued_on || 'the server that runs retention'} to run retention.`);
     } else {
       rtExpectRun({}, before);
       toast('Retention is running. The result shows here when it finishes.');

@@ -109,6 +109,9 @@ type tracked interface {
 	apply(d store.Doc, uuid string, gen uint64) bool
 	reload(ctx context.Context) error
 	cached() []CacheDoc
+	// local is a document only this server tracks (see Doc.Local): its
+	// _seq_no is left out of the token.
+	local() bool
 }
 
 // collection is a collection the watcher reloads when its watch
@@ -656,9 +659,11 @@ func (h *Hub) Cycle(ctx context.Context) error {
 		h.mu.Unlock()
 	}
 	if complete {
+		// Documents only this server tracks are left out: the other
+		// servers never read them, so they could not reach the token.
 		top := int64(-1)
-		for _, v := range vers {
-			if !v.IsZero() {
+		for r, v := range vers {
+			if t := singles[r.ID]; !v.IsZero() && (t == nil || !t.local()) {
 				top = max(top, v.SeqNo)
 			}
 		}

@@ -46,25 +46,35 @@ type ConfigToken interface {
 	Wait(ctx context.Context, min string) (stale bool)
 }
 
-// configHeaders sets headerVersion and headerConfig on every response.
-// The token is taken when the response starts, so a request that changed
-// the shared settings reports its own write.
+// configHeaders sets headerVersion on every response. The version is
+// no secret from someone not signed in: the sign-in page names it in its
+// script paths, as every server of one version must.
 func (s *Server) configHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.Version != "" {
 			w.Header().Set(headerVersion, s.Version)
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// configToken sets headerConfig, which names the config index, on the
+// responses of signed-in requests (inside requireUser), and with okOnly
+// on a successful sign-in. The token is taken when the response starts,
+// so a request that changed the shared settings reports its own write.
+func (s *Server) configToken(okOnly bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ct := s.ConfigToken
 		if ct == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cw := &configWriter{ResponseWriter: w, ct: ct, before: -1}
+		cw := &configWriter{ResponseWriter: w, ct: ct, before: -1, okOnly: okOnly}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			cw.writes, cw.before = true, ct.Written()
 		}
 		next.ServeHTTP(cw, r)
-		cw.stamp()
+		cw.stamp(http.StatusOK)
 	})
 }
 
@@ -91,13 +101,18 @@ type configWriter struct {
 	writes  bool
 	before  int64
 	stamped bool
+	// okOnly sets the token only on a successful answer.
+	okOnly bool
 }
 
-func (c *configWriter) stamp() {
+func (c *configWriter) stamp(code int) {
 	if c.stamped {
 		return
 	}
 	c.stamped = true
+	if c.okOnly && code >= 300 {
+		return
+	}
 	tok := ""
 	if after := c.ct.Written(); c.writes && after > c.before {
 		tok = c.ct.TokenAfter(after)
@@ -110,18 +125,18 @@ func (c *configWriter) stamp() {
 }
 
 func (c *configWriter) WriteHeader(code int) {
-	c.stamp()
+	c.stamp(code)
 	c.ResponseWriter.WriteHeader(code)
 }
 
 func (c *configWriter) Write(b []byte) (int, error) {
-	c.stamp()
+	c.stamp(http.StatusOK)
 	return c.ResponseWriter.Write(b)
 }
 
 // Flush keeps streamed answers (Investigate with AI) streaming.
 func (c *configWriter) Flush() {
-	c.stamp()
+	c.stamp(http.StatusOK)
 	if f, ok := c.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}

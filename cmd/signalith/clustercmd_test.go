@@ -137,7 +137,11 @@ func TestClusterCommands(t *testing.T) {
 	}
 
 	// Every copy of the key lost: a new one, and the documents signed again.
+	// While this server still has the key, it is not lost.
 	t.Setenv("SIGNALITH_STATE_DIR", stateA)
+	if _, err := run("", "reset-key", "-yes"); err == nil || !strings.Contains(err.Error(), "still has the cluster key") {
+		t.Errorf("reset-key with the key: %v", err)
+	}
 	for _, f := range shared.ClusterKeyFiles(stateA) {
 		os.Remove(f)
 	}
@@ -145,7 +149,7 @@ func TestClusterCommands(t *testing.T) {
 		t.Errorf("reset-key without -yes: %v", err)
 	}
 	out, err = run("", "reset-key", "-yes")
-	if err != nil || !strings.Contains(out, "Signed") {
+	if err != nil || !strings.Contains(out, "Signed") || !strings.Contains(out, "no key here") {
 		t.Fatalf("reset-key: %v\n%s", err, out)
 	}
 	out, err = run("", "status", "-json")

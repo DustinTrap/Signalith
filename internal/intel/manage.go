@@ -2,6 +2,8 @@ package intel
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -90,24 +92,50 @@ var ErrReadOnly = errors.New("this feed is set in signalith.yaml, so it can only
 // page read it.
 var ErrFeedStale = errors.New("this feed was changed by someone else since the page read it; reload the page and make the change again")
 
-// SpecETag is the version of a feed's settings, for a page that changes
-// it only if nobody else did meanwhile: a hash, so it reveals nothing of
-// the feed's secrets.
-func SpecETag(s FeedSpec) string {
+// specETag is the version of a feed's settings, for a page that changes
+// it only if nobody else did meanwhile. It covers the feed's secrets, so
+// re-entering one changes it, and is therefore keyed (see etagKey): a
+// plain hash would let anyone who sees it test guesses of a password or
+// API key.
+func specETag(key []byte, s FeedSpec) string {
 	s.From = ""
 	b, _ := json.Marshal(s)
-	sum := sha256.Sum256(b)
-	return `"f-` + hex.EncodeToString(sum[:12]) + `"`
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte("sgl-feed-etag-v1\x00"))
+	h.Write(b)
+	return `"f-` + hex.EncodeToString(h.Sum(nil)[:12]) + `"`
+}
+
+// ETagKeyer is a FeedList whose feeds' versions are keyed with a key
+// every server that shares the list has, so a version read from one
+// server holds on another.
+type ETagKeyer interface {
+	ETagKey() []byte
+}
+
+// etagKey is the key of the feeds' versions: the shared list's, or else
+// one made for this process, as only this server reads its own file.
+func (f *Feeds) etagKey() []byte {
+	if k, ok := f.Saved.(ETagKeyer); ok {
+		if b := k.ETagKey(); len(b) > 0 {
+			return b
+		}
+	}
+	f.etagOnce.Do(func() {
+		f.localETag = make([]byte, 32)
+		_, _ = rand.Read(f.localETag)
+	})
+	return f.localETag
 }
 
 // ETag returns the version of a feed added on the page or shared (see
-// SpecETag); false for a feed in signalith.yaml or none.
+// specETag); false for a feed in signalith.yaml or none.
 func (f *Feeds) ETag(name string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loadList()
 	if i := specIndex(f.ui, name); i >= 0 {
-		return SpecETag(f.ui[i]), true
+		return specETag(f.etagKey(), f.ui[i]), true
 	}
 	return "", false
 }
@@ -424,7 +452,7 @@ func (f *Feeds) UpdateFeedIf(ctx context.Context, by, name, etag string, in Feed
 		if i < 0 {
 			return ErrUnknownFeed
 		}
-		if etag != "" && SpecETag(set.UI[i]) != etag {
+		if etag != "" && specETag(f.etagKey(), set.UI[i]) != etag {
 			return ErrFeedStale
 		}
 		old = set.UI[i].Feed(SourceUI)
@@ -492,7 +520,7 @@ func (f *Feeds) RemoveFeedIf(ctx context.Context, by, name, etag string, removeI
 			}
 			return ErrUnknownFeed
 		}
-		if etag != "" && SpecETag(set.UI[i]) != etag {
+		if etag != "" && specETag(f.etagKey(), set.UI[i]) != etag {
 			return ErrFeedStale
 		}
 		old := set.UI[i].Feed(SourceUI)

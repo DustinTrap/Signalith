@@ -524,9 +524,11 @@ const tiCap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : '');
 // tiIfMatch makes a change apply only to the feed as the page shows it.
 const tiIfMatch = (name) => (tiState.etags && tiState.etags[name] ? { 'If-Match': tiState.etags[name] } : undefined);
 // tiStale says that someone changed a feed meanwhile, and shows theirs.
-function tiStale(e) {
+function tiStale(e, name) {
   if (e.status !== 412) return false;
-  toast(`${sentence(e.message)} The page now shows their change.`, null, { tone: 'warning', title: 'Someone else changed this feed' });
+  // The server's message says to reload; the page does that itself.
+  toast(`Someone changed ${name} since you opened the page. The page now shows their change; make yours again if it is still needed.`, null,
+    { tone: 'warning', title: 'Someone else changed this feed' });
   loadIntel();
   return true;
 }
@@ -551,7 +553,8 @@ async function refreshFeed(f) {
       else if (req.state === 'failed') toastError(`Couldn’t download ${f.name}`, new Error(req.error || 'The download failed.'));
       else if (req.state === 'done') {
         const st = req.result || {};
-        if (st.last_error) toastError(`Couldn’t download ${f.name}`, new Error(st.last_error));
+        if (st.already_running) toast(`${f.name} is already downloading on ${on}; its status shows here when it is done.`);
+        else if (st.last_error) toastError(`Couldn’t download ${f.name}`, new Error(st.last_error));
         else toast(`Downloaded ${f.name} on ${on}: ${tiPlural(st.count || 0, 'indicator')}.`);
       } else toast(`The download of ${f.name} is still waiting on ${on}. Its status shows here when it is done.`);
     } else {
@@ -568,7 +571,7 @@ async function setFeedEnabled(f, on) {
   try {
     v = await api('api/intel/feeds/' + encodeURIComponent(f.name), { enabled: on }, 'PUT', tiIfMatch(f.name));
   } catch (e) {
-    if (tiStale(e)) return;
+    if (tiStale(e, f.name)) return;
     toastError(`Couldn’t turn ${on ? 'on' : 'off'} ${f.name}`, e);
     return;
   }
@@ -611,7 +614,7 @@ function confirmFeedDelete(f) {
       r = await api(`api/intel/feeds/${encodeURIComponent(f.name)}?indicators=${drop ? 'remove' : 'keep'}`, undefined, 'DELETE', tiIfMatch(f.name));
     } catch (e) {
       done();
-      if (e.status === 412) { d.close(); tiStale(e); return; }
+      if (e.status === 412) { d.close(); tiStale(e, f.name); return; }
       body.hidden = false;
       msg.replaceChildren(riAlert('danger', 'Couldn’t delete the feed.', el('p', {}, sentence(e.message))));
       return;
@@ -1225,6 +1228,16 @@ function feedForm(kind, feed) {
     } catch (e) {
       if (!alive()) return;
       done();
+      if (edit && e.status === 412) {
+        // Someone changed the feed since the page read it: read their
+        // version (and its new ETag), so saving again replaces it.
+        await loadIntel();
+        if (!alive()) return;
+        msg.replaceChildren(riAlert('warning', 'Someone else changed this feed meanwhile.',
+          el('p', {}, 'The page now has their version. Save again to replace it with yours.')));
+        msg.scrollIntoView({ block: 'nearest' });
+        return;
+      }
       showErrors(e, edit ? 'Couldn’t save the feed.' : 'Couldn’t add the feed.');
       return;
     }

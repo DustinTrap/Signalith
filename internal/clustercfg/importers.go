@@ -178,12 +178,16 @@ func importFeeds(ctx context.Context, d *Docs, f Files, by string) error {
 func importFeedStatus(ctx context.Context, f Files) error {
 	c := f.Config()
 	cl, prefix := f.Client()
-	st := &StatusStore{Client: cl, Index: cluster.RuntimeIndex(prefix), Node: f.NodeID, Epoch: f.LeaseEpoch, Now: f.Now}
+	st := &StatusStore{Client: cl, Index: cluster.RuntimeIndex(prefix), Node: f.NodeID, Now: f.Now}
+	var epoch int64
+	if f.LeaseEpoch != nil {
+		epoch = f.LeaseEpoch()
+	}
 	all := (&intel.StatusFile{Path: FeedStatusFile(c)}).Load()
 	for _, name := range slices.Sorted(maps.Keys(all)) {
 		s := all[name]
 		s.Running = false
-		if err := st.write(ctx, name, s); err != nil {
+		if err := st.write(ctx, name, s, epoch); err != nil {
 			return err
 		}
 	}

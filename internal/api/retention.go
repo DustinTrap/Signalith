@@ -136,9 +136,14 @@ func (s *Server) retentionChanged(w http.ResponseWriter, r *http.Request, what s
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		req, err := s.Shared.Submit(ctx, clustercfg.RequestRetentionRun, clustercfg.RetentionRunArgs{Trigger: retention.TriggerChange}, user)
-		out["run_started"], out["run_queued"] = false, err == nil
+		// No run here: the other server is asked, and request_id follows
+		// that.
+		out["run_started"], out["run_queued"] = false, false
 		if err == nil {
 			out["request_id"] = req.ID
+			if s.Cluster != nil {
+				out["queued_on"] = s.Cluster.JobHolder()
+			}
 		} else {
 			s.Log.Warn("could not ask the server that runs retention to apply the change now; its next run does", "err", err)
 		}

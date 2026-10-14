@@ -8,11 +8,13 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
@@ -121,8 +123,9 @@ const (
 // SharedContent reports whether this server takes the content of the
 // shared settings (feeds, retention policies) from OpenSearch rather than
 // from its own files: it is a member, or was one and keeps its copy while
-// it cannot use OpenSearch. A server that is still moving its files into
-// OpenSearch uses them until that is done.
+// it cannot use OpenSearch. While the founder is still moving its files
+// into OpenSearch, every server uses its own files until that is done:
+// the shared content is not all there yet.
 func (rt *Runtime) SharedContent() bool {
 	rt.mu.Lock()
 	m, c := rt.mode, rt.cluster
@@ -132,8 +135,32 @@ func (rt *Runtime) SharedContent() bool {
 	default:
 		return false
 	}
-	_, ok := c.Get()
-	return ok
+	b, ok := c.Get()
+	return ok && b.Import.State != ImportImporting
+}
+
+// ImportStalled is how long the founder may take to move its files into
+// OpenSearch before the other servers report it.
+const ImportStalled = 30 * time.Minute
+
+// importWarning is the warning of a member while the founder moves its
+// files into OpenSearch, or nil.
+func (rt *Runtime) importWarning() *Warning {
+	b, ok := rt.Cluster().Get()
+	if !ok || b.Import.State != ImportImporting || b.Import.By == rt.opts.Self.NodeID {
+		return nil
+	}
+	who := b.Import.By
+	if b.CreatedByID == b.Import.By && b.CreatedBy != "" {
+		who = b.CreatedBy
+	}
+	if at, err := time.Parse(time.RFC3339Nano, b.Import.At); err == nil && rt.clock.Now().Sub(at) >= ImportStalled {
+		return &Warning{Level: "red", Text: fmt.Sprintf("%s started moving its files into the shared settings at %s and has not finished, so this server still uses its own files. "+
+			"It finishes only while %s runs the background jobs: make sure it is up, and if another server runs them, restart that one so %s takes them over.",
+			who, b.Import.At, who, who),
+			Banner: "The shared settings are not ready yet; this server uses its own files."}
+	}
+	return &Warning{Level: "amber", Text: fmt.Sprintf("Waiting for %s to finish moving its files into the shared settings; until then this server uses its own files.", who)}
 }
 
 // Writable says why the shared settings cannot be changed on this server
@@ -259,6 +286,7 @@ func (rt *Runtime) build() {
 	rt.cluster = NewDoc[ClusterBody](h, ClusterDocID, "cluster", 1)
 	rt.keyring = NewDoc[KeyringBody](h, KeyringDocID, "keyring", 1)
 	rt.nodecfg = NewDoc[NodeCfg](h, NodeCfgID(rt.opts.Self.NodeID), NodeCfgKind, 1)
+	rt.nodecfg.Local = true
 	rt.requests = NewRequests(h, rt.opts.Self.NodeID)
 	if rt.opts.Content != nil {
 		rt.opts.Content(h)
@@ -485,6 +513,9 @@ type localKeys struct {
 	// file is the key in SIGNALITH_CLUSTER_KEY_FILE.
 	file *ClusterKey
 	all  []*ClusterKey
+	// cutShort are the stored keys of a founding that stopped before
+	// the cluster document was made: no cluster ever had them.
+	cutShort []*ClusterKey
 }
 
 func (k localKeys) get(kid string) *ClusterKey {
@@ -496,13 +527,42 @@ func (k localKeys) get(kid string) *ClusterKey {
 	return nil
 }
 
+// storedOther reports whether this server keeps a cluster key of a
+// cluster it was a member of: one that is not the key file's, and not
+// left by a founding cut short.
 func (k localKeys) storedOther() bool {
 	for _, c := range k.stored {
-		if k.file == nil || c.ID() != k.file.ID() {
+		if (k.file == nil || c.ID() != k.file.ID()) && !slices.Contains(k.cutShort, c) {
 			return true
 		}
 	}
 	return false
+}
+
+// foundingPath is the file that marks the cluster key kid as made by a
+// founding whose cluster document is not known to exist yet. It is
+// written before the key and removed once a cluster document signed with
+// the key was seen, so a founding cut short (the server stopped, or
+// OpenSearch failed) is not taken for a lost cluster.
+func foundingPath(stateDir, kid string) string {
+	return filepath.Join(stateDir, "cluster", "founding-"+kid)
+}
+
+// markFounding marks the key kid as being founded with.
+func markFounding(stateDir, kid string) error {
+	p := foundingPath(stateDir, kid)
+	if err := securefile.MkdirPrivate(filepath.Dir(p)); err != nil {
+		return err
+	}
+	return securefile.WriteFile(p, nil)
+}
+
+// founded removes the mark of the key kid: a cluster document signed
+// with it exists.
+func (rt *Runtime) founded(kid string) {
+	if err := os.Remove(foundingPath(rt.opts.StateDir, kid)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		rt.log.Debug("could not remove the founding mark", "err", err)
+	}
 }
 
 // readKeys reads the cluster keys in the state folder, and the key file.
@@ -519,6 +579,11 @@ func (rt *Runtime) readKeys() (localKeys, error) {
 	}
 	out.stored = stored
 	out.all = slices.Clone(stored)
+	for _, k := range stored {
+		if _, err := os.Stat(foundingPath(rt.opts.StateDir, k.ID())); err == nil {
+			out.cutShort = append(out.cutShort, k)
+		}
+	}
 	if p := rt.opts.KeyFile; p != "" {
 		k, err := KeyFromFile(p)
 		rt.mu.Lock()
@@ -827,6 +892,9 @@ func (rt *Runtime) join(ctx context.Context, active *ClusterKey, keys localKeys)
 			}
 		}
 	}
+	if !rt.opts.ReadOnly && slices.Contains(keys.cutShort, active) {
+		rt.founded(active.ID())
+	}
 	rt.mu.Lock()
 	rt.joined, rt.addedBy = true, addedBy
 	rt.mu.Unlock()
@@ -1039,9 +1107,13 @@ func (rt *Runtime) found(ctx context.Context, by string, manual bool) error {
 		return errNotHolder
 	}
 	k := keys.file
-	if k == nil && manual && len(keys.stored) == 1 {
+	if k == nil && len(keys.cutShort) > 0 {
 		// A founding cut short before the cluster document was made left
-		// its key: "signalith cluster found" uses it.
+		// its key: it is used again.
+		k = keys.cutShort[0]
+	}
+	if k == nil && manual && len(keys.stored) == 1 {
+		// "signalith cluster found" uses the only key there is.
 		k = keys.stored[0]
 	}
 	if k == nil {
@@ -1056,12 +1128,24 @@ func (rt *Runtime) found(ctx context.Context, by string, manual bool) error {
 	if _, err := rt.nodeKey(); err != nil {
 		return fmt.Errorf("could not make this server's node key: %w", err)
 	}
-	saved := false
+	// saved is a key this founding owns: made now, or left by a founding
+	// cut short. It is removed when no cluster document is made with it.
+	saved := slices.Contains(keys.cutShort, k)
 	if slices.IndexFunc(keys.stored, func(s *ClusterKey) bool { return s.ID() == k.ID() }) < 0 {
+		if err := markFounding(rt.opts.StateDir, k.ID()); err != nil {
+			return fmt.Errorf("could not keep the cluster key: %w", err)
+		}
 		if err := ks.SaveClusterKey(k); err != nil {
+			rt.founded(k.ID())
 			return fmt.Errorf("could not keep the cluster key: %w", err)
 		}
 		saved = true
+	}
+	unsave := func() {
+		if saved {
+			_ = os.Remove(ClusterKeyPath(rt.opts.StateDir, k.ID()))
+			rt.founded(k.ID())
+		}
 	}
 	check := rt.opts.LeaseCheck
 	if manual {
@@ -1069,9 +1153,7 @@ func (rt *Runtime) found(ctx context.Context, by string, manual bool) error {
 	}
 	if check != nil {
 		if err := check(ctx); err != nil {
-			if saved {
-				_ = os.Remove(ClusterKeyPath(rt.opts.StateDir, k.ID()))
-			}
+			unsave()
 			return err
 		}
 	}
@@ -1085,20 +1167,36 @@ func (rt *Runtime) found(ctx context.Context, by string, manual bool) error {
 		CreatedBy: rt.opts.Self.Name, CreatedByID: rt.opts.Self.NodeID, IndexPrefix: prefix, Level: LevelMax,
 		Import: ImportState{State: ImportImporting, By: rt.opts.Self.NodeID, At: now, Done: map[string]string{}}}
 	if _, err := cdoc.Create(ctx, by, body); err != nil {
-		h.SetKeys(prev)
-		rt.mu.Lock()
-		rt.keysSig = prevSig
-		rt.mu.Unlock()
-		if saved {
-			_ = os.Remove(ClusterKeyPath(rt.opts.StateDir, k.ID()))
+		// An answer lost on the way may hide a document that was made:
+		// look before giving the key up.
+		made, there, lerr := false, errors.Is(err, store.ErrExists), error(nil)
+		if !there {
+			made, there, lerr = rt.madeWith(ctx, k, body.ClusterID)
 		}
-		if errors.Is(err, store.ErrExists) {
-			rt.log.Info("another server founded the cluster first")
-			rt.Kick()
-			return ErrClusterExists
+		if !made {
+			h.SetKeys(prev)
+			rt.mu.Lock()
+			rt.keysSig = prevSig
+			rt.mu.Unlock()
+			if lerr != nil {
+				// Unknown: the key and its mark stay, and the next look
+				// decides (it joins when the document was made, else it
+				// founds with the same key).
+				return err
+			}
+			unsave()
+			if there {
+				rt.log.Info("another server founded the cluster first")
+				rt.Kick()
+				return ErrClusterExists
+			}
+			return err
 		}
-		return err
+		if err := cdoc.Load(ctx); err != nil {
+			rt.log.Debug("could not read the cluster document just made", "err", err)
+		}
 	}
+	rt.founded(k.ID())
 	addedBy := AddedByFounder
 	rt.mu.Lock()
 	rt.joined, rt.addedBy, rt.keysSig = true, addedBy, k.ID()
@@ -1115,6 +1213,26 @@ func (rt *Runtime) found(ctx context.Context, by string, manual bool) error {
 	}
 	rt.cycle(ctx)
 	return nil
+}
+
+// madeWith reads the cluster document after a create whose answer was
+// lost: made is a document signed with k for the cluster id, there any
+// cluster document at all.
+func (rt *Runtime) madeWith(ctx context.Context, k *ClusterKey, clusterID string) (made, there bool, err error) {
+	c, prefix := rt.target()
+	src, _, found, err := c.Get(ctx, ConfigIndex(prefix), ClusterDocID)
+	if err != nil || !found {
+		return false, false, err
+	}
+	var e Envelope
+	if json.Unmarshal(src, &e) != nil || Verify(NewKeySet(k), ClusterDocID, &e) != nil {
+		return false, true, nil
+	}
+	var b ClusterBody
+	if json.Unmarshal([]byte(e.Body), &b) != nil {
+		return false, true, nil
+	}
+	return b.ClusterID == clusterID, true, nil
 }
 
 // ErrNotMember is a change of the shared settings asked of a server that
@@ -1390,6 +1508,11 @@ func (rt *Runtime) Warnings() []Warning {
 		}
 		w = append(w, Warning{Level: "red", Text: "The shared settings in OpenSearch are gone (their index was deleted or replaced). " + fix,
 			Banner: "The shared settings in OpenSearch are gone."})
+	}
+	if st.Mode == ModeMember {
+		if iw := rt.importWarning(); iw != nil {
+			w = append(w, *iw)
+		}
 	}
 	if len(st.Tamper) > 0 {
 		w = append(w, Warning{Level: "red", Text: fmt.Sprintf("Shared settings were changed in OpenSearch outside Signalith (%s), so this server keeps its last good copy. "+
