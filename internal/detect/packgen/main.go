@@ -67,6 +67,10 @@ var categories = map[string]string{
 	// Nor this: Code Integrity log rules (service:
 	// codeintegrity-operational).
 	"code_integrity": "rules/windows/builtin/code_integrity",
+	// Nor these: Windows Firewall and BITS log rules (service:
+	// firewall-as, bits-client).
+	"firewall_as": "rules/windows/builtin/firewall_as",
+	"bits_client": "rules/windows/builtin/bits_client",
 	// Nor this: Microsoft Defender Antivirus log rules (service:
 	// windefend).
 	"windefend": "rules/windows/builtin/windefend",
@@ -193,6 +197,9 @@ func main() {
 			}
 			if cat == "code_integrity" {
 				want["category"], want["service"] = "", "codeintegrity-operational"
+			}
+			if cat == "firewall_as" || cat == "bits_client" {
+				want["category"], want["service"] = "", strings.ReplaceAll(cat, "_", "-")
 			}
 			if rule.Logsource["product"] != want["product"] || rule.Logsource["category"] != want["category"] || rule.Logsource["service"] != want["service"] {
 				skip("log source is not plain "+product+" "+cat, rel)
@@ -400,7 +407,9 @@ func regression(root, rel string, rule *sigmacheck.Rule, cat string) []sigmachec
 					c.Data[k] = string(b)
 				}
 			}
-			ok := (strings.EqualFold(c.Channel, sigmacheck.Channel(cat)) && slices.Contains(sysmonIDs, id)) ||
+			// A log read by name: any of its events the rule matches.
+			named := (cat == "firewall_as" || cat == "bits_client") && strings.EqualFold(c.Channel, sigmacheck.Channel(cat))
+			ok := named || (strings.EqualFold(c.Channel, sigmacheck.Channel(cat)) && slices.Contains(sysmonIDs, id)) ||
 				(cat == "process_creation" && c.Channel == sigmacheck.SecurityChannel && id == "4688")
 			if !ok {
 				continue

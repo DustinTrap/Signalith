@@ -407,10 +407,12 @@ func Generate(o Options) (*Agent, error) {
 	case "windows":
 		a.ConfigPath = `C:\Program Files\fluent-bit\conf\fluent-bit.conf`
 		// The System and Application logs (services, logs cleared, SQL
-		// Server and installer events), Microsoft Defender and Code
-		// Integrity (unsigned and revoked drivers) are always collected: they are part of every supported Windows version,
-		// need no install and log little.
-		channels := "Security,System,Application,Microsoft-Windows-Windows Defender/Operational,Microsoft-Windows-CodeIntegrity/Operational"
+		// Server and installer events), Microsoft Defender, Code
+		// Integrity (unsigned and revoked drivers), Windows Firewall
+		// (rules and settings changed) and BITS (download jobs) are
+		// always collected: they are part of every supported Windows
+		// version, need no install and log little.
+		channels := "Security,System,Application,Microsoft-Windows-Windows Defender/Operational,Microsoft-Windows-CodeIntegrity/Operational,Microsoft-Windows-Windows Firewall With Advanced Security/Firewall,Microsoft-Windows-Bits-Client/Operational"
 		if o.Sysmon {
 			channels += ",Microsoft-Windows-Sysmon/Operational"
 		}

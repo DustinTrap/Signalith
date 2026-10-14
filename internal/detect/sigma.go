@@ -474,6 +474,10 @@ func ConvertSigmaWith(src []byte, opt SigmaOptions) (*SigmaResult, error) {
 		case "codeintegrity-operational":
 			// Code Integrity's log, each rule naming its events.
 			category = "code_integrity"
+		case "firewall-as", "bits-client":
+			// Windows Firewall's and BITS's logs, each rule naming its
+			// events and their data.
+			category = strings.ReplaceAll(strings.ToLower(service), "-", "_")
 		case "security":
 			// A Security log rule's fields are its event's own, so it
 			// converts for one event, or events with the same data.
@@ -636,6 +640,9 @@ func productScope(ls map[string]any, category string) query.Expr {
 		case "code_integrity":
 			return &query.Compare{Field: "sourcetype", Op: "=", Value: "WinEventLog:" + ingest.CodeIntegrityChannel}
 		}
+		if ch, ok := sigmaNamedChannels[category]; ok {
+			return &query.Compare{Field: "sourcetype", Op: "=", Value: "WinEventLog:" + ch}
+		}
 		st := &query.Compare{Field: "sourcetype", Op: "=", Value: windowsSourcetypes}
 		if ids := sigmaWindowsEvents[category]; len(ids) > 0 {
 			return and([]query.Expr{st, &query.In{Field: "signature_id", Values: ids}})
@@ -675,7 +682,7 @@ func (c *sigmaConv) datamodel(ls map[string]any) string {
 		return "Script"
 	case "system":
 		return "Change"
-	case "system_event", "application", "code_integrity":
+	case "system_event", "application", "code_integrity", "firewall_as", "bits_client":
 		return "Other"
 	case "auditd":
 		return "Other"
@@ -700,6 +707,9 @@ func (c *sigmaConv) field(name string) string {
 	}
 	if c.category == "application" || c.category == "code_integrity" {
 		return c.eventDataField(name)
+	}
+	if ch, ok := sigmaNamedChannels[c.category]; ok {
+		return c.channelField(ch, name)
 	}
 	if m, ok := sigmaEventFields[c.category]; ok {
 		if f := m[strings.ToLower(name)]; f != "" {
@@ -750,6 +760,32 @@ func (c *sigmaConv) eventDataField(name string) string {
 	}
 	c.approx("field %s is not data Signalith reads by name from these log events", name)
 	return name
+}
+
+// sigmaNamedChannels are the Windows logs whose events the parser reads by
+// name (ingest.ChannelDataField), by the category of their rules.
+var sigmaNamedChannels = map[string]string{
+	"firewall_as": ingest.FirewallChannel,
+	"bits_client": ingest.BitsChannel,
+}
+
+// channelField is the stored field of such a log's event's field: its
+// provider, ID and host, or its data (see ingest.ChannelDataField).
+func (c *sigmaConv) channelField(channel, name string) string {
+	switch strings.ToLower(name) {
+	case "provider_name":
+		return "provider"
+	case "eventid":
+		return "signature_id"
+	case "computer", "computername":
+		return "host"
+	}
+	f, ok := ingest.ChannelDataField(channel, name)
+	if !ok {
+		c.approx("field %s is not data Signalith reads from %s events", name, channel)
+		return name
+	}
+	return f
 }
 
 // auditdField is the stored field of an audit record's field (see

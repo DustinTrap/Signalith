@@ -22,6 +22,8 @@ const (
 	SystemChannel        = ingest.SystemChannel
 	ApplicationChannel   = ingest.ApplicationChannel
 	CodeIntegrityChannel = ingest.CodeIntegrityChannel
+	FirewallChannel      = ingest.FirewallChannel
+	BitsChannel          = ingest.BitsChannel
 	PowerShellChannel    = ingest.PowerShellChannel
 	DefenderChannel      = ingest.DefenderChannel
 	// LinuxSysmonChannel is Sysmon for Linux, whose events have Sysmon's
@@ -93,9 +95,10 @@ func (c Case) SigmaView() (map[string]string, bool) {
 			out[k] = v
 		}
 		return out, true
-	case c.Channel == ApplicationChannel || c.Channel == CodeIntegrityChannel:
+	case c.Channel == ApplicationChannel || c.Channel == CodeIntegrityChannel || ingest.IsNamedChannel(c.Channel):
 		// Application and Code Integrity log rules name the provider and
-		// the event's data values (Data).
+		// the event's data values (Data); Firewall and BITS log rules
+		// their events' data by name.
 		out := map[string]string{"EventID": c.EventID}
 		for k, v := range c.Data {
 			out[k] = v
@@ -182,6 +185,12 @@ var sysmonEvents = map[string]string{
 	// Code Integrity log rules name their events; an unsigned driver
 	// loaded is the first.
 	"code_integrity": "3001",
+	// Firewall log rules (service: firewall-as) name their events; a
+	// rule added is the first.
+	"firewall_as": "2004",
+	// BITS log rules (service: bits-client) name their events; a
+	// transfer started is the first.
+	"bits_client": "16403",
 	// Defender log rules (service: windefend) name their events; a
 	// threat detected is the first.
 	"windefend": "1116",
@@ -221,6 +230,8 @@ func init() {
 	Bases["system_event"] = map[string]string{}
 	Bases["application"] = map[string]string{}
 	Bases["code_integrity"] = map[string]string{}
+	Bases["firewall_as"] = map[string]string{}
+	Bases["bits_client"] = map[string]string{}
 	// A task disabled has the data of a task deleted.
 	Bases[SecurityCategory("4701")] = Bases[SecurityCategory("4699")]
 	for _, id := range SecurityEvents {
@@ -245,6 +256,10 @@ func Channel(category string) string {
 		return ApplicationChannel
 	case "code_integrity":
 		return CodeIntegrityChannel
+	case "firewall_as":
+		return FirewallChannel
+	case "bits_client":
+		return BitsChannel
 	case "windefend":
 		return DefenderChannel
 	}

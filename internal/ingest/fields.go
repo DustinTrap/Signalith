@@ -158,6 +158,23 @@ var knownFields = func() map[string]string {
 		"system_dirty_pages": kw, "system_caption": kw, "system_message": "wildcard",
 		// An Application log event's data values, one per line.
 		"event_data": "wildcard",
+		// The data of Windows Firewall and BITS events, by name
+		// (ChannelDataField): firewall rules and settings changed, and
+		// transfer jobs.
+		"firewall_action": kw, "firewall_active": kw, "firewall_application_path": kw, "firewall_direction": kw,
+		"firewall_edge_traversal": kw, "firewall_embedded_context": kw, "firewall_error_code": kw, "firewall_flags": kw,
+		"firewall_local_addresses": kw, "firewall_local_only_mapped": kw, "firewall_local_ports": kw,
+		"firewall_loose_source_mapped": kw, "firewall_modifying_application": kw, "firewall_modifying_user": kw,
+		"firewall_origin": kw, "firewall_policy_app_id": kw, "firewall_profiles": kw, "firewall_protocol": kw,
+		"firewall_remote_addresses": kw, "firewall_remote_machine_authorization_list": kw, "firewall_remote_ports": kw,
+		"firewall_remote_user_authorization_list": kw, "firewall_rule_id": kw, "firewall_rule_name": kw,
+		"firewall_rule_status": kw, "firewall_schema_version": kw, "firewall_security_options": kw,
+		"firewall_service_name": kw, "firewall_setting_type": kw, "firewall_setting_value": kw,
+		"firewall_setting_value_display": kw, "firewall_setting_value_size": kw, "firewall_setting_value_string": kw,
+		"firewall_store_type":           kw,
+		"bits_client_process_start_key": kw, "bits_file_count": kw, "bits_job_id": kw, "bits_job_owner": kw,
+		"bits_job_title": kw, "bits_local_name": kw, "bits_process_id": kw, "bits_process_path": kw,
+		"bits_remote_name": kw, "bits_user": kw,
 		// Linux audit records (auditd.go): each field as auditd names it,
 		// the names of an ENRICHED record's numbers (auditd_uid_name), and
 		// a program's arguments one by one and joined, which rules search

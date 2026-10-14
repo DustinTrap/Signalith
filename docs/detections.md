@@ -242,9 +242,9 @@ Content packs are rule sets from other open source projects, shipped unchanged
 inside Signalith and converted when it starts. Every pack detection is **off** until
 an admin turns it on.
 
-**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 2,164 rules from
-[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 2,010 Windows rules
-for these Sysmon, Security, PowerShell, System, Application, Code Integrity and Defender log sources, and 154 Linux rules (see
+**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 2,177 rules from
+[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 2,023 Windows rules
+for these Sysmon, Security, PowerShell, System, Application, Code Integrity, Windows Firewall, BITS and Defender log sources, and 154 Linux rules (see
 [Linux endpoints](#linux-endpoints-sysmon-for-linux) and
 [the Linux audit log](#linux-audit-log-auditd)):
 
@@ -265,6 +265,8 @@ for these Sysmon, Security, PowerShell, System, Application, Code Integrity and 
 | `service: system` | Other System events, by provider and event ID (see below) | Other |
 | `service: application` | Application events, by provider and event ID (see below) | Other |
 | `service: codeintegrity-operational` | Code Integrity events (unsigned, revoked and blocked drivers and images), by event ID | Other |
+| `service: firewall-as` | Windows Firewall events (rules added and deleted, settings changed, reset), by event ID and data (see below) | Other |
+| `service: bits-client` | BITS events (jobs created, transfers started), by event ID and data (see below) | Other |
 | `service: windefend` | Microsoft Defender Antivirus events (threats, attack surface reduction blocks, protection turned off, settings changed; `Path` is `file_path`, `ProcessName` `process_path`, `NewValue` `new_value`, `SourceName` `detection_source`, a 5013's `Value` `setting`) | Malware |
 | `service: security` | The Security log events in the next table | See the next table |
 
@@ -586,6 +588,14 @@ The Windows agent collects the Application log. A rule about the rendered messag
 Code Integrity rules (`Microsoft-Windows-CodeIntegrity/Operational`, which the Windows
 agent collects) find their events the same way, with the event's data values as
 `event_data`; a rule about a named value (`FileNameBuffer`) is left out of the pack.
+
+Windows Firewall rules (`Microsoft-Windows-Windows Firewall With Advanced Security/Firewall`)
+and BITS rules (`Microsoft-Windows-Bits-Client/Operational`) find their events in Other
+by event ID, and name their data the way Windows does: each value is `firewall_` or
+`bits_` and its name in snake case (`ApplicationPath` is `firewall_application_path`,
+`ModifyingApplication` `firewall_modifying_application`, `RemoteName`
+`bits_remote_name`, `processPath` `bits_process_path`). The Windows agent collects
+both logs, which Windows keeps by default.
 
 Registry values that Sysmon writes as `DWORD (0x00000001)` compare as `0x00000001`,
 the way Splunk's Sysmon add-on reads them.

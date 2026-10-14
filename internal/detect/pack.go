@@ -275,6 +275,13 @@ func packThrottle(category, datamodel string) []string {
 		// An Application or Code Integrity event: which program logged
 		// which one.
 		return []string{"host", "provider", "signature_id"}
+	case "firewall_as":
+		// A firewall rule or setting changed: which change, and the rule
+		// and program.
+		return []string{"host", "signature_id", "firewall_rule_name", "firewall_application_path"}
+	case "bits_client":
+		// A BITS job: what it downloads, where to.
+		return []string{"host", "signature_id", "bits_remote_name", "bits_local_name"}
 	case "system_event":
 		// A System log event: which one, and what it names first (the
 		// service of a service event).
@@ -347,6 +354,8 @@ func PackDetection(p *Pack, r PackRule, src []byte) (*Detection, error) {
 			category = service
 		case service == "codeintegrity-operational":
 			category = "code_integrity"
+		case service == "firewall-as", service == "bits-client":
+			category = strings.ReplaceAll(service, "-", "_")
 		case service == "system" && q.Datamodel == "Other":
 			category = "system_event"
 		}
