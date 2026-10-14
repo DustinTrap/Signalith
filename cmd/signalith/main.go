@@ -1365,6 +1365,8 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			return agentinv.Pin(certs.Fingerprint())
 		},
 		Leader: func() bool { return r.node != nil && r.node.RunsJobs() }}
+	// The cluster's one certificate authority, once it has one.
+	tlsStatus := r.sharedTLS(ctx, in, c, certs, agentsInv)
 	r.agents.Store(agentsInv)
 	in.jobs.Go(func() { agentsInv.Run(ctx) })
 	srv := &api.Server{
@@ -1588,6 +1590,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		if r.shared != nil {
 			srv.Cluster = sharedCluster{Node: r.node, rt: r.shared}
 			srv.Shared = sharedAPI{rt: r.shared, on: sharedOn}
+			srv.ClusterTLS = r.clusterTLSAPI()
 			srv.ConfigToken = configToken{rt: r.shared}
 			// A start that keeps the settings in settings.yaml has the
 			// store too, so a save there holds off the move of this
@@ -1631,6 +1634,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 				return sharedFingerprints(fp, r.shared, sharedOn)
 			},
 			Indexed: pipeline.LastIndexed,
+			TLS:     tlsStatus,
 		}
 		if rt := r.shared; rt != nil {
 			settings.Shared = func() cluster.SharedStatus { return sharedStatus(rt, r.sharedContent) }
