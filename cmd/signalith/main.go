@@ -1071,6 +1071,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		}
 	}
 	ret := newRetention(c, cl, log)
+	archiveCrypto(ret.Archive, c, r.clusterKey)
 	if sharedOn {
 		r.sharedContent.sharedRetention(ret)
 	} else {
