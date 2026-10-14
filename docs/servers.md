@@ -277,6 +277,48 @@ Until servers can be added from the Servers page:
 
 When it starts, it appears on the Servers page of every server.
 
+## Shared settings and the cluster key
+
+The servers that share one OpenSearch also share settings there, in the
+`<prefix>_config` index. Each one is signed with the **cluster key**, which every
+server keeps in its state folder (`keys/cluster-<id>.key`, encrypted with that
+server's master key) and never in OpenSearch, so someone who can write to OpenSearch
+cannot change them unnoticed. For now the servers share only what makes them one
+cluster (its name, the list of servers and their keys); retention policies and
+threat intel feeds still come from each server's own files.
+
+The server that runs the background jobs makes the cluster by itself, the first
+time it runs this version: it makes the cluster key and writes the shared settings.
+Give the OpenSearch user the right to create, read and write `<prefix>_config` too
+(or `<prefix>_*`). Every other server then needs the cluster key:
+
+- on a server that has it, run `signalith cluster export-key -o cluster-key.txt`
+  and choose a passphrase;
+- copy the file to the other server and run `signalith cluster import-key
+  cluster-key.txt` there, with that passphrase. It joins within seconds.
+
+Or put the key (base64, as one line) in a file only Signalith can read, and name
+that file in `SIGNALITH_CLUSTER_KEY_FILE` on every server: a server that has it
+joins by itself. Until a server has the key, it keeps working from its own files
+but runs no background jobs, and the Servers page says so.
+
+Each server keeps its last copy of the shared settings in `cluster/cache.enc` in
+its state folder, encrypted with its master key, so it can start while OpenSearch
+cannot be reached (it then answers `/readyz` with `degraded` and pauses changes).
+`signalith cluster` helps when something went wrong:
+
+| Command | What it does |
+| --- | --- |
+| `signalith cluster status` | This server's place in the cluster, the servers with the key, and any problem |
+| `signalith cluster found` | Makes the cluster from this server's files when no server that runs the background jobs is up |
+| `signalith cluster export` | Prints the shared settings as YAML; stored passwords stay encrypted |
+| `signalith cluster import -from-cache` | Writes this server's copy back after the `<prefix>_config` index was deleted; the other servers resume by themselves |
+| `signalith cluster export-key`, `import-key` | Gives another server the cluster key, encrypted with a passphrase |
+| `signalith cluster reset-key` | When every copy of the key is lost: with every server stopped, shows the shared settings, makes a new key and signs them with it. Passwords stored with the old key must be entered again |
+| `signalith cluster accept-restore` | After you restore an OpenSearch snapshot on purpose: makes every server accept the older shared settings, which they would otherwise refuse as changed outside Signalith |
+
+Each change is written to the log as an audit record.
+
 ## Field names when several servers receive events
 
 Each day's events go to one index per data model, and OpenSearch allows at most 2,000
@@ -348,6 +390,9 @@ The reasons `/readyz` gives:
 | `down` | It could not start, and tries again every 30 seconds; its log says why |
 | `opensearch` | It cannot reach OpenSearch, or OpenSearch refuses its sign of life (the Servers page and the log say why) |
 | `identity` | Another server uses its identity (see [Identity](#identity)) |
+| `degraded` | It is part of the cluster but cannot use the shared settings in OpenSearch now (see [Shared settings and the cluster key](#shared-settings-and-the-cluster-key)) |
+| `gone` | The shared settings in OpenSearch are gone: their index was deleted or replaced |
+| `key_missing` | The shared settings are signed with a cluster key this server does not have |
 | `stopping` | It is shutting down and handing its jobs over. This takes up to a minute while jobs finish: the systemd unit allows 100 seconds, the compose file 90, and the Windows service waits 90 |
 
 Do not use `/readyz` to restart a server: a server that waits for OpenSearch is

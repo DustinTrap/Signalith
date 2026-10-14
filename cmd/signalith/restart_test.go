@@ -165,7 +165,10 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 	}
 	r := newRunner(path, log)
 	r.node = node
+	r.shared = openShared(c, node, log)
 	node.Start(context.Background())
+	sharedCtx, sharedStop := context.WithCancel(context.Background())
+	r.shared.Start(sharedCtx)
 	rs := &running{t: t, r: r, addr: addr, os: fos, logs: logs, dir: dir, scheme: "http", client: &http.Client{Timeout: 10 * time.Second}}
 	r.failStart = func(c *config.Config) error {
 		rs.mu.Lock()
@@ -190,6 +193,8 @@ func startRunnerWith(t *testing.T, o runOptions) *running {
 			}
 			node.Stop()
 			node.Close()
+			sharedStop()
+			r.shared.Wait()
 		})
 	}
 	t.Cleanup(rs.stop)

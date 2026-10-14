@@ -98,6 +98,8 @@ type Doc[T any] struct {
 	cur  *entry
 	g    uint64
 	subs []func(old, new *T)
+	// missing is true when the last read found no document.
+	missing bool
 }
 
 // NewDoc returns the document id, of kind and up to format, and tracks it
@@ -154,6 +156,14 @@ func (d *Doc[T]) Updated() (by By, at string, rev int64) {
 	return d.cur.env.UpdatedBy, d.cur.env.UpdatedAt, d.cur.env.Rev
 }
 
+// Missing reports whether the last read found no document in
+// OpenSearch, whatever copy is kept in memory.
+func (d *Doc[T]) Missing() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.missing
+}
+
 // OnChange adds a function called with the old and new body whenever
 // another copy is applied; old is nil the first time.
 func (d *Doc[T]) OnChange(fn func(old, new *T)) {
@@ -186,6 +196,7 @@ func (d *Doc[T]) apply(doc store.Doc, uuid string, gen uint64) bool {
 		d.mu.Unlock()
 		return true
 	}
+	d.missing = !doc.Found
 	if !doc.Found {
 		if d.cur != nil {
 			d.h.report(d.id, &Problem{Kind: ProblemTamper, Reason: "it was deleted in OpenSearch outside Signalith"}, store.Version{})
@@ -234,7 +245,7 @@ func (d *Doc[T]) set(e *entry) {
 // subscribers.
 func (d *Doc[T]) setLocked(e *entry, own bool) {
 	old := d.cur
-	d.cur = e
+	d.cur, d.missing = e, false
 	d.g++
 	changed := d.h.fine(d.id, e.env.Rev)
 	if own {

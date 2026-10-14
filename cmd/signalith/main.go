@@ -85,6 +85,7 @@ Usage:
   signalith secrets   status|encrypt|set|rotate-master [-c file] ...  the master key and stored passwords
   signalith content   status|install|remove [-c file] ...  content pack updates (newer tested rules)
   signalith security  [-c file] [-json]   print the security report (exit 2 when something is at risk)
+  signalith cluster   status|found|export|import|export-key|import-key|reset-key|accept-restore [-c file] ...  the settings the servers share in OpenSearch
   signalith service   install|uninstall|start|stop     manage the Windows service
   signalith opensearch-certs -out DIR [-node name] [-san name]   certificates to secure your own OpenSearch
   signalith bootstrap-docker -opensearch-dir DIR -signalith-dir DIR   prepare the Docker quick start (its setup service runs this)
@@ -156,6 +157,8 @@ func main() {
 		err = cmdContent(args)
 	case "security":
 		err = cmdSecurity(args)
+	case "cluster":
+		err = cmdCluster(args)
 	case "version", "-v", "--version":
 		fmt.Println("signalith", version)
 	case "help", "-h", "--help":
@@ -884,10 +887,14 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	}
 	r := newRunner(path, log)
 	r.node = node
+	// The shared configuration belongs to the process too; each start of
+	// the components points it at their OpenSearch client.
+	r.shared = openShared(c, node, log)
 	r.browsers = loadBrowserKey(c, log)
 	// The node outlives ctx: stopping gives the job lease up first, which
 	// needs it.
 	node.Start(context.WithoutCancel(ctx))
+	r.shared.Start(ctx)
 	return r.run(ctx, c)
 }
 
@@ -1344,9 +1351,13 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			if !ready(ctx) {
 				return
 			}
+			// The field upgrades run once for the whole cluster; the
+			// replicas setting stays per takeover, as it is cheap.
 			upgradeIndices(ctx, log, func() bool { return r.node == nil || r.node.RunsJobs() }, []indexUpgrade{
-				{intelOK, ibackend.Index, ibackend.Upgrade, ibackend.Replicate}, {casesOK, cstore.Index, cstore.Upgrade, cstore.Replicate},
-				{findingsOK, fstore.Index, fstore.Upgrade, fstore.Replicate}, {notifyOK, deliveries.Index, nil, deliveries.Replicate},
+				{intelOK, ibackend.Index, clusterUpgrade(r.shared, "intel-fields", ibackend.Upgrade), ibackend.Replicate},
+				{casesOK, cstore.Index, clusterUpgrade(r.shared, "cases-fields", cstore.Upgrade), cstore.Replicate},
+				{findingsOK, fstore.Index, clusterUpgrade(r.shared, "findings-fields", fstore.Upgrade), fstore.Replicate},
+				{notifyOK, deliveries.Index, nil, deliveries.Replicate},
 				{playbooksOK, pruns.Index, nil, pruns.Replicate}, {respondOK, astore.Index, nil, astore.Replicate},
 			})
 		}},
@@ -1401,6 +1412,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			ret.Wait()
 		}},
 	}
+	if r.shared != nil {
+		in.jobsList = append(in.jobsList, requestsJob(r.shared))
+	}
 	in.retention = ret
 	if hook := jobStarting; hook != nil {
 		in.jobsList = watchJobs(in.jobsList, c, hook)
@@ -1422,6 +1436,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		sched.Epoch, sched.NodeID, sched.ClusterNow = r.node.Lease().Epoch, r.node.ID(), r.node.ClusterNow
 		scanner.Allowed = r.node.RunsJobs
 		srv.Cluster = r.node
+		if r.shared != nil {
+			srv.Cluster = sharedCluster{Node: r.node, rt: r.shared}
+		}
 		in.node = r.node
 	}
 	tokenSrv.Store(srv)
@@ -1438,14 +1455,21 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		in.plain = srv.PlainHandler(in.handler)
 	}
 	if r.node != nil {
-		// Last, once everything started: the node points at this
-		// OpenSearch, and runs these jobs while it holds the job lease.
-		r.node.Use(cl, c.OpenSearch.IndexPrefix, cluster.Settings{
+		// Last, once everything started: the shared configuration, then
+		// the node, point at this OpenSearch, and the node runs these jobs
+		// while it holds the job lease.
+		useShared(r.shared, c, cl)
+		settings := cluster.Settings{
 			Eligible: c.Detections.Scheduler, NodeURL: nodeURL(c), Listen: c.Server.Listen,
 			Syslog:       cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
 			Fingerprints: func() cluster.Fingerprints { return filesFingerprints(c, ret, feeds, notes, pbooks) },
 			Indexed:      pipeline.LastIndexed,
-		})
+		}
+		if rt := r.shared; rt != nil {
+			settings.Shared = func() cluster.SharedStatus { return sharedStatus(rt) }
+			settings.Housekeep = rt.Housekeep
+		}
+		r.node.Use(cl, c.OpenSearch.IndexPrefix, settings)
 		// A server with detections.scheduler off never runs the jobs. It
 		// may still hold the lease from before a restart in place, which
 		// Use gives up in the background: until then it must not start

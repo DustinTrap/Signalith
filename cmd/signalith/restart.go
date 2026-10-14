@@ -24,6 +24,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/httpserver"
 	"github.com/jrsamsanchez/signalith/internal/sample"
 	"github.com/jrsamsanchez/signalith/internal/security"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
 	"github.com/jrsamsanchez/signalith/internal/users"
@@ -95,6 +96,10 @@ type runner struct {
 	// identity and lock, heartbeat and job lease. A restart keeps it and
 	// points it at the new OpenSearch client; nil in some tests.
 	node *cluster.Node
+	// shared is this server's place in the shared configuration: its
+	// watcher, its copy of the settings and cache.enc. A restart keeps it
+	// and points it at the new OpenSearch client; nil in some tests.
+	shared *shared.Runtime
 	// security runs the Security page's checks and keeps the last
 	// report, which a restart keeps.
 	security *api.SecurityChecker
@@ -183,7 +188,10 @@ func (r *runner) ready() (bool, string) {
 	if r.node == nil {
 		return true, ""
 	}
-	return r.node.Ready()
+	if ok, why := r.node.Ready(); !ok {
+		return ok, why
+	}
+	return sharedReady(r.shared)
 }
 
 // fatal receives an error when this server must not run at all.
@@ -192,6 +200,15 @@ func (r *runner) fatal() <-chan error {
 		return nil
 	}
 	return r.node.Fatal()
+}
+
+// sharedFatal receives an error when the shared configuration in
+// OpenSearch is of a level this version cannot use.
+func (r *runner) sharedFatal() <-chan error {
+	if r.shared == nil {
+		return nil
+	}
+	return r.shared.Fatal()
 }
 
 // Restart implements api.Restarter.
@@ -297,6 +314,9 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 			r.shutdown()
 			return err
 		case err := <-r.fatal():
+			r.shutdown()
+			return err
+		case err := <-r.sharedFatal():
 			r.shutdown()
 			return err
 		case req := <-r.requests:
@@ -513,6 +533,7 @@ func (r *runner) shutdown() error {
 		// are handed over, so another server takes them within seconds.
 		r.node.Stop()
 	}
+	flushShared(r.shared, r.log)
 	var err error
 	if r.web != nil {
 		err = r.web.close(10 * time.Second)

@@ -12,6 +12,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
+	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
 // cache.enc keeps the last shared configuration this server applied, in
@@ -233,4 +234,41 @@ func (w *CacheWriter) Run(ctx context.Context) {
 		case <-w.hub.clock.After(w.hub.opts.Timing.CacheEvery):
 		}
 	}
+}
+
+// RestoreFromCache writes the documents of a cache.enc back into the
+// config index, as "signalith cluster import --from-cache" does after the
+// index was lost: each with _create, as it was stored, with its MAC and
+// revision, so it verifies under the same key on every member and is not
+// taken for a rollback. A document that is there already is left alone.
+// It returns the ids written and those left alone.
+func RestoreFromCache(ctx context.Context, c *store.Client, prefix string, d CacheData) (written, there []string, err error) {
+	if err := EnsureConfig(ctx, c, prefix); err != nil {
+		return nil, nil, err
+	}
+	index := ConfigIndex(prefix)
+	var errs []error
+	for _, cd := range d.Docs {
+		var e Envelope
+		if err := json.Unmarshal(cd.Source, &e); err != nil || e.ID != cd.ID || e.MAC == "" {
+			errs = append(errs, fmt.Errorf("%s: the copy is not a signed document", cd.ID))
+			continue
+		}
+		// The store's mark of the write that made the copy is not part of
+		// it; a new one is added.
+		e.WriteID = ""
+		_, err := c.Create(ctx, index, cd.ID, &e, false)
+		switch {
+		case errors.Is(err, store.ErrExists):
+			there = append(there, cd.ID)
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s: %w", cd.ID, err))
+		default:
+			written = append(written, cd.ID)
+		}
+	}
+	// A server whose index was made again reads everything again by
+	// itself (the index uuid changed); collections are listed again in
+	// full at the next resync.
+	return written, there, errors.Join(errs...)
 }

@@ -184,6 +184,27 @@ type Heartbeat struct {
 	// the first, and from versions before it was kept, which do not list
 	// FeatureIndexedAt (see Node.IndexingServers).
 	IndexedAt *time.Time `json:"indexed_at,omitempty"`
+	// Mode is how the server uses the shared configuration (shared.Mode),
+	// "" from versions before it; ClusterKID the cluster key it signs
+	// with; ConfigSeq how far it has read the config index; MaxRev the
+	// highest revision of a shared document it applied (accept-restore
+	// goes above every server's).
+	Mode       string `json:"mode,omitempty"`
+	ClusterKID string `json:"cluster_kid,omitempty"`
+	ConfigSeq  int64  `json:"config_seq,omitempty"`
+	MaxRev     int64  `json:"max_rev,omitempty"`
+	// NeedsUpgrade lists the shared documents a newer version wrote, and
+	// Tamper those changed in OpenSearch outside Signalith: the server
+	// keeps its last good copy of each.
+	NeedsUpgrade []string `json:"needs_upgrade,omitempty"`
+	Tamper       []string `json:"tamper,omitempty"`
+	// SettingsDrift lists, per source, the shared settings whose value in
+	// the server's file or environment differs from the one in use.
+	SettingsDrift map[string][]string `json:"settings_drift,omitempty"`
+	// LevelMin and LevelMax are the levels of the stored formats the
+	// server's version reads.
+	LevelMin int `json:"level_min,omitempty"`
+	LevelMax int `json:"level_max,omitempty"`
 }
 
 // SecuritySummary is a server's last security check, as its heartbeat

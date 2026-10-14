@@ -47,6 +47,32 @@ type Settings struct {
 	// server can tell how many share the day's field-name budgets (see
 	// IndexingServers).
 	Indexed func() time.Time
+	// Shared says how this server uses the shared configuration, for its
+	// heartbeat, and why it may not run the background jobs because of
+	// it; nil has none. It must not call the node.
+	Shared func() SharedStatus
+	// Housekeep runs with the node's housekeeping, every 10 minutes on
+	// the server that runs the background jobs (old tombstones and
+	// finished requests); nil for none.
+	Housekeep func(ctx context.Context)
+}
+
+// SharedStatus is how a server uses the shared configuration in
+// OpenSearch (see shared.Status), as its heartbeat carries it.
+type SharedStatus struct {
+	Mode         string
+	ClusterKID   string
+	ConfigSeq    int64
+	MaxRev       int64
+	NeedsUpgrade []string
+	Tamper       []string
+	// SettingsDrift lists, per source (yaml, env), the shared settings
+	// whose value there differs from the one in use.
+	SettingsDrift      map[string][]string
+	LevelMin, LevelMax int
+	// NotEligible says why the shared configuration keeps this server
+	// from running the background jobs, "" when it does not.
+	NotEligible string
 }
 
 // Node is this server in the cluster. It lives as long as the process:
@@ -689,6 +715,14 @@ func (n *Node) heartbeatDoc(state string) Heartbeat {
 	eligible, why := n.eligible()
 	view := n.lease.View()
 	n.mu.Lock()
+	sharedFn := n.settings.Shared
+	n.mu.Unlock()
+	var sh *SharedStatus
+	if sharedFn != nil {
+		s := sharedFn()
+		sh = &s
+	}
+	n.mu.Lock()
 	defer n.mu.Unlock()
 	hb := Heartbeat{Kind: "node", NodeID: n.ID(), Name: n.Name(), BootID: n.local.BootID, PrevBoot: n.local.LastBoot, State: state,
 		Version: n.opts.Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Deployment: n.opts.Deployment,
@@ -721,6 +755,11 @@ func (n *Node) heartbeatDoc(state string) Heartbeat {
 	hb.Problems = append(hb.Problems, n.local.Warnings...)
 	if n.paused != "" {
 		hb.Problems = append(hb.Problems, n.paused+". Its log says why.")
+	}
+	if sh != nil {
+		hb.Mode, hb.ClusterKID, hb.ConfigSeq, hb.MaxRev = sh.Mode, sh.ClusterKID, sh.ConfigSeq, sh.MaxRev
+		hb.NeedsUpgrade, hb.Tamper, hb.SettingsDrift = sh.NeedsUpgrade, sh.Tamper, sh.SettingsDrift
+		hb.LevelMin, hb.LevelMax = sh.LevelMin, sh.LevelMax
 	}
 	return hb
 }
@@ -937,6 +976,7 @@ func (n *Node) eligible() (bool, string) {
 }
 
 func (n *Node) eligibleLocked() (bool, string) {
+	shared := n.sharedNotEligibleLocked()
 	switch {
 	case n.stopping:
 		return false, "it is stopping"
@@ -946,12 +986,23 @@ func (n *Node) eligibleLocked() (bool, string) {
 		return false, n.paused
 	case !n.settings.Eligible:
 		return false, "detections.scheduler is off on this server"
+	case shared != "":
+		return false, shared
 	case !n.hb.checked && n.lastErr != "":
 		return false, n.osProblemLocked()
 	case !n.hb.checked:
 		return false, "it has not reached OpenSearch yet"
 	}
 	return true, ""
+}
+
+// sharedNotEligibleLocked says why the shared configuration keeps this
+// server from running the background jobs, or "". The caller holds n.mu.
+func (n *Node) sharedNotEligibleLocked() string {
+	if n.settings.Shared == nil {
+		return ""
+	}
+	return n.settings.Shared().NotEligible
 }
 
 // osProblemLocked says, in a few words, why this server could not write
@@ -1208,6 +1259,12 @@ func (n *Node) housekeeping(ctx context.Context) {
 		cancel()
 		if err != nil {
 			n.log.Debug("housekeeping could not list old heartbeats", "err", err)
+		}
+		n.mu.Lock()
+		hk := n.settings.Housekeep
+		n.mu.Unlock()
+		if hk != nil && n.lease.Valid() {
+			hk(ctx)
 		}
 	}
 }

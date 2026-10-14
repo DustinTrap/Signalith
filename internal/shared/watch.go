@@ -429,6 +429,38 @@ func (h *Hub) firstRev(id string, all bool) int64 {
 	return r + 1
 }
 
+// Applied returns how far this server has read the config index, as a
+// _seq_no (see Token); -1 before it has read anything.
+func (h *Hub) Applied() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.applied
+}
+
+// Housekeep removes the tombstones of every collection that are older
+// than TombstoneAge at now. It returns how many.
+func (h *Hub) Housekeep(ctx context.Context, now time.Time) (int, error) {
+	h.mu.Lock()
+	cols := slices.Clone(h.colls)
+	h.mu.Unlock()
+	n := 0
+	var errs []error
+	for _, col := range cols {
+		hk, ok := col.(interface {
+			Housekeep(context.Context, time.Time) (int, int64, error)
+		})
+		if !ok {
+			continue
+		}
+		k, _, err := hk.Housekeep(ctx, now)
+		n += k
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return n, errors.Join(errs...)
+}
+
 // MaxRev returns the highest revision applied of any document.
 func (h *Hub) MaxRev() int64 {
 	h.mu.Lock()
