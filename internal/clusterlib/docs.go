@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/detect"
 	"github.com/jrsamsanchez/signalith/internal/shared"
@@ -94,6 +96,24 @@ func (b *DashboardBody) decode(id string) (*dashboards.Dashboard, error) {
 	return dashboards.DecodeFile(id+".yaml", []byte(b.YAML))
 }
 
+// namesID checks that the YAML text, when there is one, holds the item
+// name.
+func namesID(name, text string) error {
+	if text == "" {
+		return nil
+	}
+	var head struct {
+		ID string `yaml:"id"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &head); err != nil {
+		return err
+	}
+	if head.ID != name {
+		return fmt.Errorf("it holds %q", head.ID)
+	}
+	return nil
+}
+
 // Docs holds the shared collections of the library, made again on each
 // hub the runtime builds (Track is part of its RuntimeOptions.Content),
 // and passes their changes to whoever uses them now. Each start of the
@@ -117,16 +137,19 @@ func NewDocs() *Docs { return &Docs{subs: map[string][]func(){}} }
 
 // Track makes the collections on h.
 func (d *Docs) Track(h *shared.Hub) {
+	// An item must name its own id. What else it holds is checked where
+	// it is used: a detection written by a newer version, with a field or
+	// query command this one does not know, is left out here rather than
+	// reported as a problem with the shared settings.
 	dets := shared.NewCollection[DetectionBody](h, DetectionKind, DetectionWatch, 1)
 	dets.ValidateItem = func(name string, b *DetectionBody) error {
-		_, _, err := b.decode(name)
-		return err
+		if b.YAML == "" && b.State == nil {
+			return errors.New("it holds neither a detection nor a state")
+		}
+		return namesID(name, b.YAML)
 	}
 	boards := shared.NewCollection[DashboardBody](h, DashboardKind, DashboardWatch, 1)
-	boards.ValidateItem = func(name string, b *DashboardBody) error {
-		_, err := b.decode(name)
-		return err
-	}
+	boards.ValidateItem = func(name string, b *DashboardBody) error { return namesID(name, b.YAML) }
 	dets.OnChange(func() { d.fire(changeDetections) })
 	boards.OnChange(func() { d.fire(changeDashboards) })
 	d.mu.Lock()
