@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"context"
 	"encoding/json"
 	"errors"
@@ -719,7 +720,15 @@ func TestStartWithoutServerSettings(t *testing.T) {
 // signalith settings reset on a member whose settings are shared: a
 // shared setting goes back to its default for every server, at once; one
 // of the server's own leaves its nodecfg document.
-func TestSettingsResetOnMember(t *testing.T) {
+func TestSettingsResetOnMemberStress(t *testing.T) {
+	for i := range 10 {
+		t.Run(fmt.Sprint(i), testSettingsResetOnMember)
+	}
+}
+
+func TestSettingsResetOnMember(t *testing.T) { testSettingsResetOnMember(t) }
+
+func testSettingsResetOnMember(t *testing.T) {
 	fastSharedCheck(t)
 	t.Setenv(clusterKeyFileEnv, "")
 	rs := startRunnerWith(t, runOptions{scheduler: true, server: plainHTTP})
