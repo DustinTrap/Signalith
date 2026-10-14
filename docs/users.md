@@ -863,7 +863,8 @@ agents that send events, shown on the [Endpoints page](endpoints.md)), `GET /api
 `POST /api/vulns/scans/{id}/stop` (setting up and running [vulnerability scans](vulnerabilities.md)),
 `PUT /api/compliance/notes` (marking a [compliance](compliance.md) control as handled outside
 Signalith or not applicable),
-`GET /api/cluster` (the Servers page; see [servers.md](servers.md)), `GET /api/requests/{id}`
+`GET /api/cluster` (the Servers page; see [servers.md](servers.md)), `POST /api/cluster/restart`
+(restart servers one at a time to apply the shared settings), `GET /api/requests/{id}`
 (work asked of the server that runs the background jobs, such as a feed download or a retention
 run; see [servers.md](servers.md#shared-feeds-and-retention-policies)), every
 `/api/notify` route (the Notifications page; see [notifications.md](notifications.md)), every
