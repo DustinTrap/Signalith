@@ -135,6 +135,23 @@ var sigmaEventFields = func() map[string]map[string]string {
 		"workstationname": "src_host", "ipaddress": "src", "ipport": "src_port", "processname": "process_path",
 		"computer": "host", "computername": "host", "eventid": "signature_id",
 	}
+	handle := security(map[string]string{
+		"subjectusersid": "user_sid", "objectserver": "object_server", "objectname": "object_path", "objecttype": "object_type",
+		"accesslist": "access_names", "accessmask": "access_mask", "processname": "process_path",
+	})
+	// A connection the filtering platform allowed or blocked.
+	wfp := map[string]string{
+		"processid": "process_id", "application": "process_path", "sourceaddress": "src", "sourceport": "src_port",
+		"destaddress": "dest", "destport": "dest_port", "filterrtid": "filter_rtid", "layername": "layer_name",
+		"layerrtid": "layer_rtid", "computer": "host", "computername": "host", "eventid": "signature_id",
+	}
+	kerberos := map[string]string{
+		"targetusername": "user", "targetdomainname": "user_domain", "targetsid": "user_sid",
+		"servicename": "kerberos_service", "servicesid": "kerberos_service_sid", "ticketoptions": "ticket_options",
+		"status": "kerberos_status", "ticketencryptiontype": "ticket_encryption_type", "preauthtype": "pre_auth_type",
+		"ipaddress": "src", "ipport": "src_port", "certissuername": "cert_issuer", "certserialnumber": "cert_serial",
+		"certthumbprint": "cert_thumbprint", "computer": "host", "computername": "host", "eventid": "signature_id",
+	}
 	return map[string]map[string]string{
 		"file_event": file, "file_delete": file,
 		"registry_add": registry, "registry_delete": registry, "registry_set": registry, "registry_event": registry,
@@ -149,6 +166,30 @@ var sigmaEventFields = func() map[string]map[string]string {
 			"objectname": "object_path", "objecttype": "object_type", "accesslist": "access_names",
 			"accessmask": "access_mask", "processname": "process_path",
 		}),
+		"security_4656":      handle,
+		"security_4656_4663": handle,
+		"security_4657": security(map[string]string{
+			"subjectusersid": "user_sid", "objectname": "object_path", "objectvaluename": "registry_value_name", "operationtype": "registry_operation",
+			"oldvalue": "registry_old_value_data", "newvalue": "registry_value_data", "newvaluetype": "registry_value_type",
+			"processname": "process_path",
+		}),
+		"security_4661": security(map[string]string{
+			"subjectusersid": "user_sid", "objectserver": "object_server", "objectname": "object_path", "objecttype": "object_type",
+			"accesslist": "access_names", "accessmask": "access_mask", "properties": "object_properties", "processname": "process_path",
+		}),
+		"security_4662": security(map[string]string{
+			"subjectusersid": "user_sid", "objectserver": "object_server", "objectname": "object", "objecttype": "object_type",
+			"accesslist": "access_names", "accessmask": "access_mask", "properties": "object_properties",
+		}),
+		"security_4648": security(map[string]string{
+			"subjectusersid": "user_sid", "subjectusername": "src_user", "subjectdomainname": "src_user_domain",
+			"targetusername": "user", "targetdomainname": "user_domain", "targetservername": "dest", "targetinfo": "target_info",
+			"processname": "process_path", "ipaddress": "src", "ipport": "src_port",
+		}),
+		"security_5156": wfp,
+		"security_5157": wfp,
+		"security_4768": kerberos,
+		"security_4769": kerberos,
 		"security_4697": security(map[string]string{
 			"servicename": "service_name", "servicefilename": "service_path", "servicetype": "service_type",
 			"servicestarttype": "service_start_type", "serviceaccount": "service_account",
@@ -196,25 +237,42 @@ var sigmaWindowsEvents = map[string][]string{
 	"system":               {"7045"},
 	"security_4624":        {"4624"},
 	"security_4625":        {"4625"},
+	"security_4648":        {"4648"},
+	"security_4656":        {"4656"},
+	"security_4657":        {"4657"},
+	"security_4661":        {"4661"},
+	"security_4662":        {"4662"},
 	"security_4663":        {"4663"},
+	"security_4656_4663":   {"4656", "4663"},
+	"security_4768":        {"4768"},
+	"security_4769":        {"4769"},
 	"security_4697":        {"4697"},
 	"security_4698":        {"4698"},
 	"security_5136":        {"5136"},
 	"security_5145":        {"5145"},
+	"security_5156":        {"5156"},
+	"security_5157":        {"5157"},
 }
 
 // sigmaSecurityModels are the Security log events Security log rules
-// (service: security) convert for, with each one's data model: an object
-// access is a file's (Filesystem) or a registry key's (Registry), so its
-// rules search any.
+// (service: security) convert for, with each one's data model: a handle
+// request or an object access is a file's (Filesystem), a registry key's
+// (Registry) or another object's, so its rules search any.
 var sigmaSecurityModels = map[string]string{
-	"4624": "Authentication", "4625": "Authentication", "4663": "", "4697": "Change", "4698": "Change",
-	"5136": "Change", "5145": "Filesystem",
+	"4624": "Authentication", "4625": "Authentication", "4656": "", "4657": "Registry", "4661": "", "4662": "Change",
+	"4663": "", "4697": "Change", "4698": "Change", "4768": "Authentication", "4769": "Authentication",
+	"4648": "Authentication", "5136": "Change", "5145": "Filesystem", "5156": "Network_Traffic", "5157": "Network_Traffic",
 }
 
 // anyModel reports whether the rule's events land in more than one data
 // model, so it searches them all.
-func (c *sigmaConv) anyModel() bool { return c.category == "security_4663" }
+func (c *sigmaConv) anyModel() bool {
+	switch c.category {
+	case "security_4656", "security_4661", "security_4663", "security_4656_4663":
+		return true
+	}
+	return false
+}
 
 // sigmaEventIDs returns the event IDs a rule's selections name (EventID
 // without modifiers), sorted.
@@ -292,11 +350,11 @@ func ConvertSigmaWith(src []byte, opt SigmaOptions) (*SigmaResult, error) {
 			category = "system"
 		case "security":
 			// A Security log rule's fields are its event's own, so it
-			// converts for one event.
+			// converts for one event, or events with the same data.
 			category = "security"
-			if ids := sigmaEventIDs(r.Detection); len(ids) == 1 {
-				if _, ok := sigmaSecurityModels[ids[0]]; ok {
-					category = "security_" + ids[0]
+			if ids := sigmaEventIDs(r.Detection); len(ids) > 0 {
+				if _, ok := sigmaWindowsEvents["security_"+strings.Join(ids, "_")]; ok {
+					category = "security_" + strings.Join(ids, "_")
 				}
 			}
 		}

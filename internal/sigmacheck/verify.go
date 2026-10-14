@@ -134,16 +134,28 @@ var sysmonEvents = map[string]string{
 
 // SecurityEvents are the Security log events Security log rules
 // (service: security) are checked for; such a rule's category is
-// SecurityCategory of its one event.
-var SecurityEvents = []string{"4624", "4625", "4663", "4697", "4698", "5136", "5145"}
+// SecurityCategory of its one event, or of the events of one of
+// SecurityGroups.
+var SecurityEvents = []string{"4624", "4625", "4648", "4656", "4657", "4661", "4662", "4663", "4697", "4698", "4768", "4769", "5136", "5145", "5156", "5157"}
 
-// SecurityCategory is the category of a Security log rule about one
-// event, as Bases, Cases and Channel know it.
-func SecurityCategory(eventID string) string { return "security_" + eventID }
+// SecurityGroups are Security events with the same data that a rule may
+// name together: a handle to an object requested (4656) and the access
+// made with it (4663). Test events are made as the last one first.
+var SecurityGroups = [][]string{{"4656", "4663"}}
+
+// SecurityCategory is the category of a Security log rule about its
+// events (sorted), as Bases, Cases and Channel know it; it is known (by
+// SysmonEventID) for one of SecurityEvents or a group of SecurityGroups.
+func SecurityCategory(eventIDs ...string) string { return "security_" + strings.Join(eventIDs, "_") }
 
 func init() {
 	for _, id := range SecurityEvents {
 		sysmonEvents[SecurityCategory(id)] = id
+	}
+	for _, g := range SecurityGroups {
+		c := SecurityCategory(g...)
+		sysmonEvents[c] = g[len(g)-1]
+		Bases[c] = Bases[SecurityCategory(g[len(g)-1])]
 	}
 }
 
@@ -273,10 +285,61 @@ var Bases = map[string]map[string]string{
 		"AuthenticationPackageName": "NTLM", "WorkstationName": "WS2", "KeyLength": "0", "ProcessId": "0x0",
 		"IpAddress": "192.0.2.10", "IpPort": "50123",
 	},
+	"security_4648": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"LogonGuid": "{00000000-0000-0000-0000-000000000000}", "TargetUserName": "svc_report", "TargetDomainName": "CORP",
+		"TargetLogonGuid": "{00000000-0000-0000-0000-000000000000}", "TargetServerName": "fs1.corp.example.com",
+		"TargetInfo": "fs1.corp.example.com", "ProcessId": "0x1092", "ProcessName": `D:\apps\launcher\launcher.exe`,
+		"IpAddress": "-", "IpPort": "-",
+	},
+	"security_4656": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"ObjectServer": "Security", "ObjectType": "File", "ObjectName": `D:\apps\work\output.txt`, "HandleId": "0x0",
+		"TransactionId": "{00000000-0000-0000-0000-000000000000}", "AccessList": "%%4416", "AccessReason": "-", "AccessMask": "0x1",
+		"PrivilegeList": "-", "RestrictedSidCount": "0", "ProcessId": "0x1092", "ProcessName": `D:\apps\launcher\launcher.exe`,
+	},
+	"security_4657": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"ObjectName": `\REGISTRY\MACHINE\SOFTWARE\ExampleVendor\Launcher`, "ObjectValueName": "Theme", "HandleId": "0x1f0",
+		"OperationType": "%%1905", "OldValueType": "%%1873", "OldValue": "light", "NewValueType": "%%1873", "NewValue": "dark",
+		"ProcessId": "0x1092", "ProcessName": `D:\apps\launcher\launcher.exe`,
+	},
+	"security_4661": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"ObjectServer": "Security Account Manager", "ObjectType": "SAM_ALIAS", "ObjectName": "S-1-5-21-1000-1201", "HandleId": "0x0",
+		"TransactionId": "{00000000-0000-0000-0000-000000000000}", "AccessList": "%%5400", "AccessMask": "0x4", "PrivilegeList": "-",
+		"Properties": "-", "RestrictedSidCount": "0", "ProcessId": "0x2b4", "ProcessName": `C:\Windows\System32\lsass.exe`,
+	},
+	"security_4662": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"ObjectServer": "DS", "ObjectType": "bf967a86-0de6-11d0-a285-00aa003049e2", "ObjectName": "CN=WS2,OU=Computers,DC=corp,DC=example,DC=com",
+		"OperationType": "Object Access", "HandleId": "0x0", "AccessList": "%%7684", "AccessMask": "0x10",
+		"Properties": "%%7684 {77b5b886-944a-11d1-aebd-0000f80367c1}",
+	},
+	"security_4768": {
+		"TargetUserName": "tester", "TargetDomainName": "CORP", "TargetSid": "S-1-5-21-1000-1104", "ServiceName": "krbtgt",
+		"ServiceSid": "S-1-5-21-1000-502", "TicketOptions": "0x40810010", "Status": "0x0", "TicketEncryptionType": "0x12",
+		"PreAuthType": "2", "IpAddress": "::ffff:192.0.2.10", "IpPort": "50123",
+	},
+	"security_4769": {
+		"TargetUserName": "tester@CORP.EXAMPLE.COM", "TargetDomainName": "CORP.EXAMPLE.COM", "ServiceName": "svc_report",
+		"ServiceSid": "S-1-5-21-1000-1301", "TicketOptions": "0x40810000", "TicketEncryptionType": "0x12",
+		"IpAddress": "::ffff:192.0.2.10", "IpPort": "50123", "Status": "0x0",
+	},
 	"security_4663": {
 		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
 		"ObjectServer": "Security", "ObjectType": "File", "ObjectName": `D:\apps\work\output.txt`, "HandleId": "0x1f4",
 		"AccessList": "%%4416", "AccessMask": "0x1", "ProcessId": "0x1092", "ProcessName": `D:\apps\launcher\launcher.exe`,
+	},
+	"security_5156": {
+		"ProcessID": "4242", "Application": `\device\harddiskvolume2\apps\launcher\launcher.exe`, "Direction": "%%14593",
+		"SourceAddress": "192.0.2.10", "SourcePort": "50123", "DestAddress": "198.51.100.20", "DestPort": "8443", "Protocol": "6",
+		"FilterRTID": "70412", "LayerName": "%%14611", "LayerRTID": "48",
+	},
+	"security_5157": {
+		"ProcessID": "4242", "Application": `\device\harddiskvolume2\apps\launcher\launcher.exe`, "Direction": "%%14593",
+		"SourceAddress": "192.0.2.10", "SourcePort": "50123", "DestAddress": "198.51.100.20", "DestPort": "8443", "Protocol": "6",
+		"FilterRTID": "70413", "LayerName": "%%14611", "LayerRTID": "48",
 	},
 	"security_4697": {
 		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
