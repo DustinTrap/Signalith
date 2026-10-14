@@ -842,6 +842,14 @@ fields (replaced with stand-ins such as `masked-user-1`), and a model on your ow
 hardware, such as Ollama, keeps everything on site. See
 [docs/investigate.md](docs/investigate.md).
 
+### AI tools (MCP)
+
+`signalith mcp` is a read-only MCP server, so AI tools such as Claude Desktop, Claude
+Code or VS Code can search Signalith and read findings, cases, detections, assets and
+risk while you chat. It has no tool that changes anything, and it signs in as a
+Signalith user (a Viewer account is enough), so that user's role applies. See
+[docs/ai-tools.md](docs/ai-tools.md).
+
 ## Notifications
 
 Signalith can tell you about new findings in Slack, Microsoft Teams, email or a webhook (a
