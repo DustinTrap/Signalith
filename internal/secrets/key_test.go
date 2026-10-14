@@ -3,6 +3,8 @@ package secrets
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,6 +53,24 @@ func TestKeyAndChain(t *testing.T) {
 	}
 	if plain, err := ch.Open("opensearch.password", byMaster); plain != "os-pw" || err != nil {
 		t.Errorf("master value %q %v", plain, err)
+	}
+	// The opener is picked by the key id, whatever the order: a value of
+	// the cluster key opens even when the master key file cannot be read.
+	if plain, err := Chain(ring, k).Open("intel.feeds[otx].password", sealed); plain != "pw" || err != nil {
+		t.Errorf("ring first: %q %v", plain, err)
+	}
+	broken := NewKeyring(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(broken.DefaultPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(broken.DefaultPath(), []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broken.Open("opensearch.password", byMaster); err == nil || errors.As(err, new(*OpenError)) {
+		t.Fatalf("a broken key file: %v", err)
+	}
+	if plain, err := Chain(broken, k).Open("intel.feeds[otx].password", sealed); plain != "pw" || err != nil {
+		t.Errorf("broken ring first: %q %v", plain, err)
 	}
 	// One its key opens but finds changed is not tried further.
 	if _, err := ch.Open("another.setting", sealed); !errors.As(err, &oe) || oe.Reason == "" {

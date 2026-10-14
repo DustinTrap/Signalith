@@ -76,7 +76,7 @@ func (c *Collection[T]) List() []Item[T] {
 			continue
 		}
 		name, _ := itemName(c.kind, id)
-		out = append(out, Item[T]{Name: name, ETag: e.ver.String(), UpdatedBy: e.env.UpdatedBy, UpdatedAt: e.env.UpdatedAt, Value: nil})
+		out = append(out, Item[T]{Name: name, ETag: e.etag(), UpdatedBy: e.env.UpdatedBy, UpdatedAt: e.env.UpdatedAt, Value: nil})
 		out[len(out)-1].Value, _ = decodeBody[T](e.env.Body)
 	}
 	c.mu.Unlock()
@@ -96,7 +96,7 @@ func (c *Collection[T]) Get(name string) (*T, string, bool) {
 	if err != nil {
 		return nil, "", false
 	}
-	return v, e.ver.String(), true
+	return v, e.etag(), true
 }
 
 // OnChange adds a function called whenever items were added, changed or
@@ -131,16 +131,21 @@ func (c *Collection[T]) check(id string, src json.RawMessage) (*Envelope, *Probl
 	return e, p
 }
 
-// apply uses a copy of an item read from OpenSearch when it passes its
-// checks and nothing was applied to that item since gen. It reports
-// whether the copy was put in use.
-func (c *Collection[T]) apply(d store.Doc, gen uint64) bool {
+// apply uses a copy of an item read from the index uuid when it passes
+// its checks and nothing was applied to that item since gen. It reports
+// whether the copy was put in use, and whether it was left alone because
+// gen moved, so it must be read again.
+func (c *Collection[T]) apply(d store.Doc, uuid string, gen uint64) (used, left bool) {
 	e, p := c.check(d.ID, d.Source)
 	c.mu.Lock()
 	cur := c.items[d.ID]
-	if c.gens[d.ID] != gen || cur != nil && cur.ver.Same(d.Version) {
+	if c.gens[d.ID] != gen {
 		c.mu.Unlock()
-		return false
+		return false, true
+	}
+	if cur != nil && cur.same(uuid, d.Version) {
+		c.mu.Unlock()
+		return false, false
 	}
 	if p == nil {
 		p = c.h.checkRev(d.ID, e.Rev)
@@ -148,14 +153,14 @@ func (c *Collection[T]) apply(d store.Doc, gen uint64) bool {
 	if p != nil {
 		c.h.report(d.ID, p, d.Version)
 		c.mu.Unlock()
-		return false
+		return false, false
 	}
-	changed := c.setLocked(d.ID, &entry{env: *e, src: d.Source, ver: d.Version})
+	changed := c.setLocked(d.ID, &entry{env: *e, src: d.Source, ver: d.Version, uuid: uuid})
 	c.mu.Unlock()
 	if changed != nil {
 		changed()
 	}
-	return true
+	return true, false
 }
 
 // set puts this server's own write of item id in use, unless a later
@@ -181,26 +186,32 @@ func (c *Collection[T]) setLocked(id string, e *entry) func() {
 	return c.h.fine(id, e.env.Rev)
 }
 
-func (c *Collection[T]) restore(d store.Doc) {
+func (c *Collection[T]) restore(d store.Doc, uuid string) {
 	c.mu.Lock()
 	g := c.gens[d.ID]
 	c.mu.Unlock()
-	if c.apply(d, g) {
+	if used, _ := c.apply(d, uuid, g); used {
 		c.notify()
 	}
 }
 
-// reload lists the collection and reads the items that changed.
-func (c *Collection[T]) reload(ctx context.Context) error {
+// reload lists the collection and reads the items that changed. It
+// reports false when an item changed here while it was read, so the
+// listing must be done again.
+func (c *Collection[T]) reload(ctx context.Context) (bool, error) {
 	cl, _ := c.h.target()
 	index := c.h.index()
+	uuid, err := c.h.indexUUID(ctx)
+	if err != nil {
+		return false, err
+	}
 	// What changes during the listing is not judged by it.
 	c.mu.Lock()
 	gens := maps.Clone(c.gens)
 	c.mu.Unlock()
 	listed, err := cl.SearchVersions(ctx, index, map[string]any{"term": map[string]any{"kind": c.kind}})
 	if err != nil {
-		return err
+		return false, err
 	}
 	present := map[string]bool{}
 	var fetch []store.Ref
@@ -210,7 +221,7 @@ func (c *Collection[T]) reload(ctx context.Context) error {
 			continue
 		}
 		present[d.ID] = true
-		if cur := c.items[d.ID]; cur == nil || !cur.ver.Same(d.Version) {
+		if cur := c.items[d.ID]; cur == nil || !cur.same(uuid, d.Version) {
 			fetch = append(fetch, store.Ref{Index: index, ID: d.ID})
 		}
 	}
@@ -229,18 +240,21 @@ func (c *Collection[T]) reload(ctx context.Context) error {
 	c.mu.Unlock()
 	docs, err := cl.MGet(ctx, fetch)
 	if err != nil {
-		return err
+		return false, err
 	}
-	changed := false
+	changed, all := false, true
 	for _, d := range docs {
-		if d.Found && c.apply(d, gens[d.ID]) {
-			changed = true
+		if !d.Found {
+			continue
 		}
+		used, left := c.apply(d, uuid, gens[d.ID])
+		changed = changed || used
+		all = all && !left
 	}
 	if changed {
 		c.notify()
 	}
-	return nil
+	return all, nil
 }
 
 // usable returns the item to build a write on.
@@ -256,7 +270,7 @@ func (c *Collection[T]) usable(id string) (*entry, error) {
 // envelope makes the signed envelope of an item's new revision; v nil is
 // a tombstone.
 func (c *Collection[T]) envelope(id string, base *entry, by string, v *T) (*Envelope, error) {
-	e := &Envelope{Kind: c.kind, ID: id, Format: c.format, Rev: 1, UpdatedAt: c.h.now(),
+	e := &Envelope{Kind: c.kind, ID: id, Format: c.format, Rev: c.h.firstRev(id, true), UpdatedAt: c.h.now(),
 		UpdatedBy: By{User: by, Node: c.h.opts.NodeName}}
 	if v == nil {
 		e.Deleted = true
@@ -286,8 +300,11 @@ func (c *Collection[T]) envelope(id string, base *entry, by string, v *T) (*Enve
 // bumps the watch document. It returns the _seq_no for the page's token.
 func (c *Collection[T]) write(ctx context.Context, id string, base *entry, e *Envelope) (int64, error) {
 	cl, _ := c.h.target()
+	uuid, err := c.h.indexUUID(ctx)
+	if err != nil {
+		return 0, err
+	}
 	var ver store.Version
-	var err error
 	if base == nil {
 		ver, err = cl.Create(ctx, c.h.index(), id, e, true)
 	} else {
@@ -297,7 +314,7 @@ func (c *Collection[T]) write(ctx context.Context, id string, base *entry, e *En
 		return 0, err
 	}
 	src, _ := json.Marshal(e)
-	c.set(id, &entry{env: *e, src: src, ver: ver})
+	c.set(id, &entry{env: *e, src: src, ver: ver, uuid: uuid})
 	c.notify()
 	seq, err := c.h.bump(ctx, c.watch)
 	if err != nil {
@@ -356,6 +373,10 @@ func (c *Collection[T]) Create(ctx context.Context, by, name string, v *T) (int6
 // readOne reads item id now.
 func (c *Collection[T]) readOne(ctx context.Context, id string) error {
 	cl, _ := c.h.target()
+	uuid, err := c.h.indexUUID(ctx)
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
 	g := c.gens[id]
 	c.mu.Unlock()
@@ -363,7 +384,7 @@ func (c *Collection[T]) readOne(ctx context.Context, id string) error {
 	if err != nil || !found {
 		return err
 	}
-	if c.apply(store.Doc{Ref: store.Ref{Index: c.h.index(), ID: id}, Found: true, Version: ver, Source: src}, g) {
+	if used, _ := c.apply(store.Doc{Ref: store.Ref{Index: c.h.index(), ID: id}, Found: true, Version: ver, Source: src}, uuid, g); used {
 		c.notify()
 	}
 	return nil
@@ -389,7 +410,7 @@ func (c *Collection[T]) replace(ctx context.Context, by, name string, v *T, etag
 	if err != nil {
 		return 0, err
 	}
-	if base == nil || base.ver.String() != etag {
+	if base == nil || base.etag() != etag {
 		if err := c.readOne(ctx, id); err != nil {
 			return 0, err
 		}
@@ -400,7 +421,7 @@ func (c *Collection[T]) replace(ctx context.Context, by, name string, v *T, etag
 	if base == nil || base.env.Deleted {
 		return 0, store.ErrNotFound
 	}
-	if base.ver.String() != etag {
+	if base.etag() != etag {
 		return 0, &StaleError{By: base.env.UpdatedBy.User, Node: base.env.UpdatedBy.Node, At: base.env.UpdatedAt}
 	}
 	e, err := c.envelope(id, base, by, v)
@@ -474,41 +495,4 @@ func (c *Collection[T]) cached() []CacheDoc {
 		out = append(out, e.cacheDoc(id))
 	}
 	return out
-}
-
-// acceptRestore signs every item now in OpenSearch whose MAC verifies
-// again at rev.
-func (c *Collection[T]) acceptRestore(ctx context.Context, rev int64, by string) error {
-	cl, _ := c.h.target()
-	index := c.h.index()
-	listed, err := cl.SearchDocs(ctx, index, map[string]any{"term": map[string]any{"kind": c.kind}})
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, d := range listed {
-		if !c.owns(d.ID) {
-			continue
-		}
-		e, p := c.h.open(d.ID, c.kind, c.format, d.Source)
-		if p != nil {
-			continue
-		}
-		e.Rev, e.UpdatedAt, e.UpdatedBy = rev, c.h.now(), By{User: by, Node: c.h.opts.NodeName}
-		if err := Sign(c.h.Keys().Active(), d.ID, e); err != nil {
-			return err
-		}
-		nv, err := cl.PutIf(ctx, index, d.ID, e, d.Version, true)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", d.ID, err))
-			continue
-		}
-		src, _ := json.Marshal(e)
-		c.set(d.ID, &entry{env: *e, src: src, ver: nv})
-	}
-	if _, err := c.h.bump(ctx, c.watch); err != nil {
-		errs = append(errs, err)
-	}
-	c.notify()
-	return errors.Join(errs...)
 }

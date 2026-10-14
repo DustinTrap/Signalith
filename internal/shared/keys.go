@@ -83,7 +83,8 @@ func ClusterKeyFrom(raw []byte) (*ClusterKey, error) {
 
 // KeyFromFile reads a cluster key file, as SIGNALITH_CLUSTER_KEY_FILE
 // names one: one line of base64 of the 32 bytes, with optional # comment
-// lines.
+// lines. The caller shows KeyFileWarning(path) with the master key's
+// warnings.
 func KeyFromFile(path string) (*ClusterKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -96,6 +97,14 @@ func KeyFromFile(path string) (*ClusterKey, error) {
 	}
 	defer clear(raw)
 	return ClusterKeyFrom(raw)
+}
+
+// KeyFileWarning says what is wrong with who may read a cluster key file
+// (on Unix: other accounts can, or another account owns it), or "". The
+// file makes whoever reads it a member of the cluster, so it is worth
+// more than the master key.
+func KeyFileWarning(path string) string {
+	return secrets.KeyFileWarning("The cluster key file", path)
 }
 
 // parseKeyText reads one line of base64, with optional # comment lines.
@@ -148,14 +157,19 @@ func (k *ClusterKey) sub(info string) []byte {
 	return b
 }
 
-// KeySet holds the cluster keys this server has: the active one, which
-// signs, and older ones, which still verify.
+// KeySet holds the cluster keys whose MACs this server accepts: the
+// active one, which signs, and during a key rotation the other one the
+// signed keyring names (its next or, until every server has moved,
+// previous key).
 type KeySet struct {
 	active *ClusterKey
 	byID   map[string]*ClusterKey
 }
 
-// NewKeySet returns a set whose active key is active.
+// NewKeySet returns a set whose active key is active. others are only
+// the keys the keyring accepts now: a retired key, which a removed server
+// may still have, must not be passed, even though its file is kept to
+// open old archives and secrets (KeyStore.ClusterKeys returns them all).
 func NewKeySet(active *ClusterKey, others ...*ClusterKey) *KeySet {
 	s := &KeySet{active: active, byID: map[string]*ClusterKey{}}
 	for _, k := range append([]*ClusterKey{active}, others...) {
@@ -589,7 +603,9 @@ func ImportKey(text string, passphrase []byte) (*ClusterKey, error) {
 	if err := json.Unmarshal([]byte(text), &f); err != nil || f.Format != exportFormat {
 		return nil, errors.New("this is not a cluster key exported by signalith cluster export-key")
 	}
-	if f.KDF.Name != "scrypt" || f.KDF.N < 2 || f.KDF.N > 1<<22 || f.KDF.R < 1 || f.KDF.R > 32 || f.KDF.P < 1 || f.KDF.P > 16 {
+	// The cost is read from the text, which may be damaged or made up:
+	// near what ExportKey writes, scrypt needs at most 256 MiB.
+	if f.KDF.Name != "scrypt" || f.KDF.N < 2 || f.KDF.N > 1<<18 || f.KDF.R < 1 || f.KDF.R > 8 || f.KDF.P < 1 || f.KDF.P > 2 {
 		return nil, errors.New("the exported key names a key derivation this version does not use")
 	}
 	salt, err := base64.StdEncoding.DecodeString(f.KDF.Salt)

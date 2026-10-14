@@ -3,6 +3,7 @@ package secrets
 import (
 	"errors"
 	"fmt"
+	"os"
 )
 
 // Key is a key other than the master key that encrypts values the same
@@ -63,16 +64,39 @@ func (k *Key) Open(field, stored string) (string, error) {
 	return plain, nil
 }
 
+// Holds reports whether the key's id is id.
+func (k *Key) Holds(id string) bool { return k.m.id == id }
+
+// KeyFileWarning says what is wrong with who may use a key file other
+// than the master key's, such as the cluster key file, which what names
+// ("The cluster key file"): "" when nothing is, when it cannot be read,
+// and on Windows, where the file's access list is set when it is made.
+func KeyFileWarning(what, path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fileWarning(what, path, st)
+}
+
 // Opener decrypts stored values; *Keyring and *Key are openers.
 type Opener interface {
 	Open(field, stored string) (string, error)
 }
 
-// Chain returns an opener that opens a value with whichever of openers
-// holds the key it was encrypted with, tried in order: a value of the
-// cluster key with the cluster key, one of the master key with the master
-// key. A value one of them holds the key for but cannot open (changed, or
-// copied from another setting) is not tried with the others.
+// holder is an opener that can tell which key ids it holds without
+// reading anything, as *Key can.
+type holder interface {
+	Holds(id string) bool
+}
+
+// Chain returns an opener that opens a value by its key id: with the
+// opener that holds that key (a *Key), and otherwise with the others in
+// order, such as the master Keyring, which reads its key files to know.
+// So a value of the cluster key opens with it even when the master key
+// file cannot be read. A value one of them holds the key for but cannot
+// open (changed, or copied from another setting) is not tried with the
+// others.
 func Chain(openers ...Opener) Opener { return chain(openers) }
 
 type chain []Opener
@@ -81,8 +105,18 @@ func (c chain) Open(field, stored string) (string, error) {
 	if !IsSealed(stored) {
 		return stored, nil
 	}
-	var last error = &OpenError{Field: field, KeyID: KeyID(stored)}
+	id := KeyID(stored)
 	for _, o := range c {
+		if h, ok := o.(holder); ok && h.Holds(id) {
+			return o.Open(field, stored)
+		}
+	}
+	var last error = &OpenError{Field: field, KeyID: id}
+	for _, o := range c {
+		if _, ok := o.(holder); ok {
+			// It does not hold the key.
+			continue
+		}
 		plain, err := o.Open(field, stored)
 		if err == nil {
 			return plain, nil

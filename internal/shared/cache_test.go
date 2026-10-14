@@ -56,7 +56,8 @@ func TestCacheRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Docs) != 2 || d.Floors["retention"] != 2 || d.MaxRev != 2 || d.IndexUUID == "" || d.AppliedSeq == 0 {
+	// A new item starts above every revision applied here.
+	if len(d.Docs) != 2 || d.Floors["retention"] != 2 || d.Floors["user:jlee"] != 3 || d.MaxRev != 3 || d.IndexUUID == "" || d.AppliedSeq == 0 {
 		t.Errorf("cache %+v", d)
 	}
 
@@ -73,7 +74,7 @@ func TestCacheRoundTrip(t *testing.T) {
 	if v, _, ok := cb.Get("jlee"); !ok || v.Name != "J. Lee" {
 		t.Errorf("restored item %+v %v", v, ok)
 	}
-	if b.MaxRev() != 2 || len(b.Problems()) != 0 {
+	if b.MaxRev() != 3 || len(b.Problems()) != 0 {
 		t.Errorf("max rev %d, problems %+v", b.MaxRev(), b.Problems())
 	}
 	// A cache whose documents were changed is not trusted either.
@@ -97,6 +98,20 @@ func TestCacheRoundTrip(t *testing.T) {
 	if _, err := other.Read(e.clock.Now()); !errors.Is(err, ErrCacheOther) {
 		t.Errorf("other prefix: %v", err)
 	}
+	// The header is sealed with the rest: a cache.enc relabelled as
+	// another cluster's or prefix's does not open.
+	other.Path = filepath.Join(state, "relabelled.enc")
+	relabelled := strings.Replace(string(raw), `"prefix": "`+testPrefix+`"`, `"prefix": "other"`, 1)
+	if relabelled == string(raw) {
+		t.Fatalf("no prefix in:\n%s", raw)
+	}
+	if err := os.WriteFile(other.Path, []byte(relabelled), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var oe *secrets.OpenError
+	if _, err := other.Read(e.clock.Now()); !errors.As(err, &oe) {
+		t.Errorf("relabelled: %v", err)
+	}
 	if err := c.Remove(); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +134,7 @@ func TestCacheResealedByRotateMaster(t *testing.T) {
 	}
 	data, _ := os.ReadFile(c.Path)
 	next, n, err := ResealCacheFile(data, func(s secrets.Stored) (string, error) {
-		if s.Field != cacheField || !strings.Contains(s.Label, "shared settings") {
+		if s.Field != cacheField("", testPrefix) || !strings.Contains(s.Label, "shared settings") {
 			t.Errorf("stored %+v", s)
 		}
 		plain, err := master.Open(s.Field, s.Value)
@@ -172,17 +187,33 @@ func TestCacheWriterWritesAfterChanges(t *testing.T) {
 		d, err := c.Read(e.clock.Now())
 		return err == nil && len(d.Docs) == 1
 	})
-	// The next change waits for CacheEvery, then is written; one left
-	// at the end is written as the writer stops.
+	// The next change waits for CacheEvery, then is written.
+	floor := func() int64 {
+		d, err := c.Read(e.clock.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.Floors["retention"]
+	}
+	waitFor(t, func() bool { return e.clock.Waiting() > 0 })
 	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "second"; return nil }); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(50 * time.Millisecond)
+	if n := floor(); n != 1 {
+		t.Fatalf("written before CacheEvery: floor %d", n)
+	}
+	e.clock.Advance(DefaultTiming.CacheEvery)
+	waitFor(t, func() bool { return floor() == 2 })
+	// One left at the end is written as the writer stops.
 	waitFor(t, func() bool { return e.clock.Waiting() > 0 })
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "third"; return nil }); err != nil {
+		t.Fatal(err)
+	}
 	cancel()
 	<-done
-	d, err := c.Read(e.clock.Now())
-	if err != nil || d.Floors["retention"] != 2 {
-		t.Errorf("after stop: %+v %v", d, err)
+	if n := floor(); n != 3 {
+		t.Errorf("after stop: floor %d", n)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,5 +179,91 @@ func TestRequestsForOneServer(t *testing.T) {
 	(&Runner{Requests: rb, Lease: notLeader, Handlers: h}).RunOnce(ctx)
 	if got, _, _ := ra.Get(ctx, req.ID); got.State != RequestDone || ranOn != "n_b" {
 		t.Errorf("%+v ran on %q", got, ranOn)
+	}
+}
+
+// A request for several servers in sequence: each acts once the one
+// before it is over, or has been offline long enough; a failure stops
+// the servers after it.
+func TestRequestsInSequence(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	runners := map[string]*Runner{}
+	var order []string
+	offline := map[string]bool{}
+	fail := map[string]bool{}
+	notLeader := func() (int64, bool) { return 0, false }
+	for _, id := range []string{"n_a", "n_b", "n_c"} {
+		runners[id] = &Runner{Requests: NewRequests(a, id), Lease: notLeader,
+			Offline: func(n string) bool { return offline[n] },
+			Handlers: map[string]Handler{"restart": func(ctx context.Context, r *Request) error {
+				order = append(order, id)
+				if fail[id] {
+					return errors.New("did not come back")
+				}
+				return nil
+			}}}
+	}
+	ra := runners["n_a"].Requests
+	runAll := func(ids ...string) {
+		for _, id := range ids {
+			if _, err := runners[id].RunOnce(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	req, err := ra.SubmitTo(ctx, "restart", []string{"n_a", "n_b", "n_c"}, true, nil, "sam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// n_c and n_b wait for the ones before them.
+	runAll("n_c", "n_b")
+	if len(order) != 0 {
+		t.Fatalf("ran early: %v", order)
+	}
+	runAll("n_a", "n_c", "n_b", "n_c")
+	got, _, _ := ra.Get(ctx, req.ID)
+	if !slices.Equal(order, []string{"n_a", "n_b", "n_c"}) || got.State != RequestDone || got.Finished == nil {
+		t.Errorf("order %v, %+v", order, got)
+	}
+	for _, id := range got.Targets {
+		if got.Status[id] != RequestDone {
+			t.Errorf("status %v", got.Status)
+		}
+	}
+
+	// n_a is offline: n_b goes on without it.
+	order = nil
+	offline["n_a"] = true
+	req, _ = ra.SubmitTo(ctx, "restart", []string{"n_a", "n_b"}, true, nil, "sam")
+	runAll("n_b")
+	got, _, _ = ra.Get(ctx, req.ID)
+	if !slices.Equal(order, []string{"n_b"}) || got.Status["n_a"] != RequestSkipped || got.State != RequestDone {
+		t.Errorf("order %v, %+v", order, got)
+	}
+
+	// A failure stops the sequence.
+	order, offline = nil, map[string]bool{}
+	fail["n_a"] = true
+	req, _ = ra.SubmitTo(ctx, "restart", []string{"n_a", "n_b"}, true, nil, "sam")
+	runAll("n_a", "n_b")
+	got, _, _ = ra.Get(ctx, req.ID)
+	if !slices.Equal(order, []string{"n_a"}) || got.State != RequestFailed || got.Status["n_a"] != RequestFailed ||
+		!strings.Contains(got.Error, "n_a: did not come back") {
+		t.Errorf("order %v, %+v", order, got)
+	}
+
+	// Not in sequence: each runs its part when it can.
+	order = nil
+	req, _ = ra.SubmitTo(ctx, "restart", []string{"n_b", "n_c"}, false, nil, "sam")
+	runAll("n_c")
+	if got, _, _ = ra.Get(ctx, req.ID); got.State != RequestQueued || got.Status["n_c"] != RequestDone {
+		t.Errorf("%+v", got)
+	}
+	runAll("n_b", "n_b")
+	if got, _, _ = ra.Get(ctx, req.ID); got.State != RequestDone || !slices.Equal(order, []string{"n_c", "n_b"}) {
+		t.Errorf("order %v, %+v", order, got)
 	}
 }

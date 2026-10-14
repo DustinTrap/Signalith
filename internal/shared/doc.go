@@ -12,12 +12,29 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
-// entry is a document as applied: its envelope, its stored source and its
-// version.
+// entry is a document as applied: its envelope, its stored source, its
+// version and the uuid of the index it was read from or written to.
 type entry struct {
-	env Envelope
-	src json.RawMessage
-	ver store.Version
+	env  Envelope
+	src  json.RawMessage
+	ver  store.Version
+	uuid string
+}
+
+// same reports whether the entry is the copy at version v of the index
+// uuid. A version alone does not tell: an index made again starts its
+// sequence numbers over.
+func (e *entry) same(uuid string, v store.Version) bool {
+	return e.uuid == uuid && e.ver.Same(v)
+}
+
+// etag is the entry's ETag, "<seq_no>.<primary term>.<index uuid>", so
+// that one read before the index was made again never matches.
+func (e *entry) etag() string {
+	if e.uuid == "" {
+		return e.ver.String()
+	}
+	return e.ver.String() + "." + e.uuid
 }
 
 // cacheDoc returns the entry as cache.enc keeps it.
@@ -116,14 +133,14 @@ func (d *Doc[T]) Get() (*T, bool) {
 }
 
 // ETag returns the version of the copy in memory, "<seq_no>.<primary
-// term>", or "" when there is none.
+// term>.<index uuid>", or "" when there is none.
 func (d *Doc[T]) ETag() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.cur == nil {
 		return ""
 	}
-	return d.cur.ver.String()
+	return d.cur.etag()
 }
 
 // Updated returns who changed the document last, on which server and
@@ -145,12 +162,12 @@ func (d *Doc[T]) OnChange(fn func(old, new *T)) {
 	d.subs = append(d.subs, fn)
 }
 
-// apply checks a copy read from OpenSearch and uses it when it passes.
-// A copy read before gen moved (another copy was applied since) is left
-// for the next read. The decision is made under d.mu, so a write of this
-// server's own cannot slip in between the check of the revision and its
-// use.
-func (d *Doc[T]) apply(doc store.Doc, gen uint64) {
+// apply checks a copy read from the index uuid and uses it when it
+// passes. A copy read before gen moved (another copy was applied since)
+// is left for the next read, and apply reports false. The decision is
+// made under d.mu, so a write of this server's own cannot slip in
+// between the check of the revision and its use.
+func (d *Doc[T]) apply(doc store.Doc, uuid string, gen uint64) bool {
 	var e *Envelope
 	var p *Problem
 	if doc.Found {
@@ -161,16 +178,20 @@ func (d *Doc[T]) apply(doc store.Doc, gen uint64) {
 		}
 	}
 	d.mu.Lock()
-	if d.g != gen || d.cur != nil && doc.Found && d.cur.ver.Same(doc.Version) {
+	if d.g != gen {
 		d.mu.Unlock()
-		return
+		return false
+	}
+	if d.cur != nil && doc.Found && d.cur.same(uuid, doc.Version) {
+		d.mu.Unlock()
+		return true
 	}
 	if !doc.Found {
 		if d.cur != nil {
 			d.h.report(d.id, &Problem{Kind: ProblemTamper, Reason: "it was deleted in OpenSearch outside Signalith"}, store.Version{})
 		}
 		d.mu.Unlock()
-		return
+		return true
 	}
 	if p == nil {
 		p = d.h.checkRev(d.id, e.Rev)
@@ -178,9 +199,10 @@ func (d *Doc[T]) apply(doc store.Doc, gen uint64) {
 	if p != nil {
 		d.h.report(d.id, p, doc.Version)
 		d.mu.Unlock()
-		return
+		return true
 	}
-	d.setLocked(&entry{env: *e, src: doc.Source, ver: doc.Version}, false)
+	d.setLocked(&entry{env: *e, src: doc.Source, ver: doc.Version, uuid: uuid}, false)
+	return true
 }
 
 func (d *Doc[T]) decode(e *Envelope) (*T, error) {
@@ -240,12 +262,16 @@ func (d *Doc[T]) Load(ctx context.Context) error {
 
 func (d *Doc[T]) reload(ctx context.Context) error {
 	c, _ := d.h.target()
+	uuid, err := d.h.indexUUID(ctx)
+	if err != nil {
+		return err
+	}
 	g := d.gen()
 	src, ver, found, err := c.Get(ctx, d.h.index(), d.id)
 	if err != nil {
 		return err
 	}
-	d.apply(store.Doc{Ref: store.Ref{Index: d.h.index(), ID: d.id}, Found: found, Version: ver, Source: src}, g)
+	d.apply(store.Doc{Ref: store.Ref{Index: d.h.index(), ID: d.id}, Found: found, Version: ver, Source: src}, uuid, g)
 	return nil
 }
 
@@ -270,7 +296,7 @@ func (d *Doc[T]) envelope(base *entry, by string, v *T) (*Envelope, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &Envelope{Kind: d.kind, ID: d.id, Format: d.format, Rev: 1, UpdatedAt: d.h.now(),
+	e := &Envelope{Kind: d.kind, ID: d.id, Format: d.format, Rev: d.h.firstRev(d.id, false), UpdatedAt: d.h.now(),
 		UpdatedBy: By{User: by, Node: d.h.opts.NodeName}, Body: body}
 	if base != nil {
 		e.Rev, e.Extra = base.env.Rev+1, base.env.Extra
@@ -291,8 +317,11 @@ func (d *Doc[T]) envelope(base *entry, by string, v *T) (*Envelope, error) {
 // write writes e over base (create when base is nil) and applies it.
 func (d *Doc[T]) write(ctx context.Context, base *entry, e *Envelope) (int64, error) {
 	c, _ := d.h.target()
+	uuid, err := d.h.indexUUID(ctx)
+	if err != nil {
+		return 0, err
+	}
 	var ver store.Version
-	var err error
 	if base == nil {
 		ver, err = c.Create(ctx, d.h.index(), d.id, e, false)
 		if errors.Is(err, store.ErrExists) {
@@ -305,7 +334,7 @@ func (d *Doc[T]) write(ctx context.Context, base *entry, e *Envelope) (int64, er
 		return 0, err
 	}
 	src, _ := json.Marshal(e)
-	d.set(&entry{env: *e, src: src, ver: ver})
+	d.set(&entry{env: *e, src: src, ver: ver, uuid: uuid})
 	return ver.SeqNo, nil
 }
 
@@ -371,7 +400,7 @@ func (d *Doc[T]) SaveIf(ctx context.Context, by string, v *T, etag string) (int6
 	if err != nil {
 		return 0, err
 	}
-	if base == nil || base.ver.String() != etag {
+	if base == nil || base.etag() != etag {
 		// Memory may be behind OpenSearch: read it.
 		if err := d.reload(ctx); err != nil {
 			return 0, err
@@ -380,7 +409,7 @@ func (d *Doc[T]) SaveIf(ctx context.Context, by string, v *T, etag string) (int6
 			return 0, err
 		}
 	}
-	if base == nil && etag != "" || base != nil && base.ver.String() != etag {
+	if base == nil && etag != "" || base != nil && base.etag() != etag {
 		return 0, d.stale(base)
 	}
 	e, err := d.envelope(base, by, v)
@@ -416,14 +445,11 @@ func (d *Doc[T]) Create(ctx context.Context, by string, v *T) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	c, _ := d.h.target()
-	ver, err := c.Create(ctx, d.h.index(), d.id, e, false)
-	if err != nil {
-		return 0, err
+	seq, err := d.write(ctx, nil, e)
+	if errors.Is(err, store.ErrConflict) {
+		err = store.ErrExists
 	}
-	src, _ := json.Marshal(e)
-	d.set(&entry{env: *e, src: src, ver: ver})
-	return ver.SeqNo, nil
+	return seq, err
 }
 
 func (d *Doc[T]) cached() []CacheDoc {
@@ -433,29 +459,4 @@ func (d *Doc[T]) cached() []CacheDoc {
 		return nil
 	}
 	return []CacheDoc{d.cur.cacheDoc(d.id)}
-}
-
-// acceptRestore signs the copy in OpenSearch again at rev, when its MAC
-// verifies.
-func (d *Doc[T]) acceptRestore(ctx context.Context, rev int64, by string) error {
-	c, _ := d.h.target()
-	src, ver, found, err := c.Get(ctx, d.h.index(), d.id)
-	if err != nil || !found {
-		return err
-	}
-	e, p := d.h.open(d.id, d.kind, d.format, src)
-	if p != nil {
-		return nil
-	}
-	e.Rev, e.UpdatedAt, e.UpdatedBy = rev, d.h.now(), By{User: by, Node: d.h.opts.NodeName}
-	if err := Sign(d.h.Keys().Active(), d.id, e); err != nil {
-		return err
-	}
-	nv, err := c.PutIf(ctx, d.h.index(), d.id, e, ver, false)
-	if err != nil {
-		return fmt.Errorf("%s: %w", d.id, err)
-	}
-	nsrc, _ := json.Marshal(e)
-	d.set(&entry{env: *e, src: nsrc, ver: nv})
-	return nil
 }

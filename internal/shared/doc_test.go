@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/jrsamsanchez/signalith/internal/cluster/ostest"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
@@ -324,13 +327,17 @@ func TestNewerDocumentsNeedAnUpgrade(t *testing.T) {
 	if v, _ := d.Get(); v.Name != "v1" || !strings.Contains(a.Problems()[0].Reason, `"settings-v9"`) {
 		t.Errorf("unknown kind: %+v %+v", v, a.Problems())
 	}
-	// A MAC of a newer kind.
+	// A MAC of a newer form is not signed itself, so anyone could write
+	// one with any body: it is tamper, an audit event, not "upgrade".
 	src := e.os.Source(testIndex, "settings")
-	src["mac"] = "m2:abcdef01:xyz"
+	src["mac"], src["body"] = "m2:abcdef01:xyz", `{"name":"evil"}`
 	e.os.Put(testIndex, "settings", src)
 	cycle(t, a)
-	if !slices.Equal(a.NeedsUpgrade(), []string{"settings"}) || len(a.Tamper()) != 0 {
+	if !slices.Equal(a.Tamper(), []string{"settings"}) || len(a.NeedsUpgrade()) != 0 {
 		t.Errorf("m2: needs upgrade %v, tamper %v", a.NeedsUpgrade(), a.Tamper())
+	}
+	if v, _ := d.Get(); v.Name != "v1" {
+		t.Errorf("m2 copy used: %+v", v)
 	}
 }
 
@@ -415,5 +422,132 @@ func TestDocValidate(t *testing.T) {
 	cycle(t, a)
 	if v, _ := d.Get(); v.Name != "ok" || len(a.Problems()) != 1 || a.Problems()[0].Kind != ProblemInvalid {
 		t.Errorf("%+v %+v", v, a.Problems())
+	}
+}
+
+// A copy read while this server wrote the document is left alone, and
+// read again at the next cycle rather than taken as seen.
+func TestDocCopyLeftDuringOwnWriteIsReadAgain(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	da := NewDoc[testBody](a, "feeds", "feeds", 1)
+	db := NewDoc[testBody](b, "feeds", "feeds", 1)
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "v1"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	cycle(t, b)
+	// Once a's cycle has taken the document's generation: a writes v2,
+	// then b writes v3 on top of it, which a's cycle reads.
+	var armed atomic.Bool
+	armed.Store(true)
+	e.os.SetFault(func(method, path string) *ostest.Fault {
+		if method != http.MethodGet || !strings.HasSuffix(path, "/_settings") || !armed.Swap(false) {
+			return nil
+		}
+		if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "v2-a"; return nil }); err != nil {
+			t.Error(err)
+		}
+		if _, err := db.Mutate(ctx, "bob", func(v *testBody) error { v.Name = "v3-b"; return nil }); err != nil {
+			t.Error(err)
+		}
+		return nil
+	})
+	cycle(t, a)
+	e.os.SetFault(nil)
+	cycle(t, a)
+	if v, _ := da.Get(); v.Name != "v3-b" {
+		t.Errorf("a keeps %+v", v)
+	}
+	if _, err := db.Mutate(ctx, "bob", func(v *testBody) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// After the config index is made again, a copy at the same version as
+// the old index's is still read, and an ETag of the old index never
+// matches.
+func TestDocInAnIndexMadeAgain(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	da := NewDoc[testBody](a, "settings", "settings", 1)
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "old"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	oldTag := da.ETag()
+	if err := e.c.Do(ctx, http.MethodDelete, "/"+testIndex, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureConfig(ctx, e.c, testPrefix); err != nil {
+		t.Fatal(err)
+	}
+	e.putSigned(e.key, "settings", "settings", 1, 5, `{"name":"new"}`, nil)
+	if ver := e.os.Source(testIndex, "settings"); ver == nil {
+		t.Fatal("not put")
+	}
+	cycle(t, a)
+	if v, _ := da.Get(); v.Name != "new" {
+		t.Errorf("a keeps %+v", v)
+	}
+	if da.ETag() == oldTag {
+		t.Errorf("same ETag %q in both indices", oldTag)
+	}
+	if _, err := da.SaveIf(ctx, "sam", &testBody{Name: "lost"}, oldTag); !errors.As(err, new(*StaleError)) {
+		t.Errorf("save with the old index's ETag: %v", err)
+	}
+}
+
+// A document refused because this server lacked its key is used once
+// the key arrives.
+func TestDocUsedOnceItsKeyArrives(t *testing.T) {
+	e := newEnv(t)
+	a, _ := e.hub("siem-a")
+	d := NewDoc[testBody](a, "settings", "settings", 1)
+	k2, _ := NewClusterKey()
+	e.putSigned(k2, "settings", "settings", 1, 1, `{"name":"rotated"}`, nil)
+	a.SetListed([]string{e.key.ID(), k2.ID()})
+	cycle(t, a)
+	if !slices.Equal(a.KeyMissing(), []string{"settings"}) || len(a.Tamper()) != 0 {
+		t.Fatalf("key missing %v, tamper %v", a.KeyMissing(), a.Tamper())
+	}
+	a.SetKeys(NewKeySet(k2, e.key))
+	cycle(t, a)
+	if v, ok := d.Get(); !ok || v.Name != "rotated" || len(a.Problems()) != 0 {
+		t.Errorf("%+v %v, problems %+v", v, ok, a.Problems())
+	}
+}
+
+// accept-restore signs again documents only another server follows.
+func TestAcceptRestoreOfAnotherServersDocument(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	da := NewDoc[testBody](a, "nodecfg:n_a", "nodecfg", 1)
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "one"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	old := e.os.Source(testIndex, "nodecfg:n_a")
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "two"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	e.os.Put(testIndex, "nodecfg:n_a", old)
+	cycle(t, a)
+	if !slices.Equal(a.Tamper(), []string{"nodecfg:n_a"}) {
+		t.Fatalf("tamper %v", a.Tamper())
+	}
+	if err := b.AcceptRestore(ctx, "sam", a.MaxRev()); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, a)
+	if v, _ := da.Get(); len(a.Tamper()) != 0 || v.Name != "one" {
+		t.Errorf("a: %+v, tamper %v", v, a.Tamper())
+	}
+	if _, _, rev := da.Updated(); rev != 3 {
+		t.Errorf("rev %d", rev)
 	}
 }

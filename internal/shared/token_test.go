@@ -3,10 +3,14 @@ package shared
 import (
 	"context"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/cluster/ostest"
 )
 
 func TestTokenFollowsWrites(t *testing.T) {
@@ -27,8 +31,12 @@ func TestTokenFollowsWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok := a.TokenAfter(seq)
-	if tok != a.Token() || !strings.HasSuffix(tok, "."+strconv.FormatInt(seq, 10)) {
-		t.Errorf("token %q, after %q", a.Token(), tok)
+	if !strings.HasSuffix(tok, "."+strconv.FormatInt(seq, 10)) {
+		t.Errorf("token after %q", tok)
+	}
+	// The writer's own token reaches it at its next cycle.
+	if stale := a.Wait(ctx, tok); stale || a.Token() != tok {
+		t.Errorf("a %q, stale %v, after %q", a.Token(), stale, tok)
 	}
 	if !b.behind(tok) {
 		t.Fatalf("b at %q is not behind %q", before, tok)
@@ -106,6 +114,7 @@ func TestTokenOfAnotherIndexIsIgnored(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	cycle(t, a)
 	old := a.Token()
 	oldUUID, oldSeq, _ := ParseToken(old)
 	if err := e.c.Do(ctx, http.MethodDelete, "/"+testIndex, nil, nil); err != nil {
@@ -131,5 +140,108 @@ func TestTokenOfAnotherIndexIsIgnored(t *testing.T) {
 	cycle(t, a)
 	if u, _, _ := ParseToken(a.Token()); u != newUUID {
 		t.Errorf("a %q", a.Token())
+	}
+}
+
+// A server's own write does not make its token claim the writes of other
+// servers it has not read yet.
+func TestTokenOnlyCountsWhatWasRead(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	ax := NewDoc[testBody](a, "x", "x", 1)
+	ay := NewDoc[testBody](a, "y", "y", 1)
+	NewDoc[testBody](b, "x", "x", 1)
+	by := NewDoc[testBody](b, "y", "y", 1)
+	cycle(t, a)
+	cycle(t, b)
+	seqY, err := by.Mutate(ctx, "bob", func(v *testBody) error { v.Name = "from b"; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokY := b.TokenAfter(seqY)
+	if _, err := ax.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "from a"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !a.behind(tokY) {
+		t.Fatalf("a %q claims %q before reading y", a.Token(), tokY)
+	}
+	if stale := a.Wait(ctx, tokY); stale {
+		t.Error("stale after one cycle")
+	}
+	if v, _ := ay.Get(); v.Name != "from b" {
+		t.Errorf("a serves y %+v at token %q", v, a.Token())
+	}
+}
+
+// A collection that fails to reload holds the token back, even when
+// other documents moved in the same cycle.
+func TestTokenWaitsForAFailedReload(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	ca := NewCollection[testBody](a, "user", "users", 1)
+	NewCollection[testBody](b, "user", "users", 1)
+	da := NewDoc[testBody](a, "settings", "settings", 1)
+	NewDoc[testBody](b, "settings", "settings", 1)
+	cycle(t, a)
+	cycle(t, b)
+	seq, err := ca.Create(ctx, "sam", "jlee", &testBody{Name: "J. Lee"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := a.TokenAfter(seq)
+	if _, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "later"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	var fail atomic.Bool
+	fail.Store(true)
+	e.os.SetFault(func(method, path string) *ostest.Fault {
+		if fail.Load() && strings.Contains(path, "/_search") {
+			return &ostest.Fault{Status: http.StatusServiceUnavailable, Type: "unavailable"}
+		}
+		return nil
+	})
+	if err := b.Cycle(ctx); err == nil {
+		t.Fatal("no error from the failed reload")
+	}
+	if !b.behind(tok) {
+		t.Errorf("b %q is not behind %q after a failed reload", b.Token(), tok)
+	}
+	fail.Store(false)
+	cycle(t, b)
+	if b.behind(tok) {
+		t.Errorf("b %q is behind %q", b.Token(), tok)
+	}
+}
+
+// A request waiting for a cycle while another runs gives up at
+// Timing.Wait, and leaves nothing behind.
+func TestWaitGivesUpOnASlowCycle(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	a.opts.Timing.Wait = 50 * time.Millisecond
+	da := NewDoc[testBody](a, "settings", "settings", 1)
+	cycle(t, a)
+	seq, err := da.Mutate(ctx, "sam", func(v *testBody) error { v.Name = "x"; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := a.TokenAfter(seq)
+	// A cycle stuck on OpenSearch.
+	a.cycling <- struct{}{}
+	before := runtime.NumGoroutine()
+	for range 5 {
+		if stale := a.Wait(ctx, tok); !stale {
+			t.Fatal("not stale while the cycle is stuck")
+		}
+	}
+	waitFor(t, func() bool { return runtime.NumGoroutine() <= before })
+	<-a.cycling
+	if stale := a.Wait(ctx, tok); stale {
+		t.Error("stale once the cycle is free")
 	}
 }

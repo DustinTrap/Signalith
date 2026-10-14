@@ -103,20 +103,25 @@ type tracked interface {
 	// gen is a counter that moves on every change applied, so a read
 	// made before a change is not applied after it.
 	gen() uint64
-	apply(d store.Doc, gen uint64)
+	// apply checks a copy read from the index uuid and uses it, or
+	// refuses it. It reports false when it left the copy alone because
+	// gen moved: that copy must be read again.
+	apply(d store.Doc, uuid string, gen uint64) bool
+	reload(ctx context.Context) error
 	cached() []CacheDoc
-	acceptRestore(ctx context.Context, rev int64, by string) error
 }
 
 // collection is a collection the watcher reloads when its watch
 // document changes.
 type collection interface {
 	watchID() string
-	reload(ctx context.Context) error
+	// reload lists the collection again. It reports false when an item
+	// read was left alone because it changed meanwhile, so the listing
+	// must be done again.
+	reload(ctx context.Context) (bool, error)
 	owns(id string) bool
-	restore(d store.Doc)
+	restore(d store.Doc, uuid string)
 	cached() []CacheDoc
-	acceptRestore(ctx context.Context, rev int64, by string) error
 }
 
 // Hub is this server's copy of the shared configuration: it holds the
@@ -135,8 +140,9 @@ type Hub struct {
 	clock Clock
 	log   *slog.Logger
 
-	// cycleMu lets one watch cycle run at a time.
-	cycleMu sync.Mutex
+	// cycling holds a token while a watch cycle runs, so one runs at a
+	// time and a request waiting for its turn can give up (Wait).
+	cycling chan struct{}
 
 	mu     sync.Mutex
 	client *store.Client
@@ -144,8 +150,11 @@ type Hub struct {
 	keys   *KeySet
 	listed map[string]bool
 	uuid   string
-	// applied is the highest _seq_no among the tracked documents applied,
-	// -1 before any (the first document of an index has 0).
+	// applied is how far this server has read, as a _seq_no: the highest
+	// one among the versions of a cycle that applied (or refused) every
+	// change it found, so every write up to it is reflected here. Only the
+	// watcher moves it; -1 before any (the first document of an index has
+	// 0).
 	applied int64
 	// seen is the last version read of each tracked document; a missing
 	// entry was never read, a zero version was read missing.
@@ -170,7 +179,7 @@ func NewHub(opts Options) *Hub {
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)
 	}
-	return &Hub{opts: opts, clock: opts.Clock, log: opts.Log, applied: -1, seen: map[string]store.Version{}, floors: map[string]int64{},
+	return &Hub{opts: opts, clock: opts.Clock, log: opts.Log, applied: -1, cycling: make(chan struct{}, 1), seen: map[string]store.Version{}, floors: map[string]int64{},
 		problems: map[string]*Problem{}, singles: map[string]tracked{}, listed: map[string]bool{}}
 }
 
@@ -185,11 +194,13 @@ func (h *Hub) Use(c *store.Client, prefix string) {
 	h.client, h.prefix = c, prefix
 }
 
-// SetKeys sets the cluster keys.
+// SetKeys sets the cluster keys. Every document is read again at the
+// next cycle, so one refused for a key this server lacked is used now.
 func (h *Hub) SetKeys(k *KeySet) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.keys = k
+	h.seen = map[string]store.Version{}
 }
 
 // Keys returns the cluster keys.
@@ -209,6 +220,7 @@ func (h *Hub) SetListed(kids []string) {
 	for _, k := range kids {
 		h.listed[k] = true
 	}
+	h.seen = map[string]store.Version{}
 }
 
 // OnApplied sets a function called after something new was applied.
@@ -227,6 +239,28 @@ func (h *Hub) target() (*store.Client, string) {
 func (h *Hub) index() string {
 	_, p := h.target()
 	return ConfigIndex(p)
+}
+
+// indexUUID returns the uuid of the config index, reading it when this
+// server has not yet. Copies are told apart by it as well as by their
+// version, which starts over in an index made again.
+func (h *Hub) indexUUID(ctx context.Context) (string, error) {
+	h.mu.Lock()
+	u, c, prefix := h.uuid, h.client, h.prefix
+	h.mu.Unlock()
+	if u != "" {
+		return u, nil
+	}
+	u, err := IndexUUID(ctx, c, prefix)
+	if err != nil {
+		return "", err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.uuid == "" && h.prefix == prefix {
+		h.uuid = u
+	}
+	return u, nil
 }
 
 func (h *Hub) track(t tracked) {
@@ -262,7 +296,11 @@ func (h *Hub) open(id, kind string, format int, src json.RawMessage) (*Envelope,
 	var uk *UnknownKeyError
 	switch {
 	case errors.Is(err, ErrNewerMAC):
-		return nil, &Problem{Kind: ProblemUpgrade, Reason: err.Error()}
+		// The form is not covered by any MAC, so anyone who can write to
+		// OpenSearch could put one there: it is never trusted to mean
+		// "upgrade". A newer version that adds a form says so in a signed
+		// document (the cluster level) first.
+		return nil, &Problem{Kind: ProblemTamper, Reason: "it was changed in OpenSearch outside Signalith, or written by a newer version of Signalith (" + err.Error() + ")"}
 	case errors.As(err, &uk) && listed[uk.KID]:
 		return nil, &Problem{Kind: ProblemKeyMissing, Reason: err.Error()}
 	case err != nil:
@@ -373,6 +411,24 @@ func (h *Hub) NeedsUpgrade() []string { return h.problemIDs(ProblemUpgrade) }
 // missed.
 func (h *Hub) KeyMissing() []string { return h.problemIDs(ProblemKeyMissing) }
 
+// firstRev is the revision a new document id is written at: above any
+// revision this server applied to it before, so an item deleted, its
+// tombstone housekept, and made again does not look like a rollback to
+// the servers that saw the tombstone. For an item (all), it is above
+// every revision applied here too: a server that never saw the tombstone
+// cannot know its revision, and this makes it very likely to be above.
+func (h *Hub) firstRev(id string, all bool) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.floors[id]
+	if all {
+		for _, f := range h.floors {
+			r = max(r, f)
+		}
+	}
+	return r + 1
+}
+
 // MaxRev returns the highest revision applied of any document.
 func (h *Hub) MaxRev() int64 {
 	h.mu.Lock()
@@ -384,12 +440,13 @@ func (h *Hub) MaxRev() int64 {
 	return m
 }
 
-// ownWrite records this server's write of a tracked document id.
+// ownWrite records this server's write of a tracked document id, so the
+// watcher does not read it back. It does not move applied: writes of
+// other servers before it may not be read yet.
 func (h *Hub) ownWrite(id string, v store.Version) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.seen[id] = v
-	h.applied = max(h.applied, v.SeqNo)
 }
 
 // bump rewrites the watch document id, so every server reloads what it
@@ -414,7 +471,6 @@ func (h *Hub) bump(ctx context.Context, id string) (int64, error) {
 	defer h.mu.Unlock()
 	if last, ok := h.seen[id]; ok && last.Version+1 == v.Version && last.PrimaryTerm == v.PrimaryTerm {
 		h.seen[id] = v
-		h.applied = max(h.applied, v.SeqNo)
 	}
 	return v.SeqNo, nil
 }
@@ -439,10 +495,17 @@ func (h *Hub) Start(ctx context.Context) {
 func (h *Hub) Kick(ctx context.Context) error { return h.Cycle(ctx) }
 
 // Cycle reads the versions of everything tracked and applies what
-// changed; every Resync it lists every collection again too.
+// changed; every Resync it reads every document and lists every
+// collection again too. Once a cycle has applied or refused every change
+// it found, applied moves to the highest _seq_no it read: the config
+// index has one shard, so every write up to that one is reflected.
 func (h *Hub) Cycle(ctx context.Context) error {
-	h.cycleMu.Lock()
-	defer h.cycleMu.Unlock()
+	select {
+	case h.cycling <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-h.cycling }()
 	h.mu.Lock()
 	c, prefix := h.client, h.prefix
 	if c == nil {
@@ -467,46 +530,38 @@ func (h *Hub) Cycle(ctx context.Context) error {
 		}
 		watches[col.watchID()] = append(watches[col.watchID()], col)
 	}
-	uuid := h.uuid
 	h.mu.Unlock()
 	// A document's lock is never taken under h.mu.
 	for id, t := range singles {
 		gens[id] = t.gen()
 	}
 
-	vers, err := c.MGetVersions(ctx, refs)
+	// The uuid is read every cycle, before the versions: an index made
+	// again can hold documents at the very versions of the old one.
+	uuid, err := IndexUUID(ctx, c, prefix)
 	if err != nil {
 		return err
 	}
 	h.mu.Lock()
-	differs := false
-	for _, r := range refs {
-		if last, ok := h.seen[r.ID]; !ok || !last.Same(vers[r]) {
-			differs = true
-		}
+	if uuid != h.uuid {
+		// The index was made again: its sequence numbers start over.
+		h.uuid, h.applied, h.seen = uuid, -1, map[string]store.Version{}
 	}
 	h.mu.Unlock()
-	if differs || full || uuid == "" {
-		now, err := IndexUUID(ctx, c, prefix)
-		if err != nil {
-			return err
-		}
-		h.mu.Lock()
-		if now != h.uuid {
-			// The index was made again: its sequence numbers start over.
-			h.uuid, h.applied, h.seen = now, -1, map[string]store.Version{}
-		}
-		h.mu.Unlock()
+	vers, err := c.MGetVersions(ctx, refs)
+	if err != nil {
+		return err
 	}
 
 	// Single documents: fetch the changed ones in one request.
+	complete := true
 	var fetch []store.Ref
 	h.mu.Lock()
 	for _, r := range refs {
 		if h.singles[r.ID] == nil {
 			continue
 		}
-		if last, ok := h.seen[r.ID]; !ok || !last.Same(vers[r]) {
+		if last, ok := h.seen[r.ID]; full || !ok || !last.Same(vers[r]) {
 			fetch = append(fetch, r)
 		}
 	}
@@ -519,12 +574,13 @@ func (h *Hub) Cycle(ctx context.Context) error {
 		h.mu.Lock()
 		t := h.singles[d.ID]
 		h.mu.Unlock()
-		t.apply(d, gens[d.ID])
+		if !t.apply(d, uuid, gens[d.ID]) {
+			// Left for the next cycle, which reads it again.
+			complete = false
+			continue
+		}
 		h.mu.Lock()
 		h.seen[d.ID] = d.Version
-		if d.Found {
-			h.applied = max(h.applied, d.SeqNo)
-		}
 		h.mu.Unlock()
 	}
 
@@ -538,21 +594,41 @@ func (h *Hub) Cycle(ctx context.Context) error {
 		if ok && last.Same(vers[r]) && !full {
 			continue
 		}
-		failed := false
+		done := true
 		for _, col := range cols {
-			if err := col.reload(ctx); err != nil {
+			all, err := col.reload(ctx)
+			if err != nil {
 				errs = append(errs, err)
-				failed = true
+			}
+			if all && err == nil {
+				continue
+			}
+			done = false
+			if _, ok := col.(watchFunc); !ok {
+				// A collection not read holds the token back; work
+				// a watch function starts (requests) is not part of it.
+				complete = false
 			}
 		}
-		if !failed {
-			h.mu.Lock()
-			h.seen[wid] = vers[r]
-			if !vers[r].IsZero() {
-				h.applied = max(h.applied, vers[r].SeqNo)
-			}
-			h.mu.Unlock()
+		if !done {
+			continue
 		}
+		h.mu.Lock()
+		h.seen[wid] = vers[r]
+		h.mu.Unlock()
+	}
+	if complete {
+		top := int64(-1)
+		for _, v := range vers {
+			if !v.IsZero() {
+				top = max(top, v.SeqNo)
+			}
+		}
+		h.mu.Lock()
+		if h.uuid == uuid {
+			h.applied = max(h.applied, top)
+		}
+		h.mu.Unlock()
 	}
 	return errors.Join(errs...)
 }
@@ -597,12 +673,12 @@ func (h *Hub) Restore(d CacheData) {
 		doc := store.Doc{Ref: store.Ref{Index: h.index(), ID: cd.ID}, Found: true, Source: cd.Source,
 			Version: store.Version{SeqNo: cd.Seq, PrimaryTerm: cd.Term}}
 		if t := singles[cd.ID]; t != nil {
-			t.apply(doc, t.gen())
+			t.apply(doc, d.IndexUUID, t.gen())
 			continue
 		}
 		for _, c := range cols {
 			if c.owns(cd.ID) {
-				c.restore(doc)
+				c.restore(doc, d.IndexUUID)
 				break
 			}
 		}
@@ -611,29 +687,73 @@ func (h *Hub) Restore(d CacheData) {
 
 // AcceptRestore makes this server, and every other, accept the documents
 // now in OpenSearch after an intentional snapshot restore lowered their
-// revisions: each document whose MAC verifies is written again, signed,
-// at a revision above every one applied anywhere (peerMaxRev is the
-// highest the other servers' heartbeats report). Documents that fail
-// their MAC stay refused.
+// revisions: every document of the config index whose MAC verifies,
+// whether this server follows it or not (another server's nodecfg, a kind
+// only a newer version knows), is written again, signed, at a revision
+// above every one applied anywhere (peerMaxRev is the highest the other
+// servers' heartbeats report). Documents that fail their MAC stay
+// refused.
 func (h *Hub) AcceptRestore(ctx context.Context, by string, peerMaxRev int64) error {
 	rev := max(peerMaxRev, h.MaxRev()) + 1
+	c, prefix := h.target()
+	keys := h.Keys()
+	k := keys.Active()
+	if c == nil || k == nil {
+		return errors.New("this server cannot sign the shared settings now")
+	}
+	index := ConfigIndex(prefix)
+	docs, err := c.SearchDocs(ctx, index, map[string]any{"bool": map[string]any{
+		"must_not": []any{map[string]any{"term": map[string]any{"kind": "watch"}}}}})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	var refused []string
+	for _, d := range docs {
+		var e Envelope
+		if json.Unmarshal(d.Source, &e) != nil || Verify(keys, d.ID, &e) != nil || e.ID != d.ID {
+			refused = append(refused, d.ID)
+			continue
+		}
+		// Extra, the fields this version does not know, is kept.
+		e.Rev, e.UpdatedAt, e.UpdatedBy, e.WriteID = rev, h.now(), By{User: by, Node: h.opts.NodeName}, ""
+		if err := Sign(k, d.ID, &e); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := c.PutIf(ctx, index, d.ID, &e, d.Version, false); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", d.ID, err))
+		}
+	}
+	if len(refused) > 0 {
+		h.log.Warn("accept-restore left documents that fail their checks as they are", "docs", refused)
+	}
+
+	// This server reads its documents now; a bump of every watch document
+	// makes every server list its collections again.
 	h.mu.Lock()
-	singles := maps.Clone(h.singles)
+	singles := slices.Collect(maps.Values(h.singles))
 	cols := slices.Clone(h.colls)
 	h.mu.Unlock()
-	ids := make([]string, 0, len(singles))
-	for id := range singles {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	var errs []error
-	for _, id := range ids {
-		if err := singles[id].acceptRestore(ctx, rev, by); err != nil {
+	for _, t := range singles {
+		if err := t.reload(ctx); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	for _, c := range cols {
-		if err := c.acceptRestore(ctx, rev, by); err != nil {
+	for _, col := range cols {
+		if _, ok := col.(watchFunc); ok {
+			continue
+		}
+		if _, err := col.reload(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	watches, err := c.SearchVersions(ctx, index, map[string]any{"term": map[string]any{"kind": "watch"}})
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, w := range watches {
+		if _, err := h.bump(ctx, w.ID); err != nil {
 			errs = append(errs, err)
 		}
 	}

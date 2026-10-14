@@ -3,12 +3,14 @@ package shared
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -47,6 +49,15 @@ func TestClusterKey(t *testing.T) {
 	k2, err := KeyFromFile(path)
 	if err != nil || k2.ID() != k.ID() || !bytes.Equal(k2.MACKey(), k.MACKey()) {
 		t.Fatalf("from file: %v", err)
+	}
+	if w := KeyFileWarning(path); w != "" {
+		t.Errorf("private key file: %s", w)
+	}
+	if runtime.GOOS != "windows" {
+		os.Chmod(path, 0o644)
+		if w := KeyFileWarning(path); !strings.Contains(w, "The cluster key file "+path+" is not private") {
+			t.Errorf("readable key file: %q", w)
+		}
 	}
 	os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString([]byte("too short"))), 0o600)
 	if _, err := KeyFromFile(path); err == nil {
@@ -211,6 +222,18 @@ func TestExportImportKey(t *testing.T) {
 	}
 	if _, err := ImportKey("not json", nil); err == nil {
 		t.Error("garbage accepted")
+	}
+	// A cost read from the text that would take gigabytes is refused
+	// before scrypt runs.
+	for _, cost := range []string{`"n": 4194304`, `"r": 32`, `"p": 16`} {
+		var f map[string]any
+		_ = json.Unmarshal([]byte(text), &f)
+		name, v, _ := strings.Cut(cost, ": ")
+		f["kdf"].(map[string]any)[strings.Trim(name, `"`)], _ = strconv.Atoi(v)
+		big, _ := json.Marshal(f)
+		if _, err := ImportKey(string(big), []byte("correct horse battery staple")); err == nil || errors.Is(err, ErrPassphrase) {
+			t.Errorf("%s: %v", cost, err)
+		}
 	}
 	if _, err := ExportKey(k, nil); err == nil {
 		t.Error("empty passphrase accepted")

@@ -23,8 +23,10 @@ import (
 // field, so "signalith secrets rotate-master" re-seals it like the other
 // files that keep secrets.
 
-// cacheField is the field the cache is sealed under.
-const cacheField = "cluster.cache"
+// cacheField is the field the cache of a cluster and index prefix is
+// sealed under, so a cache.enc relabelled with another cluster or prefix
+// does not open.
+func cacheField(clusterID, prefix string) string { return "cluster.cache/" + clusterID + "/" + prefix }
 
 // CacheMaxAge is how old a cache may be and still be used: the age at
 // which tombstones are removed, after which a cache could bring back
@@ -91,7 +93,7 @@ func (c Cache) Write(d CacheData) error {
 	if err != nil {
 		return err
 	}
-	sealed, err := c.Master.Seal(cacheField, string(plain))
+	sealed, err := c.Master.Seal(cacheField(c.ClusterID, c.Prefix), string(plain))
 	clear(plain)
 	if err != nil {
 		return err
@@ -124,7 +126,7 @@ func (c Cache) Read(now time.Time) (CacheData, error) {
 	if f.Prefix != c.Prefix || c.ClusterID != "" && f.ClusterID != c.ClusterID {
 		return CacheData{}, ErrCacheOther
 	}
-	plain, err := c.Master.Open(cacheField, f.Sealed)
+	plain, err := c.Master.Open(cacheField(f.ClusterID, f.Prefix), f.Sealed)
 	if err != nil {
 		return CacheData{}, fmt.Errorf("%s: %w", c.Path, err)
 	}
@@ -154,7 +156,7 @@ func ResealCacheFile(data []byte, fn secrets.Reseal) ([]byte, int, error) {
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, 0, fmt.Errorf("not valid JSON: %w", err)
 	}
-	v, err := fn(secrets.Stored{Field: cacheField, Label: "copy of the shared settings", Value: f.Sealed})
+	v, err := fn(secrets.Stored{Field: cacheField(f.ClusterID, f.Prefix), Label: "copy of the shared settings", Value: f.Sealed})
 	if err != nil || v == f.Sealed {
 		return data, 0, err
 	}

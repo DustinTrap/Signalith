@@ -157,3 +157,49 @@ func TestCollectionRefusesTamperedItems(t *testing.T) {
 		t.Errorf("tamper %v", got)
 	}
 }
+
+// An item made again after its tombstone was housekept is not taken for
+// a rollback by a server that saw the tombstone, nor by the writer after
+// a restart from its cache.
+func TestCollectionItemMadeAgainAfterHousekeeping(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	a, _ := e.hub("siem-a")
+	b, _ := e.hub("siem-b")
+	ca := NewCollection[testBody](a, "user", "users", 1)
+	cb := NewCollection[testBody](b, "user", "users", 1)
+	if _, err := ca.Create(ctx, "sam", "jlee", &testBody{Name: "J. Lee"}); err != nil {
+		t.Fatal(err)
+	}
+	_, etag, _ := ca.Get("jlee")
+	if _, err := ca.SaveIf(ctx, "sam", "jlee", &testBody{Name: "Jo Lee"}, etag); err != nil {
+		t.Fatal(err)
+	}
+	_, etag, _ = ca.Get("jlee")
+	if _, err := ca.Delete(ctx, "sam", "jlee", etag); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, b)
+	e.clock.Advance(TombstoneAge + time.Hour)
+	if n, _, err := ca.Housekeep(ctx, e.clock.Now()); n != 1 || err != nil {
+		t.Fatalf("housekeeping: %d %v", n, err)
+	}
+	cycle(t, b)
+	snap := a.Snapshot()
+	if _, err := ca.Create(ctx, "sam", "jlee", &testBody{Name: "another J. Lee"}); err != nil {
+		t.Fatal(err)
+	}
+	cycle(t, b)
+	if v, _, ok := cb.Get("jlee"); !ok || v.Name != "another J. Lee" || len(b.Problems()) != 0 {
+		t.Errorf("b: %+v %v, problems %+v", v, ok, b.Problems())
+	}
+	// The writer, restarted from a cache written before it made the item
+	// again.
+	a2, _ := e.hub("siem-a")
+	ca2 := NewCollection[testBody](a2, "user", "users", 1)
+	a2.Restore(snap)
+	cycle(t, a2)
+	if v, _, ok := ca2.Get("jlee"); !ok || v.Name != "another J. Lee" || len(a2.Problems()) != 0 {
+		t.Errorf("a after a restart: %+v %v, problems %+v", v, ok, a2.Problems())
+	}
+}

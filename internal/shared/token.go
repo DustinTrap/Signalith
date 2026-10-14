@@ -8,9 +8,10 @@ import (
 
 // Behind a load balancer a page may save on one server and read from
 // another. Every API answer carries the configuration token,
-// "<config index uuid>.<seq>": the highest _seq_no among the tracked
-// documents this server has applied. Writers report the _seq_no of the
-// tracked document or watch bump they wrote, a number every other
+// "<config index uuid>.<seq>": how far this server's watcher has read
+// (Hub.applied), so every write to a tracked document or watch document
+// up to seq is in use here. Writers report the _seq_no of the tracked
+// document or watch bump they wrote (TokenAfter), a number every other
 // server's watcher reaches. The page sends the highest token it has seen
 // back, and a server that is behind reads the versions once before
 // answering (Wait).
@@ -26,8 +27,9 @@ func (h *Hub) Token() string {
 	return h.uuid + "." + strconv.FormatInt(h.applied, 10)
 }
 
-// TokenAfter returns the token for a write that made seq, which this
-// server has applied.
+// TokenAfter returns the token for the answer to a write that made seq,
+// which this server serves from memory already. It does not move this
+// server's own token, which waits for its watcher.
 func (h *Hub) TokenAfter(seq int64) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -73,8 +75,8 @@ func (h *Hub) Wait(ctx context.Context, min string) (stale bool) {
 	}
 	wctx, cancel := context.WithTimeout(ctx, h.opts.Timing.Wait)
 	defer cancel()
-	// A cycle already running holds the next one up; the wait ends at
-	// Timing.Wait all the same.
+	// A cycle already running holds this one up; the wait, and the
+	// goroutine, end at Timing.Wait all the same.
 	done := make(chan struct{})
 	go func() {
 		_ = h.Kick(wctx)
