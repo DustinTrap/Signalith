@@ -173,10 +173,12 @@ func settingsResetShared(path string, keys []string) (bool, error) {
 	log := newLogger(os.Stderr)
 	c, err := loadConfig(path, log)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "DEBUG reset: config:", err)
 		return false, nil
 	}
 	self, err := cluster.ReadIdentity(c.StateDir())
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "DEBUG reset: identity:", err)
 		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -191,7 +193,8 @@ func settingsResetShared(path string, keys []string) (bool, error) {
 	defer cl.CloseIdleConnections()
 	x := &clusterCLI{c: c, cl: cl, log: log, self: self, errOut: os.Stderr, out: os.Stdout, by: cliUser()}
 	rt := x.runtime(true, "")
-	if m, _ := rt.Mode(); m != shared.ModeMember || !rt.SharedSettings() {
+	if m, why := rt.Mode(); m != shared.ModeMember || !rt.SharedSettings() {
+		fmt.Fprintln(os.Stderr, "DEBUG reset: mode:", m, why, rt.SharedSettings(), rt.SharedUsers())
 		return false, nil
 	}
 	var cluster_, own, local []string
