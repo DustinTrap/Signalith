@@ -176,6 +176,84 @@ func TestParsePowerShell(t *testing.T) {
 	}
 }
 
+// Splunk's search syntax evaluates OR before AND, so "a b OR c" is
+// a AND (b OR c).
+func TestOrBeforeAnd(t *testing.T) {
+	e, err := ParseWhere(`Processes.process_name != "*temp.dat*" Processes.process = "*runrun*" OR Processes.process = "*temp.dat*"`, "Processes", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Eval(e, map[string]string{"process_name": "temp.dat.exe", "process": "temp.dat.exe /x"}) {
+		t.Error("the OR side ignores the != before it")
+	}
+	if !Eval(e, map[string]string{"process_name": "x.exe", "process": "x.exe temp.dat"}) {
+		t.Error("does not match the second OR side")
+	}
+}
+
+func TestParseScheduledTask(t *testing.T) {
+	src := rule("`wineventlog_security` EventCode=4698 TaskContent = \"*&lt;Hidden&gt;true&lt;/Hidden&gt;*\"\n| stats count by TaskName TaskContent dest")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Node != "TaskCreated" {
+		t.Fatalf("node %s", r.Node)
+	}
+	if !Eval(r.Where, map[string]string{"signature_id": "4698", "task_content": "<Task><Hidden>true</Hidden></Task>"}) {
+		t.Error("does not match the stored XML")
+	}
+	found := false
+	for _, c := range Cases(r) {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Error("no test event matches")
+	}
+}
+
+func TestParseScheduledTaskXMLKV(t *testing.T) {
+	src := rule("`wineventlog_security` EventCode=4698 | xmlkv Message | search Command IN (\"*rundll32*\")\n| stats count by dest Task_Name Command")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Eval(r.Where, map[string]string{"signature_id": "4698", "task_command": `C:\Windows\System32\rundll32.exe`}) {
+		t.Error("does not match its own event")
+	}
+	for search, want := range map[string]string{
+		"`wineventlog_security` EventCode=4698 Command=\"*x*\" | stats count by dest":                      "no Signalith mapping",
+		"`sysmon` EventCode=10 | xmlkv Message | search Command=\"*x*\" | stats count by dest":             "xmlkv on ProcessAccess",
+		"`wineventlog_security` EventCode=4698 | xmlkv Message | search EventCode=1 | stats count by dest": "once, at the top",
+	} {
+		if _, err := Parse(rule(search), nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", search, err, want)
+		}
+	}
+}
+
+func TestParseObjectAccess(t *testing.T) {
+	src := rule("`wineventlog_security` EventCode=4663 object_file_path=\"*\\\\WinSCP 2\\\\Configuration\\\\Security*\" NOT process_path IN (\"*\\\\WinSCP.exe\")\n| stats count by object_file_path process_path dest")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Node != "ObjectAccess" || !InModel(r.Node, "Registry") || !InModel(r.Node, "Filesystem") || InModel(r.Node, "Endpoint") {
+		t.Fatalf("node %s", r.Node)
+	}
+	ev := map[string]string{"signature_id": "4663", "object_path": `\REGISTRY\USER\S-1-5-21-1\Software\Martin Prikryl\WinSCP 2\Configuration\Security`, "process_path": `C:\x\stealer.exe`}
+	if !Eval(r.Where, ev) {
+		t.Error("does not match its own event")
+	}
+	found := false
+	for _, c := range Cases(r) {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Error("no test event matches")
+	}
+}
+
 func TestParseSysmonAccess(t *testing.T) {
 	src := rule("`sysmon` EventCode=10 TargetImage=\"*\\\\lsass.exe\" GrantedAccess IN (\"0x1010\", \"0x1410\") NOT SourceImage=\"*\\\\MsMpEng.exe\"\n| stats count by dest SourceImage")
 	r, err := Parse(src, nil)

@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"html"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -164,6 +166,48 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 		if f["process"] == "" {
 			f["process"] = at(in, 5)
 		}
+	case "4698":
+		// The task's definition is its XML, as the Task Scheduler stores
+		// it: what it runs, when, and whether it is hidden.
+		ev.Model = "Change"
+		f["action"] = "created"
+		f["object_category"] = "scheduled_task"
+		f["signature"] = "A scheduled task was created"
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["object"] = at(in, 4)
+		f["task_name"] = at(in, 4)
+		f["task_content"] = at(in, 5)
+		f["task_command"] = taskElement(at(in, 5), "Command")
+		f["task_arguments"] = taskElement(at(in, 5), "Arguments")
+	case "4663":
+		// An access to an object whose audit rule (SACL) asks for it: a
+		// file goes to Filesystem and a registry key to Registry.
+		f["signature"] = "An attempt was made to access an object"
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["object_type"] = at(in, 5)
+		name := at(in, 6)
+		f["object_path"] = name
+		f["object_name"] = baseName(name)
+		f["access_list"] = strings.Join(strings.Fields(at(in, 8)), " ")
+		f["access_mask"] = at(in, 9)
+		f["process_id"] = atoi(at(in, 10))
+		f["process_path"] = at(in, 11)
+		f["process_name"] = baseName(at(in, 11))
+		f["action"] = objectAccessAction(f["access_list"].(string))
+		switch at(in, 5) {
+		case "File":
+			ev.Model = "Filesystem"
+			f["file_path"] = name
+			f["file_name"] = baseName(name)
+		case "Key":
+			ev.Model = "Registry"
+			f["registry_path"] = name
+			f["registry_key_name"] = baseName(name)
+		}
 	case "4720", "4726":
 		ev.Model = "Change"
 		f["object"] = at(in, 0)
@@ -183,6 +227,36 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 		f["object"] = at(in, 2)
 		f["user"] = at(in, 6)
 	}
+}
+
+// objectAccessAction is what an object access did, from its access list
+// (%%1537 DELETE, %%4417 WriteData, %%4418 AppendData, %%4420
+// WriteExtendedAttributes, %%4424 WriteAttributes); anything else reads.
+func objectAccessAction(list string) string {
+	codes := strings.Fields(list)
+	switch {
+	case slices.Contains(codes, "%%1537"):
+		return "deleted"
+	case slices.ContainsFunc(codes, func(c string) bool {
+		return c == "%%4417" || c == "%%4418" || c == "%%4420" || c == "%%4424"
+	}):
+		return "modified"
+	}
+	return "read"
+}
+
+// taskElement is the text of a scheduled task's first element named tag
+// (what its first action runs), or "".
+func taskElement(task, tag string) string {
+	_, rest, ok := strings.Cut(task, "<"+tag+">")
+	if !ok {
+		return ""
+	}
+	v, _, ok := strings.Cut(rest, "</"+tag+">")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(html.UnescapeString(v))
 }
 
 func parseSysmon(eventID string, kv map[string]string, ev *Event) {

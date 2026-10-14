@@ -325,7 +325,7 @@ The generator keeps each rule's Signalith ID across runs, rewrites `rules/`,
 
 ### Splunk Security Content
 
-**Splunk Security Content** (`internal/detect/packs/splunk`) holds 801 Windows and
+**Splunk Security Content** (`internal/detect/packs/splunk`) holds 822 Windows and
 Linux detections from Splunk's Threat Research Team
 ([security_content](https://github.com/splunk/security_content)), pinned to one
 commit. They are the production TTP and anomaly rules that search the CIM
@@ -341,13 +341,16 @@ names, so each rule's `where` clause becomes a Signalith filter field for field:
 | `` `powershell` EventCode=4104 `` (raw search) | PowerShell 4104 | Script |
 | `` `sysmon` EventCode=7 `` (raw search) | Sysmon 7 | Image_Load |
 | `` `sysmon` EventCode=8 `` or `10` (raw search) | Sysmon 8 and 10 | Endpoint |
+| `` `wineventlog_security` EventCode=4698 `` (raw search) | Security 4698 (scheduled task created) | Change |
+| `` `wineventlog_security` EventCode=4663 `` (raw search) | Security 4663 (object access) | Filesystem for a file, Registry for a key |
 | `Endpoint.Processes` (Sysmon for Linux rules) | Sysmon for Linux 1 | Endpoint |
 | `Endpoint.Filesystem` (Sysmon for Linux rules) | Sysmon for Linux 11 and 23 | Filesystem |
 
 The rule files and the macros they use ship unchanged; Signalith converts them when
 it starts, reading the search the way Splunk does: `*` is the only wildcard (`?` is
-literal, so rules with one are left out), case is ignored, and `!=` only matches
-when the field is present. TTP rules raise findings and add risk; anomaly rules only
+literal, so rules with one are left out), case is ignored, `!=` only matches
+when the field is present, and `OR` binds tighter than `AND` (`a b OR c` is
+`a AND (b OR c)`), as in Splunk's search syntax. TTP rules raise findings and add risk; anomaly rules only
 add risk, as in Splunk ES risk-based alerting. Severity follows the rule's risk score
 (TTP: 80 and up critical, 64 high, 30 medium; anomalies low). Each is tagged
 `splunk`, the pack name, `ttp` or `anomaly`, and the node, and keeps the rule's
@@ -360,6 +363,20 @@ Signalith's (`ScriptBlockText` is `script_block_text`, `ImageLoaded` is
 `fillnull` and `stats` stages only count the events. (Without `fillnull`, Splunk's
 `stats` also drops events that miss one of its `by` fields; Signalith keeps them.) PowerShell rules need script block logging
 turned on (**Include PowerShell** on Add data).
+
+Scheduled task rules search the task's name (`TaskName` is `task_name`) and its
+XML definition (`TaskContent` is `task_content`); after `xmlkv`, the command and
+arguments of its first action are `task_command` and `task_arguments`. Splunk keeps that XML escaped
+(`&lt;Hidden&gt;`); Signalith stores it as it is, so the rule's values are unescaped
+to match. Security 4698 is logged when **Audit Other Object Access Events** is on.
+
+Object access rules (Security 4663) search the object's path whatever its type
+(`ObjectName` and `object_file_path` are `object_path`, `object_file_name` is
+`object_name`), the program (`ProcessName` is `process_path`), `ObjectType`,
+`AccessList` and `AccessMask`. Files are stored in Filesystem and registry keys in
+Registry (action `read`, `modified` or `deleted`), and a rule searches both, as in
+Splunk. Windows logs 4663 only for objects whose auditing (SACL) asks for it, with
+**Audit File System** or **Audit Registry** on.
 
 Registry values that Sysmon writes as `DWORD (0x00000001)` compare as `0x00000001`,
 the way Splunk's Sysmon add-on reads them.
