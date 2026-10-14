@@ -60,11 +60,14 @@ const tourCap = document.querySelector('[data-tour-cap]');
 const tourPanel = document.getElementById('p-tour');
 const alts = {
   findings: 'The Signalith Findings page: a queue of findings with severity, status and owner, and an inspector panel for the selected finding.',
-  search: 'The Signalith Search page: a plain-English question box, a query, a timeline and a table of results.',
-  dashboard: 'The Signalith Security posture dashboard: key numbers, findings by hour, top detections and top risk objects.',
+  search: 'The Signalith Search page: a plain-English question turned into a query, with a timeline and a table of results.',
+  dashboard: 'The Signalith Security posture dashboard: key numbers, new findings by urgency, top detections and top risk objects.',
+  detections: 'The Signalith Detections page with the SigmaHQ and Splunk Security Content rule packs and the list of detections.',
   investigation: 'A Signalith investigation case with its timeline of notes and findings, and its details.',
+  endpoints: 'The Signalith Endpoints page listing osquery hosts with their status, failing configuration checks and log agent.',
+  vulnerabilities: 'The Signalith Vulnerabilities dashboard: hosts with known exploited and critical CVEs, and what to patch first.',
+  malware: 'The Signalith Malware dashboard: hosts with malware, what the antivirus did, and the top threats.',
   intel: 'The Signalith threat intel feed catalog with free feeds to add.',
-  security: 'The Signalith Security page listing what to fix first and whether data is encrypted in transit.',
 };
 // warm the cache so switching is instant
 addEventListener('load', () => Object.keys(alts).forEach((k) => { const i = new Image(); i.src = `assets/shots/${k}.webp`; }));
@@ -134,7 +137,7 @@ if (floor) {
 }
 
 // Reveal on scroll ------------------------------------------------------------
-const revealables = document.querySelectorAll('.section__head, .card, .split > *, .flow, .built, .start, .facts__in > div');
+const revealables = document.querySelectorAll('.section__head, .card, .soon__item, .split > *, .flow, .built, .start, .facts__in > div');
 if ('IntersectionObserver' in window && !reduced) {
   const io = new IntersectionObserver((entries) => entries.forEach((e) => {
     if (e.isIntersecting) { e.target.classList.add('is-in'); io.unobserve(e.target); }
