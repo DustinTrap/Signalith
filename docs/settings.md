@@ -185,7 +185,7 @@ Every setting on the page shows which of these its value comes from, and
 ## Applying changes
 
 Settings marked **applies at once** take effect when you save: the public address,
-the sign-out time, the default time range and events per search, the quiet data
+the sign-out time, the oldest event time, the default time range and events per search, the quiet data
 source time, the most findings per run, the AI assistant, and the NVD API key for vulnerability scans. A new public address
 waits for the restart when the listen address or the certificate also changes, so
 agents set up meanwhile are not sent to an address nothing answers yet.

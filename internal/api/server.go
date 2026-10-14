@@ -168,6 +168,10 @@ type Server struct {
 	// Agents counts the agents that send events, for the Endpoints page;
 	// nil keeps no list.
 	Agents *agentinv.Inventory
+	// EventAge follows ingest.max_event_age when a change applies at once:
+	// how old an event's own time may be in the pipeline and syslog. nil
+	// leaves the age the server started with.
+	EventAge EventAge
 
 	authOnce     sync.Once
 	creds        credCache  // recently checked Basic credentials
@@ -196,6 +200,13 @@ type Server struct {
 	blockedLog    logOnce    // blocked osquery hosts that tried to enroll
 	tokensOnce    sync.Once
 	tokenRate     tokenRate // agent token creation
+}
+
+// EventAge is what keeps the age of events the server accepts in step
+// with the configuration in use.
+type EventAge interface {
+	// Use works the age out again from c.
+	Use(c *config.Config)
 }
 
 // liveModel is the assistant after a change on the Settings page; nil

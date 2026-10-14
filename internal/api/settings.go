@@ -236,7 +236,7 @@ func pendingSettings(running, saved *config.Config) []pendingSetting {
 	out := []pendingSetting{}
 	for i := range config.Registry {
 		set := &config.Registry[i]
-		if config.SameValue(running, saved, set.Key) {
+		if !set.OnPage(false) || config.SameValue(running, saved, set.Key) {
 			continue
 		}
 		p := pendingSetting{Key: set.Key, Label: set.Label, Section: set.Section}
@@ -390,7 +390,7 @@ func (s *Server) settingsView() (map[string]any, error) {
 		out := settingsSection{ID: sec.ID, Title: sec.Title, Help: sec.Help, Fields: []settingField{}}
 		for i := range config.Registry {
 			set := &config.Registry[i]
-			if set.Section != sec.ID {
+			if set.Section != sec.ID || !set.OnPage(false) {
 				continue
 			}
 			f := settingField{Key: set.Key, Label: set.Label, Help: set.Help, Type: set.Type, Choices: set.Choices,
@@ -1067,6 +1067,9 @@ func (s *Server) applyLive(old, saved *config.Config) []string {
 	if changed("server.tls.plaintext_ingest") {
 		s.endOldTokenLocked()
 	}
+	if changed("ingest.max_event_age") && s.EventAge != nil {
+		s.EventAge.Use(&next)
+	}
 	return applied
 }
 
@@ -1492,6 +1495,9 @@ func exportSettings(c *config.Config, from string, now time.Time) (string, error
 	byTop := map[string][]*config.Setting{}
 	for i := range config.Registry {
 		set := &config.Registry[i]
+		if !set.OnPage(false) {
+			continue
+		}
 		top, _, _ := strings.Cut(set.Key, ".")
 		if byTop[top] == nil {
 			tops = append(tops, top)

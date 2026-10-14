@@ -1348,6 +1348,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Agents:     agentsInv,
 		Engine:     eng,
 		Pipeline:   pipeline,
+		EventAge:   live,
 		Syslog:     receiver,
 		Backend:    cl,
 		Detections: lib,

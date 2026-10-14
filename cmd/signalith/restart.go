@@ -1230,7 +1230,7 @@ func overlaps(a, b string) bool {
 func changedSettings(a, b *config.Config) []string {
 	out := []string{}
 	for _, s := range config.Registry {
-		if !config.SameValue(a, b, s.Key) {
+		if s.OnPage(false) && !config.SameValue(a, b, s.Key) {
 			out = append(out, s.Key)
 		}
 	}

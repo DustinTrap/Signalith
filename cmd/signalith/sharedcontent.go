@@ -304,6 +304,15 @@ type liveMaxAge struct {
 	last     time.Duration
 }
 
+// Use works the age out again with c, the configuration in use after
+// ingest.max_event_age was changed (api.EventAge).
+func (l *liveMaxAge) Use(c *config.Config) {
+	l.mu.Lock()
+	l.c = c
+	l.mu.Unlock()
+	l.update(nil)
+}
+
 // update works the age out again from s, or from the policies in use when
 // s is nil.
 func (l *liveMaxAge) update(s *retention.Settings) {
@@ -314,8 +323,8 @@ func (l *liveMaxAge) update(s *retention.Settings) {
 		}
 		s = &cur
 	}
-	d := l.c.MaxEventAge(s.ShortestKeepDays())
 	l.mu.Lock()
+	d := l.c.MaxEventAge(s.ShortestKeepDays())
 	same := d == l.last
 	l.last = d
 	l.mu.Unlock()
