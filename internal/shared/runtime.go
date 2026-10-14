@@ -1595,6 +1595,13 @@ func (rt *Runtime) wakeRequests() {
 // parts it claims.
 func (rt *Runtime) BootID() string { return rt.boot }
 
+// Self returns this server's node id and name.
+func (rt *Runtime) Self() Self {
+	s := rt.opts.Self
+	s.BootID = rt.boot
+	return s
+}
+
 // offline reports whether server nodeID's heartbeat stopped.
 func (rt *Runtime) offline(nodeID string) bool {
 	if rt.opts.Peers == nil {
