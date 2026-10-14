@@ -459,6 +459,11 @@ func importSettings(ctx context.Context, d *Docs, f Files, by string) error {
 		if key == "ingest.tokens" || src.Kind != config.FromPage && src.Kind != config.FromFile && src.Kind != config.FromEnv {
 			continue
 		}
+		if config.AddressHasSecret(key, c.Value(key)) {
+			f.log().Warn("an address with a password or key in it is not imported into the shared settings, which every server shows; "+
+				"take it out of the address and set it on the Settings page", "setting", key)
+			continue
+		}
 		sentTo := ""
 		if s, ok := config.Lookup(key); ok && s.Type == config.TypeSecret {
 			sentTo = s.SentTo(c)
@@ -486,19 +491,14 @@ func importSettings(ctx context.Context, d *Docs, f Files, by string) error {
 		}
 		for _, key := range slices.Sorted(maps.Keys(values)) {
 			sv := values[key]
-			if cur, ok := b.Values[key]; ok {
-				if sameSetting(keys, key, cur, sv) {
-					continue
-				}
-				sv.Rev, sv.Extra = cur.Rev+1, cur.Extra
-			} else {
-				sv.Rev = 1
+			if cur, ok := b.Values[key]; ok && sameSetting(keys, key, cur, sv) {
+				continue
 			}
-			b.Values[key] = sv
+			b.set(key, sv)
 		}
 		for _, tv := range tokens {
 			plain, _ := tv.Value.([]string)
-			list, _, err := setTokens(keys, b.IngestTokens, f.NodeID, tv.Source, plain, now)
+			list, _, err := setTokens(keys, b.IngestTokens, f.NodeID, f.Node, tv.Source, plain, now)
 			if err != nil {
 				return err
 			}

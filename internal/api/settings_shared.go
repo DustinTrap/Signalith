@@ -45,8 +45,9 @@ type SettingsStore interface {
 	// nodecfg document: this server's from its own copies, another's
 	// read from OpenSearch now.
 	Layer(ctx context.Context, server string) (*config.Shared, *shared.NodeCfg, error)
-	// ETag is the settings document's ETag.
+	// ETag is the settings document's ETag, and Revision its revision.
 	ETag() string
+	Revision() int64
 	// Save writes an edit of server's settings checked against base (see
 	// clustercfg.Save), and returns the new revision of each setting
 	// written.
@@ -167,7 +168,7 @@ func (s *Server) decorateShared(view map[string]any, sh *config.Shared, nc *shar
 			f.Scope = string(set.Scope)
 			switch set.Scope {
 			case config.ScopeCluster:
-				v := sh.Cluster[f.Key].Rev
+				v := sh.Rev(f.Key)
 				f.Version = &v
 				f.AppliedFrom = sourceWords(f.Source)
 				if r, ok := saved.SharedKept(f.Key); ok {
@@ -175,33 +176,23 @@ func (s *Server) decorateShared(view map[string]any, sh *config.Shared, nc *shar
 				}
 				// Where a change that waits for a restart is in use yet.
 				if set.Restart {
-					f.Servers = map[string]string{}
-					for _, sv := range servers {
-						switch {
-						case slices.Contains(sv.Refused, f.Key):
-							f.Servers[sv.Name] = "refused"
-						case slices.Contains(sv.RestartNeeded, f.Key):
-							f.Servers[sv.Name] = "waiting"
-						default:
-							f.Servers[sv.Name] = "applied"
-						}
-					}
+					f.Servers = serverStates(servers, f.Key, s.Settings.Revision())
 				}
 			case config.ScopeServer:
 				var v int64
 				if nc != nil {
-					v = nc.Values[f.Key].Rev
+					v = nc.ValueRev(f.Key)
 				}
 				f.Version = &v
 			}
 		}
 	}
 	self, _ := s.serverNamed("")
-	migrated := []shared.MigratedValue{}
-	if nc != nil && nc.Migrated != nil {
+	var migrated []shared.MigratedValue
+	if nc != nil {
 		migrated = nc.Migrated
 	}
-	view["migrated"] = migrated
+	view["migrated"] = migratedView(migrated)
 	view["shared"] = true
 	view["server"] = self
 	view["servers"] = servers
@@ -210,6 +201,58 @@ func (s *Server) decorateShared(view map[string]any, sh *config.Shared, nc *shar
 	if err := s.Settings.Writable(); err != nil {
 		view["paused"] = sentence(err.Error())
 	}
+}
+
+// migratedView is a server's settings that differed from the shared ones
+// when they were moved to the shared settings, as the page shows them:
+// an address with a user name and password in it shown without them.
+func migratedView(list []shared.MigratedValue) []shared.MigratedValue {
+	out := make([]shared.MigratedValue, 0, len(list))
+	for _, m := range list {
+		if set, ok := config.Lookup(m.Key); ok && set.Type == config.TypeURL || urlKeys[m.Key] {
+			m.Value, m.Shared = redactedRaw(m.Value), redactedRaw(m.Shared)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// redactedRaw is an address as JSON without the password in it.
+func redactedRaw(raw json.RawMessage) json.RawMessage {
+	var str string
+	if len(raw) == 0 || json.Unmarshal(raw, &str) != nil {
+		return raw
+	}
+	out, err := json.Marshal(redact.URL(str))
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// serverStates says, by server name, where a shared setting that waits
+// for a restart is in use: "refused" where the server could not use it,
+// "waiting" where it waits for the server's restart, or where the
+// server's last heartbeat had not seen the settings document at
+// revision rev yet, "offline" for a server stopped or not heard from
+// (what it said last may predate the change), else "applied". A value
+// refused somewhere, or not known to be in use, is never said to be
+// applied there.
+func serverStates(servers []sharedServer, key string, rev int64) map[string]string {
+	out := map[string]string{}
+	for _, sv := range servers {
+		switch {
+		case sv.Offline:
+			out[sv.Name] = "offline"
+		case slices.Contains(sv.Refused, key):
+			out[sv.Name] = "refused"
+		case slices.Contains(sv.RestartNeeded, key), rev > 0 && (sv.SettingsRev == nil || sv.SettingsRev.Settings < rev):
+			out[sv.Name] = "waiting"
+		default:
+			out[sv.Name] = "applied"
+		}
+	}
+	return out
 }
 
 // sharedSettingsView is GET /api/settings on a server whose settings are
@@ -253,6 +296,7 @@ func (s *Server) otherServerView(ctx context.Context, sv sharedServer) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("the settings of %s cannot be read now: %w", sv.Name, err)
 	}
+	servers := s.sharedServers()
 	if nc == nil {
 		nc = &shared.NodeCfg{}
 	}
@@ -275,16 +319,19 @@ func (s *Server) otherServerView(ctx context.Context, sv sharedServer) (map[stri
 				f.Value, f.Set = fieldValue(saved.Config, set)
 				f.Source = saved.Source(set.Key)
 				f.AppliedFrom = sourceWords(f.Source)
-				v := sh.Cluster[set.Key].Rev
+				v := sh.Rev(set.Key)
 				f.Version = &v
 				if r, ok := osh.Refused[set.Key]; ok {
 					f.Kept = &keptSetting{Reason: r.Reason, At: r.At}
 				}
 				f.Pending = slices.Contains(sv.RestartNeeded, set.Key)
+				if set.Restart {
+					f.Servers = serverStates(servers, set.Key, s.Settings.Revision())
+				}
 			case config.ScopeServer:
 				pv, onPage := nc.Values[set.Key]
 				run, runs := nc.Running[set.Key]
-				v := pv.Rev
+				v := nc.ValueRev(set.Key)
 				f.Version = &v
 				switch {
 				case onPage && pv.Refused != "":
@@ -329,12 +376,12 @@ func (s *Server) otherServerView(ctx context.Context, sv sharedServer) (map[stri
 		"editable":  true,
 		"shared":    true,
 		"server":    sv,
-		"servers":   s.sharedServers(),
+		"servers":   servers,
 		"etag":      s.Settings.ETag(),
 		"writable":  s.Settings.Writable() == nil,
 		"restart":   restart,
 		"bootstrap": map[string]any{"elsewhere": elsewhere + ".", "node_url": sv.NodeURL},
-		"migrated":  nc.Migrated,
+		"migrated":  migratedView(nc.Migrated),
 		"pending":   []pendingSetting{},
 		"refused":   []config.RefusedSetting{},
 		"problems":  []string{},
@@ -554,8 +601,12 @@ func (s *Server) handlePutSharedSettings(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg, "fields": fields, "problems": nonNil(problems)})
 		return
 	}
+	// The proxy the browser came through is this server's: a shared
+	// change applies here too, whichever server's page it was saved on,
+	// and its Config is this server's with the change. A change of
+	// another server's own settings is not.
 	for _, p := range parts {
-		if p.res.Config == nil || !sv.Self {
+		if p.res.Config == nil || !sv.Self && p.scope != config.ScopeCluster {
 			continue
 		}
 		if msg := s.proxyLockout(r, p.res.Config); msg != "" {
@@ -605,6 +656,15 @@ func (s *Server) handlePutSharedSettings(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			if len(savedKeys) > 0 {
 				err = fmt.Errorf("%w (%s were saved before this)", err, strings.Join(savedKeys, ", "))
+			}
+			var stale *shared.StaleError
+			if errors.As(err, &stale) && len(savedKeys) > 0 {
+				// The page says which were saved, and that only the rest
+				// were refused.
+				body := staleBody(err, stale)
+				body["saved"] = savedKeys
+				writeJSON(w, http.StatusPreconditionFailed, body)
+				return
 			}
 			if !sharedError(w, err) {
 				writeError(w, http.StatusInternalServerError, err)

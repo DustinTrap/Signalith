@@ -119,6 +119,10 @@ type clusterShared struct {
 	RestartNeeded   []string               `json:"restart_needed,omitempty"`
 	SettingsRefused []string               `json:"settings_refused,omitempty"`
 	Restart         *cluster.RestartStatus `json:"restart,omitempty"`
+	// SettingsRev is how far the server applied the settings of the
+	// Settings page from the shared settings; nil while it takes them from
+	// its own files.
+	SettingsRev *cluster.SettingsRev `json:"settings_rev,omitempty"`
 }
 
 // clusterLease is who runs the background jobs.
@@ -158,7 +162,8 @@ func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 			out.MachineMoved, out.Problems = d.MachineMoved, d.Problems
 			if d.Mode != "" {
 				out.Shared = &clusterShared{Mode: d.Mode, ConfigSeq: d.ConfigSeq, NeedsUpgrade: d.NeedsUpgrade, Tamper: d.Tamper,
-					SettingsDrift: d.SettingsDrift, RestartNeeded: d.RestartNeeded, SettingsRefused: d.SettingsRefused, Restart: d.Restart}
+					SettingsDrift: d.SettingsDrift, RestartNeeded: d.RestartNeeded, SettingsRefused: d.SettingsRefused, Restart: d.Restart,
+					SettingsRev: d.SettingsRev}
 			}
 		}
 		servers = append(servers, out)

@@ -2,6 +2,7 @@ package clustercfg
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -40,7 +41,55 @@ type SettingsBody struct {
 	Values map[string]SettingValue `json:"values"`
 	// IngestTokens are the shared agent tokens of older setups.
 	IngestTokens []IngestToken `json:"ingest_tokens,omitempty"`
+	// Reset holds, by key, the last change of each setting taken back to
+	// its default, whose entry left Values: its revision goes on counting
+	// from there (see shared.ResetMark).
+	Reset        map[string]shared.ResetMark `json:"reset,omitempty"`
 	shared.Extra `json:"-"`
+}
+
+// Rev is the revision of setting key: of its value, or of the change that
+// took it back to its default; 0 for one never changed.
+func (b *SettingsBody) Rev(key string) int64 {
+	if v, ok := b.Values[key]; ok {
+		return v.Rev
+	}
+	return b.Reset[key].Rev
+}
+
+// changedFrom says who changed setting key last: its value, or its reset.
+func (b *SettingsBody) changedFrom(key string) shared.From {
+	if v, ok := b.Values[key]; ok {
+		return v.From
+	}
+	return b.Reset[key].From
+}
+
+// set sets setting key to v, at the revision after Rev, and returns it.
+func (b *SettingsBody) set(key string, v SettingValue) int64 {
+	v.Rev, v.Extra = b.Rev(key)+1, b.Values[key].Extra
+	if b.Values == nil {
+		b.Values = map[string]SettingValue{}
+	}
+	b.Values[key] = v
+	delete(b.Reset, key)
+	return v.Rev
+}
+
+// ResetValue takes setting key back to its default, as from says,
+// keeping its revision counting, and returns the new revision; 0 when it
+// was at its default already.
+func (b *SettingsBody) ResetValue(key string, from shared.From) int64 {
+	if _, ok := b.Values[key]; !ok {
+		return 0
+	}
+	rev := b.Rev(key) + 1
+	delete(b.Values, key)
+	if b.Reset == nil {
+		b.Reset = map[string]shared.ResetMark{}
+	}
+	b.Reset[key] = shared.ResetMark{Rev: rev, From: from, Extra: b.Reset[key].Extra}
+	return rev
 }
 
 // SettingValue is the value of one shared setting.
@@ -82,11 +131,22 @@ type IngestToken struct {
 	// config.SharedField("ingest.tokens", "").
 	Secret string `json:"secret"`
 	// Node is the node id of the server whose signalith.yaml (Source
-	// yaml) or environment (env) has it.
+	// yaml) or environment (env) has it, and Name its name then.
 	Node         string    `json:"node"`
+	Name         string    `json:"name,omitempty"`
 	Source       string    `json:"source"`
 	At           time.Time `json:"at,omitzero"`
 	shared.Extra `json:"-"`
+}
+
+// from says where the token came from, for Add data: "signalith.yaml on
+// siem-b" or "the environment of siem-b".
+func (t IngestToken) from() string {
+	server := cmp.Or(t.Name, t.Node)
+	if t.Source == FromEnv {
+		return "the environment of " + server
+	}
+	return "signalith.yaml on " + server
 }
 
 // MarshalJSON writes the token with the fields this version does not
@@ -222,10 +282,17 @@ func Layer(d *Docs, cb *shared.ClusterBody, nc *shared.NodeCfg, self string) *co
 		for k, v := range b.Values {
 			sh.Cluster[k] = sharedValueOf(v)
 		}
+		for k, m := range b.Reset {
+			if sh.Revs == nil {
+				sh.Revs = map[string]int64{}
+			}
+			sh.Revs[k] = m.Rev
+		}
 		if len(b.IngestTokens) > 0 {
 			list := make([]string, 0, len(b.IngestTokens))
 			for _, t := range b.IngestTokens {
 				list = append(list, t.Secret)
+				sh.TokenFrom = append(sh.TokenFrom, t.from())
 			}
 			raw, _ := json.Marshal(list)
 			sh.Cluster["ingest.tokens"] = config.SharedValue{Value: raw}
@@ -323,21 +390,16 @@ func Save(ctx context.Context, rt *shared.Runtime, d *Docs, by, server string, b
 					b.Values = map[string]SettingValue{}
 				}
 				for _, k := range values {
-					cur := b.Values[k]
 					want, listed := versions[k]
-					if cur.Rev != base.Cluster[k].Rev || listed && cur.Rev != want {
-						return stale(cur.From)
+					if rev := b.Rev(k); rev != base.Rev(k) || listed && rev != want {
+						return stale(b.changedFrom(k))
 					}
 					nv, ok := next.Cluster[k]
 					if !ok {
-						delete(b.Values, k)
-						revs[k] = 0
+						revs[k] = b.ResetValue(k, shared.From{Source: FromPage, Node: rt.Self().Name, By: by, At: time.Now().UTC()})
 						continue
 					}
-					sv := settingValueOf(nv)
-					sv.Rev, sv.Extra = cur.Rev+1, cur.Extra
-					b.Values[k] = sv
-					revs[k] = sv.Rev
+					revs[k] = b.set(k, settingValueOf(nv))
 				}
 				return nil
 			}); err != nil {
@@ -396,13 +458,12 @@ func Save(ctx context.Context, rt *shared.Runtime, d *Docs, by, server string, b
 				cur, had := n.Values[k]
 				want, listed := versions[k]
 				old := base.Server[k]
-				if listed && cur.Rev != want || had != (old != nil) || had && !reflect.DeepEqual(*pageEntryOf(k, cur), *old) {
-					return stale(cur.From)
+				if listed && n.ValueRev(k) != want || had != (old != nil) || had && !reflect.DeepEqual(*pageEntryOf(k, cur), *old) {
+					return stale(n.ValueFrom(k))
 				}
 				e := next.Server[k]
 				if e == nil {
-					delete(n.Values, k)
-					revs[k] = 0
+					revs[k] = n.ResetValue(k, shared.From{Source: FromPage, Node: rt.Self().Name, By: by, At: time.Now().UTC()})
 					continue
 				}
 				pv, err := pageValueOf(k, e, rt.Self().Name)
@@ -413,9 +474,7 @@ func Save(ctx context.Context, rt *shared.Runtime, d *Docs, by, server string, b
 					// Tried again, not changed: it still came from where it did.
 					pv.From = cur.From
 				}
-				pv.Rev, pv.Extra = cur.Rev+1, cur.Extra
-				n.Values[k] = pv
-				revs[k] = pv.Rev
+				revs[k] = n.SetValue(k, pv)
 			}
 			return nil
 		})

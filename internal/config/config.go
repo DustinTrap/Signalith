@@ -80,6 +80,9 @@ type Config struct {
 	// environment, which follow those in the file in Ingest.Tokens:
 	// SIGNALITH_INGEST_TOKEN_FILE or SIGNALITH_INGEST_TOKEN.
 	envTokens []string
+	// sharedTokenFrom says, with a shared layer, where each of
+	// Ingest.Tokens came from: the server whose files brought it.
+	sharedTokenFrom []string
 	// httpPublicURL is the http:// public_url Validate read as https://,
 	// for Warnings.
 	httpPublicURL string
@@ -2211,10 +2214,19 @@ func (c *Config) Warnings() []string {
 }
 
 // IngestTokenSource says where the i-th of Ingest.Tokens came from:
-// signalith.yaml, SIGNALITH_INGEST_TOKEN or SIGNALITH_INGEST_TOKEN_FILE.
+// signalith.yaml, SIGNALITH_INGEST_TOKEN or SIGNALITH_INGEST_TOKEN_FILE;
+// once the servers share them, the files of the server that brought it
+// (see Shared.TokenFrom).
 // These are the shared agent tokens of older setups and the Docker quick
 // start; new agents get their own (see internal/agenttokens).
 func (c *Config) IngestTokenSource(i int) string {
+	if c.sharedTokenFrom != nil {
+		// Shared by the servers, each brought by one of them.
+		if i >= 0 && i < len(c.sharedTokenFrom) && c.sharedTokenFrom[i] != "" {
+			return c.sharedTokenFrom[i]
+		}
+		return "the shared settings"
+	}
 	if fromEnv := i - (len(c.Ingest.Tokens) - len(c.envTokens)); fromEnv >= 0 && fromEnv < len(c.envTokens) {
 		return c.envTokens[fromEnv]
 	}
@@ -2443,8 +2455,10 @@ const header = `# Signalith configuration.
 # syslog.allow       sender IPs or CIDRs allowed to send syslog (empty = any sender)
 # syslog.public_port port devices send to, if forwarded to another (Docker: 514 -> 5514)
 # detections.dir     folder for custom detections (relative to this file)
-# detections.scheduler  lets this server run detections, threat intel downloads and
-#                    retention; servers that share one OpenSearch take turns
+# cluster.leader_eligible  lets this server run detections, threat intel downloads,
+#                    notifications and retention (default true; SIGNALITH_LEADER_ELIGIBLE);
+#                    servers that share one OpenSearch take turns.
+#                    detections.scheduler is its older name
 # detections.catch_up  how far back detection runs missed while no server ran them
 #                    are made up (default 6h, at most 7d; 0 = off)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)

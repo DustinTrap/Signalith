@@ -374,13 +374,27 @@ func TestSaveVersions(t *testing.T) {
 		map[string]int64{"search.max_events": 0}); !errors.As(err, &se) {
 		t.Errorf("a save from an older page: %v", err)
 	}
-	// Reset takes it back to its default.
+	// Reset takes it back to its default, and its revision goes on.
 	revs, err = a.edit("n_siem-a", a.layer(), config.ScopeCluster, config.Edit{Reset: []string{"search.max_events"}, By: "alice"}, map[string]int64{"search.max_events": 1})
-	if err != nil || revs["search.max_events"] != 0 {
+	if err != nil || revs["search.max_events"] != 2 {
 		t.Fatalf("reset: %v %v", revs, err)
 	}
 	if _, ok := a.setting("search.max_events"); ok {
 		t.Error("the reset setting is still shared")
+	}
+	// A-B-A: a page read at revision 1, before the reset and another
+	// change to the same value, is refused all the same.
+	a.cycle()
+	if revs, err = a.edit("n_siem-a", a.layer(), config.ScopeCluster, config.Edit{Values: map[string]any{"search.max_events": float64(777)}, By: "carol"},
+		map[string]int64{"search.max_events": 2}); err != nil || revs["search.max_events"] != 3 {
+		t.Fatalf("set again after the reset: %v %v", revs, err)
+	}
+	if _, err := b.edit("n_siem-b", b.layer(), config.ScopeCluster, config.Edit{Values: map[string]any{"search.max_events": float64(900)}, By: "bob"},
+		map[string]int64{"search.max_events": 1}); !errors.As(err, &se) || se.By != "carol" {
+		t.Errorf("a save from a page read before the reset: %v", err)
+	}
+	if revs, err = a.edit("n_siem-a", a.layer(), config.ScopeCluster, config.Edit{Reset: []string{"search.max_events"}, By: "alice"}, nil); err != nil || revs["search.max_events"] != 4 {
+		t.Fatalf("reset again: %v %v", revs, err)
 	}
 
 	// B's own settings, changed on A's page.
@@ -423,6 +437,19 @@ func TestSaveVersions(t *testing.T) {
 	b.cycle()
 	if c := b.load(); c.Server.Listen != "0.0.0.0:7443" || c.Server.MaxConnections != 50 {
 		t.Errorf("B's settings %q %d", c.Server.Listen, c.Server.MaxConnections)
+	}
+
+	// A-B-A on B's own setting: reset, then saved again with the value a
+	// page read at revision 1; that page's save is refused all the same.
+	if revs, err = a.edit("n_siem-b", baseB(), config.ScopeServer, config.Edit{Reset: []string{"server.listen"}, By: "bob"}, nil); err != nil || revs["server.listen"] != 2 {
+		t.Fatalf("reset of B's listen address: %v %v", revs, err)
+	}
+	if revs, err = a.edit("n_siem-b", baseB(), config.ScopeServer, config.Edit{Values: map[string]any{"server.listen": "0.0.0.0:7443"}, By: "dave"}, nil); err != nil || revs["server.listen"] != 3 {
+		t.Fatalf("B's listen address again: %v %v", revs, err)
+	}
+	if _, err := a.edit("n_siem-b", baseB(), config.ScopeServer, config.Edit{Values: map[string]any{"server.listen": "0.0.0.0:6443"}, By: "carol"},
+		map[string]int64{"server.listen": 1}); !errors.As(err, &se) || se.By != "dave" {
+		t.Errorf("a save from a page read before the reset: %v", err)
 	}
 
 	// A shared value B could not use, tried again on its page.
@@ -602,11 +629,48 @@ func TestIngestTokensUnion(t *testing.T) {
 	if got := tokensOf(t, a.member); !reflect.DeepEqual(got, want) {
 		t.Errorf("tokens %v", got)
 	}
-	if c := a.load(); !slices.Contains(c.Ingest.Tokens, "tok-cccc-0123456789ab") || slices.Contains(c.Ingest.Tokens, "tok-bbbb-0123456789ab") {
+	c := a.load()
+	if !slices.Contains(c.Ingest.Tokens, "tok-cccc-0123456789ab") || slices.Contains(c.Ingest.Tokens, "tok-bbbb-0123456789ab") {
 		t.Errorf("A accepts %v", c.Ingest.Tokens)
+	}
+	// Add data names the server whose files brought each one.
+	if i := slices.Index(c.Ingest.Tokens, "tok-cccc-0123456789ab"); i < 0 || c.IngestTokenSource(i) != "the environment of siem-b" {
+		t.Errorf("B's token is said to come from %q", c.IngestTokenSource(i))
 	}
 	if res := b.apply(); len(res.Applied) != 0 {
 		t.Fatalf("applied twice: %v", res.Applied)
+	}
+}
+
+// An address with a user name and password in it, in a server's
+// signalith.yaml, is neither imported into the shared settings nor
+// applied when it changes: they are kept unencrypted and shown on every
+// server's page. The same address without them is.
+func TestAddressWithPasswordNotShared(t *testing.T) {
+	o := newOS(t)
+	dirA := t.TempDir()
+	a := newAuthMember(t, o, "siem-a", dirA, authConfig(t, dirA, "assistant:\n  url: https://user:pw@llm.internal/v1\n"), nil)
+	if v, ok := a.setting("assistant.url"); ok {
+		t.Fatalf("imported: %+v", v)
+	}
+	mustContain(t, "the log", a.logs.String(), "not imported into the shared settings")
+	a.load()
+	a.apply()
+	a.rewrite("assistant:\n  url: https://user:other@llm.internal/v1\n")
+	if res := a.apply(); len(res.Applied) != 0 {
+		t.Fatalf("applied %v", res.Applied)
+	}
+	if v, ok := a.setting("assistant.url"); ok {
+		t.Fatalf("shared: %+v", v)
+	}
+	mustContain(t, "the log", a.logs.String(), `"settings":"assistant.url"`)
+	a.rewrite("assistant:\n  url: https://llm.internal/v1\n")
+	if res := a.apply(); !slices.Contains(res.Applied, "assistant.url") {
+		t.Fatalf("the address without a password %+v", res)
+	}
+	a.cycle()
+	if v, _ := a.setting("assistant.url"); rawString(v.Value) != `"https://llm.internal/v1"` {
+		t.Errorf("shared %+v", v)
 	}
 }
 

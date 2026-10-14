@@ -70,7 +70,86 @@ type NodeCfg struct {
 	// Settings page differed from the shared one when its settings were
 	// moved here, for the Servers page.
 	Migrated []MigratedValue `json:"migrated,omitempty"`
-	Extra    `json:"-"`
+	// Reset holds, by key, the last change of each of this server's own
+	// settings taken back to its default, whose entry left Values: its
+	// revision goes on counting from there (see ResetMark).
+	Reset map[string]ResetMark `json:"reset,omitempty"`
+	Extra `json:"-"`
+}
+
+// ResetMark is the last change of a setting taken back to its default:
+// the revision it had then, and who did it, where and when. A value saved
+// later counts on from Rev, so a page that read the value before the
+// reset never names the revision of a value saved after it, even one
+// equal to what it read.
+type ResetMark struct {
+	Rev   int64 `json:"rev"`
+	From  From  `json:"from"`
+	Extra `json:"-"`
+}
+
+// MarshalJSON writes the mark with the fields this version does not know.
+func (m ResetMark) MarshalJSON() ([]byte, error) {
+	type plain ResetMark
+	return MarshalExtra(plain(m), m.Extra)
+}
+
+// UnmarshalJSON reads the mark, keeping the fields this version does not
+// know.
+func (m *ResetMark) UnmarshalJSON(data []byte) error {
+	type plain ResetMark
+	var p plain
+	extra, err := UnmarshalExtra(data, &p)
+	*m = ResetMark(p)
+	m.Extra = extra
+	return err
+}
+
+// ValueRev is the revision of this server's own setting key: of its value
+// in Values, or of the change that took it back to its default; 0 for one
+// never changed.
+func (n *NodeCfg) ValueRev(key string) int64 {
+	if v, ok := n.Values[key]; ok {
+		return v.Rev
+	}
+	return n.Reset[key].Rev
+}
+
+// ValueFrom says who changed this server's own setting key last: its
+// value, or its reset.
+func (n *NodeCfg) ValueFrom(key string) From {
+	if v, ok := n.Values[key]; ok {
+		return v.From
+	}
+	return n.Reset[key].From
+}
+
+// SetValue sets this server's own setting key to v, at the revision after
+// ValueRev, and returns it.
+func (n *NodeCfg) SetValue(key string, v PageValue) int64 {
+	v.Rev, v.Extra = n.ValueRev(key)+1, n.Values[key].Extra
+	if n.Values == nil {
+		n.Values = map[string]PageValue{}
+	}
+	n.Values[key] = v
+	delete(n.Reset, key)
+	return v.Rev
+}
+
+// ResetValue takes this server's own setting key back to its default, as
+// from says, keeping its revision counting (see ResetMark), and returns
+// the new revision; 0 when it was at its default already.
+func (n *NodeCfg) ResetValue(key string, from From) int64 {
+	if _, ok := n.Values[key]; !ok {
+		return 0
+	}
+	rev := n.ValueRev(key) + 1
+	delete(n.Values, key)
+	if n.Reset == nil {
+		n.Reset = map[string]ResetMark{}
+	}
+	n.Reset[key] = ResetMark{Rev: rev, From: from, Extra: n.Reset[key].Extra}
+	return rev
 }
 
 // From says where a setting's value came from: Source is page, yaml, env,

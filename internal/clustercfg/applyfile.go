@@ -119,6 +119,9 @@ func PlanFile(rt *shared.Runtime, d *Docs, cur, f *config.Config) (*FilePlan, er
 			}
 		}
 	}
+	for _, k := range addressSecrets(f) {
+		problems = append(problems, k+": leave passwords and keys out of the address; the shared settings are shown on every server's page")
+	}
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("the file's settings have problems; nothing was changed:\n  %s", strings.Join(problems, "\n  "))
 	}

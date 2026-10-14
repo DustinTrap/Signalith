@@ -740,3 +740,36 @@ func TestSettingsResetOnMember(t *testing.T) {
 		t.Error("a second reset of the same setting did not say nothing was reset")
 	}
 }
+
+// A shared setting that needs a restart, changed in signalith.yaml, is
+// applied to the shared value before the restart loads the
+// configuration, so it is in use after that restart, not only after the
+// next one.
+func TestFileChangeAppliesAtRestart(t *testing.T) {
+	fastSharedCheck(t)
+	t.Setenv(clusterKeyFileEnv, "")
+	fos := ostest.New(t)
+	a := startRunnerWith(t, runOptions{scheduler: true, server: plainHTTP, os: fos, name: "siem-a", extra: "syslog:\n  allow: [10.1.0.0/16]\n"})
+	a.settingsShared()
+	eventually(t, "A's files are recorded in the shared settings", func() bool {
+		nc, _ := a.r.shared.NodeCfg().Get()
+		return nc != nil && nc.SettingsApplied != ""
+	})
+	path := filepath.Join(a.dir, "signalith.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(data), "10.1.0.0/16", "10.2.0.0/16", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, res := a.restart(); !res.OK {
+		t.Fatalf("restart: %+v", res)
+	}
+	if got := a.running().Syslog.Allow; !slices.Equal(got, []string{"10.2.0.0/16"}) {
+		t.Errorf("A runs syslog.allow %v after the restart", got)
+	}
+	if !strings.Contains(a.logs.String(), "syslog.allow applied from signalith.yaml on siem-a") {
+		t.Errorf("not audited:\n%s", a.logs.String())
+	}
+}

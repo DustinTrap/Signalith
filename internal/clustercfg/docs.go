@@ -30,6 +30,9 @@ const (
 	FromEnv    = "env"
 	FromImport = "import"
 	FromPage   = "page"
+	// FromApply is a change made with signalith cluster apply or
+	// signalith settings reset.
+	FromApply = "apply"
 )
 
 // From says where a shared value came from: the page, a server's

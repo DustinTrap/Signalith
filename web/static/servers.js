@@ -203,8 +203,8 @@
       body = [el('span', { class: 'sv-standby' }, 'Doesn’t run them')];
       let why = s.not_eligible || '';
       // The setting's name as this server's Settings page shows it: its new
-      // name once the settings are shared.
-      if (/^detections\.scheduler is off/.test(why)) why = (s.shared && s.shared.mode === 'member' ? 'May run background jobs' : 'Run detections on schedule') + ' is off';
+      // name once that server takes its settings from the shared ones.
+      if (/^detections\.scheduler is off/.test(why)) why = (s.shared && s.shared.settings_rev ? 'May run background jobs' : 'Run detections on schedule') + ' is off';
       if (why) body.push(el('div', { class: 'sv-sub' }, cap(why)));
     }
     return el('td', { 'data-col': 'jobs' }, ...body);

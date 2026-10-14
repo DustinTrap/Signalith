@@ -199,7 +199,8 @@ func sharedFixture(t *testing.T) (string, *Shared) {
 			"cluster.name":         {Value: jsonOf(t, "SOC")},
 			"ingest.tokens":        {Value: jsonOf(t, []string{token})},
 		},
-		Server: map[string]*PageEntry{"syslog.tcp": pageEntry(t, "0.0.0.0:6514"), "server.listen": pageEntry(t, "0.0.0.0:7070")},
+		Server:    map[string]*PageEntry{"syslog.tcp": pageEntry(t, "0.0.0.0:6514"), "server.listen": pageEntry(t, "0.0.0.0:7070")},
+		TokenFrom: []string{"the environment of siem-a"},
 	}, k)
 	return path, sh
 }
@@ -243,8 +244,9 @@ func TestLoadSharedPrecedence(t *testing.T) {
 	if src := c.Source("auth.session_timeout"); src.Applied != "env" {
 		t.Errorf("session timeout from %+v", src)
 	}
-	if c.IngestTokenSource(0) != "signalith.yaml" || len(c.Ingest.Tokens) != 1 {
-		t.Errorf("tokens %v", c.Ingest.Tokens)
+	// Each shared token is said to come from the server that brought it.
+	if c.IngestTokenSource(0) != "the environment of siem-a" || len(c.Ingest.Tokens) != 1 {
+		t.Errorf("tokens %v from %q", c.Ingest.Tokens, c.IngestTokenSource(0))
 	}
 	w := strings.Join(c.SettingsWarnings(), "\n")
 	for _, k := range []string{"auth.session_timeout", "syslog.udp"} {

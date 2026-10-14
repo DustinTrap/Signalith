@@ -104,11 +104,15 @@ func fileValues(c *config.Config) []fileValue {
 
 // settingValues lists the settings of the settings document that
 // signalith.yaml and the environment set, each source on its own, and
-// auth.admin_user.
+// auth.admin_user. An address with a password or key in it is left out
+// (see addressSecrets).
 func settingValues(c *config.Config) []fileValue {
 	var out []fileValue
 	for _, key := range config.SharedKeys() {
 		for _, sv := range c.SourceValues(key) {
+			if config.AddressHasSecret(key, sv.Value) {
+				continue
+			}
 			out = append(out, fileValue{key: key, value: sv.Value, source: sv.Source, setting: true})
 		}
 	}
@@ -116,6 +120,32 @@ func settingValues(c *config.Config) []fileValue {
 		out = append(out, fileValue{key: "auth.admin_user", value: sv.Value, source: sv.Source, adminUser: true})
 	}
 	return out
+}
+
+// addressSecrets lists the shared settings whose address in this
+// server's signalith.yaml or environment has a password or key in it:
+// the shared settings, kept unencrypted and shown on every server's
+// page, take none of them, as the Settings page does not.
+func addressSecrets(c *config.Config) []string {
+	var out []string
+	for _, key := range config.SharedKeys() {
+		for _, sv := range c.SourceValues(key) {
+			if config.AddressHasSecret(key, sv.Value) && !slices.Contains(out, key) {
+				out = append(out, key)
+			}
+		}
+	}
+	return out
+}
+
+// warnAddressSecrets says which addresses of this server's files the
+// shared settings do not take, and why.
+func warnAddressSecrets(log *slog.Logger, c *config.Config) {
+	if keys := addressSecrets(c); len(keys) > 0 && log != nil {
+		log.Warn("these addresses in signalith.yaml or the environment have a password or key in them, so the servers do not share them; "+
+			"take it out of the address (an API key has its own setting) and the change applies",
+			"settings", strings.Join(keys, ","))
+	}
 }
 
 // ldapValue is the directory sign-in settings as compared: normalised,
@@ -187,6 +217,9 @@ func Apply(ctx context.Context, rt *shared.Runtime, d *Docs, c *config.Config, n
 	firstAuth := nc.UsersApplied == ""
 	withSettings := rt.SharedSettings()
 	firstSettings := nc.SettingsApplied == ""
+	if withSettings {
+		warnAddressSecrets(log, c)
+	}
 	now := time.Now()
 	type seen struct{ key, source, hash string }
 	var record []seen
@@ -538,7 +571,7 @@ func applySettings(ctx context.Context, d *Docs, list []fileValue, c *config.Con
 			src := cmp.Or(fv.source, shared.SourceYAML)
 			if fv.key == "ingest.tokens" {
 				plain, _ := fv.value.([]string)
-				toks, _, err := setTokens(keys, b.IngestTokens, self.NodeID, src, plain, now)
+				toks, _, err := setTokens(keys, b.IngestTokens, self.NodeID, self.Name, src, plain, now)
 				if err != nil {
 					return err
 				}
@@ -549,9 +582,7 @@ func applySettings(ctx context.Context, d *Docs, list []fileValue, c *config.Con
 			if err != nil {
 				return fmt.Errorf("%s: %w", fv.key, err)
 			}
-			cur := b.Values[fv.key]
-			sv.Rev, sv.Extra = cur.Rev+1, cur.Extra
-			b.Values[fv.key] = sv
+			b.set(fv.key, sv)
 		}
 		return nil
 	})
@@ -602,10 +633,10 @@ func sentToFor(c *config.Config, key string, batch map[string]any) string {
 	return s.SentTo(view)
 }
 
-// setTokens replaces the shared agent tokens server node brought from
-// source with plain, and reports whether that changed them: the same
-// tokens are kept as they are.
-func setTokens(keys *shared.KeySet, list []IngestToken, node, source string, plain []string, now time.Time) ([]IngestToken, bool, error) {
+// setTokens replaces the shared agent tokens server node (named name)
+// brought from source with plain, and reports whether that changed them:
+// the same tokens are kept as they are.
+func setTokens(keys *shared.KeySet, list []IngestToken, node, name, source string, plain []string, now time.Time) ([]IngestToken, bool, error) {
 	var others, mine []IngestToken
 	var have []string
 	for _, t := range list {
@@ -627,7 +658,7 @@ func setTokens(keys *shared.KeySet, list []IngestToken, node, source string, pla
 		if err != nil {
 			return list, false, err
 		}
-		out = append(out, IngestToken{Secret: sealed, Node: node, Source: source, At: now.UTC()})
+		out = append(out, IngestToken{Secret: sealed, Node: node, Name: name, Source: source, At: now.UTC()})
 	}
 	return out, true, nil
 }

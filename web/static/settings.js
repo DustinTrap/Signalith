@@ -826,8 +826,9 @@
   }
 
   // serverStates says, for a shared setting that waits for a restart and
-  // is not in use everywhere yet, where it is applied, waiting or refused;
-  // null when every server uses it.
+  // is not in use everywhere yet, where it is applied, waiting or refused,
+  // and which servers are offline, so not known; null when every server
+  // uses it.
   function serverStates(f) {
     const st = f.servers || {};
     const names = Object.keys(st);
@@ -837,6 +838,7 @@
     if (by('applied').length) parts.push('applied on ' + listWords(by('applied')));
     if (by('waiting').length) parts.push('waiting for a restart on ' + listWords(by('waiting')));
     if (by('refused').length) parts.push('refused on ' + listWords(by('refused')));
+    if (by('offline').length) parts.push('not known on ' + listWords(by('offline')) + ', which ' + (by('offline').length === 1 ? 'is' : 'are') + ' offline');
     const bad = by('refused').length > 0;
     return el('p', { class: 'st-source ' + (bad ? 'st-source--kept' : 'st-source--pending') }, icon(bad ? 'circle-alert' : 'server', 'icon--xs'),
       el('span', {}, cap(parts.join('; ')) + '.'));
@@ -1043,7 +1045,15 @@
       return;
     }
     if (!selfShown()) {
-      toast(`Saved. ${shownName()} uses the changes within a few seconds, or at its restart.`);
+      // Settings every server shares apply on every server; that server's
+      // own only there.
+      const savedKeys = v.saved || [];
+      const forAll = savedKeys.some((k) => (S.fields[k] || {}).scope === 'cluster');
+      const forIt = savedKeys.some((k) => (S.fields[k] || {}).scope !== 'cluster');
+      const all = 'The settings every server shares apply on every server within a few seconds, or at each server’s restart.';
+      if (forAll && forIt) toast(`${all} ${shownName()} uses its own within a few seconds, or at its restart.`, null, { title: 'Saved' });
+      else if (forAll) toast('Saved. ' + all);
+      else toast(`Saved. ${shownName()} uses the changes within a few seconds, or at its restart.`);
       return;
     }
     if (later.length) {
@@ -1060,8 +1070,11 @@
   // staleDialog says who changed a setting since this page read it, where
   // and when (a 412), and offers to read the settings again; the changes
   // on the page are kept, so they can be looked at against the new values.
+  // A save of settings of several kinds writes the shared ones first: when
+  // those were saved before the refusal, it says so.
   function staleDialog(e) {
     const data = e.data || {};
+    const saved = data.saved || [];
     const d = modalDialog('st-stale');
     d.classList.add('st-dialog');
     const who = data.changed_by || 'someone else';
@@ -1070,8 +1083,12 @@
     const reload = el('button', { type: 'button', class: 'btn btn--primary', onclick: () => { d.close(); load(); } }, icon('refresh-cw'), 'Reload');
     fill(d, modalHead('st-stale', 'Changed meanwhile', null, () => d.close()),
       el('div', { class: 'modal__body' },
-        el('p', {}, `Changed${where} by ${who}${when}. Nothing was saved.`),
-        el('p', { class: 'st-hint' }, 'Reload to see the new values. Your changes stay on the page, so you can save them again.')),
+        el('p', {}, saved.length
+          ? `Changed${where} by ${who}${when}. ${cap(listWords(saved.map(shortName)))} ${saved.length === 1 ? 'was' : 'were'} saved before this; the other changes weren’t.`
+          : `Changed${where} by ${who}${when}. Nothing was saved.`),
+        el('p', { class: 'st-hint' }, saved.length
+          ? 'Reload to see the new values. Your other changes stay on the page, so you can save them again.'
+          : 'Reload to see the new values. Your changes stay on the page, so you can save them again.')),
       el('div', { class: 'modal__foot' }, el('button', { type: 'button', class: 'btn btn--ghost', onclick: () => d.close() }, 'Cancel'), reload));
     d.onclose = () => { const b = $('st-save'); if (b && !b.disabled) b.focus(); };
     d.showModal();
@@ -1507,7 +1524,9 @@
     renderAlerts();
   }
 
-  // partWords says how one server's restart goes.
+  // partWords says how one server's restart goes. A server offline when
+  // its turn came was skipped (the next one went on); one still queued
+  // once the request failed was not restarted, as one before it failed.
   function partWords(st, id) {
     const r = st.req || {};
     const state = (r.status || {})[id] || 'queued';
@@ -1517,8 +1536,8 @@
       case 'running': return [move && !move.confirmed ? 'moving to ' + move.to + '…' : 'restarting…', 'progress'];
       case 'done': return [move ? 'ready at ' + move.to : 'ready', 'ok'];
       case 'failed': return [sentence(res.error || r.error || 'it failed') + (res.rolled_back ? ' It went back to its previous settings.' : ''), 'failed'];
-      case 'skipped': return ['not restarted, since a server before it failed', 'skipped'];
-      default: return ['waiting', 'queued'];
+      case 'skipped': return ['was offline when its turn came, so it wasn’t restarted; it applies the settings when it starts', 'skipped'];
+      default: return r.state === 'failed' ? ['not restarted, since the server before it failed', 'skipped'] : ['waiting', 'queued'];
     }
   }
 
@@ -1530,8 +1549,10 @@
       const [text, state] = partWords(st, id);
       return el('li', { 'data-state': state }, el('span', { class: 'st-changes__name' }, st.names[id] || id), el('span', { class: 'st-changes__val' }, text));
     });
+    const skipped = st.targets.filter((id) => ((r.status || {})[id]) === 'skipped').map((id) => st.names[id] || id);
     let title = 'Restarting the servers one at a time…';
-    if (over && !failed) title = st.targets.length === 1 ? `${st.names[st.targets[0]] || 'The server'} restarted with the saved settings` : 'Every server restarted with the saved settings';
+    if (over && !failed && skipped.length) title = `Restarted, but not ${listWords(skipped)}, which ${skipped.length === 1 ? 'was' : 'were'} offline`;
+    else if (over && !failed) title = st.targets.length === 1 ? `${st.names[st.targets[0]] || 'The server'} restarted with the saved settings` : 'Every server restarted with the saved settings';
     else if (over && st.lost) title = 'The restart can’t be followed any more';
     else if (over && !st.req) title = 'The restart hasn’t finished in 15 minutes';
     else if (over) title = 'The restart stopped';

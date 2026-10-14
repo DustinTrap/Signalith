@@ -215,9 +215,9 @@ func settingsResetShared(path string, keys []string) (bool, error) {
 	if len(cluster_) > 0 {
 		_, err := x.docs.Settings().Mutate(ctx, x.by, func(b *clustercfg.SettingsBody) error {
 			removed = removed[:0]
+			from := shared.From{Source: clustercfg.FromApply, Node: self.Name, By: x.by, At: time.Now().UTC()}
 			for _, k := range cluster_ {
-				if _, ok := b.Values[k]; ok {
-					delete(b.Values, k)
+				if b.ResetValue(k, from) > 0 {
 					removed = append(removed, k)
 				}
 			}
@@ -243,9 +243,10 @@ func settingsResetShared(path string, keys []string) (bool, error) {
 	if len(own) > 0 || len(keys) == 0 {
 		_, err := rt.NodeCfg().Mutate(ctx, x.by, func(n *shared.NodeCfg) error {
 			mine = mine[:0]
+			from := shared.From{Source: clustercfg.FromApply, Node: self.Name, By: x.by, At: time.Now().UTC()}
 			for k := range n.Values {
 				if len(keys) == 0 || slices.Contains(own, k) {
-					delete(n.Values, k)
+					n.ResetValue(k, from)
 					mine = append(mine, k)
 				}
 			}

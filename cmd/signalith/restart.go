@@ -327,6 +327,12 @@ func (r *runner) followShared(ctx context.Context) {
 			d.OnChange(func(_, _ *shared.ClusterBody) { kick() })
 		}
 	}
+	// tried is the switch of the settings a restart in place was asked
+	// for: one that kept the settings in use (they could not be loaded,
+	// or they move the web page, which waits for a restart) leaves the
+	// switch undone, and it is not asked for again until another restart
+	// decides once more.
+	var tried *bool
 	for {
 		watch()
 		select {
@@ -337,6 +343,11 @@ func (r *runner) followShared(ctx context.Context) {
 		}
 		want, wantUsers, wantSettings := r.shared.SharedContent(), r.shared.SharedUsers(), r.settingsShared()
 		settingsFlip := wantSettings != r.sharedContent.settingsOn.Load()
+		if !settingsFlip {
+			tried = nil
+		} else if tried != nil && *tried == wantSettings {
+			settingsFlip = false
+		}
 		if want == r.sharedContent.on.Load() && wantUsers == r.sharedContent.users.on.Load() && !settingsFlip {
 			continue
 		}
@@ -357,6 +368,9 @@ func (r *runner) followShared(ctx context.Context) {
 			// Another restart is going; it decides again, and so does the
 			// next look.
 			continue
+		}
+		if settingsFlip {
+			tried = &wantSettings
 		}
 	}
 }
@@ -422,7 +436,7 @@ func (r *runner) run(ctx context.Context, c *config.Config) error {
 		// starting, which would also lock everyone out of the page that
 		// can fix them: start with signalith.yaml alone, and say why there.
 		// They are to blame only when that starts.
-		keys := blame(err, c)
+		keys := blame(err, c, nil)
 		base, berr := config.LoadWithoutPage(r.path, fmt.Sprintf("Signalith could not start with them (%v)", err), keys)
 		if berr == nil {
 			var bin *instance
@@ -551,11 +565,17 @@ func (e *keyedError) Unwrap() error { return e.err }
 func keyed(err error, keys ...string) error { return &keyedError{err: err, keys: keys} }
 
 // blame returns the settings changed on the Settings page that err is
-// about, or every one that a restart applies when that is not known. A
-// password saved there that cannot be decrypted is never among them: it
-// is left out, not used, and set aside it would stay unused after the
-// master key it needs is back.
-func blame(err error, c *config.Config) []string {
+// about, or every one that a restart applies when that is not known: each
+// setting of this server's page whose value differs from signalith.yaml's,
+// and, while the settings are shared, each shared value that differs from
+// the one prev ran with (prev is the configuration in use before c; nil
+// at a start, when none is known, so a shared value is to blame only when
+// err names it). A shared value at another value than signalith.yaml's is
+// no sign it is to blame: the files do not set it. A password saved there
+// that cannot be decrypted is never among them: it is left out, not used,
+// and set aside it would stay unused after the master key it needs is
+// back.
+func blame(err error, c, prev *config.Config) []string {
 	var ke *keyedError
 	var keys []string
 	if errors.As(err, &ke) {
@@ -570,7 +590,13 @@ func blame(err error, c *config.Config) []string {
 	}
 	base := c.Base()
 	for _, k := range pageKeys(c) {
-		if !config.SameValue(base, c, k) {
+		if c.Source(k).Kind != config.FromShared {
+			if !config.SameValue(base, c, k) {
+				keys = append(keys, k)
+			}
+			continue
+		}
+		if prev != nil && !config.SameValue(prev, c, k) {
 			keys = append(keys, k)
 		}
 	}
@@ -764,7 +790,7 @@ func (r *runner) restart(ctx context.Context, req restartRequest) {
 		if req.reload {
 			// The settings of the Settings page moved: the configuration
 			// is loaded again, with the same values unless they changed.
-			if c, err := r.loadConfig(); err != nil {
+			if c, err := r.loadStartConfig(); err != nil {
 				r.log.Error("the settings cannot be loaded again; restarting with those in use", "err", err)
 			} else if !moved(prev, c) {
 				next = c
@@ -775,7 +801,7 @@ func (r *runner) restart(ctx context.Context, req restartRequest) {
 		r.switchTo(ctx, prev, next, res, false)
 		return
 	}
-	next, err := r.loadConfig()
+	next, err := r.loadStartConfig()
 	if err != nil {
 		res.Error = fmt.Sprintf("The saved settings could not be loaded (%v). Signalith kept running with the previous settings.", err)
 		return
@@ -955,7 +981,7 @@ func (r *runner) switchTo(ctx context.Context, prev, next *config.Config, res *a
 		if plan.reuse != nil {
 			r.retire(plan.reuse, 0)
 		}
-		res.ProblemKeys = blame(err, next)
+		res.ProblemKeys = blame(err, next, prev)
 		res.Refused = r.setAside(next, prev, res.ProblemKeys, fmt.Sprintf("Signalith could not start with it (%v).", err))
 		back, err2 := r.start(ctx, prev)
 		if err2 != nil {

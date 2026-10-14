@@ -632,6 +632,7 @@ func (c *Config) CopyValue(key string, from *Config) error {
 		c.Cluster.LeaderEligible, c.Detections.Scheduler = &v, v
 	}
 	c.copyPageProblem(key, from)
+	c.copySharedSource(key, from)
 	return nil
 }
 
@@ -769,6 +770,19 @@ func noSecretIn(why string) func(any) error {
 		}
 		return nil
 	}
+}
+
+// AddressHasSecret reports whether v, a value of setting key, is an
+// address with a password or key in it (see hasSecret). The Settings page
+// refuses those; the shared settings take none from a server's files
+// either, as they are kept unencrypted and shown on every server's page.
+func AddressHasSecret(key string, v any) bool {
+	s, ok := Lookup(key)
+	if !ok || s.Type != TypeURL {
+		return false
+	}
+	str, _ := v.(string)
+	return hasSecret(str)
 }
 
 // hasSecret reports whether an address holds a user name and password,

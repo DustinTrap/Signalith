@@ -61,6 +61,14 @@ type Shared struct {
 	// Hash, when set, replaces SharedHash in matching a refusal to the
 	// shared value it refused.
 	Hash func(key string, v SharedValue) string
+	// TokenFrom says, for each shared agent token of older setups in
+	// Cluster["ingest.tokens"], in order, where it came from, such as
+	// "signalith.yaml on siem-b" (see Config.IngestTokenSource).
+	TokenFrom []string
+	// Revs holds the revision of each shared setting taken back to its
+	// default, which Cluster no longer holds: a change saved after it
+	// counts on from there (see Rev).
+	Revs map[string]int64
 
 	// explicitMode is PageSettings.explicitMode for Server, while an edit
 	// of this server's own settings is checked.
@@ -143,11 +151,21 @@ func (s *Shared) hash(key string, v SharedValue) string {
 	return SharedHash(key, v)
 }
 
+// Rev is the revision of shared setting key: of its value, or of the
+// change that took it back to its default.
+func (s *Shared) Rev(key string) int64 {
+	if v, ok := s.Cluster[key]; ok {
+		return v.Rev
+	}
+	return s.Revs[key]
+}
+
 // Clone returns a copy of s that can be changed without changing s.
 func (s *Shared) Clone() *Shared {
 	out := *s
 	out.Cluster = maps.Clone(s.Cluster)
 	out.Refused = maps.Clone(s.Refused)
+	out.Revs = maps.Clone(s.Revs)
 	out.Server = (&PageSettings{Settings: s.Server}).Clone().Settings
 	if out.Cluster == nil {
 		out.Cluster = map[string]SharedValue{}
@@ -176,7 +194,7 @@ func (c *Config) resetShared() {
 		delete(l.env, key)
 	}
 	c.publicURLFromEnv, c.publicURLDerived, c.httpPublicURL = false, false, ""
-	c.envTokens = nil
+	c.envTokens, c.sharedTokenFrom = nil, nil
 }
 
 // applyShared gives the shared settings their values from sh: the shared
@@ -208,6 +226,43 @@ func (c *Config) applyShared(sh *Shared) {
 		}
 		l.shared[key] = v
 	}
+}
+
+// copySharedSource makes c say of the shared setting key what from says,
+// as CopyValue copies its value: the shared value it came from, or the
+// value this server kept in place of one, so the configuration in use
+// tells where a value applied at once came from, and which value a
+// refusal keeps (KeptValue). c's layers may be another configuration's
+// too, so they are copied before they change.
+func (c *Config) copySharedSource(key string, from *Config) {
+	l, fl := c.layers, from.layers
+	if l == nil || fl == nil || !l.sharedOn || !slices.Contains(layerKeys(), key) {
+		return
+	}
+	fv, inShared := fl.shared[key]
+	fk, inKept := fl.kept[key]
+	cv, hadShared := l.shared[key]
+	ck, hadKept := l.kept[key]
+	if inShared == hadShared && inKept == hadKept && reflect.DeepEqual(fv, cv) && reflect.DeepEqual(fk, ck) {
+		return
+	}
+	nl := *l
+	nl.shared, nl.kept = maps.Clone(l.shared), maps.Clone(l.kept)
+	if nl.shared == nil {
+		nl.shared = map[string]SharedValue{}
+	}
+	if nl.kept == nil {
+		nl.kept = map[string]SharedRefusal{}
+	}
+	delete(nl.shared, key)
+	delete(nl.kept, key)
+	if inShared {
+		nl.shared[key] = fv
+	}
+	if inKept {
+		nl.kept[key] = fk
+	}
+	c.layers = &nl
 }
 
 // keptValue reads a refusal's kept value.
@@ -248,7 +303,7 @@ func (c *Config) setShared(key string, v SharedValue, sh *Shared) error {
 		if err := json.Unmarshal(v.Value, &list); err != nil {
 			return err
 		}
-		tokens := []string{}
+		tokens, from := []string{}, []string{}
 		for i, t := range list {
 			if secrets.IsSealed(t) {
 				plain, err := sh.open(key, t, "")
@@ -259,8 +314,13 @@ func (c *Config) setShared(key string, v SharedValue, sh *Shared) error {
 				t = plain
 			}
 			tokens = append(tokens, t)
+			f := ""
+			if i < len(sh.TokenFrom) {
+				f = sh.TokenFrom[i]
+			}
+			from = append(from, f)
 		}
-		c.Ingest.Tokens = tokens
+		c.Ingest.Tokens, c.sharedTokenFrom = tokens, from
 		return nil
 	}
 	f, ok := field(&Config{}, key)

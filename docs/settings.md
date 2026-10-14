@@ -533,7 +533,11 @@ What you will notice once the settings are shared:
 - The shared agent tokens of every server (`ingest.tokens`, `SIGNALITH_INGEST_TOKEN`
   and `SIGNALITH_INGEST_TOKEN_FILE`) are accepted by every server, so agents keep
   sending through a load balancer. A changed token file replaces that server's token;
-  an unchanged one never brings back a token retired on Add data.
+  an unchanged one never brings back a token retired on Add data. **Add data** names
+  the server whose files brought each one. Deleting a token's line from
+  `signalith.yaml`, or unsetting its variable, no longer stops it being accepted: the
+  servers keep it until it is retired on **Add data** (**Stop accepting**), which every
+  server follows within seconds.
 
 ### Exporting and configuration as code
 

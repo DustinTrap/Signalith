@@ -105,6 +105,39 @@ func (r *runner) loadConfig() (*config.Config, error) {
 	return config.LoadShared(r.path, sh)
 }
 
+// loadStartConfig is loadConfig for a start or a restart: the shared
+// settings changed in signalith.yaml or the environment since they were
+// last applied are applied first (applyFiles), so one that needs a
+// restart applies at this one.
+func (r *runner) loadStartConfig() (*config.Config, error) {
+	r.applyFiles()
+	return r.loadConfig()
+}
+
+// applyFiles applies the shared settings changed in this server's
+// signalith.yaml or environment to the shared settings
+// (clustercfg.Apply), while the settings are shared and OpenSearch takes
+// writes. Each start applies them too, in the background (see
+// sharedContent.apply), which then finds them applied; it does so as
+// well when they could not be applied here.
+func (r *runner) applyFiles() {
+	if !r.settingsShared() || r.shared.Writable() != nil {
+		return
+	}
+	c, err := r.loadConfig()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.backgroundContext(context.Background()), 30*time.Second)
+	defer cancel()
+	ct := r.sharedContent
+	ct.applyMu.Lock()
+	defer ct.applyMu.Unlock()
+	if _, err := clustercfg.Apply(ctx, r.shared, ct.docs, c, r.node.Name(), r.log); err != nil {
+		r.log.Warn("could not apply the changes to signalith.yaml and the environment to the shared settings before starting; they apply once this start can", "err", err)
+	}
+}
+
 // loadSetAside is loadConfig with keys set aside for reason, whether or
 // not that could be recorded.
 func (r *runner) loadSetAside(keys []string, reason string) (*config.Config, error) {
@@ -141,7 +174,7 @@ func (r *runner) primeShared(c *config.Config) *config.Config {
 	if !r.settingsShared() {
 		return c
 	}
-	next, err := r.loadConfig()
+	next, err := r.loadStartConfig()
 	if err != nil {
 		r.log.Error("the settings the servers share cannot be used; starting with this server's files", "err", err)
 		return c
@@ -252,20 +285,27 @@ func (r *runner) trySetAside(next, keep *config.Config, keys []string, reason st
 
 // startWithout starts the components when c, with the shared layer, could
 // not start (err): without this server's own settings from its nodecfg,
-// then with signalith.yaml alone. The settings to blame are refused here
-// once OpenSearch takes writes, and this server keeps the values it
-// started with meanwhile.
+// then with signalith.yaml alone. The settings to blame that the start
+// left out are refused here once OpenSearch takes writes, and this server
+// keeps the values it started with meanwhile. A start without this
+// server's own settings ran with the shared values, so none of those is
+// to blame; and as a start knows no values that ran before, a shared
+// value is to blame only when err names it (see blame): the others are
+// tried again at the next start.
 func (r *runner) startWithout(ctx context.Context, c *config.Config, err error) (*config.Config, *instance, net.Listener, error) {
-	keys := blame(err, c)
+	keys := blame(err, c, nil)
+	own := slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return config.ScopeOf(k) == config.ScopeCluster })
 	reason := fmt.Sprintf("Signalith could not start with them (%v)", err)
 	for _, step := range []struct {
 		what string
+		// left are the settings to blame this step leaves out.
+		left []string
 		load func() (*config.Config, error)
 	}{
-		{"without this server's own settings saved on a Settings page", func() (*config.Config, error) {
-			return config.LoadWithoutServerValues(r.path, r.layer(), reason, keys)
+		{"without this server's own settings saved on a Settings page", own, func() (*config.Config, error) {
+			return config.LoadWithoutServerValues(r.path, r.layer(), reason, own)
 		}},
-		{"with signalith.yaml alone", func() (*config.Config, error) {
+		{"with signalith.yaml alone", keys, func() (*config.Config, error) {
 			return config.LoadWithoutShared(r.path, reason, keys)
 		}},
 	} {
@@ -275,8 +315,8 @@ func (r *runner) startWithout(ctx context.Context, c *config.Config, err error) 
 			var ln net.Listener
 			if in, ln, lerr = r.open(ctx, next); lerr == nil {
 				r.log.Error("Signalith could not start with the settings saved on the Settings pages; started "+step.what,
-					"err", err, "settings", strings.Join(keys, ","))
-				r.refuseWhenWritable(ctx, c, next, keys, reason)
+					"err", err, "settings", strings.Join(step.left, ","))
+				r.refuseWhenWritable(ctx, c, next, step.left, reason)
 				return next, in, ln, nil
 			}
 		}
@@ -344,14 +384,16 @@ func (r *runner) followSettings(ctx context.Context, srv *api.Server, ret *reten
 	prev := c
 	var reported string
 	for {
+		// A value refused keeps the one in use now: what this start began
+		// with, and the changes applied at once since.
 		next, err := r.loadConfig()
-		if err == nil && next.SettingsProblem() != "" && r.refuseUnusable(c, next.SettingsProblem()) {
+		if err == nil && next.SettingsProblem() != "" && r.refuseUnusable(srv.Running(), next.SettingsProblem()) {
 			// Started without settings saved for this server that it
 			// cannot use: they are refused, and so left out from now on.
 			continue
 		}
 		if err != nil {
-			if r.refuseUnusable(c, strings.TrimPrefix(err.Error(), r.path+": ")) {
+			if r.refuseUnusable(srv.Running(), strings.TrimPrefix(err.Error(), r.path+": ")) {
 				continue
 			}
 			if msg := err.Error(); msg != reported {
@@ -716,6 +758,10 @@ func (s settingsStore) Shared() bool    { return s.r.sharedContent.settingsOn.Lo
 func (s settingsStore) Writable() error { return s.r.shared.Writable() }
 func (s settingsStore) Self() string    { return s.r.node.ID() }
 func (s settingsStore) ETag() string    { return s.r.sharedContent.docs.Settings().ETag() }
+func (s settingsStore) Revision() int64 {
+	_, _, rev := s.r.sharedContent.docs.Settings().Updated()
+	return rev
+}
 
 func (s settingsStore) Layer(ctx context.Context, server string) (*config.Shared, *shared.NodeCfg, error) {
 	r := s.r

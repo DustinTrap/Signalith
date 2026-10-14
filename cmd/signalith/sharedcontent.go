@@ -59,6 +59,9 @@ type sharedContent struct {
 	followMu        sync.Mutex
 	followedNC      *shared.Doc[shared.NodeCfg]
 	followedCluster *shared.Doc[shared.ClusterBody]
+	// applyMu keeps the changes of the files from being applied twice at
+	// once: by a start, and before the next one (runner.applyFiles).
+	applyMu sync.Mutex
 }
 
 type osTarget struct {
@@ -209,7 +212,9 @@ func (ct *sharedContent) apply(ctx context.Context, rt *shared.Runtime, c *confi
 	ct.drift.Store(nil)
 	for {
 		if rt.Writable() == nil {
+			ct.applyMu.Lock()
 			res, err := clustercfg.Apply(ctx, rt, ct.docs, c, ct.node.Name(), ct.log)
+			ct.applyMu.Unlock()
 			if err == nil {
 				ct.drift.Store(&res.Drift)
 				return
