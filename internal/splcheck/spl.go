@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -59,6 +60,8 @@ type Rule struct {
 	Node string `yaml:"-"`
 	// Where selects the node's events.
 	Where Expr `yaml:"-"`
+	// Linux is set for a rule over Sysmon for Linux events only.
+	Linux bool `yaml:"-"`
 }
 
 // Score is the risk the rule assigns, 0 when it names none.
@@ -109,11 +112,14 @@ var Nodes = map[string][]string{
 
 // The stages after the where clause that only reshape the results.
 var (
-	tstatsRe    = regexp.MustCompile(`(?s)^\|\s*tstats\s+.*?\bfrom\s+datamodel=Endpoint\.(\w+)\s+where\s+(.*?)\s+by\s+[^|]*$`)
+	tstatsRe    = regexp.MustCompile(`(?is)^\|\s*tstats\s+.*?\bfrom\s+datamodel=Endpoint\.(\w+)\s+where\s+(.*?)\s+by\s+[^|]*$`)
 	harmlessRe  = regexp.MustCompile("^`(drop_dm_object_name|security_content_ctime)\\([^`]*\\)`$")
 	filterRe    = regexp.MustCompile("^`[\\w-]+_filter`$")
 	summariesRe = regexp.MustCompile("`security_content_summariesonly`")
 	commentRe   = regexp.MustCompile("(?s)```.*?```")
+	// where isnotnull(field) after the tstats keeps the rows that have
+	// the field, which is field=* in the where clause.
+	notNullRe = regexp.MustCompile(`(?i)^where\s+isnotnull\((\w+)\)$`)
 )
 
 // Parse reads a detection and its search. Only a tstats search over
@@ -128,31 +134,193 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 	if r.ID == "" || r.Name == "" || r.Search == "" {
 		return nil, errors.New("not a detection: name, id and search are required")
 	}
+	r.Linux = len(r.DataSource) > 0 && !slices.ContainsFunc(r.DataSource, func(s string) bool {
+		return !strings.HasPrefix(s, "Sysmon for Linux ")
+	})
 	// ```text``` is a comment in SPL.
 	stages := pipes(strings.TrimSpace(commentRe.ReplaceAllString(r.Search, " ")))
 	if len(stages) == 0 {
 		return nil, errors.New("empty search")
+	}
+	if m := rawRe.FindStringSubmatch(stages[0]); m != nil {
+		return parseRaw(&r, m[1], m[2], stages[1:], macros)
 	}
 	first := summariesRe.ReplaceAllString("| "+stages[0], "")
 	m := tstatsRe.FindStringSubmatch(first)
 	if m == nil {
 		return nil, errors.New("search is not a tstats search of Endpoint.Processes, Filesystem or Registry")
 	}
+	r.Node = m[1]
+	fields, ok := Nodes[r.Node]
+	if !ok {
+		return nil, fmt.Errorf("data model node Endpoint.%s is not supported", r.Node)
+	}
+	var present []Expr
 	for _, s := range stages[1:] {
+		if nn := notNullRe.FindStringSubmatch(s); nn != nil && slices.Contains(fields, nn[1]) {
+			present = append(present, &Cmp{Field: nn[1], Values: []string{"*"}})
+			continue
+		}
 		if !harmlessRe.MatchString(s) && !filterRe.MatchString(s) {
 			return nil, fmt.Errorf("search has a later stage Signalith does not run: %s", firstWords(s))
 		}
-	}
-	r.Node = m[1]
-	if _, ok := Nodes[r.Node]; !ok {
-		return nil, fmt.Errorf("data model node Endpoint.%s is not supported", r.Node)
 	}
 	where, err := ParseWhere(m[2], r.Node, macros)
 	if err != nil {
 		return nil, err
 	}
+	if len(present) > 0 {
+		where = &And{Kids: append([]Expr{where}, present...)}
+	}
 	r.Where = where
 	return &r, nil
+}
+
+// Raw event searches: a source macro, then terms on the event's own
+// fields, which must name the event code (EventCode=10). The code picks
+// the node, and each node's fields map to the Signalith fields they are
+// stored as. The code stays in the clause as signature_id.
+var (
+	rawRe = regexp.MustCompile("(?s)^`(powershell|sysmon)`\\s+(.*)$")
+	// rawNodes are the nodes of each source by event code.
+	rawNodes = map[string]map[string]string{
+		"powershell": {"4104": "PowerShell"},
+		"sysmon":     {"7": "ImageLoad", "8": "ProcessAccess", "10": "ProcessAccess"},
+	}
+	// RawFields are the event fields a raw search may name on each node,
+	// with the Signalith field each is stored as.
+	RawFields = map[string]map[string]string{
+		"PowerShell": {"ScriptBlockText": "script_block_text"},
+		"ImageLoad": {
+			"ImageLoaded": "loaded_file_path", "loaded_file_path": "loaded_file_path",
+			"Image": "process_path", "process_path": "process_path", "process_name": "process_name",
+			"Signed": "signed", "SignatureStatus": "signature_status", "Signature": "signature",
+		},
+		"ProcessAccess": {
+			"SourceImage": "process_path", "TargetImage": "target_process_path",
+			"GrantedAccess": "granted_access", "CallTrace": "call_trace", "SourceUser": "user",
+		},
+	}
+	fillnullRe = regexp.MustCompile(`(?i)^fillnull$`)
+	statsRe    = regexp.MustCompile(`(?is)^stats\s`)
+	renameRe   = regexp.MustCompile(`(?is)^rename\s`)
+)
+
+// eventCode is the stored field of EventCode or EventID.
+const eventCode = "signature_id"
+
+// rawSource is the pseudo node a raw search is parsed against before its
+// event code names the node.
+func rawSource(source string) string { return "raw:" + source }
+
+// parseRaw reads a raw event search of one source. Later, fillnull and
+// stats only count the events and rename only renames the counts.
+// (Without fillnull, Splunk's stats also drops events that miss one of
+// its by fields; Signalith keeps them, so it finds those too.)
+func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*Macro) (*Rule, error) {
+	filled, counted := false, false
+	for _, s := range later {
+		switch {
+		case harmlessRe.MatchString(s) || filterRe.MatchString(s):
+		case fillnullRe.MatchString(s) && !counted && !filled:
+			filled = true
+		case statsRe.MatchString(s) && !counted:
+			counted = true
+		case renameRe.MatchString(s) && counted:
+		default:
+			return nil, fmt.Errorf("search has a later stage Signalith does not run: %s", firstWords(s))
+		}
+	}
+	where, err := ParseWhere(terms, rawSource(source), macros)
+	if err != nil {
+		return nil, err
+	}
+	// The event code, named once at the top, picks the node.
+	var top []Expr
+	if a, ok := where.(*And); ok {
+		top = a.Kids
+	} else {
+		top = []Expr{where}
+	}
+	var code *Cmp
+	for _, k := range top {
+		if c, ok := k.(*Cmp); ok && c.Field == eventCode {
+			if code != nil || c.Neg {
+				return nil, fmt.Errorf("a %s search must name its event code once", source)
+			}
+			code = c
+		}
+	}
+	if code == nil || countField(where, eventCode) != 1 {
+		return nil, fmt.Errorf("a %s search must name its event code (EventCode=...) once, at the top", source)
+	}
+	for _, v := range code.Values {
+		n := rawNodes[source][v]
+		if n == "" || (r.Node != "" && n != r.Node) {
+			return nil, fmt.Errorf("%s event %s is not supported", source, v)
+		}
+		r.Node = n
+	}
+	if len(top) < 2 {
+		return nil, fmt.Errorf("a %s search must name a field besides its event code", source)
+	}
+	if err := fieldsOf(where, r.Node); err != nil {
+		return nil, err
+	}
+	r.Where = where
+	return r, nil
+}
+
+// fieldsOf checks that a raw clause names only fields of node.
+func fieldsOf(e Expr, node string) error {
+	switch x := e.(type) {
+	case *And:
+		for _, k := range x.Kids {
+			if err := fieldsOf(k, node); err != nil {
+				return err
+			}
+		}
+	case *Or:
+		for _, k := range x.Kids {
+			if err := fieldsOf(k, node); err != nil {
+				return err
+			}
+		}
+	case *Not:
+		return fieldsOf(x.Kid, node)
+	case *Cmp:
+		if x.Field == eventCode {
+			return nil
+		}
+		for _, f := range RawFields[node] {
+			if f == x.Field {
+				return nil
+			}
+		}
+		return fmt.Errorf("field %s is not a field of %s events", x.Field, node)
+	}
+	return nil
+}
+
+func countField(e Expr, f string) int {
+	n := 0
+	switch x := e.(type) {
+	case *And:
+		for _, k := range x.Kids {
+			n += countField(k, f)
+		}
+	case *Or:
+		for _, k := range x.Kids {
+			n += countField(k, f)
+		}
+	case *Not:
+		n = countField(x.Kid, f)
+	case *Cmp:
+		if x.Field == f {
+			n = 1
+		}
+	}
+	return n
 }
 
 func firstWords(s string) string {

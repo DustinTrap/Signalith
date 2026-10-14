@@ -915,6 +915,7 @@ function renderFindingDetail(box, data, opts = {}) {
     d ? { icon: 'crosshair', label: 'Open the detection', run: () => focusDetection(f.detection_id) } : null,
     d ? { icon: 'list-filter', label: 'Findings from this detection', run: () => { fnd.detection = f.detection_id; fnd.urgency.clear(); loadFindings(); } } : null,
     can('analyst') ? { icon: 'zap', label: 'Respond…', run: () => { const b = box.querySelector('[data-action="respond"]'); if (b) b.click(); } } : null,
+    can('analyst') ? { icon: 'sparkles', label: 'Investigate with AI…', run: () => openInvestigate(f) } : null,
     d && can('admin') ? 'sep' : null,
     d && can('admin') ? { icon: 'bell-off', label: 'Don’t alert on this again…', run: () => suppressFinding(f, d) } : null,
   ]);
@@ -962,6 +963,7 @@ function renderFindingDetail(box, data, opts = {}) {
         f.credit ? el('p', { class: 'dx-credit' }, f.credit) : null,
         d && d.guidance ? el('div', { class: 'callout' }, icon('lightbulb'), el('div', {}, el('b', {}, 'How to triage. '), d.guidance)) : null,
         (f.mitre || []).length ? techRow(f.mitre) : null,
+        can('analyst') && typeof findingInvestigate === 'function' ? findingInvestigate(f) : null,
         err,
         // Viewers see the triage state; analysts and admins change it.
         can('analyst') ? dxSection('Triage',
@@ -1060,10 +1062,10 @@ const packShort = (name) => ({ sigmahq: 'SigmaHQ', splunk: 'Splunk' }[name] || n
 // (Splunk's TTP rules raise findings; its anomalies only add risk).
 const PACK_INFO = {
   sigmahq: { icon: 'sigma', by: 'By the SigmaHQ authors named on each rule, under the ', license: 'Detection Rule License 1.1', home: 'SigmaHQ on GitHub',
-    desc: 'Windows rules for Sysmon, Security and PowerShell events, each tested before it ships. Off until you turn them on.',
+    desc: 'Windows rules for Sysmon, Security and PowerShell events, and Linux rules for Sysmon for Linux, each tested before it ships. Off until you turn them on.',
     strong: (d) => d.severity === 'high' || d.severity === 'critical', strongName: 'high and critical rule' },
   splunk: { icon: 'layers', by: 'By Splunk’s Threat Research Team and the authors named on each rule, under the ', license: 'Apache License 2.0', home: 'security_content on GitHub',
-    desc: 'Splunk’s Windows process, file and registry detections, each tested before it ships. TTP rules raise findings; anomalies add risk. Off until you turn them on.',
+    desc: 'Splunk’s Windows and Linux process, file, registry and PowerShell detections, each tested before it ships. TTP rules raise findings; anomalies add risk. Off until you turn them on.',
     strong: (d) => (d.tags || []).includes('ttp'), strongName: 'TTP rule' },
 };
 const packInfo = (p) => PACK_INFO[p.name] || { icon: 'layers', by: 'Under the ', license: p.license, home: 'Source', desc: p.description, strong: () => false, strongName: 'rule' };
@@ -1073,14 +1075,16 @@ async function loadDetections() {
   const seq = ++det.seq;
   if (!det.loaded) renderDetectionsSkeleton();
   try {
-    const [res, f24, packs] = await Promise.all([
+    const [res, f24, packs, contentInfo] = await Promise.all([
       api('api/detections'),
       api('api/findings?since=24h&limit=1000').catch(() => null),
       api('api/detections/packs').catch(() => null),
+      api('api/detections/content').catch(() => null),
     ]);
     if (seq !== det.seq) return;
     detections = res.detections;
     det.packs = packs ? packs.packs : [];
+    det.content = contentInfo;
     schedulerOn = res.scheduler;
     runsOn = typeof res.runs_on === 'string' ? res.runs_on : null;
     schedulerHere = res.scheduler_here !== false;
@@ -1230,8 +1234,80 @@ function renderPacks(list) {
         credit),
       el('div', { class: 'dx-pack__actions' }, ...actions));
   });
-  fill(box, ...cards);
+  fill(box, ...cards, browsing ? null : contentBar());
   box.classList.toggle('hidden', !det.packs.length);
+}
+
+// contentVersion turns a content version (20261013140000) into a date.
+function contentDate(v) {
+  if (!v || v.length < 8) return '';
+  const d = new Date(Date.UTC(+v.slice(0, 4), +v.slice(4, 6) - 1, +v.slice(6, 8)));
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+// contentBar says how new the pack rules are and, for admins, checks for
+// signed updates or takes one uploaded (for servers without internet).
+function contentBar() {
+  const c = det.content;
+  if (!c) return null;
+  const st = c.status;
+  const admin = can('admin');
+  const parts = [st.updated ? `Rules updated ${contentDate(st.version)}` : `Rules from ${contentDate(st.version)}, built into Signalith`];
+  if (c.mode === 'daily') parts.push('checked daily');
+  if (st.last_check) parts.push(`last checked ${dxClock(st.last_check)}${st.last_result === 'up to date' ? ', up to date' : ''}`);
+  const lines = [el('span', {}, parts.join(' · '))];
+  if (st.skipped) lines.push(el('span', { class: 'dx-content__warn', title: (st.skipped_reasons || []).join('\n') }, `${dxPlural(st.skipped, 'new rule')} need a newer Signalith.`));
+  if (st.last_error) lines.push(el('span', { class: 'dx-content__err' }, sentence(st.last_error)));
+  const actions = [];
+  if (admin && st.ready) {
+    actions.push(dxBtn('ghost', 'Check for updates', (ev) => contentAction(ev.currentTarget, () => api('api/detections/content/check', {})), { sm: true, icon: 'refresh-cw' }));
+    const pick = el('input', { type: 'file', multiple: '', accept: '.gz,.sig', class: 'hidden', 'aria-label': 'Content update and its signature' });
+    pick.addEventListener('change', () => uploadContent(pick, upBtn));
+    const upBtn = dxBtn('ghost', 'Upload update…', () => pick.click(), { sm: true, icon: 'upload' });
+    upBtn.title = 'For a server without internet access: choose signalith-content.tar.gz and signalith-content.tar.gz.sig together';
+    actions.push(pick, upBtn);
+    if (st.updated) actions.push(dxBtn('ghost', 'Use built-in rules', (ev) => contentAction(ev.currentTarget, () => api('api/detections/content', undefined, 'DELETE')), { sm: true }));
+  } else if (admin) {
+    lines.push(el('span', { class: 'dx-meta' }, 'This build of Signalith cannot take content updates.'));
+  }
+  return el('div', { class: 'dx-content' }, el('span', { class: 'dx-content__icon', 'aria-hidden': 'true' }, icon('cloud-download')),
+    el('div', { class: 'dx-content__text' }, ...lines), actions.length ? el('div', { class: 'dx-content__actions' }, ...actions) : null);
+}
+
+async function contentAction(btn, call) {
+  btn.disabled = true;
+  try {
+    det.content = await call();
+    const st = det.content.status;
+    toast(st.last_result === 'installed' ? `Rules updated to ${contentDate(st.version)}.` : st.updated ? 'Rules are up to date.' : 'Using the rules built into Signalith.');
+    loadDetections();
+  } catch (e) {
+    toastError('Content update failed', e);
+    if (det.content) det.content = await api('api/detections/content').catch(() => det.content);
+    renderDetections();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function uploadContent(pick, btn) {
+  const files = [...pick.files];
+  pick.value = '';
+  const sig = files.find((f) => f.name.endsWith('.sig'));
+  const bundle = files.find((f) => !f.name.endsWith('.sig'));
+  if (!sig || !bundle) {
+    toast('Choose both files: the update (.tar.gz) and its signature (.sig).', null, { tone: 'danger', title: 'Two files needed' });
+    return;
+  }
+  const form = new FormData();
+  form.append('bundle', bundle);
+  form.append('signature', sig);
+  await contentAction(btn, async () => {
+    const resp = await fetch('api/detections/content/upload', { method: 'POST', body: form });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    return data;
+  });
 }
 
 // bulkEnable turns many detections on or off at once, after a check when

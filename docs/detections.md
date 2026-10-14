@@ -190,9 +190,10 @@ Content packs are rule sets from other open source projects, shipped unchanged
 inside Signalith and converted when it starts. Every pack detection is **off** until
 an admin turns it on.
 
-**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 1,695 Windows
-rules from [SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit, for
-these Sysmon, Security and PowerShell log sources:
+**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 1,805 rules from
+[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 1,695 Windows rules
+for these Sysmon, Security and PowerShell log sources, and 110 Linux rules (see
+[Linux endpoints](#linux-endpoints-sysmon-for-linux)):
 
 | Sigma log source | Windows events | Data model |
 | --- | --- | --- |
@@ -209,6 +210,26 @@ Each pack rule only searches its own log source's event IDs, since several kinds
 event share a data model (a process creation and a process access are both Endpoint).
 Sysmon only records the events its configuration asks for, so a rule fires only when
 your Sysmon configuration logs that kind of event.
+
+### Linux endpoints (Sysmon for Linux)
+
+[Sysmon for Linux](https://github.com/Sysinternals/SysmonForLinux) (open source, MIT)
+records process creations, network connections and file creation and deletion with
+the same event IDs and fields as Sysmon on Windows, and writes them to syslog. Signalith
+reads them into the same data models, with sourcetype `sysmon:linux`:
+
+| Sigma log source (Linux) | Sysmon for Linux events | Data model |
+| --- | --- | --- |
+| `process_creation` | 1 | Endpoint |
+| `network_connection` | 3 | Network_Traffic |
+| `file_event` | 11 | Filesystem |
+
+The SigmaHQ pack's Linux rules and the Splunk pack's Linux rules read these events.
+Sigma Linux rules search every Linux event of their data model; Splunk's search only
+Sysmon for Linux events. To collect them, install Sysmon for Linux with a
+configuration, then on **Add data** choose Linux, turn on **Include Sysmon for Linux**
+and use the new agent configuration: the agent reads Sysmon's events from the
+systemd journal.
 
 ### PowerShell script blocks
 
@@ -287,19 +308,24 @@ The generator keeps each rule's Signalith ID across runs, rewrites `rules/`,
 
 ### Splunk Security Content
 
-**Splunk Security Content** (`internal/detect/packs/splunk`) holds 173 Windows
-detections from Splunk's Threat Research Team
+**Splunk Security Content** (`internal/detect/packs/splunk`) holds 801 Windows and
+Linux detections from Splunk's Threat Research Team
 ([security_content](https://github.com/splunk/security_content)), pinned to one
 commit. They are the production TTP and anomaly rules that search the CIM
 `Endpoint.Processes`, `Endpoint.Filesystem` and `Endpoint.Registry` nodes with
-`tstats`. Signalith uses the same CIM field names, so each rule's `where` clause
-becomes a Signalith filter field for field:
+`tstats`, plus the PowerShell script block rules. Signalith uses the same CIM field
+names, so each rule's `where` clause becomes a Signalith filter field for field:
 
 | Splunk node | Windows events | Data model |
 | --- | --- | --- |
 | `Endpoint.Processes` | Sysmon 1, Security 4688 | Endpoint |
 | `Endpoint.Filesystem` | Sysmon 11, 23 and 26 | Filesystem |
 | `Endpoint.Registry` | Sysmon 12, 13 and 14 | Registry |
+| `` `powershell` EventCode=4104 `` (raw search) | PowerShell 4104 | Script |
+| `` `sysmon` EventCode=7 `` (raw search) | Sysmon 7 | Image_Load |
+| `` `sysmon` EventCode=8 `` or `10` (raw search) | Sysmon 8 and 10 | Endpoint |
+| `Endpoint.Processes` (Sysmon for Linux rules) | Sysmon for Linux 1 | Endpoint |
+| `Endpoint.Filesystem` (Sysmon for Linux rules) | Sysmon for Linux 11 and 23 | Filesystem |
 
 The rule files and the macros they use ship unchanged; Signalith converts them when
 it starts, reading the search the way Splunk does: `*` is the only wildcard (`?` is
@@ -310,12 +336,23 @@ add risk, as in Splunk ES risk-based alerting. Severity follows the rule's risk 
 `splunk`, the pack name, `ttp` or `anomaly`, and the node, and keeps the rule's
 known false positives as triage guidance.
 
+PowerShell rules, and Sysmon image load, remote thread and process access rules,
+search the events themselves rather than a data model: their event fields become
+Signalith's (`ScriptBlockText` is `script_block_text`, `ImageLoaded` is
+`loaded_file_path`, `TargetImage` is `target_process_path`, and so on), and their
+`fillnull` and `stats` stages only count the events. (Without `fillnull`, Splunk's
+`stats` also drops events that miss one of its `by` fields; Signalith keeps them.) PowerShell rules need script block logging
+turned on (**Include PowerShell** on Add data).
+
+Registry values that Sysmon writes as `DWORD (0x00000001)` compare as `0x00000001`,
+the way Splunk's Sysmon add-on reads them.
+
 A rule is shipped only when its whole search converts exactly (a `tstats` search
-whose later stages only rename fields, format times or apply the rule's empty
-`_filter` macro) and, on test events made from its `where` clause and passed through
+whose later stages only rename fields, format times, keep rows that have a field
+(`where isnotnull(...)`) or apply the rule's empty `_filter` macro) and, on test events made from its `where` clause and passed through
 the real Windows parser, the converted detection agrees with Splunk's reading of the
-clause on every event. Searches with `eval`, `rex`, `regex`, `lookup` or raw `sysmon`
-event searches are left out for now; `internal/detect/packs/splunk/REPORT.md` lists
+clause on every event. Searches with `eval`, `rex`, `regex`, `lookup`, and other raw searches
+are left out for now; `internal/detect/packs/splunk/REPORT.md` lists
 every rule left out and why. The same CI checks as the SigmaHQ pack run on it.
 
 On the pack card, **Turn on N TTP rules** is the suggested start.
@@ -333,6 +370,51 @@ git clone https://github.com/splunk/security_content /tmp/security_content
 go run ./internal/detect/splunkgen -splunk /tmp/security_content
 go test ./internal/detect/ ./internal/splcheck/
 ```
+
+### Content updates
+
+Pack rules can be updated without a new Signalith release. Every week the Signalith
+project rebuilds both packs from the newest SigmaHQ and Splunk rules, runs every check
+above on them (in memory and against a real OpenSearch), and publishes the ones that
+pass as one signed bundle. A server only installs a bundle that:
+
+- is signed by a key built into Signalith (Ed25519; the keys are in
+  `internal/content/trusted.keys`), so a copy from anywhere else is as good as the
+  original, and a changed byte is refused;
+- is newer than the rules it uses, so an old bundle cannot roll rules back;
+- this version of Signalith can read. A rule for something it does not know yet, such as
+  a new log source, is left out and counted on the Detections page.
+
+Under the pack cards on the **Detections** page, the line says how new the rules are.
+Admins can:
+
+- **Check for updates**: download and install the newest bundle.
+- **Upload update…**: for a server without internet access. Download
+  `signalith-content.tar.gz` and `signalith-content.tar.gz.sig` from the
+  [content release](https://github.com/jrsamsanchez/Signalith/releases/tag/content)
+  on another computer, then choose both files together.
+- **Use built-in rules**: go back to the rules that came with this version of Signalith.
+
+Rules you turned on stay on, exceptions stay, and new rules start off. A rule that an
+update drops stops running; your choices for it come back if it returns.
+
+The **Content pack updates** setting (`detections.content_updates`) can be **Daily**:
+the server then checks once a day and installs what it finds. **Content update address**
+(`detections.content_url`) points servers at a copy on your own web server; the bundle's
+signature is read from the same address plus `.sig`. Each server keeps its update in
+`content/` in its detections folder. Upgrading Signalith to a version with newer rules
+built in uses those instead of an older update.
+
+From the command line (as the service, with `-c` for the config file):
+
+```sh
+signalith content status
+signalith content install signalith-content.tar.gz   # reads signalith-content.tar.gz.sig too
+signalith content remove
+```
+
+Restart Signalith after `install` or `remove` so a running server uses the change, or
+upload on the Detections page instead.
 
 ## Sigma rules
 
@@ -389,6 +471,10 @@ Imported rules start disabled with a 5 minute schedule and 10 minute lookback.
 | `POST /api/detections/{id}/run` | Run now and raise findings |
 | `POST /api/detections/sigma` | Convert a Sigma rule (YAML body, or JSON `{"rule": "..."}`) |
 | `GET /api/detections/packs` | Content packs with their rule IDs, how many are on, and counts by severity |
+| `GET /api/detections/content` | Content update status: the version in use, whether it is an update, the last check and the `content_updates` mode |
+| `POST /api/detections/content/check` | Download and install a newer content update (admin; 502 with the reason when it fails) |
+| `POST /api/detections/content/upload` | Install an update from a form with the files `bundle` and `signature` (admin; 409 when it is not newer) |
+| `DELETE /api/detections/content` | Remove the update and use the rules built into Signalith (admin) |
 | `POST /api/detections/{id}/exceptions` | Add an exception: `{"match": {"host": "web*"}, "for": "7d", "from", "until", "comment"}` (admin) |
 | `DELETE /api/detections/{id}/exceptions/{exception}` | Remove an exception (admin) |
 | `POST /api/findings/{id}/suppress` | Don't alert on this again: `{"fields": ["host", "user"], "for": "30d", "comment", "update": {"status": "closed", "disposition": "false_positive"}}` adds an exception for the finding's values of those fields and can update the finding (admin) |

@@ -33,7 +33,8 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 docker compose -f deploy/docker/docker-compose.yml exec signalith signalith initial-password
 ```
 
-The first command starts OpenSearch and Signalith. On first start a setup step makes the
+The first command downloads Signalith's ready-made image from GitHub
+(`ghcr.io/jrsamsanchez/signalith`) and starts OpenSearch and Signalith. On first start a setup step makes the
 admin password, a shared agent token and the certificates OpenSearch and Signalith use
 with each other, and keeps them in Docker volumes; no password is written in the compose
 files. Once OpenSearch is up, a second step loads OpenSearch's security settings (who may
@@ -82,8 +83,8 @@ Settings changed on the **Settings** page are kept in the `signalith-data` volum
 certificate authority, so they survive updates; settings given in `docker-compose.yml`'s
 `environment:` show there locked.
 
-To update, run `git pull` and then the first command again. It rebuilds Signalith from the
-new code each time. If `git pull` says your local changes to
+To update, run `git pull` and then the first command again. It downloads the Signalith
+image built from the newest code each time. If `git pull` says your local changes to
 `deploy/docker/signalith.yaml` would be overwritten, run `git stash` and `git pull` again.
 If the change you had made there was `plaintext_ingest: deny`, add that line back under
 `mode: auto`, indented the same, before you run the first command; otherwise agents on
@@ -93,6 +94,26 @@ Settings > General > "Start Docker Desktop when you sign in". If the computer re
 while the first command was still waiting for the step that loads OpenSearch's security
 settings, Signalith had not started yet and does not start by itself: https://localhost:8080
 doesn't answer. Run `docker compose -f deploy/docker/docker-compose.yml up -d` again then.
+
+#### Running a release, or building the image yourself
+
+The quick start runs the image GitHub builds from `main`, which matches the code `git pull`
+gives you. To run a release instead, check out its tag and set `SIGNALITH_VERSION` to the
+same version before the first command, for example in PowerShell:
+
+```powershell
+git checkout v0.1.0
+$env:SIGNALITH_VERSION = "0.1.0"
+docker compose -f deploy/docker/docker-compose.yml up -d
+```
+
+(in a Linux or macOS terminal: `export SIGNALITH_VERSION=0.1.0`). To build the image
+from the code you checked out, for example to try a change of your own, add
+`-f deploy/docker/docker-compose.build.yml` after the first `-f` in every command:
+
+```sh
+docker compose -f deploy/docker/docker-compose.yml -f deploy/docker/docker-compose.build.yml up -d
+```
 
 #### Upgrading the Docker quick start
 
@@ -113,7 +134,7 @@ same):
    ```sh
    docker compose -f deploy/docker/docker-compose.yml up -d
    ```
-   This rebuilds Signalith, runs the setup step once, restarts OpenSearch with its
+   This downloads the new Signalith image, runs the setup step once, restarts OpenSearch with its
    security plugin on, and then runs the step that loads OpenSearch's security settings;
    Signalith starts after that. The first start takes a minute or two longer, and up to
    about 10 minutes on a slow computer, where that step keeps trying while OpenSearch is
@@ -580,6 +601,8 @@ are counted for each person's own address, not the proxy's. See
 | `dashboards.stale_after` | `2h` | How long a host and source type can be quiet before the posture dashboard lists it as stopped |
 | `assistant.provider` | off | Optional AI model for **Ask**: `anthropic`, or `openai` for any OpenAI-compatible API (OpenAI, Ollama, LM Studio, vLLM) |
 | `assistant.url`, `assistant.model`, `assistant.api_key` | per provider | Endpoint, model name and key; `anthropic` defaults to `claude-sonnet-5-5` |
+| `assistant.investigate` | `false` | Lets analysts use **Investigate with AI** on a finding, which sends the finding's events to the model. See [docs/investigate.md](docs/investigate.md) |
+| `assistant.mask_fields` | none | Fields whose values are replaced with stand-ins before Investigate with AI sends anything; `_raw` leaves out the event text. Passwords, tokens, keys and cookies are always masked |
 
 Secrets can come from the environment instead: `SIGNALITH_OPENSEARCH_PASSWORD`,
 `SIGNALITH_ADMIN_PASSWORD`, `SIGNALITH_INGEST_TOKEN`, `SIGNALITH_LDAP_BIND_PASSWORD` (for
@@ -720,12 +743,13 @@ changes and more, plus two risk incident rules); 19 are on by default.
 - **Import Sigma rule** converts a [Sigma](https://github.com/SigmaHQ/sigma) rule to a
   Signalith query and lists anything it had to approximate. Imported rules start
   disabled so you can test them first.
-- **Content packs** add community rules, off until you turn them on: 1,695 tested
-  [SigmaHQ](https://github.com/SigmaHQ/sigma) Windows rules and 173 Windows detections
+- **Content packs** add community rules, off until you turn them on: 1,805 tested
+  [SigmaHQ](https://github.com/SigmaHQ/sigma) Windows and Linux rules and 801 Windows and Linux detections
   from Splunk's open source
   [security_content](https://github.com/splunk/security_content) (Apache 2.0). With
-  both packs on, detections cover 140 ATT&CK techniques. See
-  [docs/detections.md](docs/detections.md#content-packs).
+  both packs on, detections cover 147 ATT&CK techniques. Newer tested rules arrive as
+  signed content updates, without a new Signalith release (from the internet or as an
+  upload). See [docs/detections.md](docs/detections.md#content-packs).
 - **ATT&CK coverage** shows the Enterprise matrix with techniques covered by enabled
   detections, by disabled ones, and gaps.
 
@@ -750,6 +774,20 @@ like an investigation in Splunk ES. Open the **Investigations** tab to see open 
 
 Cases are stored in OpenSearch in the `<prefix>_cases` index, and every change is
 recorded with who made it.
+
+### Investigate with AI
+
+**Investigate with AI** on a finding gathers its events, where its users, hosts and
+addresses show up, threat intel matches and related findings, lets the AI model run a
+few more read-only searches, and writes a short verdict (likely real, likely benign or
+unsure) with a timeline, the evidence behind it and suggested response actions, which a
+person still reviews and runs. **Save to case** keeps the write-up as a case note.
+
+It sends event data to the model, so it is off until an admin turns it on in **Settings
+→ AI assistant**. Analysts see exactly what will be sent before it goes, admins can mask
+fields (replaced with stand-ins such as `masked-user-1`), and a model on your own
+hardware, such as Ollama, keeps everything on site. See
+[docs/investigate.md](docs/investigate.md).
 
 ## Notifications
 

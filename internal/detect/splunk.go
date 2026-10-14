@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/splcheck"
 )
@@ -19,9 +20,12 @@ import (
 // splunkEvents are the Windows events each data model node is, so a rule
 // over Endpoint.Processes reads process creations, not process access.
 var splunkEvents = map[string][]string{
-	"Processes":  {"1", "4688"},
-	"Filesystem": {"11", "23", "26"},
-	"Registry":   {"12", "13", "14"},
+	"Processes":     {"1", "4688"},
+	"Filesystem":    {"11", "23", "26"},
+	"Registry":      {"12", "13", "14"},
+	"PowerShell":    {"4104"},
+	"ImageLoad":     {"7"},
+	"ProcessAccess": {"8", "10"},
 }
 
 // UseMacros gives a splunk pack the macros its rules' searches use (the
@@ -58,8 +62,12 @@ func SplunkFilter(r *splcheck.Rule) (query.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
+	sourcetype := windowsSourcetypes
+	if r.Linux {
+		sourcetype = ingest.SysmonLinuxSourcetype
+	}
 	scope := and([]query.Expr{
-		&query.Compare{Field: "sourcetype", Op: "=", Value: windowsSourcetypes},
+		&query.Compare{Field: "sourcetype", Op: "=", Value: sourcetype},
 		&query.In{Field: "signature_id", Values: splunkEvents[r.Node]},
 	})
 	return and([]query.Expr{scope, e}), nil
@@ -102,11 +110,18 @@ func splunkExpr(e splcheck.Expr) (query.Expr, error) {
 				return nil, fmt.Errorf("an empty value of %s is not supported", x.Field)
 			}
 		}
-		var match query.Expr
-		if len(x.Values) == 1 {
-			match = &query.Compare{Field: x.Field, Op: "=", Value: x.Values[0]}
-		} else {
-			match = &query.In{Field: x.Field, Values: x.Values}
+		match := valuesMatch(x.Field, x.Values)
+		if x.Field == "registry_value_data" {
+			// Signalith keeps Sysmon's "DWORD (0x00000001)" as it is;
+			// Splunk's add-on reads it as 0x00000001 (splcheck.View).
+			words := make([]string, 0, 2*len(x.Values))
+			for _, v := range x.Values {
+				words = append(words, "DWORD ("+v+")", "QWORD ("+v+")")
+			}
+			match = or([]query.Expr{
+				and([]query.Expr{match, &query.Not{Child: valuesMatch(x.Field, []string{"DWORD (0x*)", "QWORD (0x*)"})}}),
+				valuesMatch(x.Field, words),
+			})
 		}
 		if x.Neg {
 			return and([]query.Expr{&query.Compare{Field: x.Field, Op: "=", Value: "*"}, &query.Not{Child: match}}), nil
@@ -114,6 +129,14 @@ func splunkExpr(e splcheck.Expr) (query.Expr, error) {
 		return match, nil
 	}
 	return nil, fmt.Errorf("unknown where clause %T", e)
+}
+
+// valuesMatch is field=v, or field IN (v...) for several values.
+func valuesMatch(field string, values []string) query.Expr {
+	if len(values) == 1 {
+		return &query.Compare{Field: field, Op: "=", Value: values[0]}
+	}
+	return &query.In{Field: field, Values: values}
 }
 
 // splunkSeverity is a rule's severity: TTPs by their risk score, and

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/sigmacheck"
@@ -325,6 +325,10 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
 		set(s, "User", ev["user"])
 		target := ev["registry_path"]
+		// The path ends in the value's name, as Sysmon writes it.
+		if v := ev["registry_value_name"]; target != "" && v != "" && !strings.HasSuffix(strings.ToLower(target), `\`+strings.ToLower(v)) {
+			target = strings.TrimRight(target, `\`) + `\` + v
+		}
 		if target == "" {
 			key := ev["registry_key_name"]
 			if key == "" {
@@ -352,6 +356,79 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 			delete(s, "Details")
 		}
 		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: id, Data: s}}
+	case "ImageLoad":
+		s := map[string]string{"ProcessId": "4242", "ProcessGuid": "{6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10}"}
+		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
+		set(s, "ImageLoaded", ev["loaded_file_path"])
+		set(s, "Signed", ev["signed"])
+		set(s, "SignatureStatus", ev["signature_status"])
+		set(s, "Signature", ev["signature"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: "7", Data: s}}
+	case "ProcessAccess":
+		s := map[string]string{"SourceProcessId": "4242", "TargetProcessId": "640"}
+		set(s, "SourceImage", ev["process_path"])
+		set(s, "TargetImage", ev["target_process_path"])
+		set(s, "GrantedAccess", ev["granted_access"])
+		set(s, "CallTrace", ev["call_trace"])
+		set(s, "SourceUser", ev["user"])
+		id := ev[eventCode]
+		if id != "8" {
+			id = "10"
+		}
+		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: id, Data: s}}
+	case "PowerShell":
+		s := map[string]string{"MessageNumber": "1", "MessageTotal": "1", "ScriptBlockId": "6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10"}
+		set(s, "ScriptBlockText", ev["script_block_text"])
+		return []sigmacheck.Case{{Channel: sigmacheck.PowerShellChannel, EventID: "4104", Data: s}}
+	}
+	return nil
+}
+
+// linuxRecords turns one field-level event into the Sysmon for Linux
+// events that carry it.
+func linuxRecords(node string, ev map[string]string) []sigmacheck.Case {
+	set := func(m map[string]string, k, v string) {
+		if v != "" {
+			m[k] = v
+		}
+	}
+	bin := func(path, name string) string {
+		switch {
+		case path != "":
+			return path
+		case name != "":
+			return "/usr/bin/" + name
+		}
+		return ""
+	}
+	switch node {
+	case "Processes":
+		s := map[string]string{"ProcessId": "4242", "ParentProcessId": "4000", "User": "tester"}
+		set(s, "Image", bin(ev["process_path"], ev["process_name"]))
+		set(s, "CommandLine", ev["process"])
+		set(s, "ParentImage", bin(ev["parent_process_path"], ev["parent_process_name"]))
+		set(s, "ParentCommandLine", ev["parent_process"])
+		set(s, "User", ev["user"])
+		set(s, "CurrentDirectory", ev["process_current_directory"])
+		set(s, "ProcessId", ev["process_id"])
+		set(s, "ParentProcessId", ev["parent_process_id"])
+		return []sigmacheck.Case{{Channel: sigmacheck.LinuxSysmonChannel, EventID: "1", Data: s}}
+	case "Filesystem":
+		s := map[string]string{"ProcessId": "4242", "User": "tester"}
+		set(s, "Image", bin(ev["process_path"], ev["process_name"]))
+		set(s, "User", ev["user"])
+		target := ev["file_path"]
+		if target == "" && ev["file_name"] != "" {
+			target = "/tmp/" + ev["file_name"]
+		} else if name := ev["file_name"]; name != "" && !strings.EqualFold(path.Base(target), name) {
+			target = strings.TrimRight(target, "/") + "/" + name
+		}
+		set(s, "TargetFilename", target)
+		id := "11"
+		if a := strings.ToLower(ev["action"]); strings.HasPrefix(a, "delet") {
+			id = "23"
+		}
+		return []sigmacheck.Case{{Channel: sigmacheck.LinuxSysmonChannel, EventID: id, Data: s}}
 	}
 	return nil
 }
@@ -360,8 +437,7 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 // parser, with its data model.
 func Stored(c sigmacheck.Case) (map[string]any, string) {
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
-	rec := ingest.WinEventRecord(c.Channel, c.EventID, "test-host", now, c.Data)
-	ev := ingest.Normalize("win.events", rec, now)
+	ev := c.Stored("test-host", now)
 	return ev.Document(), ev.Model
 }
 
@@ -383,8 +459,16 @@ func View(doc map[string]any) map[string]string {
 			out[k] = fmt.Sprint(x)
 		}
 	}
+	// Splunk's Sysmon add-on keeps the number of "DWORD (0x00000001)" as
+	// registry_value_data, so its rules compare with 0x00000001.
+	if m := wordRe.FindStringSubmatch(out["registry_value_data"]); m != nil {
+		out["registry_value_data"] = m[1]
+	}
 	return out
 }
+
+// wordRe is how Sysmon writes a DWORD or QWORD value's data.
+var wordRe = regexp.MustCompile(`^[DQ]WORD \((0x[0-9a-fA-F]+)\)$`)
 
 // Cases makes a rule's test events: each field-level event becomes the
 // Windows events that carry it, and whether the rule must match each is
@@ -393,7 +477,11 @@ func Cases(r *Rule) []sigmacheck.Case {
 	pos, neg := Events(r.Where)
 	var out []sigmacheck.Case
 	for _, ev := range append(pos, neg...) {
-		for _, c := range records(r.Node, ev) {
+		cs := records(r.Node, ev)
+		if r.Linux {
+			cs = linuxRecords(r.Node, ev)
+		}
+		for _, c := range cs {
 			doc, model := Stored(c)
 			c.Source = "synthesized"
 			c.Expect = model == NodeModel[r.Node] && Eval(r.Where, View(doc))
@@ -405,7 +493,7 @@ func Cases(r *Rule) []sigmacheck.Case {
 }
 
 // NodeModel is the Signalith data model of each node.
-var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry"}
+var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry", "PowerShell": "Script", "ImageLoad": "Image_Load", "ProcessAccess": "Endpoint"}
 
 // Verify checks a converted detection against a rule's test events: each
 // event, as the real parser stores it, must be read the same way by the

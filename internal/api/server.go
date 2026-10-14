@@ -28,6 +28,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/cases"
 	"github.com/jrsamsanchez/signalith/internal/clientaddr"
 	"github.com/jrsamsanchez/signalith/internal/config"
+	"github.com/jrsamsanchez/signalith/internal/content"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
 	"github.com/jrsamsanchez/signalith/internal/detect"
@@ -87,6 +88,8 @@ type Server struct {
 	// Endpoints manages the hosts that run osquery (the Endpoints page and
 	// osquery's remote API); nil disables them.
 	Endpoints *endpoint.Store
+	// Content installs content pack updates; nil disables them.
+	Content *content.Updater
 	// Sample loads and removes the one-click sample data; nil disables the
 	// sample-data card and its endpoints.
 	Sample *sample.Loader
@@ -238,6 +241,7 @@ func (s *Server) Handler() http.Handler {
 	s.routeDetections(api)
 	s.routeRisk(api)
 	s.routeAsk(api)
+	s.routeInvestigate(api)
 	s.routeIntel(api)
 	s.routeNotify(api)
 	s.routeDashboards(api)

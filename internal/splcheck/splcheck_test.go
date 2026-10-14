@@ -79,7 +79,7 @@ func TestParse(t *testing.T) {
 func TestParseRefuses(t *testing.T) {
 	for search, want := range map[string]string{
 		"| tstats count from datamodel=Endpoint.Processes where Processes.process=* by Processes.dest | eval x=1": "later stage",
-		"`sysmon` EventCode=10 | stats count":                                                                              "not a tstats",
+		"`sysmon` EventCode=10 | stats count":                                                                              "besides its event code",
 		"| tstats count from datamodel=Endpoint.Processes where Processes.dest=x by Processes.dest":                        "no Signalith mapping",
 		"| tstats count from datamodel=Endpoint.Processes where Filesystem.file_name=x by Processes.dest":                  "not a field of",
 		"| tstats count from datamodel=Endpoint.Processes where `nope` by Processes.dest":                                  "not defined",
@@ -112,5 +112,95 @@ func TestCasesAgreeWithTheRule(t *testing.T) {
 	}
 	if pos == 0 || pos == len(cases) {
 		t.Fatalf("%d positives of %d", pos, len(cases))
+	}
+}
+
+func TestParseUppercaseAndNotNull(t *testing.T) {
+	src := rule("| tstats count FROM datamodel=Endpoint.Registry\n  WHERE Registry.registry_path=\"*\\\\Winlogon*\" Registry.registry_value_name=AutoAdminLogon Registry.registry_value_data=0x00000001\n" +
+		"  BY Registry.dest Registry.registry_value_data\n| `drop_dm_object_name(Registry)`\n| where isnotnull(registry_value_data)\n| `test_rule_filter`")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := map[string]string{"registry_path": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\AutoAdminLogon`, "registry_value_name": "AutoAdminLogon", "registry_value_data": "0x00000001"}
+	if !Eval(r.Where, ev) {
+		t.Error("does not match its own event")
+	}
+	// Splunk's Sysmon add-on reads "DWORD (0x00000001)" as 0x00000001.
+	if v := View(map[string]any{"registry_value_data": "DWORD (0x00000001)"}); v["registry_value_data"] != "0x00000001" {
+		t.Errorf("view = %v", v)
+	}
+	cases := Cases(r)
+	found := false
+	for _, c := range cases {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Errorf("no test event matches: %+v", cases)
+	}
+}
+
+func TestParsePowerShell(t *testing.T) {
+	src := rule("`powershell` EventCode=4104 ScriptBlockText = \"*ShadowCopy*\" (ScriptBlockText = \"*Delete*\" OR ScriptBlockText = \"*Remove*\")\n" +
+		"| fillnull | stats count min(_time) as firstTime BY dest signature\n| rename dest as host | `security_content_ctime(firstTime)` | `test_rule_filter`")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Node != "PowerShell" {
+		t.Fatalf("node %s", r.Node)
+	}
+	if !Eval(r.Where, map[string]string{"signature_id": "4104", "script_block_text": "Get-WmiObject Win32_ShadowCopy | Remove-WmiObject"}) {
+		t.Error("does not match its own event")
+	}
+	if Eval(r.Where, map[string]string{"signature_id": "4104", "script_block_text": "Get-WmiObject Win32_ShadowCopy"}) {
+		t.Error("matches without Delete or Remove")
+	}
+	found := false
+	for _, c := range Cases(r) {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Error("no test event matches")
+	}
+	for search, want := range map[string]string{
+		"`powershell` ScriptBlockText=\"*x*\" | fillnull | stats count by dest":                               "must name its event code",
+		"`powershell` EventCode=4103 ScriptBlockText=\"*x*\" | fillnull | stats count by dest":                "event 4103 is not supported",
+		"`powershell` EventCode=4104 ScriptBlockText=\"*x*\" | eval x=1 | stats count by dest":                "later stage",
+		"`powershell` EventCode=4104 Path=\"*x*\" | fillnull | stats count by dest":                           "no Signalith mapping",
+		"`powershell` EventCode=4104 (ScriptBlockText=\"*x*\" OR EventID=1) | fillnull | stats count by dest": "once, at the top",
+	} {
+		if _, err := Parse(rule(search), nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", search, err, want)
+		}
+	}
+}
+
+func TestParseSysmonAccess(t *testing.T) {
+	src := rule("`sysmon` EventCode=10 TargetImage=\"*\\\\lsass.exe\" GrantedAccess IN (\"0x1010\", \"0x1410\") NOT SourceImage=\"*\\\\MsMpEng.exe\"\n| stats count by dest SourceImage")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Node != "ProcessAccess" {
+		t.Fatalf("node %s", r.Node)
+	}
+	ev := map[string]string{"signature_id": "10", "target_process_path": `C:\Windows\System32\lsass.exe`, "granted_access": "0x1410", "process_path": `C:\x\procdump.exe`}
+	if !Eval(r.Where, ev) {
+		t.Error("does not match its own event")
+	}
+	ev["signature_id"] = "8"
+	if Eval(r.Where, ev) {
+		t.Error("matches a remote thread event")
+	}
+	found := false
+	for _, c := range Cases(r) {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Error("no test event matches")
+	}
+	if _, err := Parse(rule("`sysmon` EventCode IN (7, 10) ImageLoaded=\"*x*\" | stats count by dest"), nil); err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("mixed events: err = %v", err)
 	}
 }

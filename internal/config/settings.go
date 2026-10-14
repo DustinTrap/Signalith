@@ -165,7 +165,7 @@ var Sections = []Section{
 	{ID: "search", Title: "Search", Help: "What a new search starts with, and when a quiet data source is flagged."},
 	{ID: "syslog", Title: "Syslog", Help: "Receive syslog from firewalls, switches and servers that cannot run an agent."},
 	{ID: "detections", Title: "Detections", Help: "Whether detections run by themselves, and how many findings one run can raise."},
-	{ID: "assistant", Title: "AI assistant", Help: "An optional AI model for Ask questions the built-in translator does not fully understand. Only the question and field names are sent, never events."},
+	{ID: "assistant", Title: "AI assistant", Help: "An optional AI model. Ask sends it only the question and field names, never events. Investigate with AI sends a finding's events, and is off until you turn it on below."},
 	{ID: "intel", Title: "Threat intel", Help: "Where threat intel feeds may be downloaded from."},
 }
 
@@ -300,6 +300,14 @@ var Registry = []Setting{
 		Confirm: "This server will stop running detections, threat intel downloads, notifications and retention. If no other server shares its OpenSearch, none of them run until this is turned on again.", ConfirmWhen: "off"},
 	{Key: "detections.max_findings_per_run", Scope: ScopeCluster, Section: "detections", Label: "Most findings per run", Type: TypeNumber, Min: intp(1), Max: intp(10000),
 		Help: "The most findings one detection run can raise, so a noisy rule cannot flood the queue."},
+	{Key: "detections.content_updates", Scope: ScopeServer, Section: "detections", Label: "Content pack updates", Type: TypeChoice,
+		Help: "Newer SigmaHQ and Splunk rules, tested and signed by the Signalith project, without a new Signalith release. " +
+			"Manual: an admin checks for them on the Detections page, or uploads them on a computer without internet access. " +
+			"Daily: this server checks once a day and installs them. Rules you turned on stay on, and new rules start off.",
+		Choices: []Choice{{ContentManual, "Manual"}, {ContentDaily, "Daily"}}, EmptyMeans: ContentManual},
+	{Key: "detections.content_url", Scope: ScopeCluster, Section: "detections", Label: "Content update address", Type: TypeURL,
+		Help:        "Where content updates are downloaded from, such as a copy on your own web server. Only bundles signed by the Signalith project are installed, wherever they come from.",
+		Placeholder: DefaultContentURL, EmptyMeans: "the Signalith project's GitHub releases"},
 
 	{Key: "assistant.provider", Scope: ScopeCluster, Section: "assistant", Label: "Provider", Type: TypeChoice,
 		Help: "Who runs the model. OpenAI or compatible includes Ollama, LM Studio and vLLM on your own hardware.",
@@ -315,6 +323,15 @@ var Registry = []Setting{
 		Help: "Only sent to the provider's address it was entered for. Local models often need none.",
 		Env:  "SIGNALITH_ASSISTANT_API_KEY", SentWith: []string{"assistant.provider", "assistant.url"},
 		sentTo: func(c *Config) string { return c.AssistantURL() }},
+	{Key: "assistant.investigate", Scope: ScopeCluster, Section: "assistant", Label: "Investigate with AI", Type: TypeBool,
+		Help: "Lets analysts ask the model to investigate a finding. It sends the finding's events, the host and user history, threat intel matches and the results of read-only searches, " +
+			"with the fields below masked. Analysts see exactly what is sent before it goes. For data that must stay in-house, use a model on your own hardware, such as Ollama.",
+		Confirm: "Event data from findings, such as user names, host names and IP addresses, will be sent to the AI model when an analyst investigates a finding. " +
+			"With a cloud provider, it leaves your network.", ConfirmWhen: "on"},
+	{Key: "assistant.mask_fields", Scope: ScopeCluster, Section: "assistant", Label: "Fields never sent", Type: TypeList,
+		Help: "Fields whose values are replaced with [masked] wherever they appear, such as user or src. Add _raw to leave out the original event text. Wildcards * work. " +
+			"Passwords, tokens, keys and cookies are always masked.",
+		Placeholder: "user, _raw", EmptyMeans: "only passwords, tokens, keys and cookies"},
 
 	{Key: "intel.allow_loopback_feeds", Scope: ScopeCluster, Section: "intel", Label: "Allow feeds from this computer", Type: TypeBool, Restart: true,
 		Help:    "Lets feeds download from 127.0.0.1 or ::1, for a feed server on this computer.",
