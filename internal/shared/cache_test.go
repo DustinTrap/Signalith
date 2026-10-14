@@ -187,11 +187,13 @@ func TestCacheWriterWritesAfterChanges(t *testing.T) {
 		d, err := c.Read(e.clock.Now())
 		return err == nil && len(d.Docs) == 1
 	})
-	// The next change waits for CacheEvery, then is written.
+	// The next change waits for CacheEvery, then is written. On Windows a
+	// read can meet the writer replacing the file, so a failed read counts
+	// as "not written yet" (-1) and the wait tries again.
 	floor := func() int64 {
 		d, err := c.Read(e.clock.Now())
 		if err != nil {
-			t.Fatal(err)
+			return -1
 		}
 		return d.Floors["retention"]
 	}
