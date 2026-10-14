@@ -118,6 +118,8 @@ func sharedImporters(d sharedDocs, f clustercfg.Files) []shared.Importer {
 		// The feeds, their status, the retention policies, the users, the
 		// directory sign-in settings and the settings of the Settings page.
 		clustercfg.Importers(d.docs, f),
+		// The retention history and the archive manifests (sharedaudit.go).
+		auditImporters(f),
 		// Append a new shared feature's importers here.
 	)
 }
