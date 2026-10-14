@@ -70,9 +70,19 @@ func peersOf(st cluster.Status) []shared.Peer {
 	return out
 }
 
-// sharedStatus is the runtime's status as the heartbeat carries it.
+// sharedStatus is the runtime's status as the heartbeat carries it. A
+// server that has just founded or joined the cluster says it is a member
+// only once its components take their content from the shared settings:
+// until then (the founder still moves its files into OpenSearch, or the
+// restart in place that followShared asks for has not switched the
+// components yet) its API still answers from its own files, refusing,
+// for example, a feed added on a server that does not run the background
+// jobs, so it reports itself as starting.
 func sharedStatus(rt *shared.Runtime, ct *sharedContent) cluster.SharedStatus {
 	st := rt.Status()
+	if ct != nil && !st.Mode.Legacy() && st.Mode != shared.ModeImporting && !ct.on.Load() {
+		st.Mode = shared.ModeStarting
+	}
 	return cluster.SharedStatus{Mode: string(st.Mode), ClusterKID: st.ClusterKID, ConfigSeq: max(st.ConfigSeq, 0), MaxRev: st.MaxRev,
 		NeedsUpgrade: st.NeedsUpgrade, Tamper: st.Tamper, LevelMin: st.LevelMin, LevelMax: st.LevelMax, NotEligible: st.NotEligible,
 		SettingsDrift: ct.settingsDrift()}

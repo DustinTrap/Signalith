@@ -283,13 +283,27 @@ func (r *runner) followShared(ctx context.Context) {
 		return
 	}
 	changed := make(chan struct{}, 1)
-	r.shared.OnMode(func(_, _ shared.Mode) {
+	kick := func() {
 		select {
 		case changed <- struct{}{}:
 		default:
 		}
-	})
+	}
+	r.shared.OnMode(func(_, _ shared.Mode) { kick() })
+	// A server that joins while the founder still moves its files into
+	// OpenSearch is a member before the shared content may be used: that
+	// waits for the cluster document to say the import is done, which
+	// changes no mode. So the cluster document is followed too, the one
+	// of the runtime's index prefix of the moment.
+	var watched *shared.Doc[shared.ClusterBody]
+	watch := func() {
+		if d := r.shared.Cluster(); d != nil && d != watched {
+			watched = d
+			d.OnChange(func(_, _ *shared.ClusterBody) { kick() })
+		}
+	}
 	for {
+		watch()
 		select {
 		case <-ctx.Done():
 			return

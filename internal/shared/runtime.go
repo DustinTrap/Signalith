@@ -778,6 +778,15 @@ func (rt *Runtime) evaluate(ctx context.Context, mayFound bool) {
 			rt.unreachable(err)
 			return
 		}
+		// The sessions index is made here with its own mappings, before
+		// the first sign-in: a session write must not make OpenSearch
+		// create it with dynamic defaults, nor create it while writes to
+		// the existing indices are refused. A sign-in still works without
+		// it (Sessions.Create falls back as for any refused write), so a
+		// failure is only logged.
+		if err := EnsureSessions(ectx, c, prefix); err != nil {
+			rt.log.Debug("could not make the sessions index", "index", SessionsIndex(prefix), "err", err)
+		}
 	}
 	src, _, found, err := c.Get(ectx, ConfigIndex(prefix), ClusterDocID)
 	if err != nil {
