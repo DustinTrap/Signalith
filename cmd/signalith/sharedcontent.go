@@ -286,6 +286,13 @@ func contentHandlers(feeds *intel.Feeds, ret *retention.Manager) map[string]shar
 		retentionHandlers(ret),
 		// Append a new shared feature's handlers here.
 	} {
+		for k := range hs {
+			if _, dup := out[k]; dup {
+				// Two features naming one request type would leave one
+				// of them silently unrun.
+				panic("shared request type " + k + " has two handlers")
+			}
+		}
 		maps.Copy(out, hs)
 	}
 	return out

@@ -343,7 +343,9 @@ func (r *runner) followShared(ctx context.Context) {
 		}
 		ct := r.sharedContent
 		want, wantUsers, wantSettings := r.shared.SharedContent(), r.shared.SharedUsers(), r.settingsShared()
-		settingsFlip := wantSettings != ct.settingsOn.Load()
+		// Read once, so that the switch below agrees with settingsFlip.
+		settingsOn := ct.settingsOn.Load()
+		settingsFlip := wantSettings != settingsOn
 		if !settingsFlip {
 			tried = nil
 		} else if tried != nil && *tried == wantSettings {
@@ -351,7 +353,6 @@ func (r *runner) followShared(ctx context.Context) {
 		}
 		// A switch of the settings left undone counts as made until
 		// another restart decides once more.
-		settingsOn := ct.settingsOn.Load()
 		if !settingsFlip {
 			settingsOn = wantSettings
 		}
