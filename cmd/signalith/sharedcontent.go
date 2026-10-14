@@ -212,14 +212,18 @@ func (ct *sharedContent) settingsDrift() map[string][]string {
 
 // sharedFingerprints puts the shared sentinel in place of the retention
 // and feed fingerprints of a member that takes them from the shared
-// settings: two members always agree on them, and a server that keeps
-// them in its own files never agrees with a member.
+// settings, and of the users' once those are shared too: two members
+// always agree on them, and a server that keeps them in its own files
+// never agrees with a member.
 func sharedFingerprints(fp cluster.Fingerprints, rt *shared.Runtime, on bool) cluster.Fingerprints {
 	if !on || rt == nil {
 		return fp
 	}
 	if id := rt.Status().ClusterID; id != "" {
 		fp.Retention, fp.Feeds = cluster.SharedFingerprint(id), cluster.SharedFingerprint(id)
+		if rt.SharedUsers() {
+			fp.Users = cluster.SharedFingerprint(id)
+		}
 	}
 	return fp
 }

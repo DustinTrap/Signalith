@@ -232,8 +232,12 @@ func (x *clusterCLI) peers(ctx context.Context, watch time.Duration) ([]shared.P
 		} else {
 			live = live && time.Since(hb.HeartbeatAt) < cliHeartbeatAge
 		}
-		out = append(out, shared.Peer{NodeID: hb.NodeID, Name: hb.Name, Live: live, Eligible: hb.LeaderEligible,
-			Leader: hb.Leader, MaxRev: hb.MaxRev})
+		p := shared.Peer{NodeID: hb.NodeID, Name: hb.Name, Live: live, Eligible: hb.LeaderEligible,
+			Leader: hb.Leader, MaxRev: hb.MaxRev, LevelMax: hb.LevelMax, Users: hb.FilesFingerprint.Users}
+		if !live {
+			p.SeenAgo = max(time.Since(hb.HeartbeatAt), 0)
+		}
+		out = append(out, p)
 	}
 	slices.SortFunc(out, func(a, b shared.Peer) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil

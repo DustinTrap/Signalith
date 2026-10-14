@@ -1502,7 +1502,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			Eligible: c.Detections.Scheduler, NodeURL: nodeURL(c), Listen: c.Server.Listen,
 			Syslog: cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
 			Fingerprints: func() cluster.Fingerprints {
-				return sharedFingerprints(filesFingerprints(c, ret, feeds, notes, pbooks), r.shared, sharedOn)
+				fp := filesFingerprints(c, ret, feeds, notes, pbooks)
+				fp.Users = usersFingerprint(people, dir)
+				return sharedFingerprints(fp, r.shared, sharedOn)
 			},
 			Indexed: pipeline.LastIndexed,
 		}
@@ -1583,6 +1585,33 @@ func filesFingerprints(c *config.Config, ret *retention.Manager, feeds *intel.Fe
 		Playbooks: pbooks.Fingerprint()}
 	fp.Retention, fp.Archives = ret.Fingerprint()
 	return fp
+}
+
+// usersFingerprint hashes this server's users and directory sign-in
+// settings as a late import of the users would take them: who they are,
+// their roles, states and password hashes, and the directory settings
+// without the service account's password. Sign-in times are left out, so
+// two servers with the same users agree.
+func usersFingerprint(people *users.Store, dir *users.Directory) string {
+	type entry struct {
+		users.User
+		Hash string `json:"hash"`
+	}
+	list := people.List()
+	out := make([]entry, 0, len(list))
+	for _, u := range list {
+		u.Created, u.Updated, u.LastSignIn, u.SessionEpoch = time.Time{}, time.Time{}, nil, 0
+		out = append(out, entry{User: u, Hash: people.PasswordVersion(u.Username)})
+	}
+	ub, err := json.Marshal(out)
+	if err != nil {
+		return cluster.Hash([]byte(err.Error()))
+	}
+	db, err := json.Marshal(dir.Settings())
+	if err != nil {
+		return cluster.Hash([]byte(err.Error()))
+	}
+	return cluster.Hash(ub, db)
 }
 
 // detectionsFingerprint hashes the names and contents of the custom

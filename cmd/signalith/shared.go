@@ -58,6 +58,10 @@ func peersOf(st cluster.Status) []shared.Peer {
 			Live: s.State != cluster.StateOffline && s.State != cluster.StateStopped}
 		if s.Detail != nil {
 			p.Eligible, p.MaxRev = s.Detail.LeaderEligible, s.Detail.MaxRev
+			p.LevelMax, p.Users = s.Detail.LevelMax, s.Detail.FilesFingerprint.Users
+		}
+		if s.SeenAgo != nil {
+			p.SeenAgo = *s.SeenAgo
 		}
 		out = append(out, p)
 	}
