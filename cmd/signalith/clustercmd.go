@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"text/tabwriter"
 	"time"
 
@@ -157,6 +158,14 @@ func (x *clusterCLI) runtime(readOnly bool, name string) *shared.Runtime {
 	docs := clustercfg.NewDocs()
 	x.auth = clusterauth.NewDocs()
 	docs.UseAuth(x.auth)
+	files := x.files()
+	var made atomic.Pointer[shared.Runtime]
+	files.NodeCfg = func() *shared.Doc[shared.NodeCfg] {
+		if rt := made.Load(); rt != nil {
+			return rt.NodeCfg()
+		}
+		return nil
+	}
 	rt := shared.NewRuntime(shared.RuntimeOptions{
 		StateDir: x.c.StateDir(), Self: shared.Self{NodeID: x.self.NodeID, Name: x.self.Name},
 		KeyFile: os.Getenv(clusterKeyFileEnv), ClusterName: name, ReadOnly: readOnly, Log: x.log,
@@ -170,8 +179,9 @@ func (x *clusterCLI) runtime(readOnly bool, name string) *shared.Runtime {
 			docs.Track(h)
 			x.auth.Track(h)
 		},
-		Importers: clustercfg.Importers(docs, x.files()),
+		Importers: clustercfg.Importers(docs, files),
 	})
+	made.Store(rt)
 	x.auth.Cluster = rt.Cluster
 	rt.Use(x.cl, x.prefix(), x.c.Keyring())
 	return rt
@@ -187,6 +197,7 @@ func (x *clusterCLI) files() clustercfg.Files {
 		Peers: func() map[string]string {
 			return heartbeatRetention(context.Background(), x.cl, x.prefix(), x.self.NodeID)
 		},
+		Log: x.log,
 	}
 }
 

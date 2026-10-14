@@ -56,6 +56,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/store"
 	"github.com/jrsamsanchez/signalith/internal/syslog"
 	"github.com/jrsamsanchez/signalith/internal/tlsauto"
@@ -558,17 +559,32 @@ func cmdPasswd(args []string) error {
 	// and one for a service given the password in its environment.
 	stateDir := config.StateDirFor(*path)
 	hashFile := config.AdminHashFileIn(stateDir)
+	// A server that was ever a member of a cluster has a copy of its
+	// shared settings.
+	_, cacheErr := os.Stat(shared.CachePath(stateDir))
+	member := cacheErr == nil
 	if *local {
 		if err := config.RecordStateDir(stateDir); err != nil {
 			return err
 		}
+		if member {
+			// Only this file is the break-glass password of a member: an
+			// admin-password-hash an earlier passwd wrote is not.
+			localFile := config.AdminLocalHashFileIn(stateDir)
+			if err := writeAdminHash(localFile, h); err != nil {
+				return err
+			}
+			fmt.Printf("Password updated in %s, on this server only.\n", localFile)
+			fmt.Println("While this server shares the users of its cluster, it works here only while the shared settings cannot be used " +
+				"(OpenSearch down or refusing writes), within a few seconds and with no restart; the cluster's password works too. " +
+				"signalith passwd without -local changes the password of every server.")
+			fmt.Println("While this server keeps its users in its own files, this password is not used: run signalith passwd without -local.")
+			return nil
+		}
 		if err := writeAdminHash(hashFile, h); err != nil {
 			return err
 		}
-		fmt.Printf("Password updated in %s, on this server only.\n", hashFile)
-		fmt.Println("On a member of a cluster that shares its users, it works only while the shared settings cannot be used " +
-			"(OpenSearch down or refusing writes); signalith passwd without -local changes the password of every server.")
-		fmt.Println("On any other server it replaces the configured password: restart the server to apply it.")
+		fmt.Printf("Password updated in %s, on this server only. It replaces the configured password: restart the server to apply it.\n", hashFile)
 		return nil
 	}
 	// A member of a cluster that shares its users changes the built-in
@@ -587,10 +603,15 @@ func cmdPasswd(args []string) error {
 		if svcPassword != "" {
 			fmt.Printf("Password updated. It is kept in %s, since the signalith service is given %s; it replaces that password.\n", hashFile, svcPassword)
 			fmt.Println("Restart the service to apply it.")
-			return nil
+		} else {
+			fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
+			fmt.Println("Restart the server to apply it. With the Docker quick start, from the Signalith folder: docker compose -f deploy/docker/docker-compose.yml restart signalith")
 		}
-		fmt.Printf("Password updated. It is kept in %s and replaces the first password.\n", hashFile)
-		fmt.Println("Restart the server to apply it. With the Docker quick start, from the Signalith folder: docker compose -f deploy/docker/docker-compose.yml restart signalith")
+		if member {
+			fmt.Println("This server is a member of a cluster: the password is used only while it keeps its users in its own files. " +
+				"While it shares the users of the cluster, the cluster's password applies and this file is not used, not even while OpenSearch is unavailable " +
+				"(signalith passwd -local sets the password for that). Run signalith passwd again once OpenSearch answers to change the cluster's password.")
+		}
 		return nil
 	}
 	// Only the hash changes in the file; settings from the environment
@@ -599,6 +620,10 @@ func cmdPasswd(args []string) error {
 		return err
 	}
 	fmt.Println("Password updated. Restart the server to apply it.")
+	if member {
+		fmt.Println("This server is a member of a cluster: auth.admin_password_hash in signalith.yaml changed, so the next time this server starts " +
+			"with OpenSearch available and sharing the users of the cluster, it becomes the password of every server.")
+	}
 	if os.Getenv("SIGNALITH_ADMIN_PASSWORD") != "" {
 		fmt.Println("Note: SIGNALITH_ADMIN_PASSWORD is set in this environment, and wherever it is set for the server it replaces the password in the file.")
 	}
@@ -1154,6 +1179,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		// Lockouts other servers reported while the users were shared no
 		// longer count.
 		r.limiter.External(nil)
+		r.limiter.SetLockSecret(nil)
 		if people, dir, err = r.openUsers(c); err != nil {
 			return nil, err
 		}

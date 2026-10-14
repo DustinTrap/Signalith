@@ -261,11 +261,13 @@ const FounderGone = 7 * 24 * time.Hour
 // lateImports runs the importers a newer version added after the cluster
 // was founded (their names are missing from cluster.import.done) once the
 // cluster's level allows them. They import the founder's files, so the
-// founder runs them when it runs the background jobs; when it has not
-// been seen for FounderGone, the server that runs them does, and the
-// cluster document records that the servers whose users differ keep
-// theirs only in their files. The caller holds the job lease.
-func (rt *Runtime) lateImports(ctx context.Context) error {
+// founder runs them while it is a member, whether or not it holds the
+// job lease (each is idempotent, and done is recorded with a
+// compare-and-set); when it has not been seen for FounderGone, the
+// server that runs the background jobs does (lease: the caller holds
+// the job lease), and the cluster document records that the servers
+// whose users differ keep theirs only in their files.
+func (rt *Runtime) lateImports(ctx context.Context, lease bool) error {
 	cdoc := rt.Cluster()
 	body, ok := cdoc.Get()
 	if !ok || body.Import.State != ImportReady {
@@ -280,7 +282,13 @@ func (rt *Runtime) lateImports(ctx context.Context) error {
 	if len(pending) == 0 {
 		return nil
 	}
-	if body.CreatedByID != rt.opts.Self.NodeID {
+	check := rt.opts.LeaseCheck
+	if body.CreatedByID == rt.opts.Self.NodeID {
+		check = nil
+	} else {
+		if !lease {
+			return nil
+		}
 		peers, known := rt.peersSeen()
 		if !known || !founderGone(peers, body.CreatedByID) {
 			return nil
@@ -316,7 +324,7 @@ func (rt *Runtime) lateImports(ctx context.Context) error {
 			"audit", true, "founder", founder, "sources", strings.Join(names, ","), "differ", strings.Join(differ, ","))
 	}
 	for _, im := range pending {
-		if err := rt.importOne(ctx, "signalith", im, rt.opts.LeaseCheck); err != nil {
+		if err := rt.importOne(ctx, "signalith", im, check); err != nil {
 			return err
 		}
 	}

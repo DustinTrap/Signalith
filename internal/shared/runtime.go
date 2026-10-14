@@ -195,6 +195,38 @@ func (rt *Runtime) lateWarning() *Warning {
 		"Those of %s differ: their own users are kept only in their files.", founder, l.By, l.At, strings.Join(l.Differ, ", "))}
 }
 
+// founderWarning is the warning while imports a newer version added wait
+// for the server that founded the cluster, which is down: it runs them
+// once it is back, or the server that runs the background jobs does once
+// it has not been seen for FounderGone. nil otherwise.
+func (rt *Runtime) founderWarning() *Warning {
+	b, ok := rt.Cluster().Get()
+	if !ok || b.Import.State != ImportReady || b.CreatedByID == rt.opts.Self.NodeID {
+		return nil
+	}
+	waiting := false
+	for _, im := range rt.opts.Importers {
+		if _, done := b.Import.Done[im.Name]; !done && im.MinLevel <= b.Level {
+			waiting = true
+		}
+	}
+	if !waiting {
+		return nil
+	}
+	peers, known := rt.peersSeen()
+	if !known || founderGone(peers, b.CreatedByID) {
+		return nil
+	}
+	for _, p := range peers {
+		if p.NodeID == b.CreatedByID && p.Live {
+			return nil
+		}
+	}
+	founder := cmp.Or(b.CreatedBy, b.CreatedByID)
+	return &Warning{Level: "amber", Text: fmt.Sprintf("Users and sign-in become shared once %s, which founded the cluster, is back: it brings in its users and directory sign-in settings. "+
+		"Until then each server keeps its own. If %s is gone for good, the server that runs the background jobs brings in its own once %s has not been seen for 7 days.", founder, founder, founder)}
+}
+
 // Writable says why the shared settings cannot be changed on this server
 // now, or nil when they can: it must be a member that reads them from
 // OpenSearch.
@@ -1058,10 +1090,18 @@ func (rt *Runtime) afterCycle(ctx context.Context) {
 		return
 	}
 	rt.setMode(ModeMember, "")
-	if !rt.opts.ReadOnly && rt.holdsLease() {
-		rt.RaiseLevel(ctx)
-		if err := rt.lateImports(ctx); err != nil && ctx.Err() == nil {
-			rt.log.Warn("could not finish importing into the shared settings; trying again", "err", err)
+	if !rt.opts.ReadOnly {
+		// The founder brings in its own files whether or not it runs the
+		// background jobs: after a rolling upgrade another server may
+		// keep them for good.
+		lease := rt.holdsLease()
+		if lease {
+			rt.RaiseLevel(ctx)
+		}
+		if lease || body.CreatedByID == rt.opts.Self.NodeID {
+			if err := rt.lateImports(ctx, lease); err != nil && ctx.Err() == nil {
+				rt.log.Warn("could not finish importing into the shared settings; trying again", "err", err)
+			}
 		}
 	}
 }
@@ -1658,6 +1698,9 @@ func (rt *Runtime) Warnings() []Warning {
 		}
 		if lw := rt.lateWarning(); lw != nil {
 			w = append(w, *lw)
+		}
+		if fw := rt.founderWarning(); fw != nil {
+			w = append(w, *fw)
 		}
 	}
 	if len(st.Tamper) > 0 {

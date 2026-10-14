@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -391,6 +392,34 @@ func TestAuthAppliedWhenChanged(t *testing.T) {
 	}
 	if res := b.apply(); len(res.Applied) != 0 {
 		t.Fatalf("applied twice: %v", res.Applied)
+	}
+
+	// The page points the settings at another server; the environment's
+	// password then changes: it is not sealed for that server.
+	evil := s
+	evil.URL, evil.BindPassword = "ldaps://evil.example.net", "whatever"
+	if err := page.Save(ctx, "mallory", "", evil); err != nil {
+		t.Fatal(err)
+	}
+	b.cycle()
+	t.Setenv("SIGNALITH_LDAP_BIND_PASSWORD", "rotated-pass")
+	b.cfg.Store(authConfig(t, dirB, ldap("ldaps://new.example.org")))
+	if res := b.apply(); len(res.Applied) != 0 {
+		t.Fatalf("a password for another connection applied %v", res.Applied)
+	}
+	b.cycle()
+	if got, _, _ := bk.Load(); got.URL != "ldaps://evil.example.net" || got.BindPassword != "whatever" {
+		t.Fatalf("the environment's password reached the page's server: %+v", got)
+	}
+	if !strings.Contains(b.logs.String(), "no longer connect as auth.ldap") {
+		t.Errorf("not logged:\n%s", b.logs.String())
+	}
+	// Without auth.ldap in signalith.yaml the environment's password is
+	// not used at all.
+	t.Setenv("SIGNALITH_LDAP_BIND_PASSWORD", "another-pass")
+	b.cfg.Store(authConfig(t, dirB, ""))
+	if vals := fileValues(b.cfg.Load()); slices.ContainsFunc(vals, func(fv fileValue) bool { return fv.password != "" }) {
+		t.Error("the environment's password is a value without auth.ldap")
 	}
 }
 

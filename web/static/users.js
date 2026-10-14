@@ -861,6 +861,7 @@
       yaml: `Applied from signalith.yaml${on}${when}.`,
       page: `Saved on this page${on}${when}.`,
       import: `Brought in from ${f.node ? f.node + '’s' : 'the first server’s'} settings when the servers began sharing users${when}.`,
+      env: `Service account password last set from SIGNALITH_LDAP_BIND_PASSWORD${on}${when}.`,
     }[f.source];
     return dxAlert('info', 'These settings apply on every server.', (from ? from + ' ' : '') +
       'A change saved here applies on every server at once. A later change to auth.ldap in a server’s signalith.yaml applies too, when that server starts.');

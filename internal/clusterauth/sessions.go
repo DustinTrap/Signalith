@@ -73,12 +73,16 @@ type sessionDoc struct {
 	Client   string `json:"client,omitempty"`
 	Method   string `json:"method"`
 	Degraded bool   `json:"degraded"`
-	MAC      string `json:"mac"`
+	// Born is the creation time of the user document the session was
+	// made for, as that document's server wrote it: a user made again
+	// under the same name has another.
+	Born string `json:"born,omitempty"`
+	MAC  string `json:"mac"`
 }
 
 func sessionText(id string, d *sessionDoc) []byte {
 	var b bytes.Buffer
-	for _, f := range []string{sessionMAC, id, d.User, strconv.FormatInt(d.Epoch, 10), d.Created, strconv.FormatBool(d.Remember)} {
+	for _, f := range []string{sessionMAC, id, d.User, strconv.FormatInt(d.Epoch, 10), d.Created, strconv.FormatBool(d.Remember), d.Born} {
 		b.WriteString(f)
 		b.WriteByte(0)
 	}
@@ -99,7 +103,7 @@ func (d *sessionDoc) sign(k *shared.ClusterKey, id string) {
 // verify checks the MAC of the session document id against keys.
 func (d *sessionDoc) verify(keys *shared.KeySet, id string) bool {
 	rest, ok := strings.CutPrefix(d.MAC, "m1:")
-	if !ok || strings.IndexByte(d.User, 0) >= 0 || strings.IndexByte(d.Created, 0) >= 0 {
+	if !ok || strings.IndexByte(d.User, 0) >= 0 || strings.IndexByte(d.Created, 0) >= 0 || strings.IndexByte(d.Born, 0) >= 0 {
 		return false
 	}
 	kid, sum, ok := strings.Cut(rest, ":")
@@ -119,10 +123,31 @@ type entry struct {
 	remember bool
 	method   string
 	degraded bool
+	// born is the session document's Born.
+	born string
 	// stored is the last_seen stored, local this server's last request,
 	// and confirmed when the session was last read from OpenSearch (or
 	// written).
 	stored, local, confirmed time.Time
+}
+
+// bornText is the creation time of user u as a session records it.
+func bornText(u *UserBody) string {
+	if u.Created.IsZero() {
+		return ""
+	}
+	return u.Created.UTC().Format(time.RFC3339Nano)
+}
+
+// bornOf reports whether the session was made for user u as they are
+// now. A session made while this server had no document of its user (the
+// built-in admin's, while OpenSearch could not be used) was made no
+// earlier than the user.
+func (e *entry) bornOf(u *UserBody) bool {
+	if e.born == "" {
+		return !e.created.Before(u.Created)
+	}
+	return e.born == bornText(u)
 }
 
 // SessionCache is what a server keeps of the sessions in memory: those
@@ -243,11 +268,14 @@ func (s *Sessions) Create(ctx context.Context, n auth.NewSession) (string, error
 	now := s.now().UTC()
 	user := users.NormalizeUsername(n.User)
 	e := &entry{user: user, epoch: n.Epoch, created: now, remember: n.Remember, method: n.Method, stored: now, local: now, confirmed: now}
+	if u, _, ok := s.Docs.Users().Get(user); ok {
+		e.born = bornText(u)
+	}
 	if s.degradedNow() {
 		return cookie, s.createDegraded(id, e, n.Client)
 	}
 	doc := &sessionDoc{User: user, Epoch: n.Epoch, Created: now.Format(time.RFC3339Nano), LastSeen: now.Format(time.RFC3339Nano),
-		Remember: n.Remember, Node: s.Node, Client: n.Client, Method: n.Method}
+		Remember: n.Remember, Node: s.Node, Client: n.Client, Method: n.Method, Born: e.born}
 	doc.sign(k, id)
 	cl, index := s.index()
 	if _, err := cl.Create(ctx, index, id, doc, false); err != nil {
@@ -446,7 +474,7 @@ func (s *Sessions) read(ctx context.Context, id string, old *entry, now time.Tim
 		return entry{}, false
 	}
 	stored, _ := time.Parse(time.RFC3339Nano, d.LastSeen)
-	e := entry{user: d.User, epoch: d.Epoch, created: created, remember: d.Remember, method: d.Method, degraded: d.Degraded,
+	e := entry{user: d.User, epoch: d.Epoch, created: created, remember: d.Remember, method: d.Method, degraded: d.Degraded, born: d.Born,
 		stored: stored, local: oldCopy.local, confirmed: now}
 	s.Cache.mu.Lock()
 	if cur := s.Cache.pos[id]; cur != nil {
@@ -460,9 +488,9 @@ func (s *Sessions) read(ctx context.Context, id string, old *entry, now time.Tim
 
 // allows checks a session against its user as they are now: there, not
 // disabled or refused, a directory user only while directory sign-in is
-// on, in the user's current session epoch, made after the user was (a
-// user deleted and made again under the same name does not get the old
-// sessions), younger than MaxAge, and not idle too long unless
+// on, in the user's current session epoch, made for the user as they
+// are now (born: a user deleted and made again under the same name does
+// not get the old sessions; servers' clocks are never compared), younger than MaxAge, and not idle too long unless
 // remembered. inMemory is a session made while OpenSearch could not be
 // written; the built-in admin may have one without a user document.
 func (s *Sessions) allows(e *entry, now time.Time, inMemory bool) bool {
@@ -476,7 +504,7 @@ func (s *Sessions) allows(e *entry, now time.Time, inMemory bool) bool {
 	if !ok {
 		return inMemory && e.method == users.SourceBuiltin && e.epoch == 0 && strings.EqualFold(e.user, s.Docs.builtinName())
 	}
-	if u.Disabled || u.Refused != "" || e.epoch != u.SessionEpoch || e.created.Before(u.Created) {
+	if u.Disabled || u.Refused != "" || e.epoch != u.SessionEpoch || !e.bornOf(u) {
 		return false
 	}
 	if u.Source == users.SourceDirectory && (s.DirectoryOn == nil || !s.DirectoryOn()) {
@@ -631,7 +659,7 @@ func (s *Sessions) Users(ctx context.Context) []string {
 				continue
 			}
 			stored, _ := time.Parse(time.RFC3339Nano, sd.LastSeen)
-			e := entry{user: sd.User, epoch: sd.Epoch, created: created, remember: sd.Remember, method: sd.Method, stored: stored}
+			e := entry{user: sd.User, epoch: sd.Epoch, created: created, remember: sd.Remember, method: sd.Method, born: sd.Born, stored: stored}
 			if s.allows(&e, now, false) {
 				seen[sd.User] = true
 			}
@@ -679,12 +707,12 @@ func (s *Sessions) Recover(ctx context.Context) {
 		}
 		at := e.created.UTC().Format(time.RFC3339Nano)
 		doc := &sessionDoc{User: e.user, Epoch: e.epoch, Created: at, LastSeen: maxTime(e.local, e.stored).UTC().Format(time.RFC3339Nano),
-			Remember: e.remember, Node: s.Node, Method: e.method, Degraded: true}
+			Remember: e.remember, Node: s.Node, Method: e.method, Degraded: true, Born: bornText(u)}
 		doc.sign(k, id)
 		if _, err := cl.Create(ctx, index, id, doc, false); err != nil && !errors.Is(err, store.ErrExists) {
 			continue
 		}
-		e.degraded, e.confirmed = false, now
+		e.degraded, e.confirmed, e.born = false, now, doc.Born
 		e.created, _ = time.Parse(time.RFC3339Nano, at)
 		s.Cache.mu.Lock()
 		delete(s.Cache.degraded, id)

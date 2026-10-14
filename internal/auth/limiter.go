@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"bytes"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -84,6 +86,8 @@ type Limiter struct {
 	known   map[string]time.Time // address and account: last sign-in
 	// external holds the locks other servers reported, by LockKey.
 	external map[string]time.Time
+	// lockSecret keys LockKey (SetLockSecret).
+	lockSecret []byte
 }
 
 // Lock scopes (Limiter.OnLock).
@@ -94,13 +98,31 @@ const (
 	ScopeSlow           = "slow"
 )
 
-// LockKey is the key a bucket is known by outside the limiter: a digest,
-// so neither addresses nor account names leave it, and the same on every
-// server.
-func LockKey(bucket string) string {
-	sum := sha256.Sum256([]byte(bucket))
-	return hex.EncodeToString(sum[:])
+// LockKey is the key a bucket is known by outside the limiter: an HMAC
+// under secret (a key the servers of a cluster share), so neither
+// addresses nor account names can be read back from it, and the same on
+// every server. Without a secret it is a plain digest, which never leaves
+// the server.
+func LockKey(secret []byte, bucket string) string {
+	if len(secret) == 0 {
+		sum := sha256.Sum256([]byte(bucket))
+		return hex.EncodeToString(sum[:])
+	}
+	m := hmac.New(sha256.New, secret)
+	m.Write([]byte(bucket))
+	return hex.EncodeToString(m.Sum(nil))
 }
+
+// SetLockSecret sets the secret LockKey is keyed with.
+func (l *Limiter) SetLockSecret(secret []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lockSecret = bytes.Clone(secret)
+}
+
+// longestLock is the longest a lock or wait the limiter itself makes
+// lasts: a lock another server reports for longer is cut to it.
+func (l *Limiter) longestLock() time.Duration { return max(l.Lockout, l.MaxSlow) }
 
 // scopeOf returns the lock scope of a bucket key.
 func scopeOf(key string) string {
@@ -120,7 +142,15 @@ func scopeOf(key string) string {
 // bucket (ReasonLocked), or in an account's strangers' bucket while it
 // is slowed (ReasonSlowed). A success here does not lift them; they end
 // by time.
+// A lock that would end later than this limiter's own longest lock
+// from now is cut to it, so a forged one cannot lock anyone out for long.
 func (l *Limiter) External(locks map[string]time.Time) {
+	limit := l.Now().Add(l.longestLock())
+	for k, until := range locks {
+		if until.After(limit) {
+			locks[k] = limit
+		}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.external = locks
@@ -311,7 +341,7 @@ func (l *Limiter) Begin(c Client, account string) (*Attempt, error) {
 		}
 	}
 	for _, s := range a.slots {
-		if until, ok := l.external[LockKey(s.key)]; ok && until.After(now) && s.limit > 0 {
+		if until, ok := l.external[LockKey(l.lockSecret, s.key)]; ok && until.After(now) && s.limit > 0 {
 			switch s.kind {
 			case kindLock:
 				refuse(until.Sub(now), ReasonLocked)
@@ -438,11 +468,11 @@ func (a *Attempt) Fail() Failure {
 			b.failures = nil
 			f.Locked = true
 			f.AddressLocked = f.AddressLocked || strings.HasPrefix(s.key, "a\x00")
-			locks = append(locks, lock{scopeOf(s.key), LockKey(s.key), b.lockedUntil})
+			locks = append(locks, lock{scopeOf(s.key), LockKey(l.lockSecret, s.key), b.lockedUntil})
 		case s.kind == kindSlow && n >= s.limit:
 			f.Slowed = l.slowWait(n, s.limit)
 			if l.MaxSlow > 0 && f.Slowed >= l.MaxSlow {
-				locks = append(locks, lock{ScopeSlow, LockKey(s.key), now.Add(f.Slowed)})
+				locks = append(locks, lock{ScopeSlow, LockKey(l.lockSecret, s.key), now.Add(f.Slowed)})
 			}
 		}
 	}

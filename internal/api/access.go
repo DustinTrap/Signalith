@@ -94,6 +94,9 @@ type principal struct {
 	epoch int64
 	// shared is set when the users are kept in the shared settings.
 	shared bool
+	// breakGlass is set when the built-in admin signed in with the
+	// password signalith passwd -local wrote on this server.
+	breakGlass bool
 }
 
 type userKey struct{}
@@ -218,6 +221,9 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 // for every server.
 func (s *Server) principalFor(name string) *principal {
 	if s.isBuiltin(name) {
+		if !s.builtinReadable() {
+			return nil
+		}
 		return s.builtinPrincipal()
 	}
 	u, ok := s.userStore().Get(name)
@@ -280,6 +286,8 @@ var (
 		msg: "Your directory account is not in a group that can use Signalith. Ask an admin to add you to one."}
 	errDirectoryDown = &signInError{status: http.StatusServiceUnavailable, code: "directory_unavailable",
 		msg: "Signalith could not reach the directory server to check your password. Try again in a minute, or ask an admin."}
+	errDegraded = &signInError{status: http.StatusServiceUnavailable, code: "degraded", retryAfter: time.Minute,
+		msg: "OpenSearch cannot be used right now, so only admins can sign in. Try again later."}
 	errDirectoryBusy = &signInError{status: http.StatusServiceUnavailable, code: "directory_unavailable", retryAfter: 30 * time.Second,
 		msg: "Signalith is checking many directory sign-ins right now. Try again in a minute."}
 )
@@ -480,11 +488,14 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 	}
 	store := s.userStore()
 	if s.isBuiltin(name) {
-		if !s.checkBuiltinPassword(password, true) {
+		ok, local := s.checkBuiltinPassword(password, true)
+		if !ok {
 			return nil, "wrong password", errWrongCredentials
 		}
 		store.RecordBuiltinSignIn(ctx)
-		return s.builtinPrincipal(), "", nil
+		p := s.builtinPrincipal()
+		p.breakGlass = local
+		return p, "", nil
 	}
 	if u, ok := store.Get(name); ok && u.Source == users.SourceLocal {
 		if !store.CheckPassword(u.Username, password) {
@@ -493,8 +504,12 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		if u.Disabled {
 			return nil, "account disabled", errDisabled
 		}
+		p := principalFromUser(u)
+		if err := s.degradedRefusal(p); err != nil {
+			return nil, "OpenSearch cannot be used, and only admins may sign in then", err
+		}
 		store.RecordSignIn(ctx, u.Username)
-		return principalFromUser(u), "", nil
+		return p, "", nil
 	}
 	d := s.dir()
 	if !d.Enabled() {
@@ -549,6 +564,9 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		return nil, fmt.Sprintf("directory unavailable (%s at %s): %s", de.Code, de.Server, de.Detail()), errDirectoryDown
 	case err != nil:
 		return nil, "directory: " + err.Error(), errDirectoryDown
+	}
+	if err := s.degradedRefusal(&principal{Username: du.Username, Source: users.SourceDirectory}); err != nil {
+		return nil, "OpenSearch cannot be used, and only admins may sign in then", err
 	}
 	u, err := store.SeeDirectoryUser(ctx, *du)
 	if errors.Is(err, users.ErrExists) || errors.Is(err, users.ErrReserved) {
@@ -771,6 +789,9 @@ func (s *Server) checkBasic(r *http.Request, user, pass string) (*principal, err
 	key, ttl := s.credentialKey(user, pass)
 	if name, ok := s.creds.get(key); ok {
 		if p := s.principalFor(name); p != nil {
+			if err := s.degradedRefusal(p); err != nil {
+				return nil, err
+			}
 			return p, nil
 		}
 	}
@@ -778,6 +799,10 @@ func (s *Server) checkBasic(r *http.Request, user, pass string) (*principal, err
 	if err != nil {
 		return nil, err
 	}
-	s.creds.put(key, p.Username, ttl)
+	// The break-glass password works only while the shared settings
+	// cannot be used: it is checked again each time.
+	if !p.breakGlass {
+		s.creds.put(key, p.Username, ttl)
+	}
 	return p, nil
 }

@@ -45,6 +45,9 @@ type sharedContent struct {
 	// drift lists the shared settings whose value in signalith.yaml
 	// differs from the shared one.
 	drift atomic.Pointer[[]string]
+	// rt is the runtime, whose nodecfg document the importers record
+	// this server's settings in.
+	rt atomic.Pointer[shared.Runtime]
 }
 
 type osTarget struct {
@@ -82,6 +85,13 @@ func (ct *sharedContent) files() clustercfg.Files {
 		},
 		LeaseEpoch: ct.node.Lease().Epoch,
 		Peers:      func() map[string]string { return retentionPeers(ct.node.Status(), time.Now()) },
+		NodeCfg: func() *shared.Doc[shared.NodeCfg] {
+			if rt := ct.rt.Load(); rt != nil {
+				return rt.NodeCfg()
+			}
+			return nil
+		},
+		Log: ct.log,
 	}
 }
 

@@ -181,13 +181,21 @@ server of the cluster, in OpenSearch. It applies within a few seconds, with no r
 and is written to the log as an audit record. It needs the cluster key and OpenSearch,
 like the commands above. When OpenSearch cannot be reached, or the servers do not
 share their users yet, it changes the password in this server's files, as on a server
-that is not in a cluster, and says so.
+that is not in a cluster, and says what that does: a password kept in
+`admin-password-hash` in the state folder is used only while this server keeps its
+users in its own files, and one written to signalith.yaml becomes the password of every
+server the next time this server starts with OpenSearch available. Run it again once
+OpenSearch answers to change the cluster's password at once.
 
-`-local` keeps the new password on this server only, in `admin-password-hash` in its
+`-local` keeps the new password on this server only, in `admin-password-local` in its
 state folder. On a server of a cluster that shares its users it works only while the
 shared settings cannot be used (OpenSearch down, or refusing writes because its disk is
-full), so an admin can always sign in to that server to fix it. Use it before you need
-it, as a break-glass password; it never changes the password of the other servers.
+full), so an admin can always sign in to that server to fix it; it applies within a few
+seconds, with no restart. It is the only break-glass password: an
+`admin-password-hash` from an earlier `signalith passwd` is not one. Use it before you
+need it; it never changes the password of the other servers. On a server that was never
+in a cluster, `-local` writes `admin-password-hash` and needs a restart, as
+`signalith passwd` does there.
 
 ## When to use which
 

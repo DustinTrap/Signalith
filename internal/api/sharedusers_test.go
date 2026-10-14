@@ -80,7 +80,11 @@ type member struct {
 	sessions *clusterauth.Sessions
 	shared   *memberShared
 	degraded atomic.Bool
-	logs     *syncBuffer
+	// writesRefused is whether OpenSearch refuses this server's writes.
+	writesRefused atomic.Bool
+	// copyAge makes the copy of the shared settings look older.
+	copyAge atomic.Int64
+	logs    *syncBuffer
 	// localHash is what signalith passwd -local wrote here.
 	localHash atomic.Pointer[string]
 }
@@ -148,7 +152,9 @@ func (c *memberCluster) newMember(t *testing.T, name string, key *shared.Cluster
 	st.Builtin, st.SignIns = m.docs.Builtin, seen.Hook(log)
 	directory := users.NewDirectory(&clusterauth.DirectoryBackend{Docs: m.docs, Node: name})
 	m.sessions = &clusterauth.Sessions{Docs: m.docs, Client: c.client, Node: "n_" + name, Cache: clusterauth.NewSessionCache(),
-		DirectoryOn: directory.Enabled, Degraded: m.degraded.Load, Confirmed: func() time.Time { return m.rt.Hub().Confirmed() }, Log: log}
+		DirectoryOn: directory.Enabled, Degraded: m.degraded.Load, Confirmed: func() time.Time {
+			return m.rt.Hub().Confirmed().Add(-time.Duration(m.copyAge.Load()))
+		}, Log: log}
 	m.sessions.SetIdle(12 * time.Hour)
 	m.sessions.Listen()
 	limiter := auth.NewLimiter()
@@ -166,7 +172,7 @@ func (c *memberCluster) newMember(t *testing.T, name string, key *shared.Cluster
 				return *p
 			}
 			return ""
-		}}
+		}, WritesRefused: m.writesRefused.Load, MayDegrade: m.sessions.MayDegrade}
 		if change != nil {
 			change(s)
 		}
@@ -602,13 +608,13 @@ func TestUntrustedForwardedForInLocks(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		signInWith(t, c.a.client, c.a.url, attempt{user: "jlee", pass: "wrong", xff: fmt.Sprintf("203.0.113.%d", i)})
 	}
-	cid := c.a.docs.ClusterID()
-	peer := clusterauth.LockID(cid, auth.ScopeAddressAccount, auth.LockKey("p\x00127.0.0.1\x00jlee"))
+	cid, secret := c.a.docs.ClusterID(), c.a.docs.Hub().Keys().Active().LockKey()
+	peer := clusterauth.LockID(cid, auth.ScopeAddressAccount, auth.LockKey(secret, "p\x00127.0.0.1\x00jlee"))
 	waitFor(t, "the lock of the peer's address", func() bool {
 		return c.fake.Source(memberPrefix+"_runtime", peer) != nil
 	})
 	for i := 0; i < 5; i++ {
-		named := clusterauth.LockID(cid, auth.ScopeAddressAccount, auth.LockKey(fmt.Sprintf("p\x00203.0.113.%d\x00jlee", i)))
+		named := clusterauth.LockID(cid, auth.ScopeAddressAccount, auth.LockKey(secret, fmt.Sprintf("p\x00203.0.113.%d\x00jlee", i)))
 		if c.fake.Source(memberPrefix+"_runtime", named) != nil {
 			t.Errorf("a lock for the forwarded address 203.0.113.%d", i)
 		}
@@ -666,6 +672,120 @@ func TestDegradedBuiltinSignIn(t *testing.T) {
 	}
 	if !strings.Contains(c.a.logs.String(), "signed in while OpenSearch cannot be written") {
 		t.Errorf("the degraded sign-in was not logged:\n%s", c.a.logs.String())
+	}
+}
+
+// While OpenSearch refuses writes (a full disk), the server stays a
+// member, and the -local password still works there, for a session kept
+// in memory; on a server whose writes are taken it does not.
+func TestBreakGlassWhileWritesRefused(t *testing.T) {
+	c := newMemberCluster(t, nil)
+	h, err := config.HashPassword("local-break-glass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.a.localHash.Store(&h)
+	c.b.localHash.Store(&h)
+	c.fake.Block(true)
+	c.a.writesRefused.Store(true)
+	ck, code := c.a.signIn("admin", "local-break-glass")
+	if ck == nil {
+		t.Fatalf("the -local password while writes are refused: %d", code)
+	}
+	if got := c.a.me(ck); got != http.StatusOK {
+		t.Fatalf("the session: %d", got)
+	}
+	if ck, code := c.b.signIn("admin", "local-break-glass"); ck != nil || code != http.StatusUnauthorized {
+		t.Errorf("the -local password on a server that sees no refused writes: %d", code)
+	}
+	// Basic with it works only while writes are refused: it is not
+	// remembered.
+	if got := c.a.basic("admin", "local-break-glass"); got != http.StatusOK {
+		t.Fatalf("Basic with the -local password: %d", got)
+	}
+	c.fake.Block(false)
+	c.a.writesRefused.Store(false)
+	if got := c.a.basic("admin", "local-break-glass"); got != http.StatusUnauthorized {
+		t.Errorf("Basic with the -local password once writes are taken again: %d", got)
+	}
+}
+
+// While this server cannot use the shared settings, Basic credentials
+// follow the same rule as sign-ins: only the built-in admin and local
+// admins whose copy is recent.
+func TestBasicWhileDegraded(t *testing.T) {
+	c := newMemberCluster(t, nil)
+	ctx := context.Background()
+	for _, u := range []users.NewUser{
+		{Username: "vic", Role: users.Viewer, Password: "viewer-password-1"},
+		{Username: "ada", Role: users.Admin, Password: "admin-password-1"},
+	} {
+		if _, err := c.a.srv.Users.Create(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.a.cycle()
+	if got := c.a.basic("vic", "viewer-password-1"); got != http.StatusOK {
+		t.Fatalf("Basic as a viewer: %d", got)
+	}
+	c.a.shared.paused.Store(true)
+	c.a.degraded.Store(true)
+	if got := c.a.basic("vic", "viewer-password-1"); got != http.StatusServiceUnavailable {
+		t.Errorf("Basic as a viewer while degraded (remembered): %d", got)
+	}
+	if got := c.a.basic("ada", "admin-password-1"); got != http.StatusOK {
+		t.Errorf("Basic as a local admin while degraded: %d", got)
+	}
+	if got := c.a.basic("admin", adminPass); got != http.StatusOK {
+		t.Errorf("Basic as the built-in admin while degraded: %d", got)
+	}
+	// A copy older than a day: local admins are refused too.
+	c.a.copyAge.Store(int64(25 * time.Hour))
+	if got := c.a.basic("ada", "admin-password-1"); got != http.StatusServiceUnavailable {
+		t.Errorf("Basic as a local admin with an old copy: %d", got)
+	}
+	// Refused for that reason is no wrong password: it locks nobody out.
+	for range 20 {
+		c.a.basic("vic", "viewer-password-1")
+	}
+	c.a.shared.paused.Store(false)
+	c.a.degraded.Store(false)
+	if got := c.a.basic("vic", "viewer-password-1"); got != http.StatusOK {
+		t.Errorf("Basic as a viewer once OpenSearch is back: %d", got)
+	}
+}
+
+// With shared users the built-in admin's password is the cluster's only:
+// when this server cannot read its document, this server's own configured
+// password does not take its place.
+func TestBuiltinFailsClosed(t *testing.T) {
+	c := newMemberCluster(t, func(s *Server) {
+		h, _ := config.HashPassword("file-pass")
+		s.Config.Auth.AdminPasswordHash = h
+	})
+	if got := c.a.basic("admin", adminPass); got != http.StatusOK {
+		t.Fatalf("the cluster's password: %d", got)
+	}
+	if got := c.a.basic("admin", "file-pass"); got != http.StatusUnauthorized {
+		t.Fatalf("this server's own password: %d", got)
+	}
+	ck, _ := c.a.signIn("admin", adminPass)
+	if ck == nil {
+		t.Fatal("no session")
+	}
+	ctx := context.Background()
+	_, etag, _ := c.a.docs.Users().Get("admin")
+	if _, err := c.a.docs.Users().Delete(ctx, "test", "admin", etag); err != nil {
+		t.Fatal(err)
+	}
+	c.a.cycle()
+	for _, pass := range []string{adminPass, "file-pass"} {
+		if got := c.a.basic("admin", pass); got != http.StatusUnauthorized {
+			t.Errorf("Basic with %s and no built-in admin document: %d", pass, got)
+		}
+	}
+	if got := c.a.me(ck); got != http.StatusUnauthorized {
+		t.Errorf("a session with no built-in admin document: %d", got)
 	}
 }
 

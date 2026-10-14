@@ -257,6 +257,15 @@ func TestLateImports(t *testing.T) {
 		if w := lateWarned(); w != nil {
 			t.Errorf("warning before the import: %+v", w)
 		}
+		waitWarned := false
+		for _, w := range b.rt.Warnings() {
+			if strings.Contains(w.Text, "once siem-f, which founded the cluster, is back") && w.Level == "amber" {
+				waitWarned = true
+			}
+		}
+		if !waitWarned {
+			t.Errorf("no warning naming the founder the users wait for: %+v", b.rt.Warnings())
+		}
 
 		founder.SeenAgo = FounderGone
 		peers.set(append([]Peer{self, founder}, others...)...)
@@ -275,6 +284,48 @@ func TestLateImports(t *testing.T) {
 		}
 		mustContain(t, "log", b.logs.String(), "has not been seen for 7 days")
 		b.step()
+		if n := usersIm.runs.Load(); n != 1 {
+			t.Errorf("the users importer ran %d times", n)
+		}
+	})
+	t.Run("by the founder after a rolling upgrade", func(t *testing.T) {
+		// The founder is restarted first, so another server takes the
+		// job lease and keeps it: the founder imports without it.
+		e := newEnv(t)
+		pr4 := e.server("siem-a", func(o *RuntimeOptions) { o.levelMax = 1 })
+		pr4.holds.Store(true)
+		pr4.step()
+		pr4.holds.Store(false)
+		k := pr4.key()
+		peers := func() []Peer {
+			return []Peer{{NodeID: "n_siem-a", Name: "siem-a", Live: true, LevelMax: LevelMax},
+				{NodeID: "n_siem-b", Name: "siem-b", Live: true, LevelMax: LevelMax}}
+		}
+		usersIm := &counter{name: ImportUsers, min: LevelSharedUsers}
+		b := e.server("siem-b", func(o *RuntimeOptions) {
+			o.KeyFile = writeKeyFile(t, k)
+			o.Peers = peers
+			o.Importers = []Importer{usersIm.importer()}
+		})
+		b.holds.Store(true)
+		b.step()
+		wantLevel(t, e, 2)
+		if n := usersIm.runs.Load(); n != 0 {
+			t.Fatalf("the leader imported while the founder is live: %d", n)
+		}
+		a := e.server("siem-a", func(o *RuntimeOptions) {
+			o.KeyFile = writeKeyFile(t, k)
+			o.Peers = peers
+			o.Importers = []Importer{usersIm.importer()}
+		})
+		a.step()
+		a.wantMode(ModeMember)
+		body := wantLevel(t, e, 2)
+		if n := usersIm.runs.Load(); n != 1 || body.Import.Done[ImportUsers] != "h-users" || body.Import.Late != nil {
+			t.Fatalf("runs %d, import %+v", n, body.Import)
+		}
+		b.step()
+		a.step()
 		if n := usersIm.runs.Load(); n != 1 {
 			t.Errorf("the users importer ran %d times", n)
 		}

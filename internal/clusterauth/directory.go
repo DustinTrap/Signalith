@@ -191,13 +191,24 @@ func (b *DirectoryBackend) save(ctx context.Context, by, etag string, s users.LD
 	return err
 }
 
+// ErrOtherConnection refuses a service account password meant for one
+// directory connection while the shared settings name another.
+var ErrOtherConnection = errors.New("the shared directory sign-in settings connect to another server or as another account " +
+	"than this server's signalith.yaml, so the password is not used with them")
+
 // SetBindPassword seals a new service account password for the shared
 // settings as they are, as SIGNALITH_LDAP_BIND_PASSWORD gives when it
-// changed. There must be settings.
-func (b *DirectoryBackend) SetBindPassword(ctx context.Context, by, password string, source string) error {
+// changed. There must be settings, and they must connect as for (the
+// server, bind account and TLS settings users.SameConnection compares):
+// otherwise ErrOtherConnection, so the password never goes to a
+// directory server someone changed the shared settings to.
+func (b *DirectoryBackend) SetBindPassword(ctx context.Context, by, password, source string, conn users.LDAPSettings) error {
 	_, err := b.Docs.Directory().Mutate(ctx, by, func(cur *DirectoryBody) error {
 		if cur.Settings.URL == "" {
 			return errors.New("there are no directory sign-in settings to set the password of")
+		}
+		if !users.SameConnection(conn, cur.Settings) {
+			return ErrOtherConnection
 		}
 		s := cur.Settings.Clone()
 		s.BindPassword = password

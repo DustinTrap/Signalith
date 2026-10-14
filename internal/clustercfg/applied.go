@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -48,6 +49,9 @@ type fileValue struct {
 	hash     string
 	ldap     *users.LDAPSettings
 	password string
+	// conn is the directory connection signalith.yaml names, which the
+	// service account password is for.
+	conn *users.LDAPSettings
 }
 
 // from says where a value came from, for the audit.
@@ -72,8 +76,12 @@ func fileValues(c *config.Config) []fileValue {
 		// the environment gives is its own source.
 		out = append(out, fileValue{key: "auth.ldap", value: ldapValue(*s), source: shared.SourceYAML, auth: true, ldap: applied})
 	}
-	if pw := c.LDAPBindPasswordFromEnv(); pw != "" {
-		out = append(out, fileValue{key: "auth.ldap.bind_password", value: pw, source: shared.SourceEnv, auth: true, password: pw})
+	// The environment's password is only for the connection this
+	// server's signalith.yaml names: without auth.ldap it is not used.
+	if s, err := c.LDAPFromFile(); err == nil && s != nil {
+		if pw := c.LDAPBindPasswordFromEnv(); pw != "" {
+			out = append(out, fileValue{key: "auth.ldap.bind_password", value: pw, source: shared.SourceEnv, auth: true, password: pw, conn: s})
+		}
 	}
 	return out
 }
@@ -276,9 +284,14 @@ func applyAuth(ctx context.Context, a *clusterauth.Docs, list []fileValue, node 
 			err = dir.SaveFrom(ctx, "signalith", *fv.ldap, clusterauth.FromYAML)
 		case fv.password != "" && ldapApplied:
 			// Applied with auth.ldap just now.
-		case fv.password != "":
-			if err = dir.SetBindPassword(ctx, "signalith", fv.password, clusterauth.FromEnv); err != nil {
-				log.Warn("SIGNALITH_LDAP_BIND_PASSWORD changed, but there are no directory sign-in settings to use it with", "err", err)
+		case fv.password != "" && fv.conn != nil:
+			if err = dir.SetBindPassword(ctx, "signalith", fv.password, clusterauth.FromEnv, *fv.conn); err != nil {
+				if errors.Is(err, clusterauth.ErrOtherConnection) {
+					log.Warn("SIGNALITH_LDAP_BIND_PASSWORD changed, but the shared directory sign-in settings no longer connect as auth.ldap in this server's signalith.yaml does, "+
+						"so the password is not used with them; enter it on the Users page if it is meant for them", "err", err)
+				} else {
+					log.Warn("SIGNALITH_LDAP_BIND_PASSWORD changed, but there are no directory sign-in settings to use it with", "err", err)
+				}
 				continue
 			}
 		}

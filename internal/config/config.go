@@ -1513,6 +1513,31 @@ func (c *Config) AdminHashFile() string { return AdminHashFileIn(c.StateDir()) }
 // AdminHashFileIn is AdminHashFile for the state folder dir.
 func AdminHashFileIn(dir string) string { return filepath.Join(dir, "admin-password-hash") }
 
+// AdminLocalHashFileIn is where signalith passwd -local keeps, in the
+// state folder dir of a member of a cluster, the built-in admin's
+// password for this server only: while the users are shared, it works
+// only while the shared settings cannot be used (OpenSearch down or
+// refusing writes), so an admin can always sign in to fix that.
+func AdminLocalHashFileIn(dir string) string { return filepath.Join(dir, "admin-password-local") }
+
+// ReadAdminLocalHash returns the password hash in AdminLocalHashFileIn(dir),
+// or "" when there is none.
+func ReadAdminLocalHash(dir string) (string, error) {
+	path := AdminLocalHashFileIn(dir)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	h := strings.TrimSpace(string(b))
+	if _, err := bcrypt.Cost([]byte(h)); err != nil {
+		return "", fmt.Errorf("%s does not hold a password hash; set it again with signalith passwd -local", path)
+	}
+	return h, nil
+}
+
 // SignInKeyFile is the key that signs the cookie marking a browser as one
 // that signed in to an account before, so that guesses at the account's
 // password from elsewhere do not keep it out (see auth.Limiter). The

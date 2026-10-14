@@ -190,7 +190,8 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 **The state folder.** Signalith keeps the files it makes for itself in one folder:
 its master key (`keys`), its HTTPS certificate and certificate authority (`tls`),
 `admin-password-hash` when the admin password was changed with `signalith passwd`
-(on servers that share their users, only with `signalith passwd -local`),
+(not used while the server shares the users of its cluster), `admin-password-local`
+with the break-glass password `signalith passwd -local` sets on a member of a cluster,
 the key for the cookie that recognizes browsers that signed in before
 (`signin.key`, see [failed sign-in limits](users.md#signing-in)), and this server's
 identity (`node.id`, and `cluster/lock` while it runs). The

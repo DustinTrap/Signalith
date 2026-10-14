@@ -556,10 +556,11 @@ Give the OpenSearch user the right to create, read and write `<prefix>_sessions`
   this OpenSearch and says it needs a newer version.
 - **Where they come from.** The server that founded the cluster brings in its users,
   its directory settings and the built-in admin's password in use there (an
-  `admin-password-hash` file from `signalith passwd` included), when it runs the
-  background jobs. If it has not been seen for 7 days, the server that runs the jobs
-  does it instead, and the Servers page names the servers whose users differed from
-  its own. Users that only another server had are not brought in: add them again on
+  `admin-password-hash` file from `signalith passwd` included), as soon as every
+  server runs this version, whether or not it runs the background jobs. While it is
+  down, the Servers page says the users wait for it. If it has not been seen for 7
+  days, the server that runs the jobs does it instead, and the Servers page names the
+  servers whose users differed from its own. Users that only another server had are not brought in: add them again on
   the Users page. `users.json` and `directory.json` stay as they were, unused.
 - **Everyone signs in once more** when the users become shared, since the sessions
   each server kept are not carried over.
@@ -597,16 +598,28 @@ The built-in admin has one password for every server.
 
 - **`signalith passwd`** on any server of the cluster changes it for every server
   within a few seconds, with no restart. When OpenSearch cannot be reached, or the
-  users are not shared yet, it changes this server's files as before and says so.
+  users are not shared yet, it changes this server's files as before and says what
+  that does on a member: a password it keeps in `admin-password-hash` in the state
+  folder (the Docker quick start, or a service given the password) is used only while
+  this server keeps its users in its own files, not as the cluster's password and not
+  while OpenSearch is down; one it writes to `auth.admin_password_hash` in
+  signalith.yaml becomes the password of every server the next time this server starts
+  with OpenSearch available, since the file changed. Run it again once OpenSearch
+  answers to change the cluster's password at once.
 - **On the page.** Signed in as the built-in admin, use **Change password** in the user
   menu, or on the built-in admin's row on the Users page. Other admins cannot change
   it there.
-- **`signalith passwd -local`** keeps a password on this server only, in
-  `admin-password-hash` in its state folder. On a server of a cluster that shares its
-  users, it works only while the shared settings cannot be used (OpenSearch down or
-  refusing writes), so you can always sign in to fix that. On any other server it
-  replaces the configured password at the next restart, as `signalith passwd` does
-  there.
+- **`signalith passwd -local`** keeps a password on this server only. On a server
+  that was ever a member of a cluster it is kept in `admin-password-local` in its state
+  folder and works only while the shared settings cannot be used (OpenSearch down or
+  refusing writes), within a few seconds and with no restart, so you can always sign in
+  to fix that. It is the only break-glass password: an `admin-password-hash` an earlier
+  `signalith passwd` wrote (as on Docker and service installs) is not used once the
+  users are shared, so a password that leaked before does not come back while
+  OpenSearch is down. Change or delete `admin-password-local` when the person who knew
+  it should no longer have it. On a server that was never a member, `-local` writes
+  `admin-password-hash`, which replaces the configured password at the next restart, as
+  `signalith passwd` does there.
 - **`auth.admin_password_hash`, `SIGNALITH_ADMIN_PASSWORD` and
   `SIGNALITH_ADMIN_PASSWORD_FILE`** apply only when they change: a server that starts
   with a changed value sets it as the shared password and logs
@@ -619,12 +632,17 @@ The built-in admin has one password for every server.
 The servers share one set of directory sign-in settings, which an admin can change on
 the Users page of any server, also when they came from `auth.ldap` in signalith.yaml.
 The page says where the settings in use came from: applied from signalith.yaml, saved
-on the page, or brought in, with the server and the time.
+on the page, brought in, or the service account password set from
+`SIGNALITH_LDAP_BIND_PASSWORD`, with the server and the time.
 
 `auth.ldap` and `SIGNALITH_LDAP_BIND_PASSWORD` apply only when they change, like the
 admin password above: an unchanged signalith.yaml never undoes a change made on the
 page, and a server whose file differs without having changed only notes it in its
-heartbeat (`settings_drift`).
+heartbeat (`settings_drift`). `SIGNALITH_LDAP_BIND_PASSWORD` is used only on a server
+whose signalith.yaml has `auth.ldap`, and only while the shared settings connect to the
+same servers, as the same bind DN and with the same TLS settings as that file: when
+someone changed them on the page, a new password from the environment is not used with
+them, and the server logs a warning instead.
 
 The service account's password is encrypted with the cluster key for the saved
 servers, bind DN and TLS settings: change any of them and it must be typed again, so
@@ -661,9 +679,11 @@ full:
 
 - Sessions it has already checked keep working for 5 minutes after it last confirmed
   them with OpenSearch.
-- Only admins can sign in: the built-in admin (with the password this server last
-  read, or the one `signalith passwd -local` set), and local admins when this server's
-  copy of the users is at most 24 hours old. Their session works on this server only,
+- Only admins can sign in, with a session or with HTTP Basic credentials: the
+  built-in admin (with the password this server last read, or the one
+  `signalith passwd -local` set), and local admins when this server's copy of the users
+  is at most 24 hours old. Everyone else gets `503` with the code `degraded`, which does
+  not count as a failed sign-in. Their session works on this server only,
   for at most an hour, and the log says so. Once OpenSearch takes writes again, it is
   stored for every server if the user is still an enabled admin whose password did not
   change meanwhile; otherwise it ends. Directory users and everyone else sign in again
@@ -965,9 +985,11 @@ While a server cannot write the shared settings, changes answer `503`.
 `from_config` is `true` when the settings come from `signalith.yaml` on a server that
 keeps them in its own files; `config_file` then names the file, and `PUT` answers
 `409`. `etag` is the settings' version for `If-Match` on `PUT` (`412` when they changed
-since). On servers that share their users, `shared` is `true` and `from` says where the
-settings in use came from: `{"source": "yaml", "node": "siem-a", "at": "..."}`, with
-`source` `yaml`, `page` or `import`.
+since). `from` says where the settings in use came from:
+`{"source": "yaml", "node": "siem-a", "at": "..."}`, with `source` `yaml`, `page`,
+`import` (the first server's files, when the servers began sharing users) or `env`
+(the service account password from `SIGNALITH_LDAP_BIND_PASSWORD` changed); `node` and
+`at` are given on servers that share their users, where `shared` is `true`.
 
 `PUT /api/auth/directory` takes the `settings` object (with `bind_password` instead
 of `bind_password_set`; leave it empty to keep the saved one). Settings that need

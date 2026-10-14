@@ -47,6 +47,7 @@ func openShared(c *config.Config, node *cluster.Node, log *slog.Logger) (*shared
 		Importers:  clustercfg.Importers(ct.docs, ct.files()),
 		Log:        log,
 	})
+	ct.rt.Store(rt)
 	ct.users.follow(rt)
 	return rt, ct
 }

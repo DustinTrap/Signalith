@@ -115,7 +115,7 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 	}
 	right := false
 	if builtin {
-		right = s.checkBuiltinPassword(req.Current, false)
+		right, _ = s.checkBuiltinPassword(req.Current, false)
 	} else {
 		right = s.userStore().CheckPassword(p.Username, req.Current)
 	}

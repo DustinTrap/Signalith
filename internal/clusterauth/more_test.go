@@ -158,8 +158,13 @@ func TestDirectoryPasswordBound(t *testing.T) {
 		}
 	}
 
-	// SetBindPassword seals a new one for the settings as they are.
-	if err := ab.SetBindPassword(ctx, "admin", "new-pass", FromEnv); err != nil {
+	// SetBindPassword seals a new one for the settings as they are, when
+	// they connect as the caller expects.
+	cur, _ := a.docs.Directory().Get()
+	if err := ab.SetBindPassword(ctx, "admin", "new-pass", FromEnv, s); !errors.Is(err, ErrOtherConnection) {
+		t.Fatalf("a password for another connection: %v", err)
+	}
+	if err := ab.SetBindPassword(ctx, "admin", "new-pass", FromEnv, cur.Settings); err != nil {
 		t.Fatal(err)
 	}
 	b.cycle()
@@ -315,7 +320,8 @@ func TestLocksShared(t *testing.T) {
 			t.Fatalf("try %d: locked %v (limits halved for 2 servers: 5)", i, f.Locked)
 		}
 	}
-	id := LockID(a.docs.ClusterID(), auth.ScopeAddressAccount, auth.LockKey("p\x0010.0.0.1\x00jlee"))
+	secret := a.key().LockKey()
+	id := LockID(a.docs.ClusterID(), auth.ScopeAddressAccount, auth.LockKey(secret, "p\x0010.0.0.1\x00jlee"))
 	deadline := time.Now().Add(5 * time.Second)
 	for o.fake.Source(runtimeIndex(testPrefix), id) == nil {
 		if time.Now().After(deadline) {
@@ -344,7 +350,7 @@ func TestLocksShared(t *testing.T) {
 		}
 	}
 	// An earlier end does not replace a later one.
-	if err := locksB.Write(ctx, auth.ScopeAddressAccount, auth.LockKey("p\x0010.0.0.1\x00jlee"), clk.Now()); err != nil {
+	if err := locksB.Write(ctx, auth.ScopeAddressAccount, auth.LockKey(secret, "p\x0010.0.0.1\x00jlee"), clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := locksB.Reload(ctx); err != nil {
@@ -362,6 +368,50 @@ func TestLocksShared(t *testing.T) {
 	}
 	if n, err := locksA.Housekeep(ctx); err != nil || n != 1 {
 		t.Errorf("housekeeping deleted %d: %v", n, err)
+	}
+}
+
+// Lock documents written without the cluster key are ignored, and a
+// signed lock counts for no longer than the limiter's own longest.
+func TestLocksForged(t *testing.T) {
+	o, a, b, clk := pair(t)
+	ctx := context.Background()
+	lb := auth.NewLimiter()
+	lb.Now = clk.Now
+	locksB := &Locks{Docs: b.docs, Client: o.client, Node: "n_siem-b", Limiter: lb, Log: b.log, Now: clk.Now}
+	locksB.Listen()
+	c := auth.Client{Address: "10.0.0.7"}
+	refused := func() bool {
+		_, err := lb.Begin(c, "admin")
+		return err != nil
+	}
+	cid := a.docs.ClusterID()
+	key := auth.LockKey(a.key().LockKey(), "a\x0010.0.0.7")
+	id := LockID(cid, auth.ScopeAddress, key)
+	o.fake.Put(runtimeIndex(testPrefix), id, map[string]any{"kind": "lock", "scope": auth.ScopeAddress, "key": key,
+		"until": "2100-01-01T00:00:00Z", "node": "n_x", "at": clk.Now().UTC().Format(time.RFC3339Nano)})
+	if err := locksB.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if refused() {
+		t.Fatal("an unsigned lock document locked an address")
+	}
+	// The same, signed with the cluster key (written over the unsigned
+	// one, whose later end does not count): it counts, for at most the
+	// longest lock.
+	locksA := &Locks{Docs: a.docs, Client: o.client, Node: "n_siem-a", Limiter: auth.NewLimiter(), Now: clk.Now}
+	if err := locksA.Write(ctx, auth.ScopeAddress, key, time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	if err := locksB.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !refused() {
+		t.Fatal("a signed lock is not refused")
+	}
+	clk.Advance(16 * time.Minute)
+	if refused() {
+		t.Error("a lock reported for years lasts longer than the longest lock")
 	}
 }
 

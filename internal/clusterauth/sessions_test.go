@@ -239,6 +239,21 @@ func TestRecreatedUserKeepsNoSessions(t *testing.T) {
 		t.Fatal("the new zed cannot sign in")
 	}
 
+	// A user made on a server whose clock is ahead signs in at once on
+	// another: the servers' clocks are never compared.
+	a.addUser("amy", users.Analyst)
+	if _, err := a.docs.Users().Mutate(ctx, "x", "amy", func(v *UserBody) error {
+		v.Created = v.Created.Add(5 * time.Second)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b.cycle()
+	early := b.signIn("amy", false)
+	if !a.valid(early) || !b.valid(early) {
+		t.Fatal("a session made just after a user was, by a clock behind, is refused")
+	}
+
 	a.addUser("gone", users.Viewer)
 	if _, err := a.store.Delete(ctx, "gone"); err != nil {
 		t.Fatal(err)

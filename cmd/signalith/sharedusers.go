@@ -139,7 +139,36 @@ func (ua *sharedUsers) use(p *usersParts) {
 
 // api is what the API needs of p.
 func (p *usersParts) api(c *config.Config) *api.SharedUsers {
-	return &api.SharedUsers{Docs: p.sessions.Docs, Seen: p.seen, LocalHash: c.AdminHashFromFile}
+	local := &localHash{dir: c.StateDir()}
+	return &api.SharedUsers{Docs: p.sessions.Docs, Seen: p.seen, LocalHash: local.get,
+		WritesRefused: p.node.WritesRefused, MayDegrade: p.sessions.MayDegrade}
+}
+
+// localHashFor is how long the hash signalith passwd -local wrote is used
+// before its file is read again.
+const localHashFor = 2 * time.Second
+
+// localHash reads the built-in admin's password hash that signalith
+// passwd -local wrote, at most every localHashFor, so a new one works
+// without a restart. A file that cannot be read now (on Windows, while
+// passwd replaces it) keeps the hash read before.
+type localHash struct {
+	dir string
+	mu  sync.Mutex
+	at  time.Time
+	h   string
+}
+
+func (l *localHash) get() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.at.IsZero() && time.Since(l.at) < localHashFor {
+		return l.h
+	}
+	if h, err := config.ReadAdminLocalHash(l.dir); err == nil {
+		l.h, l.at = h, time.Now()
+	}
+	return l.h
 }
 
 // job is the background job that checks signed-in directory users again,

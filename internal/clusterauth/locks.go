@@ -2,6 +2,7 @@ package clusterauth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,10 +10,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/auth"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/store"
 )
 
@@ -25,8 +28,11 @@ import (
 // the locks that have not ended into its limiter (auth.Limiter.External).
 // A lock costs one write per key and server, and checking one costs no
 // request: Begin only reads memory. Without OpenSearch each server's own
-// limits still apply. Keys are digests (auth.LockKey), so no address or
-// account name is stored.
+// limits still apply. Keys are HMACs under a key derived from the
+// cluster key (auth.LockKey, shared.ClusterKey.LockKey), so no address
+// or account name can be read back from them, and each document is
+// signed with the cluster key: one written by anyone else is ignored, and
+// no lock counts for longer than the limiter's own longest.
 
 // ReloadEvery is how often every server reads the locks again, besides
 // whenever watch:locks moves.
@@ -42,6 +48,39 @@ type lockDoc struct {
 	Until string `json:"until"`
 	Node  string `json:"node"`
 	At    string `json:"at"`
+	MAC   string `json:"mac"`
+}
+
+// lockMAC labels the MAC of lock documents.
+const lockMAC = "sgl-lock-v1"
+
+func lockSum(k *shared.ClusterKey, id string, d *lockDoc) []byte {
+	m := hmac.New(sha256.New, k.MACKey())
+	for _, f := range []string{lockMAC, id, d.Scope, d.Key, d.Until} {
+		m.Write([]byte(f))
+		m.Write([]byte{0})
+	}
+	return m.Sum(nil)
+}
+
+// sign sets the MAC of the lock document id with k.
+func (d *lockDoc) sign(k *shared.ClusterKey, id string) {
+	d.MAC = "m1:" + k.ID() + ":" + b64.EncodeToString(lockSum(k, id, d))
+}
+
+// verify checks the MAC of the lock document id against keys.
+func (d *lockDoc) verify(keys *shared.KeySet, id string) bool {
+	rest, ok := strings.CutPrefix(d.MAC, "m1:")
+	if !ok || keys == nil || strings.ContainsRune(d.Scope+d.Key+d.Until, 0) {
+		return false
+	}
+	kid, sum, ok := strings.Cut(rest, ":")
+	k := keys.Get(kid)
+	if !ok || k == nil {
+		return false
+	}
+	got, err := b64.DecodeString(sum)
+	return err == nil && hmac.Equal(got, lockSum(k, id, d))
 }
 
 // Locks shares the sign-in lockouts of the servers of a cluster.
@@ -87,6 +126,16 @@ func (l *Locks) Listen() {
 	l.Follow()
 }
 
+// useKey keys the limiter's lock names with the cluster key in use, and
+// returns it (nil while there is none).
+func (l *Locks) useKey() *shared.ClusterKey {
+	k := l.Docs.key()
+	if k != nil {
+		l.Limiter.SetLockSecret(k.LockKey())
+	}
+	return k
+}
+
 // Report writes a lock the limiter tripped, in the background: it is
 // called as a sign-in fails, and the write must not hold up the answer.
 func (l *Locks) Report(scope, key string, until time.Time) {
@@ -102,6 +151,7 @@ func (l *Locks) Report(scope, key string, until time.Time) {
 // Follow reads the locks again whenever another server reports one. Call
 // it once per start.
 func (l *Locks) Follow() {
+	l.useKey()
 	l.Docs.OnLocks(func() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -141,22 +191,25 @@ func (l *Locks) Write(ctx context.Context, scope, key string, until time.Time) e
 	if l.Writable != nil && !l.Writable() {
 		return nil
 	}
-	cid := l.Docs.ClusterID()
-	if cid == "" {
+	cid, k := l.Docs.ClusterID(), l.Docs.key()
+	if cid == "" || k == nil {
 		return errors.New("this server is not a member of the cluster now")
 	}
 	cl, prefix := l.Client()
 	index, id := runtimeIndex(prefix), LockID(cid, scope, key)
 	doc := lockDoc{Kind: "lock", Scope: scope, Key: key, Until: until.UTC().Format(time.RFC3339Nano), Node: l.Node,
 		At: l.now().UTC().Format(time.RFC3339Nano)}
+	doc.sign(k, id)
 	for try := 0; try < store.ModifyTries; try++ {
 		src, ver, found, err := cl.Get(ctx, index, id)
 		if err != nil {
 			return err
 		}
 		if found {
+			// A later end another server wrote is kept; one nobody signed
+			// is not.
 			var old lockDoc
-			if json.Unmarshal(src, &old) == nil {
+			if json.Unmarshal(src, &old) == nil && old.verify(l.Docs.keys(), id) {
 				if t, err := time.Parse(time.RFC3339Nano, old.Until); err == nil && !t.Before(until) {
 					return nil
 				}
@@ -184,7 +237,8 @@ func (l *Locks) Write(ctx context.Context, scope, key string, until time.Time) e
 // Reload reads the locks that have not ended into the limiter. It runs
 // whenever watch:locks moves, and at least every ReloadEvery (Due).
 func (l *Locks) Reload(ctx context.Context) error {
-	cid := l.Docs.ClusterID()
+	cid, keys := l.Docs.ClusterID(), l.Docs.keys()
+	l.useKey()
 	cl, prefix := l.Client()
 	now := l.now()
 	docs, err := cl.SearchDocs(ctx, runtimeIndex(prefix), map[string]any{"bool": map[string]any{"must": []any{
@@ -197,7 +251,7 @@ func (l *Locks) Reload(ctx context.Context) error {
 	locks := map[string]time.Time{}
 	for _, d := range docs {
 		var ld lockDoc
-		if json.Unmarshal(d.Source, &ld) != nil || ld.Key == "" || d.ID != LockID(cid, ld.Scope, ld.Key) {
+		if json.Unmarshal(d.Source, &ld) != nil || ld.Key == "" || d.ID != LockID(cid, ld.Scope, ld.Key) || !ld.verify(keys, d.ID) {
 			continue
 		}
 		t, err := time.Parse(time.RFC3339Nano, ld.Until)

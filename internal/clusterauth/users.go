@@ -110,8 +110,10 @@ func (b *UsersBackend) Load() (map[string]users.Record, error) {
 	return out, nil
 }
 
-// OnChange calls fn after users changed, here or on another server.
-func (b *UsersBackend) OnChange(fn func()) { b.Docs.Users().OnChange(fn) }
+// OnChange calls fn after users changed, here or on another server,
+// until the next start of the components (Docs.Reset), so a store of an
+// earlier start is not kept.
+func (b *UsersBackend) OnChange(fn func()) { b.Docs.OnUsers(fn) }
 
 // Create adds a user with _create, so of two servers that add the same
 // name at once one wins; the other gets users.ErrExists.

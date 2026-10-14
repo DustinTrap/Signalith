@@ -97,6 +97,7 @@ func TestPasswdOnAMember(t *testing.T) {
 
 	path := filepath.Join(a.dir, "signalith.yaml")
 	hashFile := config.AdminHashFileIn(a.dir)
+	localFile := config.AdminLocalHashFileIn(a.dir)
 	t.Setenv("SIGNALITH_NEW_PASSWORD", "a-new-admin-pass")
 	out, err := capture(t, func() error { return cmdPasswd([]string{"-c", path}) })
 	if err != nil || !strings.Contains(out, "every server of the cluster") || !strings.Contains(out, "no restart needed") {
@@ -121,9 +122,12 @@ func TestPasswdOnAMember(t *testing.T) {
 	if err != nil || !strings.Contains(out, "on this server only") {
 		t.Fatalf("passwd -local: %v\n%s", err, out)
 	}
-	raw, err := os.ReadFile(hashFile)
+	raw, err := os.ReadFile(localFile)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(strings.TrimSpace(string(raw))), []byte("break-glass-pass")) != nil {
 		t.Fatalf("the -local file: %v", err)
+	}
+	if _, err := os.Stat(hashFile); err == nil {
+		t.Error("passwd -local on a member wrote admin-password-hash")
 	}
 	if _, h, _ := a.r.sharedContent.users.docs.Builtin(); bcrypt.CompareHashAndPassword([]byte(h), []byte("break-glass-pass")) == nil {
 		t.Error("-local changed the shared password")
@@ -131,4 +135,29 @@ func TestPasswdOnAMember(t *testing.T) {
 	if code := a.signInAs("admin", "break-glass-pass"); code != http.StatusUnauthorized {
 		t.Errorf("the -local password while the shared settings work: %d", code)
 	}
+
+	// An admin-password-hash an earlier passwd wrote is no break-glass
+	// password of a member.
+	old, err := config.HashPassword("old-file-pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAdminHash(hashFile, old); err != nil {
+		t.Fatal(err)
+	}
+	// OpenSearch refuses writes (a full disk): the -local password works
+	// on A, without a restart, and nowhere else.
+	fos.Block(true)
+	eventually(t, "A sees OpenSearch refuse writes", a.r.node.WritesRefused)
+	eventually(t, "B sees OpenSearch refuse writes", b.r.node.WritesRefused)
+	if code := a.signInAs("admin", "old-file-pass"); code != http.StatusUnauthorized {
+		t.Errorf("an old admin-password-hash while writes are refused: %d", code)
+	}
+	if code := a.signInAs("admin", "break-glass-pass"); code != http.StatusOK {
+		t.Errorf("the -local password on A while writes are refused: %d", code)
+	}
+	if code := b.signInAs("admin", "break-glass-pass"); code != http.StatusUnauthorized {
+		t.Errorf("A's -local password on B: %d", code)
+	}
+	fos.Block(false)
 }
