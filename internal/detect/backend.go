@@ -3,11 +3,11 @@ package detect
 import (
 	"bytes"
 	"context"
-	"errors"
-	"io"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )

@@ -58,7 +58,7 @@ type Inbox struct {
 }
 
 type seenFile struct {
-	Version int                  `json:"version"`
+	Version int                   `json:"version"`
 	Files   map[string]*seenEntry `json:"files"`
 }
 
