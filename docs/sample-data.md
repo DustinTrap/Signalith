@@ -28,7 +28,7 @@ from the detections, or have them deleted with the sample data, by adding it.
 
 ## Load and remove it
 
-**In the browser (admins):** open **Add data** under Configure. The **Try it
+**In the browser (admins):** open **Add data** under Data. The **Try it
 with sample data** card loads the week, shows its progress, then lists things
 to try (each opens a view covering the whole week) and removes it again behind
 a confirm. While it loads, the detections run over the week so findings and

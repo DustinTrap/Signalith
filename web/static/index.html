@@ -180,30 +180,41 @@
       <a class="nav__item" href="#search" data-page="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><span>Search</span></a>
       <a class="nav__item" href="#intel" data-page="intel"><svg class="icon" aria-hidden="true"><use href="#i-radar"/></svg><span>Threat intel</span></a>
     </div>
-    <div class="nav__group" data-group="Detect">
-      <div class="nav__label">Detect</div>
+    <div class="nav__group" data-group="Detect &amp; respond">
+      <div class="nav__label">Detect &amp; respond</div>
       <a class="nav__item" href="#detections" data-page="detections"><svg class="icon" aria-hidden="true"><use href="#i-crosshair"/></svg><span>Detections</span></a>
       <a class="nav__item" href="#coverage" data-page="coverage"><svg class="icon" aria-hidden="true"><use href="#i-grid-3x3"/></svg><span>ATT&amp;CK coverage</span></a>
-    </div>
-    <div class="nav__group" data-group="Configure">
-      <div class="nav__label">Configure</div>
-      <a class="nav__item" href="#assets" data-page="assets"><svg class="icon" aria-hidden="true"><use href="#i-fingerprint"/></svg><span>Assets &amp; identities</span></a>
-      <a class="nav__item" href="#endpoints" data-page="endpoints" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-laptop"/></svg><span>Endpoints</span></a>
-      <a class="nav__item" href="#data" data-page="data" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
-      <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
-      <a class="nav__item" href="#notify" data-page="notify" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span>Notifications</span></a>
-      <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
-      <a class="nav__item" href="#respond" data-page="respond" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-zap"/></svg><span>Response actions</span></a>
       <a class="nav__item" href="#playbooks" data-page="playbooks" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-list-checks"/></svg><span>Playbooks</span></a>
-      <a class="nav__item" href="#security" data-page="security" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-shield-check"/></svg><span>Security</span><span id="security-count" class="nav__count hidden" data-critical></span></a>
-      <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
+      <a class="nav__item" href="#respond" data-page="respond" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-zap"/></svg><span>Response actions</span></a>
+    </div>
+    <div class="nav__group" data-group="Data">
+      <div class="nav__label">Data</div>
+      <a class="nav__item" href="#data" data-page="data" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg><span>Add data</span></a>
+      <a class="nav__item" href="#endpoints" data-page="endpoints" data-min-role="analyst"><svg class="icon" aria-hidden="true"><use href="#i-laptop"/></svg><span>Endpoints</span></a>
+      <a class="nav__item" href="#assets" data-page="assets"><svg class="icon" aria-hidden="true"><use href="#i-fingerprint"/></svg><span>Assets &amp; identities</span></a>
+    </div>
+    <!-- The Settings pages. They open from Settings at the foot of the
+         sidebar and switch with the tabs above each of them (#set-tabs),
+         so this group shows only while the jump box finds one of them. It
+         still names each page's title and least role, as every nav item
+         does. -->
+    <div class="nav__group nav__group--jump hidden" data-group="Settings">
+      <div class="nav__label">Settings</div>
+      <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-sliders-horizontal"/></svg><span>Server</span></a>
+      <a class="nav__item" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
+      <a class="nav__item" href="#notify" data-page="notify" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span>Notifications</span></a>
+      <a class="nav__item" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
+      <a class="nav__item" href="#security" data-page="security" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-shield-check"/></svg><span>Security</span></a>
       <a class="nav__item" href="#servers" data-page="servers" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
-      <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></a>
+      <a class="nav__item" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
     </div>
     <p class="nav__empty hidden" id="jump-empty">No page matches.</p>
   </nav>
   <div class="sidebar__foot">
+    <div class="sidebar__links">
       <a class="nav__item" href="#help" data-page="help"><svg class="icon" aria-hidden="true"><use href="#i-book-open"/></svg><span>Query guide</span></a>
+      <a class="nav__item" href="#settings" data-page="settings" data-min-role="admin" data-settings-home><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span><span id="settings-count" class="nav__count hidden" data-critical></span></a>
+    </div>
     <a class="health hidden" id="health-card" href="#health" data-page="health">
       <span class="health__row"><span class="pulse" id="health-pulse"></span><b id="health-title"></b></span>
       <span class="health__meta" id="health-meta"></span>
@@ -238,6 +249,19 @@
   <!-- Problems with the servers that share this OpenSearch that everyone
        should know of, on every page (from api/health). -->
   <div class="cluster-banner hidden" id="cluster-banner" role="alert"></div>
+  <!-- Tabs between the Settings pages, above whichever of them is open.
+       Each tab is hidden from roles its page is not for. -->
+  <nav class="set-tabs hidden" id="set-tabs" aria-label="Settings">
+    <div class="set-tabs__list">
+      <a class="set-tab" href="#settings" data-page="settings" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-sliders-horizontal"/></svg><span>Server</span></a>
+      <a class="set-tab" href="#users" data-page="users" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg><span>Users</span></a>
+      <a class="set-tab" href="#notify" data-page="notify" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span>Notifications</span></a>
+      <a class="set-tab" href="#retention" data-page="retention" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-hourglass"/></svg><span>Data retention</span></a>
+      <a class="set-tab" href="#security" data-page="security" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-shield-check"/></svg><span>Security</span><span id="security-count" class="nav__count hidden" data-critical></span></a>
+      <a class="set-tab" href="#servers" data-page="servers" data-min-role="admin"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg><span>Servers</span></a>
+      <a class="set-tab" href="#health" data-page="health"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span>Health</span></a>
+    </div>
+  </nav>
   <!-- Search -->
   <section id="page-search" class="page">
     <div class="search-layout">
@@ -1322,7 +1346,7 @@ login-bank.example,Phishing site,,2026-12-31,phishing</pre>
   <section id="page-settings" class="page">
     <div class="page-head">
       <div>
-        <h2 class="page-head__title">Settings</h2>
+        <h2 class="page-head__title">Server settings</h2>
         <p class="page-head__desc">How this server runs. Settings not changed on this page come from signalith.yaml or their defaults.</p>
       </div>
     </div>
