@@ -37,21 +37,31 @@ type osDisk struct {
 	Flood       *float64 `json:"flood"`
 }
 
+// osEndpoint is one of this server's OpenSearch addresses. RetryIn is how
+// long it is still skipped after failing, in this server's own time, so
+// the page needs no right clock of its own.
+type osEndpoint struct {
+	URL     string `json:"url"`
+	Down    bool   `json:"down"`
+	RetryIn int    `json:"retry_in_seconds,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+}
+
 // osCard is GET /api/cluster/opensearch. Counts are nil when OpenSearch
 // did not say (an older version, or a user without the right to ask).
 type osCard struct {
-	Status           string                 `json:"status"`
-	Problem          string                 `json:"problem,omitempty"`
-	Nodes            *int                   `json:"nodes"`
-	DataNodes        *int                   `json:"data_nodes"`
-	ManagerEligible  *int                   `json:"manager_eligible"`
-	UnassignedShards *int                   `json:"unassigned_shards"`
-	Disk             []osDisk               `json:"disk"`
-	NoReplicas       []string               `json:"no_replicas"`
-	ReplicasSetting  string                 `json:"replicas_setting"`
-	SuggestAuto      bool                   `json:"suggest_auto"`
-	Endpoints        []store.EndpointStatus `json:"endpoints"`
-	Warnings         []string               `json:"warnings"`
+	Status           string       `json:"status"`
+	Problem          string       `json:"problem,omitempty"`
+	Nodes            *int         `json:"nodes"`
+	DataNodes        *int         `json:"data_nodes"`
+	ManagerEligible  *int         `json:"manager_eligible"`
+	UnassignedShards *int         `json:"unassigned_shards"`
+	Disk             []osDisk     `json:"disk"`
+	NoReplicas       []string     `json:"no_replicas"`
+	ReplicasSetting  string       `json:"replicas_setting"`
+	SuggestAuto      bool         `json:"suggest_auto"`
+	Endpoints        []osEndpoint `json:"endpoints"`
+	Warnings         []string     `json:"warnings"`
 }
 
 // handleClusterOpenSearch says how safe the OpenSearch cluster is from
@@ -66,8 +76,15 @@ func (s *Server) handleClusterOpenSearch(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	conf := s.conf()
-	out := osCard{Disk: []osDisk{}, NoReplicas: []string{}, Endpoints: oc.Endpoints(), Warnings: []string{},
+	out := osCard{Disk: []osDisk{}, NoReplicas: []string{}, Endpoints: []osEndpoint{}, Warnings: []string{},
 		ReplicasSetting: strings.TrimSpace(string(conf.OpenSearch.Replicas))}
+	for _, e := range oc.Endpoints() {
+		oe := osEndpoint{URL: e.URL, Down: e.Down, Reason: e.Reason}
+		if e.Down {
+			oe.RetryIn = max(1, int(time.Until(e.Until).Round(time.Second)/time.Second))
+		}
+		out.Endpoints = append(out.Endpoints, oe)
+	}
 	if out.ReplicasSetting == "" {
 		out.ReplicasSetting = "auto"
 	}
