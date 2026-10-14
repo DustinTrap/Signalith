@@ -310,20 +310,33 @@ func TestUpgradeRollingPair(t *testing.T) {
 		t.Logf("prev %s: no shared sessions, skipped", b.prevVersion)
 	}
 
-	code, out, raw := upgradeCheck(t, sb, b.next)
-	if code != 0 || !out.Safe || !strings.Contains(out.Next, "Upgrade siem-b next") {
-		t.Fatalf("upgrade-check before the upgrade: exit %d\n%s", code, raw)
+	// A heartbeat can still say starting for a moment after the pages
+	// say ready, and upgrade-check rightly waits for it.
+	safeNext := func(s *testServer, want string) {
+		t.Helper()
+		var code int
+		var raw string
+		deadline := time.Now().Add(60 * time.Second)
+		for {
+			var out upgradeOutput
+			code, out, raw = upgradeCheck(t, s, b.next)
+			if code == 0 && out.Safe && strings.Contains(out.Next, want) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("upgrade-check does not say %q: exit %d\n%s", want, code, raw)
+			}
+			time.Sleep(time.Second)
+		}
 	}
+	safeNext(sb, "Upgrade siem-b next")
 
 	w := watchJobs(h, a, sb)
 	stopGraceful(sb)
 	startBin(sb, b.next)
 	waitStandby(t, a, sb)
 
-	code, out, raw = upgradeCheck(t, a, b.next)
-	if code != 0 || !strings.Contains(out.Next, "Upgrade siem-a next") {
-		t.Fatalf("upgrade-check with one server upgraded: exit %d\n%s", code, raw)
-	}
+	safeNext(a, "Upgrade siem-a next")
 	stopGraceful(a)
 	waitUntil(t, 90*time.Second, "siem-b takes over the jobs", func() bool { return h.leaseHolder() == "siem-b" })
 	startBin(a, b.next)
