@@ -32,8 +32,12 @@ func NodeCfgID(nodeID string) string { return NodeCfgKind + ":" + nodeID }
 type NodeCfg struct {
 	// Seen holds, per setting and source, the hash of the value last
 	// applied or recorded.
-	Seen  map[string]map[string]string `json:"seen"`
-	Extra `json:"-"`
+	Seen map[string]map[string]string `json:"seen"`
+	// Applied is when this server first applied (only recorded) its
+	// files' values as a member; until then every value is only
+	// recorded.
+	Applied string `json:"applied,omitempty"`
+	Extra   `json:"-"`
 }
 
 // SeenHash returns the hash of a setting's value as nodecfg records it:

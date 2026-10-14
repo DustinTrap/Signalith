@@ -40,14 +40,16 @@ func TestRestartKeepsTheJobLease(t *testing.T) {
 	node := rs.r.node
 	eventually(t, "this server runs the jobs", node.RunsJobs)
 	epoch := node.Lease().Epoch()
-	eventually(t, "the detection scheduler starts", func() bool {
-		return strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 1
+	// The server founds the cluster and restarts its components in place
+	// to take their content from it: the jobs start a second time.
+	eventually(t, "the detection scheduler starts with the shared settings", func() bool {
+		return rs.r.sharedContent.on.Load() && strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 2
 	})
 	if _, res := rs.restart(); !res.OK {
 		t.Fatalf("restart %+v\n%s", res, rs.logs.String())
 	}
 	eventually(t, "the jobs start again", func() bool {
-		return strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 2
+		return strings.Count(rs.logs.String(), `msg="detection scheduler started"`) == 3
 	})
 	if !node.RunsJobs() || node.Lease().Epoch() != epoch || rs.r.node != node {
 		t.Errorf("after the restart: runs %v epoch %d (was %d)", node.RunsJobs(), node.Lease().Epoch(), epoch)

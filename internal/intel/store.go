@@ -22,11 +22,22 @@ type Backend interface {
 	Version(ctx context.Context) (string, error)
 }
 
+// SourceLister is a Backend that can list the IDs of a source's
+// indicators as stored, so a download replaces what is really there
+// rather than what this server last loaded.
+type SourceLister interface {
+	SourceIDs(ctx context.Context, source string) ([]string, error)
+}
+
 // Store holds the indicators in memory for fast lookups, backed by a
 // Backend. It is safe for concurrent use.
 type Store struct {
 	Backend Backend
 	Now     func() time.Time
+	// AfterWrite, when set, is called after each write of indicators (one
+	// call per download, upload or change), so other servers that share
+	// the backend can be told to reload.
+	AfterWrite func()
 
 	mu      sync.RWMutex
 	all     map[string]*Indicator // by ID
@@ -37,6 +48,9 @@ type Store struct {
 	// stale marks a copy changed by this server's own writes since it was
 	// last loaded, which the next Sync reloads.
 	stale bool
+	// wake makes Watch sync now.
+	wakeOnce sync.Once
+	wake     chan struct{}
 }
 
 type netEntry struct {
@@ -164,6 +178,23 @@ func (s *Store) afterWrite(put []Indicator, deleted []string) {
 	s.mu.Lock()
 	s.stale = true
 	s.mu.Unlock()
+	if s.AfterWrite != nil {
+		s.AfterWrite()
+	}
+}
+
+func (s *Store) wakeCh() chan struct{} {
+	s.wakeOnce.Do(func() { s.wake = make(chan struct{}, 1) })
+	return s.wake
+}
+
+// Wake makes Watch check the backend now, as when another server
+// says it changed the indicators. It does not block.
+func (s *Store) Wake() {
+	select {
+	case s.wakeCh() <- struct{}{}:
+	default:
+	}
 }
 
 // prepare fills IDs and times, keeping first_seen of existing indicators.
@@ -240,20 +271,19 @@ func (s *Store) ReplaceSource(ctx context.Context, source string, inds []Indicat
 	for _, ind := range inds {
 		keep[ind.ID] = true
 	}
+	ids, err := s.sourceIDs(ctx, source)
+	if err != nil {
+		return 0, 0, err
+	}
 	var gone []string
-	s.mu.RLock()
 	existing := 0
-	for id, ind := range s.all {
-		if ind.Source != source {
-			continue
-		}
+	for _, id := range ids {
 		if keep[id] {
 			existing++
 		} else {
 			gone = append(gone, id)
 		}
 	}
-	s.mu.RUnlock()
 	if err := s.Backend.Put(ctx, inds); err != nil {
 		return 0, 0, err
 	}
@@ -262,6 +292,28 @@ func (s *Store) ReplaceSource(ctx context.Context, source string, inds []Indicat
 	}
 	s.afterWrite(inds, gone)
 	return len(inds) - existing, len(gone), nil
+}
+
+// sourceIDs lists the IDs of a source's indicators: as stored, when the
+// backend can say (another server may have written some this one never
+// loaded), else as this server last loaded them.
+func (s *Store) sourceIDs(ctx context.Context, source string) ([]string, error) {
+	if l, ok := s.Backend.(SourceLister); ok {
+		ids, err := l.SourceIDs(ctx, source)
+		if err != nil {
+			return nil, fmt.Errorf("could not list the indicators stored for %s: %w", source, err)
+		}
+		return ids, nil
+	}
+	var ids []string
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for id, ind := range s.all {
+		if ind.Source == source {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
 
 // MergeSource adds and updates indicators from a source without removing

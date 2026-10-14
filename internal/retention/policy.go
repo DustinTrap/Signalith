@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/datamodel"
 )
@@ -263,15 +264,51 @@ func (c Config) Problems() []string {
 }
 
 // Saved is what the Data retention page saved, in retention.yaml next to
-// the asset and identity lists.
+// the asset and identity lists, or, when servers share their settings,
+// the shared retention policies.
 type Saved struct {
+	// Days is retention.days, which only the shared policies carry: a
+	// server with its own files reads it from signalith.yaml.
+	Days     *int              `yaml:"-"`
 	Default  *Policy           `yaml:"default,omitempty"`
 	Policies map[string]Policy `yaml:"policies,omitempty"`
 	Guard    *Guard            `yaml:"guard,omitempty"`
+	// From says, for a shared setting applied from a server's
+	// signalith.yaml, which one and when: by "days", "default", "guard"
+	// or "policies.<category>".
+	From map[string]Provenance `yaml:"-"`
+}
+
+// Provenance is where a shared setting's value came from, when not from
+// the page: Source is yaml (a server's signalith.yaml) or import (the
+// files of the server that founded the cluster).
+type Provenance struct {
+	Source string `json:"source"`
+	Node   string `json:"node,omitempty"`
+	At     string `json:"at,omitempty"`
+}
+
+// Note says where the value came from, for the page.
+func (p Provenance) Note() string {
+	what := "Applied from signalith.yaml"
+	if p.Source == "import" {
+		what = "Imported from the files"
+	}
+	if p.Node != "" {
+		what += " on " + p.Node
+	}
+	if t, err := time.Parse(time.RFC3339Nano, p.At); err == nil {
+		what += ", " + t.UTC().Format(time.DateOnly)
+	}
+	return what
 }
 
 func (s Saved) clone() Saved {
-	out := Saved{Policies: maps.Clone(s.Policies)}
+	out := Saved{Policies: maps.Clone(s.Policies), From: maps.Clone(s.From)}
+	if s.Days != nil {
+		d := *s.Days
+		out.Days = &d
+	}
 	if s.Default != nil {
 		d := *s.Default
 		out.Default = &d
@@ -290,6 +327,9 @@ func (s Saved) clone() Saved {
 // problems checks saved settings the way the page's API does.
 func (s Saved) problems() []string {
 	var out []string
+	if s.Days != nil && (*s.Days < 0 || *s.Days > MaxKeepDays) {
+		out = append(out, fmt.Sprintf("days must be between 0 and %d (0 keeps data forever)", MaxKeepDays))
+	}
 	if s.Default != nil {
 		for _, p := range s.Default.Problems(KindEvents) {
 			out = append(out, "default."+p)
@@ -343,6 +383,9 @@ type Settings struct {
 	Sources     map[string]string
 	Guard       Guard
 	GuardSource string
+	// From says where shared settings applied from a signalith.yaml came
+	// from (see Saved.From).
+	From map[string]Provenance
 }
 
 // Effective merges signalith.yaml with the page's saved settings.
@@ -354,6 +397,12 @@ func Effective(cfg Config, saved Saved) Settings {
 		Sources:       map[string]string{},
 		Guard:         Guard{}.Normalized(),
 		GuardSource:   SourceBuiltin,
+		From:          maps.Clone(saved.From),
+	}
+	if saved.Days != nil {
+		// Shared policies carry retention.days; signalith.yaml no longer
+		// sets it directly (it is applied when it changes).
+		s.Default.KeepDays = *saved.Days
 	}
 	switch {
 	case cfg.Default != nil:
@@ -414,6 +463,7 @@ func (s Settings) clone() Settings {
 	out := s
 	out.Policies = maps.Clone(s.Policies)
 	out.Sources = maps.Clone(s.Sources)
+	out.From = maps.Clone(s.From)
 	return out
 }
 

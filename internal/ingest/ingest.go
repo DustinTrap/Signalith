@@ -97,6 +97,9 @@ type Pipeline struct {
 	// FieldCount returns how many fields an index's mapping has (see
 	// MappingFieldCount); nil does not look.
 	FieldCount func(ctx context.Context, index string) (int, error)
+	// liveMaxAge, when set (SetMaxEventAge), replaces MaxEventAge: the
+	// retention policies it follows can change while the pipeline runs.
+	liveMaxAge atomic.Int64
 
 	stats   Stats
 	names   fieldBudget
@@ -177,7 +180,18 @@ func (p *Pipeline) now() time.Time {
 	return time.Now()
 }
 
+// SetMaxEventAge changes MaxEventAge while the pipeline runs, as when
+// the shared retention policies change; zero or less is ignored.
+func (p *Pipeline) SetMaxEventAge(d time.Duration) {
+	if d > 0 {
+		p.liveMaxAge.Store(int64(d))
+	}
+}
+
 func (p *Pipeline) maxAge() time.Duration {
+	if d := p.liveMaxAge.Load(); d > 0 {
+		return time.Duration(d)
+	}
 	if p.MaxEventAge > 0 {
 		return p.MaxEventAge
 	}

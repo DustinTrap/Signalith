@@ -145,6 +145,9 @@ type Server struct {
 	// says which one runs the background jobs. nil means this server runs
 	// them when detections.scheduler is on, and lists no servers.
 	Cluster Cluster
+	// Shared is the shared configuration in OpenSearch; nil on a server
+	// that keeps every setting in its own files.
+	Shared Shared
 	// Security runs the Security page's checks and keeps the last
 	// report; it carries over a restart in place. nil makes one.
 	Security *SecurityChecker
@@ -253,6 +256,7 @@ func (s *Server) Handler() http.Handler {
 	s.routePlaybooks(api)
 	s.routeUsers(api)
 	s.routeRetention(api)
+	s.routeRequests(api)
 	s.routeSample(api)
 	s.routeEndpoints(api)
 	s.routeVulns(api)

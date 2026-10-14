@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
+	"github.com/jrsamsanchez/signalith/internal/clustercfg"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
 	"github.com/jrsamsanchez/signalith/internal/shared"
@@ -150,6 +151,7 @@ func (x *clusterCLI) keyStore() shared.KeyStore {
 // runtime returns a runtime that has looked for the cluster once.
 // readOnly writes nothing to OpenSearch or the state folder.
 func (x *clusterCLI) runtime(readOnly bool, name string) *shared.Runtime {
+	docs := clustercfg.NewDocs()
 	rt := shared.NewRuntime(shared.RuntimeOptions{
 		StateDir: x.c.StateDir(), Self: shared.Self{NodeID: x.self.NodeID, Name: x.self.Name},
 		KeyFile: os.Getenv(clusterKeyFileEnv), ClusterName: name, ReadOnly: readOnly, Log: x.log,
@@ -157,9 +159,26 @@ func (x *clusterCLI) runtime(readOnly bool, name string) *shared.Runtime {
 			peers, _ := x.peers(context.Background(), 0)
 			return peers
 		},
+		// A founding from the command line imports this server's feeds
+		// and retention policies, as the server's own would.
+		Content:   docs.Track,
+		Importers: clustercfg.Importers(docs, x.files()),
 	})
 	rt.Use(x.cl, x.prefix(), x.c.Keyring())
 	return rt
+}
+
+// files is what the importers read, for a founding from the command
+// line.
+func (x *clusterCLI) files() clustercfg.Files {
+	return clustercfg.Files{
+		Config: func() *config.Config { return x.c },
+		Node:   x.self.Name, NodeID: x.self.NodeID,
+		Client: func() (*store.Client, string) { return x.cl, x.prefix() },
+		Peers: func() map[string]string {
+			return heartbeatRetention(context.Background(), x.cl, x.prefix(), x.self.NodeID)
+		},
+	}
 }
 
 // cliHeartbeatAge is how old a heartbeat may be for its server to count

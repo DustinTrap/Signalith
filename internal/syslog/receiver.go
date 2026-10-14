@@ -137,6 +137,8 @@ type Receiver struct {
 
 	queue       chan queued
 	queuedBytes atomic.Int64
+	// maxAge is cfg.MaxAge, which SetMaxAge changes while it runs.
+	maxAge atomic.Int64
 
 	udp       *net.UDPConn
 	lns       []net.Listener
@@ -289,6 +291,7 @@ func New(cfg Config, sink Sink, log *slog.Logger) *Receiver {
 		warned:      map[string]time.Time{},
 	}
 	r.names.servers = cfg.Servers
+	r.maxAge.Store(int64(cfg.MaxAge))
 	return r
 }
 
@@ -713,6 +716,15 @@ func (r *Receiver) rejectSender(a netip.Addr) {
 	r.warn("allow", "dropped syslog from a sender outside syslog.allow (logged once a minute)", "sender", a.String(), "dropped_so_far", r.notAllowed.Load())
 }
 
+// SetMaxAge changes how old a message's own timestamp may be and still be
+// the event time, while the receiver runs, as when the shared retention
+// policies change; zero or less is ignored.
+func (r *Receiver) SetMaxAge(d time.Duration) {
+	if d > 0 {
+		r.maxAge.Store(int64(d))
+	}
+}
+
 // handle parses one message and queues its event. wait says whether to
 // wait for room in the queue (TCP) or drop the message when it is full
 // (UDP).
@@ -722,8 +734,9 @@ func (r *Receiver) handle(ctx context.Context, data []byte, from netip.Addr, pro
 	if m.Raw == "" {
 		return
 	}
-	ev := m.Event(from, now, r.cfg.MaxAge)
-	r.names.limit(ev, from, now, r.cfg.MaxAge)
+	maxAge := time.Duration(r.maxAge.Load())
+	ev := m.Event(from, now, maxAge)
+	r.names.limit(ev, from, now, maxAge)
 	r.received.Add(1)
 	r.lastMessage.Store(now.UnixNano())
 	r.senders.seen(from, m.Hostname, proto, now)

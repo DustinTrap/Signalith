@@ -113,14 +113,17 @@ health and warnings, and **Run now** works on any of them.
 servers take turns by themselves. Turn it off only on a server that should never
 run the jobs, for example one that only receives data.
 
-**Changing retention and feeds.** Until settings are shared between servers, the
-Data retention, Threat intel feed, Notifications and Playbooks settings can be changed only on
-the server that runs the jobs.
+**Changing retention and feeds.** Once the servers are a cluster (see
+[Shared feeds and retention policies](#shared-feeds-and-retention-policies)), the Data retention
+and Threat intel feed settings can be changed on any server. Notifications and Playbooks settings,
+and both on a server that is not part of the cluster yet, can be changed only on the server that
+runs the jobs.
 
 ## When a server will not take over
 
-Retention policies, threat intel feeds, notifications, playbooks and custom detections are still kept in
-files on each server. A server whose files differ from those of the server that
+Notifications, playbooks and custom detections are still kept in files on each server, and so are
+retention policies and threat intel feeds on a server that is not part of the cluster yet (on
+the servers of the cluster they are shared, so they never differ). A server whose files differ from those of the server that
 runs the jobs does not take the jobs over by itself: it would delete, download or
 alert differently. The list shows it as **Standby** with "Won't take over" and the
 reason, and an alert says what to copy:
@@ -283,9 +286,9 @@ The servers that share one OpenSearch also share settings there, in the
 `<prefix>_config` index. Each one is signed with the **cluster key**, which every
 server keeps in its state folder (`keys/cluster-<id>.key`, encrypted with that
 server's master key) and never in OpenSearch, so someone who can write to OpenSearch
-cannot change them unnoticed. For now the servers share only what makes them one
-cluster (its name, the list of servers and their keys); retention policies and
-threat intel feeds still come from each server's own files.
+cannot change them unnoticed. They share what makes them one cluster (its name, the
+list of servers and their keys), the threat intel feeds and the retention policies;
+see [Shared feeds and retention policies](#shared-feeds-and-retention-policies).
 
 The server that runs the background jobs makes the cluster by itself, the first
 time it runs this version: it makes the cluster key and writes the shared settings.
@@ -318,6 +321,43 @@ cannot be reached (it then answers `/readyz` with `degraded` and pauses changes)
 | `signalith cluster accept-restore` | After you restore an OpenSearch snapshot on purpose: makes every server accept the older shared settings, which they would otherwise refuse as changed outside Signalith |
 
 Each change is written to the log as an audit record.
+
+## Shared feeds and retention policies
+
+On the servers of the cluster, the threat intel feeds and the retention policies are
+shared: a change on any server's Threat intel or Data retention page applies to all of them
+at once, and feed passwords and API keys are stored encrypted with the cluster key. The
+server that founds the cluster brings its own: the feeds from `intel_feeds.yaml` and
+`intel.feeds` in signalith.yaml, their download status, and the retention policies from
+`retention.yaml` and `retention` in signalith.yaml. The other servers' own files are no
+longer used for them. A server switches to the shared ones by itself, with a quick restart
+in place, when it founds or joins the cluster.
+
+**When the servers' policies differed.** If another server that ran in the last 7 days had
+retention policies of its own that differ from the founder's, the shared policies wait to be
+confirmed: until an admin confirms them on the Data retention page (or with
+`POST /api/retention/policies/confirm`), retention runs only the disk guard and freezes,
+archives and deletes nothing else.
+
+**signalith.yaml.** `retention.days`, `retention.default`, `retention.policies`,
+`retention.guard` and the feeds in `intel.feeds` still work, but only when they change: a
+server that starts with a changed value applies it to the shared one, and the log says so
+("retention.days applied from signalith.yaml on siem-b"). An unchanged file never undoes a
+change made on a page, and removing a setting from the file changes nothing. A value that
+differs from the shared one without having changed is only noted, for information, in that
+server's heartbeat (`settings_drift`).
+
+**Downloads and runs.** The server that runs the background jobs downloads the feeds and runs
+retention. **Refresh** on a feed, and **Run now** or a policy change on the Data retention
+page, on another server ask it to: the request answers `202` with a `request_id`, which
+`GET /api/requests/{id}` follows until it is `done` or `failed`. Restoring archived days is
+still done on the server that runs the jobs.
+
+**Changes at the same moment.** `GET /api/retention` and `GET /api/intel/feeds` (for
+admins) give each item's version (`ETag`, and `etags` for the feeds). A change sent with
+`If-Match` and that version is refused with `412` when someone changed the item meanwhile.
+While a server cannot use the shared settings (OpenSearch cannot be reached, or it misses
+the cluster key), changes there answer `503`.
 
 ## Field names when several servers receive events
 

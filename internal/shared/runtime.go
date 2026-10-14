@@ -118,6 +118,49 @@ const (
 	ModeGone Mode = "gone"
 )
 
+// SharedContent reports whether this server takes the content of the
+// shared settings (feeds, retention policies) from OpenSearch rather than
+// from its own files: it is a member, or was one and keeps its copy while
+// it cannot use OpenSearch. A server that is still moving its files into
+// OpenSearch uses them until that is done.
+func (rt *Runtime) SharedContent() bool {
+	rt.mu.Lock()
+	m, c := rt.mode, rt.cluster
+	rt.mu.Unlock()
+	switch m {
+	case ModeMember, ModeDegraded, ModeKeyMissing, ModeGone:
+	default:
+		return false
+	}
+	_, ok := c.Get()
+	return ok
+}
+
+// Writable says why the shared settings cannot be changed on this server
+// now, or nil when they can: it must be a member that reads them from
+// OpenSearch.
+func (rt *Runtime) Writable() error {
+	switch m, why := rt.Mode(); m {
+	case ModeMember:
+		return nil
+	case ModeDegraded:
+		return &PausedError{Why: why}
+	default:
+		return &PausedError{Why: m.Text()}
+	}
+}
+
+// PausedError is a change of the shared settings asked while they cannot
+// be changed on this server; the API answers it with 503.
+type PausedError struct{ Why string }
+
+func (e *PausedError) Error() string {
+	if e.Why == "" {
+		return "changes to the shared settings are paused on this server right now; try again in a moment"
+	}
+	return "changes to the shared settings are paused on this server right now (" + e.Why + "); try again in a moment"
+}
+
 // Legacy reports whether a server in mode m uses its own files.
 func (m Mode) Legacy() bool {
 	return m == ModeLegacyA || m == ModeLegacyB || m == ModeLegacyC || m == ModeStarting
@@ -164,6 +207,10 @@ type RuntimeOptions struct {
 	Peers func() []Peer
 	// Importers move the founder's files into the shared settings.
 	Importers []Importer
+	// Content makes the documents of the shared settings themselves (the
+	// feed list, the retention policies) on each hub the runtime builds,
+	// before cache.enc is read into it.
+	Content func(h *Hub)
 	// ReadOnly is for the command line: nothing is written, the cluster
 	// is never founded, and no cache is kept.
 	ReadOnly bool
@@ -213,6 +260,9 @@ func (rt *Runtime) build() {
 	rt.keyring = NewDoc[KeyringBody](h, KeyringDocID, "keyring", 1)
 	rt.nodecfg = NewDoc[NodeCfg](h, NodeCfgID(rt.opts.Self.NodeID), NodeCfgKind, 1)
 	rt.requests = NewRequests(h, rt.opts.Self.NodeID)
+	if rt.opts.Content != nil {
+		rt.opts.Content(h)
+	}
 	h.Watch("requests", func(context.Context) error {
 		select {
 		case rt.reqWake <- struct{}{}:

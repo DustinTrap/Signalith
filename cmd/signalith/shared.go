@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
+	"github.com/jrsamsanchez/signalith/internal/clustercfg"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -19,9 +20,10 @@ import (
 // its watcher, its copy of the settings and cache.enc, and only points it
 // at the new OpenSearch client.
 //
-// This step brings the cluster document, the keyring, the cluster key and
-// the requests; feeds and retention policies still come from each
-// server's own files in every mode.
+// Besides the cluster document, the keyring, the cluster key and the
+// requests, a member takes the threat intel feeds and the retention
+// policies from it (see sharedcontent.go); other servers keep using their
+// own files.
 
 // clusterKeyFileEnv names a file holding the cluster key: a server that
 // has it joins the cluster (or founds it with that key) by itself.
@@ -29,9 +31,11 @@ const clusterKeyFileEnv = "SIGNALITH_CLUSTER_KEY_FILE"
 
 // openShared returns this server's runtime of the shared configuration,
 // which asks the node whether it runs the background jobs (only the one
-// that does founds the cluster) and about the other servers.
-func openShared(c *config.Config, node *cluster.Node, log *slog.Logger) *shared.Runtime {
-	return shared.NewRuntime(shared.RuntimeOptions{
+// that does founds the cluster) and about the other servers, and the
+// link of its content to the components.
+func openShared(c *config.Config, node *cluster.Node, log *slog.Logger) (*shared.Runtime, *sharedContent) {
+	ct := newSharedContent(c, node, log)
+	rt := shared.NewRuntime(shared.RuntimeOptions{
 		StateDir:   c.StateDir(),
 		Self:       shared.Self{NodeID: node.ID(), Name: node.Name()},
 		KeyFile:    os.Getenv(clusterKeyFileEnv),
@@ -39,8 +43,11 @@ func openShared(c *config.Config, node *cluster.Node, log *slog.Logger) *shared.
 		LeaseCheck: node.Check,
 		LeaseEpoch: node.Lease().Epoch,
 		Peers:      func() []shared.Peer { return peersOf(node.Status()) },
+		Content:    ct.docs.Track,
+		Importers:  clustercfg.Importers(ct.docs, ct.files()),
 		Log:        log,
 	})
+	return rt, ct
 }
 
 // peersOf lists the servers as the node sees them.
@@ -58,28 +65,38 @@ func peersOf(st cluster.Status) []shared.Peer {
 }
 
 // sharedStatus is the runtime's status as the heartbeat carries it.
-func sharedStatus(rt *shared.Runtime) cluster.SharedStatus {
+func sharedStatus(rt *shared.Runtime, ct *sharedContent) cluster.SharedStatus {
 	st := rt.Status()
 	return cluster.SharedStatus{Mode: string(st.Mode), ClusterKID: st.ClusterKID, ConfigSeq: max(st.ConfigSeq, 0), MaxRev: st.MaxRev,
-		NeedsUpgrade: st.NeedsUpgrade, Tamper: st.Tamper, LevelMin: st.LevelMin, LevelMax: st.LevelMax, NotEligible: st.NotEligible}
+		NeedsUpgrade: st.NeedsUpgrade, Tamper: st.Tamper, LevelMin: st.LevelMin, LevelMax: st.LevelMax, NotEligible: st.NotEligible,
+		SettingsDrift: ct.settingsDrift()}
 }
 
 // useShared points the runtime at this start's OpenSearch client, with
-// the master key of its config, before the node: the node then reads
-// whether this server may run the background jobs from it.
-func useShared(rt *shared.Runtime, c *config.Config, cl *store.Client) {
+// the master key of its config, before the components are built (whether
+// they take their content from the shared settings depends on what it
+// finds) and before the node, which reads from it whether this server may
+// run the background jobs. It reports whether the components take their
+// content from the shared settings.
+func useShared(rt *shared.Runtime, ct *sharedContent, c *config.Config, cl *store.Client) bool {
 	if rt == nil {
-		return
+		return false
 	}
+	ct.use(c, cl)
 	rt.Use(cl, c.OpenSearch.IndexPrefix, c.Keyring())
+	on := ct != nil && rt.SharedContent()
+	if ct != nil {
+		ct.on.Store(on)
+	}
+	return on
 }
 
 // requestsJob runs the requests for the server that runs the background
-// jobs. This step has no request types yet: requests a later version
-// queues wait for a server that knows them.
-func requestsJob(rt *shared.Runtime) cluster.Job {
+// jobs with handlers; requests a later version queues wait for a server
+// that knows them.
+func requestsJob(rt *shared.Runtime, handlers map[string]shared.Handler) cluster.Job {
 	return cluster.Job{Name: "requests", Run: func(ctx context.Context) {
-		rt.RunRequests(ctx, map[string]shared.Handler{})
+		rt.RunRequests(ctx, handlers)
 	}}
 }
 

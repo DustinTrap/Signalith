@@ -302,16 +302,36 @@ func (f Fingerprints) Combined() string {
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }
 
+// SharedPrefix starts the fingerprint of the parts a member of the
+// cluster takes from the shared settings rather than its files:
+// "shared:<cluster id>". Two members of one cluster always match on
+// them; a server that keeps them in its own files (an older version, or
+// one not part of the cluster yet) never matches a member.
+const SharedPrefix = "shared:"
+
+// SharedFingerprint is the fingerprint of the shared parts of a member
+// of the cluster clusterID.
+func SharedFingerprint(clusterID string) string { return SharedPrefix + clusterID }
+
+// differWords names a part that differs, saying so when one of the two
+// servers keeps it in its own files and the other shares it.
+func differWords(what, a, b string) string {
+	if strings.HasPrefix(a, SharedPrefix) != strings.HasPrefix(b, SharedPrefix) {
+		return what + " (one server keeps them in its own files: an older version, or not part of the cluster yet)"
+	}
+	return what
+}
+
 // Differ lists the parts that differ between f and o, in words: "retention
 // policies", "threat intel feeds", "detections folder", "notification
 // channels", "playbooks", "archive folder".
 func (f Fingerprints) Differ(o Fingerprints) []string {
 	var out []string
 	if f.Retention != o.Retention {
-		out = append(out, "retention policies")
+		out = append(out, differWords("retention policies", f.Retention, o.Retention))
 	}
 	if f.Feeds != o.Feeds {
-		out = append(out, "threat intel feeds")
+		out = append(out, differWords("threat intel feeds", f.Feeds, o.Feeds))
 	}
 	if f.Detections != o.Detections {
 		out = append(out, "detections folder")

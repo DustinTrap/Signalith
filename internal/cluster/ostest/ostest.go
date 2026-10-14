@@ -20,7 +20,7 @@
 //     seq_no_primary_term, _source and max aggregations;
 //   - POST /<pattern>/_delete_by_query and _update_by_query (recorded,
 //     only deletes change anything);
-//   - POST /_bulk with create and index actions;
+//   - POST /_bulk with create, index and delete actions;
 //   - GET /<pattern>/_count (every document, whatever the query);
 //   - GET /_nodes/_local/settings (path.home and path.data, see Paths);
 //   - GET /_plugins/_security/authinfo, once Secure turns sign-in on
@@ -992,6 +992,23 @@ func (s *Server) bulk(w http.ResponseWriter, body []byte) {
 		if err := json.Unmarshal(line, &action); err != nil {
 			writeError(w, 400, "parse_exception", err.Error())
 			return
+		}
+		if meta, ok := action["delete"]; ok && len(action) == 1 {
+			// A delete has no source line.
+			res := map[string]any{"_index": meta.Index, "_id": meta.ID, "status": 200, "result": "deleted"}
+			ix := s.indices[meta.Index]
+			switch {
+			case s.blocked:
+				res["status"], res["error"] = 429, map[string]any{"type": "cluster_block_exception", "reason": "disk usage exceeded flood-stage watermark"}
+				errs = true
+			case ix == nil || ix.docs[meta.ID] == nil:
+				res["status"], res["result"] = 404, "not_found"
+			default:
+				ix.seq++
+				delete(ix.docs, meta.ID)
+			}
+			items = append(items, map[string]any{"delete": res})
+			continue
 		}
 		if !sc.Scan() {
 			break

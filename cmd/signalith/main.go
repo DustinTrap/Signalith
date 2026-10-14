@@ -889,7 +889,7 @@ func serve(ctx context.Context, path string, log *slog.Logger) error {
 	r.node = node
 	// The shared configuration belongs to the process too; each start of
 	// the components points it at their OpenSearch client.
-	r.shared = openShared(c, node, log)
+	r.shared, r.sharedContent = openShared(c, node, log)
 	r.browsers = loadBrowserKey(c, log)
 	// The node outlives ctx: stopping gives the job lease up first, which
 	// needs it.
@@ -998,7 +998,17 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	r.useKeys(c)
 	cl := newStore(c)
 	in.store = cl
+	// The shared configuration looks at this OpenSearch first: whether
+	// the feeds and retention policies come from it or from this server's
+	// files depends on what it finds.
+	sharedOn := false
+	if r.node != nil {
+		sharedOn = useShared(r.shared, r.sharedContent, c, cl)
+	}
 	ret := newRetention(c, cl, log)
+	if sharedOn {
+		r.sharedContent.sharedRetention(ret)
+	}
 	maxAge := c.MaxEventAge(retentionKeepDays(ret))
 	pipeline := &ingest.Pipeline{Store: cl, Prefix: c.OpenSearch.IndexPrefix, MaxEventAge: maxAge, Log: log}
 	// Each day's new field names are shared out among the servers that
@@ -1041,6 +1051,16 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		}
 		log.Info("syslog receiver listening", append(addrs, "allow", allow)...)
 	}
+	// The retention policies may change while this runs, on the page or,
+	// for shared ones, on another server: the event age follows them.
+	live := &liveMaxAge{c: c, ret: ret, pipeline: pipeline, last: maxAge}
+	if receiver != nil {
+		live.receiver = receiver
+	}
+	ret.OnSettings = func(s retention.Settings) { live.update(&s) }
+	if sharedOn {
+		r.sharedContent.docs.OnRetention(func() { live.update(nil) })
+	}
 	eng := newEngine(c, cl)
 	// A damaged list must not keep Signalith from starting: it starts with
 	// empty lists, and picks the file up once it is fixed.
@@ -1056,8 +1076,15 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	indicators := intel.NewStore(ibackend)
 	eng.Intel = indicators
 	feeds := newFeeds(c, indicators, log)
+	if sharedOn {
+		r.sharedContent.sharedFeeds(ctx, feeds, indicators, cl, c.OpenSearch.IndexPrefix, &in.jobs)
+	}
 	if err := feeds.Load(); err != nil {
-		log.Error("threat intel feeds added on the Threat intel page cannot be used until the file is fixed", "err", err)
+		if sharedOn {
+			log.Error("the shared threat intel feed list cannot be read from OpenSearch yet; feeds download once it can", "err", err)
+		} else {
+			log.Error("threat intel feeds added on the Threat intel page cannot be used until the file is fixed", "err", err)
+		}
 	}
 	// A content update installed earlier goes into use before the
 	// detections load.
@@ -1126,8 +1153,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	}
 	sched.SetCatchUp(c.DetectionsCatchUp())
 	if saved, err := ret.Store.Get(); err != nil {
-		log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
-	} else if saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
+		if sharedOn {
+			log.Error("the shared retention policies cannot be read from OpenSearch yet; retention is paused until they can", "err", err)
+		} else {
+			log.Error("retention settings file has errors; retention is paused until it is fixed", "err", err)
+		}
+	} else if !sharedOn && saved.Default != nil && c.Retention.Default == nil && saved.Default.KeepDays != c.Retention.Days {
 		log.Info("the default retention policy saved on the Data retention page replaces retention.days",
 			"retention.days", c.Retention.Days, "keep_days", saved.Default.KeepDays)
 	}
@@ -1413,13 +1444,21 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		}},
 	}
 	if r.shared != nil {
-		in.jobsList = append(in.jobsList, requestsJob(r.shared))
+		in.jobsList = append(in.jobsList, requestsJob(r.shared, contentHandlers(feeds, ret)))
+	}
+	if sharedOn {
+		// signalith.yaml's shared settings that changed since the last
+		// start go to the shared values.
+		in.jobs.Go(func() { r.sharedContent.apply(ctx, r.shared, c) })
 	}
 	in.retention = ret
 	if hook := jobStarting; hook != nil {
 		in.jobsList = watchJobs(in.jobsList, c, hook)
 	}
-	if !c.Detections.Scheduler {
+	if !c.Detections.Scheduler && sharedOn {
+		log.Warn("detections.scheduler is off, so this server never runs detections, threat intel downloads, notifications, playbooks or retention; " +
+			"another server that shares its OpenSearch does")
+	} else if !c.Detections.Scheduler {
 		log.Warn("detections.scheduler is off, so this server never runs detections, threat intel downloads, notifications, playbooks or retention; " +
 			"another server that shares its OpenSearch does. The Data retention and feed settings are read-only here")
 	}
@@ -1438,6 +1477,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		srv.Cluster = r.node
 		if r.shared != nil {
 			srv.Cluster = sharedCluster{Node: r.node, rt: r.shared}
+			srv.Shared = sharedAPI{rt: r.shared, on: sharedOn}
 		}
 		in.node = r.node
 	}
@@ -1455,18 +1495,18 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		in.plain = srv.PlainHandler(in.handler)
 	}
 	if r.node != nil {
-		// Last, once everything started: the shared configuration, then
-		// the node, point at this OpenSearch, and the node runs these jobs
-		// while it holds the job lease.
-		useShared(r.shared, c, cl)
+		// Last, once everything started: the node points at this
+		// OpenSearch, and runs these jobs while it holds the job lease.
 		settings := cluster.Settings{
 			Eligible: c.Detections.Scheduler, NodeURL: nodeURL(c), Listen: c.Server.Listen,
-			Syslog:       cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
-			Fingerprints: func() cluster.Fingerprints { return filesFingerprints(c, ret, feeds, notes, pbooks) },
-			Indexed:      pipeline.LastIndexed,
+			Syslog: cluster.Syslog{UDP: c.Syslog.UDP, TCP: c.Syslog.TCP, TLS: c.Syslog.TLS},
+			Fingerprints: func() cluster.Fingerprints {
+				return sharedFingerprints(filesFingerprints(c, ret, feeds, notes, pbooks), r.shared, sharedOn)
+			},
+			Indexed: pipeline.LastIndexed,
 		}
 		if rt := r.shared; rt != nil {
-			settings.Shared = func() cluster.SharedStatus { return sharedStatus(rt) }
+			settings.Shared = func() cluster.SharedStatus { return sharedStatus(rt, r.sharedContent) }
 			settings.Housekeep = rt.Housekeep
 		}
 		r.node.Use(cl, c.OpenSearch.IndexPrefix, settings)

@@ -332,8 +332,8 @@ func TestFindingsAndCasesRetention(t *testing.T) {
 func TestBrokenSettingsFilePausesRetention(t *testing.T) {
 	f := newFixture(t, Config{Days: 30})
 	a := f.add("endpoint", 40, GB, 1)
-	os.MkdirAll(filepath.Dir(f.m.Store.Path), 0o750)
-	os.WriteFile(f.m.Store.Path, []byte("policies:\n  endpoint: {keep_days: forever}\n"), 0o600)
+	os.MkdirAll(filepath.Dir(f.m.Store.(*Store).Path), 0o750)
+	os.WriteFile(f.m.Store.(*Store).Path, []byte("policies:\n  endpoint: {keep_days: forever}\n"), 0o600)
 	run, err := f.m.Run(context.Background(), TriggerSchedule, "")
 	if err == nil || !strings.Contains(err.Error(), "paused") || !f.exists(a) || len(run.Errors) != 1 {
 		t.Errorf("run = %+v, err = %v", run, err)
