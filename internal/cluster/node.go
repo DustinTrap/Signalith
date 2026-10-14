@@ -363,6 +363,15 @@ func (n *Node) SetSecurity(s SecuritySummary) {
 	n.mu.Unlock()
 }
 
+// SetNodeURL changes the address the other servers reach this one at,
+// from the next heartbeat on: server.node_url applies without a restart.
+func (n *Node) SetNodeURL(url string) {
+	n.mu.Lock()
+	n.settings.NodeURL = url
+	n.mu.Unlock()
+	n.poke()
+}
+
 // SetJobs replaces the background jobs this server runs while it holds
 // the lease. It waits for the old ones to end. Housekeeping is added.
 func (n *Node) SetJobs(jobs []Job) {

@@ -405,7 +405,7 @@ func Save(ctx context.Context, rt *shared.Runtime, d *Docs, by, server string, b
 					revs[k] = 0
 					continue
 				}
-				pv, err := pageValueOf(k, e, next.Self)
+				pv, err := pageValueOf(k, e, rt.Self().Name)
 				if err != nil {
 					return err
 				}

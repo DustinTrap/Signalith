@@ -172,9 +172,12 @@ func TestServerRequestsRunOnEveryServer(t *testing.T) {
 	waitFor(t, func() bool {
 		return state(forA.ID).State == RequestDone && state(both.ID).Status["n_siem-a"] == RequestDone
 	})
-	// A's part bumped watch:requests: B acts at its next look.
-	b.step()
-	waitFor(t, func() bool { return state(both.ID).State == RequestDone })
+	// A's part bumps watch:requests, just after it is recorded done: B
+	// acts at its next look once the bump is there.
+	waitFor(t, func() bool {
+		b.step()
+		return state(both.ID).State == RequestDone
+	})
 	if got := ranOf(both.ID); !slices.Equal(got, []string{"a", "b"}) {
 		t.Errorf("order %v", got)
 	}

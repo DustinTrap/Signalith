@@ -212,7 +212,7 @@ var Registry = []Setting{
 	{Key: "server.shared_addresses", Scope: ScopeServer, Section: "web", Label: "Proxies and gateways", Type: TypeList, Restart: true,
 		Help:        "IP addresses or ranges of a reverse proxy, load balancer or NAT gateway that many people and agents reach Signalith through. They are not limited like one computer: wrong passwords from them count against each account, and never pause sign-ins from the whole address.",
 		Placeholder: "10.0.0.5", EmptyMeans: "none", check: checkAddressList, problem: listProblem("server.shared_addresses")},
-	{Key: "server.node_url", Scope: ScopeServer, Section: "web", Label: "Address for other servers", Type: TypeURL, Restart: true, SharedOnly: true,
+	{Key: "server.node_url", Scope: ScopeServer, Section: "web", Label: "Address for other servers", Type: TypeURL, SharedOnly: true,
 		Help: "The address the other Signalith servers that share this OpenSearch reach this one at, shown on the Servers page. " +
 			"In a container set it, since a container cannot know the address it is reached at.",
 		Placeholder: "https://10.0.0.5:8080", EmptyMeans: "worked out from the listen address and this computer's name",

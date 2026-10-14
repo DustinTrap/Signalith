@@ -211,6 +211,48 @@ func Apply(ctx context.Context, rt *shared.Runtime, d *Docs, c *config.Config, n
 			apply = append(apply, fv)
 		}
 	}
+	applied, err := write(ctx, rt, d, c, apply, node, log, func(fv fileValue) string { return "applied from " + fv.from() + " on " + node })
+	if err != nil {
+		return res, err
+	}
+	res.Applied = applied
+	if first || len(record) > 0 || withAuth && firstAuth || withSettings && firstSettings {
+		_, err := ncDoc.Mutate(ctx, "signalith", func(n *shared.NodeCfg) error {
+			for _, s := range record {
+				n.Record(s.key, s.source, s.hash)
+			}
+			stamp := now.UTC().Format(time.RFC3339Nano)
+			if n.Applied == "" {
+				n.Applied = stamp
+			}
+			if withAuth && n.UsersApplied == "" {
+				n.UsersApplied = stamp
+			}
+			if withSettings && n.SettingsApplied == "" {
+				n.SettingsApplied = stamp
+			}
+			return nil
+		})
+		if err != nil {
+			return res, err
+		}
+	}
+	res.Drift = Drift(d, c)
+	return res, nil
+}
+
+// write writes values of the shared settings to their documents: the
+// retention policies, the feeds, the settings document and the users'
+// documents, and audits each one as how words it. It returns the keys
+// written.
+func write(ctx context.Context, rt *shared.Runtime, d *Docs, c *config.Config, apply []fileValue, node string, log *slog.Logger,
+	how func(fileValue) string) ([]string, error) {
+	keys := d.Hub().Keys()
+	k := keys.Active()
+	if k == nil {
+		return nil, fmt.Errorf("this server has no cluster key")
+	}
+	now := time.Now()
 	var feeds, ret, creds, sets []fileValue
 	for _, fv := range apply {
 		switch {
@@ -255,7 +297,7 @@ func Apply(ctx context.Context, rt *shared.Runtime, d *Docs, c *config.Config, n
 			return nil
 		})
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 	}
 	if len(feeds) > 0 {
@@ -276,46 +318,25 @@ func Apply(ctx context.Context, rt *shared.Runtime, d *Docs, c *config.Config, n
 			return nil
 		})
 		if err != nil {
-			return res, err
+			return nil, err
 		}
 	}
 	if err := applySettings(ctx, d, sets, c, rt.Self(), now); err != nil {
-		return res, err
+		return nil, err
 	}
-	applied, err := applyAuth(ctx, auth, creds, node, log)
+	applied, err := applyAuth(ctx, d.Auth(), creds, node, log)
 	if err != nil {
-		return res, err
+		return nil, err
 	}
+	var out []string
 	for _, fv := range apply {
 		if fv.auth && !slices.Contains(applied, fv.key+"/"+fv.source) {
 			continue
 		}
-		res.Applied = append(res.Applied, fv.key)
-		log.Info(fv.key+" applied from "+fv.from()+" on "+node, "audit", true, "setting", fv.key, "server", node)
+		out = append(out, fv.key)
+		log.Info(fv.key+" "+how(fv), "audit", true, "setting", fv.key, "server", node)
 	}
-	if first || len(record) > 0 || withAuth && firstAuth || withSettings && firstSettings {
-		_, err := ncDoc.Mutate(ctx, "signalith", func(n *shared.NodeCfg) error {
-			for _, s := range record {
-				n.Record(s.key, s.source, s.hash)
-			}
-			stamp := now.UTC().Format(time.RFC3339Nano)
-			if n.Applied == "" {
-				n.Applied = stamp
-			}
-			if withAuth && n.UsersApplied == "" {
-				n.UsersApplied = stamp
-			}
-			if withSettings && n.SettingsApplied == "" {
-				n.SettingsApplied = stamp
-			}
-			return nil
-		})
-		if err != nil {
-			return res, err
-		}
-	}
-	res.Drift = Drift(d, c)
-	return res, nil
+	return out, nil
 }
 
 // applyAuth applies the settings of the users and directory sign-in that

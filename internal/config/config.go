@@ -156,6 +156,8 @@ type layers struct {
 	// settings in effect (see SourceValues).
 	files    *Config
 	filesEnv map[string]string
+	// sharedSkipped is set by LoadWithoutShared.
+	sharedSkipped bool
 }
 
 // Server controls the web UI and API listener.
@@ -1254,17 +1256,41 @@ func LoadSetAside(path string, keys []string, reason string) (*Config, error) {
 // server.tls.mode aside, for one, takes along the certificate files saved
 // with it, which the mode in signalith.yaml refuses.
 func SetAsideAlong(path string, keys []string) []string {
+	return setAsideAlong(path, keys, nil)
+}
+
+// SetAsideAlongShared is SetAsideAlong with the shared layer sh: the
+// settings taken along may be this server's own, or shared ones.
+func SetAsideAlongShared(path string, sh *Shared, keys []string) []string {
+	return setAsideAlong(path, keys, sh)
+}
+
+func setAsideAlong(path string, keys []string, sh *Shared) []string {
 	out := slices.Clone(keys)
 	now := time.Now()
 	for range len(Registry) {
-		s, err := loadSaved(path, func(p *PageSettings) { p.refuse(out, "set aside", now) }, nil)
+		layer := sh
+		if sh != nil {
+			layer = sh.Clone()
+			for _, k := range out {
+				if e := layer.Server[k]; e != nil && e.Refused == "" {
+					e.Refused, e.RefusedAt = "set aside", now.UTC()
+				}
+				if v, ok := layer.Cluster[k]; ok {
+					if _, done := layer.Refused[k]; !done {
+						layer.Refused[k] = SharedRefusal{Hash: layer.hash(k, v), Reason: "set aside", At: now.UTC()}
+					}
+				}
+			}
+		}
+		s, err := loadSaved(path, func(p *PageSettings) { p.refuse(out, "set aside", now) }, layer)
 		if err != nil || s.PageErr != nil || s.Problems == nil {
 			return out
 		}
 		more := false
 		for _, p := range s.Problems {
 			for _, k := range ProblemKeys(p) {
-				if s.Config.Source(k).Kind == FromPage && !slices.Contains(out, k) {
+				if kind := s.Config.Source(k).Kind; (kind == FromPage || kind == FromShared) && !slices.Contains(out, k) {
 					out, more = append(out, k), true
 				}
 			}

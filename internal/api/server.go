@@ -148,6 +148,13 @@ type Server struct {
 	// Pages keeps the settings saved on the Settings page; nil keeps them
 	// in the settings file next to Config (config.PageFile).
 	Pages config.PageStore
+	// Settings keeps them in the shared settings once the servers of a
+	// cluster share their settings; nil, or while it is not Shared, they
+	// stay in Pages.
+	Settings SettingsStore
+	// NodeURLChanged hears of a new server.node_url applied at once, which
+	// the heartbeat then carries; nil when there is no heartbeat.
+	NodeURLChanged func(*config.Config)
 	// Cluster is this server among those that share its OpenSearch: it
 	// says which one runs the background jobs. nil means this server runs
 	// them when detections.scheduler is on, and lists no servers.

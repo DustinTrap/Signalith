@@ -7,9 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/jrsamsanchez/signalith/internal/secrets"
 )
@@ -660,3 +664,209 @@ func (d *clusterEdits) clear() {
 }
 
 func (d *clusterEdits) build(bool) (*Config, error) { return d.make() }
+
+// LoadWithoutServerValues is LoadShared for a server that could not start
+// with its own settings in sh (sh.Server) or with settings.yaml's: it
+// starts with signalith.yaml for those, and the shared settings of sh,
+// and SettingsProblem says why. keys are the settings to blame, when
+// known.
+func LoadWithoutServerValues(path string, sh *Shared, reason string, keys []string) (*Config, error) {
+	c, err := loadFileShared(path, sh)
+	if err != nil {
+		return nil, err
+	}
+	c.layers.problem = "This server's own settings saved on the Settings page were not used, because " + reason +
+		". Signalith started with signalith.yaml for them, and the settings the servers share. Fix these settings on the Settings page, or remove them with: signalith settings reset"
+	c.layers.problemKeys = keys
+	return c, nil
+}
+
+// LoadWithoutShared is LoadWithoutPage for a server that could not start
+// with the shared layer at all: neither the settings the servers share
+// nor its own saved on a Settings page are used, only signalith.yaml and
+// the environment, and SettingsProblem says why. SharedSkipped then
+// reports that the shared settings were left out on purpose.
+func LoadWithoutShared(path, reason string, keys []string) (*Config, error) {
+	c, err := LoadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c.layers.problem = "Neither the settings the servers share nor this server's own saved on the Settings page were used, because " + reason +
+		". Signalith started with signalith.yaml alone. Fix these settings on the Settings page of another server, or remove them with: signalith settings reset"
+	c.layers.problemKeys = keys
+	c.layers.sharedSkipped = true
+	return c, nil
+}
+
+// SharedSkipped reports whether c was loaded with LoadWithoutShared: the
+// server shares its settings, but started without them.
+func (c *Config) SharedSkipped() bool { return c.layers != nil && c.layers.sharedSkipped }
+
+// EditServer applies an edit of another server's own settings (server
+// scope) to its layer sh, with the checks each value has alone: what the
+// rest of that server's configuration says (its signalith.yaml, its
+// environment and its certificate files) is for it to check (see
+// CheckEditShared). env names the settings its environment sets, by key,
+// with the variable: those are locked. sh is not changed; the result's
+// Config and Before are nil.
+func EditServer(sh *Shared, e Edit, env map[string]string) *SharedEditResult {
+	e = renameAliases(e)
+	if e.At.IsZero() {
+		e.At = time.Now()
+	}
+	work := sh.Clone()
+	if work.Server == nil {
+		work.Server = map[string]*PageEntry{}
+	}
+	page := &PageSettings{Settings: work.Server}
+	res := &SharedEditResult{EditResult: EditResult{Fields: map[string]string{}}, Scope: ScopeServer, Shared: work}
+	known := func(key string) bool {
+		s, ok := Lookup(key)
+		switch {
+		case !ok:
+			res.Fields[key] = notOnPage(key)
+		case s.Scope != ScopeServer:
+			res.Fields[key] = fmt.Sprintf("This setting is one of %s, not of %s.", scopeWords[s.Scope], scopeWords[ScopeServer])
+		case env[key] != "":
+			res.Fields[key] = LockedReason(env[key])
+		default:
+			return true
+		}
+		return false
+	}
+	if e.ResetAll {
+		page.Settings = map[string]*PageEntry{}
+	}
+	for _, key := range sortedKeys(e.Values) {
+		if !known(key) {
+			continue
+		}
+		s, _ := Lookup(key)
+		v, err := ParseValue(s, e.Values[key])
+		if err == nil && s.check != nil {
+			err = s.check(v)
+		}
+		if err == nil && s.Type == TypeSecret {
+			err = errors.New("a server's own settings have no passwords or keys")
+		}
+		if err != nil {
+			res.Fields[key] = sentence(err.Error())
+			continue
+		}
+		if old := page.Settings[key]; old != nil && old.Refused == "" {
+			var cur any = reflect.New(reflect.TypeOf(v)).Interface()
+			if old.Value.Decode(cur) == nil && reflect.DeepEqual(reflect.ValueOf(cur).Elem().Interface(), v) {
+				continue
+			}
+		}
+		if err := page.Set(key, v, e.By, e.At); err != nil {
+			res.Fields[key] = sentence(err.Error())
+		}
+	}
+	for _, key := range e.Clear {
+		if known(key) {
+			res.Fields[key] = "Only passwords and keys can be cleared; use Reset instead."
+		}
+	}
+	for _, key := range e.Reset {
+		if known(key) {
+			page.Remove(key)
+		}
+	}
+	for _, key := range e.Retry {
+		if !known(key) {
+			continue
+		}
+		if en := page.Settings[key]; en != nil && en.Refused != "" {
+			en.Refused, en.RefusedAt, en.CheckedAt = "", time.Time{}, time.Time{}
+		}
+	}
+	work.Server = page.Settings
+	res.Touched = touchedKeys(sh, work)
+	for _, k := range res.Touched {
+		if s, ok := Lookup(k); ok && s.OnPage(true) {
+			res.Changed = append(res.Changed, k)
+		}
+	}
+	return res
+}
+
+// KeptValue is the value c runs a shared setting with, as a refusal of
+// another shared value keeps it (SharedRefusal.Kept): for a password or
+// key, the sealed SharedValue c took it from, never the plain value;
+// empty when c runs it at its default.
+func (c *Config) KeptValue(key string) (json.RawMessage, error) {
+	if s, ok := Lookup(key); ok && s.Type == TypeSecret || key == "ingest.tokens" {
+		l := c.layers
+		if l == nil {
+			return nil, nil
+		}
+		if v, ok := l.shared[key]; ok {
+			if key == "ingest.tokens" {
+				return v.Value, nil
+			}
+			return json.Marshal(v)
+		}
+		if r, ok := l.kept[key]; ok {
+			return r.Kept, nil
+		}
+		return nil, nil
+	}
+	if c.Source(key).Kind == FromDefault {
+		return nil, nil
+	}
+	return json.Marshal(c.Value(key))
+}
+
+// ReadSettingsFile reads a file in signalith.yaml's shape, such as the
+// shared settings GET /api/settings/export writes, for signalith cluster
+// apply: the settings it sets over the defaults, without the environment.
+// Passwords and keys encrypted with master are decrypted when read.
+// FileKeys lists what it sets.
+func ReadSettingsFile(path string, master *secrets.Keyring) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c, err := decodeFile(path, data)
+	if err != nil {
+		return nil, err
+	}
+	c.path = path
+	c.keys = master
+	c.layers = &layers{file: map[string]bool{}, env: map[string]string{}, page: map[string]*PageEntry{}, refused: map[string]*PageEntry{}}
+	var top map[string]any
+	if err := yaml.Unmarshal(data, &top); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	fileKeys(top, "", c.layers.file)
+	if c.file, err = decodeFile(path, data); err != nil {
+		return nil, err
+	}
+	c.file.keys = master
+	return c, nil
+}
+
+// FileKeys lists the settings c's file sets, sorted: each one at its
+// deepest level ("server.tls.mode", not "server"), a list or a map of
+// policies as one key ("intel.feeds", "retention.policies.auth").
+func (c *Config) FileKeys() []string {
+	if c.layers == nil {
+		return nil
+	}
+	var out []string
+	for k := range c.layers.file {
+		leaf := true
+		for o := range c.layers.file {
+			if strings.HasPrefix(o, k+".") {
+				leaf = false
+				break
+			}
+		}
+		if leaf {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}

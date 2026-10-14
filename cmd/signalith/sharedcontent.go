@@ -48,6 +48,17 @@ type sharedContent struct {
 	// rt is the runtime, whose nodecfg document the importers record
 	// this server's settings in.
 	rt atomic.Pointer[shared.Runtime]
+	// settingsOn is true while the components running now take the
+	// settings of the Settings page from the shared settings, settings is
+	// what the heartbeat says of them, and settingsKick wakes the follower
+	// (see sharedsettings.go). followedNC and followedCluster are the
+	// runtime's documents subscribed to, under followMu.
+	settingsOn      atomic.Bool
+	settings        atomic.Pointer[settingsState]
+	settingsKick    chan struct{}
+	followMu        sync.Mutex
+	followedNC      *shared.Doc[shared.NodeCfg]
+	followedCluster *shared.Doc[shared.ClusterBody]
 }
 
 type osTarget struct {
@@ -57,7 +68,7 @@ type osTarget struct {
 
 // newSharedContent returns the content's link for the process.
 func newSharedContent(c *config.Config, node *cluster.Node, log *slog.Logger) *sharedContent {
-	ct := &sharedContent{docs: clustercfg.NewDocs(), users: newSharedUsers(log), node: node, log: log}
+	ct := &sharedContent{docs: clustercfg.NewDocs(), users: newSharedUsers(log), node: node, log: log, settingsKick: make(chan struct{}, 1)}
 	// The users and directory importers and the auth settings of
 	// signalith.yaml reach the users' documents.
 	ct.docs.UseAuth(ct.users.docs)

@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -222,6 +224,49 @@ func (r *Requests) put(ctx context.Context, req *Request) error {
 	}
 	req.ver = ver
 	return nil
+}
+
+// SaveResult records what a running request found so far (its Result
+// and Progress), before it is over: such as where a restart of several
+// servers moves one of them. Servers of a request for several write the
+// same document, so a result that is a JSON object keeps the entries the
+// others wrote.
+func (r *Requests) SaveResult(ctx context.Context, req *Request) error {
+	var err error
+	for range store.ModifyTries {
+		now, found, gerr := r.Get(ctx, req.ID)
+		if gerr != nil || !found {
+			return cmp.Or(gerr, store.ErrNotFound)
+		}
+		now.Progress, now.Result = req.Progress, mergeResult(now.Result, req.Result)
+		if err = r.put(ctx, now); err == nil {
+			*req = *now
+			return nil
+		}
+		if !errors.Is(err, store.ErrConflict) {
+			return err
+		}
+	}
+	return err
+}
+
+// mergeResult is mine over theirs when both are JSON objects (one entry
+// per server): mine's entries win, theirs' others are kept. Otherwise it
+// is mine, or theirs when mine is empty.
+func mergeResult(theirs, mine json.RawMessage) json.RawMessage {
+	if len(mine) == 0 {
+		return theirs
+	}
+	var a, b map[string]json.RawMessage
+	if json.Unmarshal(theirs, &a) != nil || json.Unmarshal(mine, &b) != nil || a == nil || b == nil {
+		return mine
+	}
+	maps.Copy(a, b)
+	out, err := json.Marshal(a)
+	if err != nil {
+		return mine
+	}
+	return out
 }
 
 // SetProgress records how far a running request has come.
@@ -546,8 +591,9 @@ func (rn *Runner) finishListed(ctx context.Context, req *Request, runErr error) 
 			err = gerr
 			break
 		}
-		// What the handler recorded (progress, result) is kept.
-		now.Progress, now.Result = req.Progress, req.Result
+		// What the handler recorded (progress, result) is kept, with what
+		// the other servers recorded in a result of one entry per server.
+		now.Progress, now.Result = req.Progress, mergeResult(now.Result, req.Result)
 		if now.Status == nil {
 			now.Status = map[string]string{}
 		}
