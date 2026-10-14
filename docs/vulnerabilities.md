@@ -74,10 +74,16 @@ so later scans of the same software ask nothing.
 
 Without an API key the NVD allows 5 requests every 30 seconds, so a first scan that finds
 a lot of different software takes a few extra minutes. A free key from
-<https://nvd.nist.gov/developers/request-an-api-key> makes it about ten times faster: set it
-in the `SIGNALITH_NVD_API_KEY` environment variable of the Signalith service (or put it in
-a file and set `SIGNALITH_NVD_API_KEY_FILE` to its path), then restart Signalith. If the
+<https://nvd.nist.gov/developers/request-an-api-key> makes it about ten times faster. Enter
+it as **NVD API key** in [Settings](settings.md), on the **Server** tab under **Vulnerability scans**: it
+is kept encrypted, never shown again, and used from the next lookup with no restart. It
+can also come from the `SIGNALITH_NVD_API_KEY` environment variable of the Signalith
+service (or a file named by `SIGNALITH_NVD_API_KEY_FILE`), or from `vulns.nvd_api_key` in
+`signalith.yaml` (`signalith secrets set vulns.nvd_api_key` stores it encrypted). If the
 server reaches the internet through a proxy, set `HTTPS_PROXY` for the service.
+
+To look CVEs up in a copy of the NVD's CVE API 2.0 on your own network instead, set
+**CVE database address** in the same place (or `SIGNALITH_NVD_URL`).
 
 When the NVD cannot be reached, a scan still lists hosts, ports and software, uses CVE
 answers kept from the last 30 days, and says on the **Scans** tab that lookups failed.
@@ -126,6 +132,9 @@ For example:
 datamodel=Vulnerabilities category=vulnerability known_exploited=true | stats dc(cve) as cves by dest | sort -cves
 datamodel=Vulnerabilities category=open_port app=rdp | table dest, dest_ip, product_version
 ```
+
+The built-in **Vulnerabilities** dashboard ([dashboards.md](dashboards.md#vulnerabilities))
+sums them up over the last 7 days.
 
 The Ask box understands questions such as "hosts with known exploited vulnerabilities" or
 "top CVEs".

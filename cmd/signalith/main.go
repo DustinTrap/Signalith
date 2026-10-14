@@ -1103,7 +1103,7 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	// Network scans for vulnerabilities, set up on the Vulnerabilities
 	// page. The server that runs the background jobs runs them.
 	vstore := vulnscan.NewStore(cl, c.OpenSearch.IndexPrefix)
-	nvd := vulnscan.NewNVD()
+	nvd := vulnscan.NewNVD(c.NVDURL(), c.Vulns.NVDAPIKey)
 	in.jobs.Go(func() { feedFoundAssets(ctx, estore, vstore, lists, log) })
 	// Notifications: the channels and rules set on the Notifications
 	// page, and the deliveries index that makes each message go out once.

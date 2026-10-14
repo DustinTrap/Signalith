@@ -22,6 +22,17 @@ type Vulns struct {
 	report *vulnscan.Report
 }
 
+// useNVD puts a CVE database address and API key saved on the Settings
+// page into use, and has the next setup check look again.
+func (v *Vulns) useNVD(url, key string) {
+	if v.Scanner != nil && v.Scanner.NVD != nil {
+		v.Scanner.NVD.Set(url, key)
+	}
+	v.mu.Lock()
+	v.report = nil
+	v.mu.Unlock()
+}
+
 // The Vulnerabilities page.
 func (s *Server) routeVulns(api *router) {
 	// Analysts see what the scans found and which networks are scanned.

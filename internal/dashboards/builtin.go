@@ -13,6 +13,9 @@ import (
 // MalwareID is the ID of the built-in Malware dashboard.
 const MalwareID = "malware"
 
+// VulnerabilitiesID is the ID of the built-in Vulnerabilities dashboard.
+const VulnerabilitiesID = "vulnerabilities"
+
 //go:embed builtin/*.yaml
 var builtinFS embed.FS
 
