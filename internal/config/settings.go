@@ -167,6 +167,7 @@ var Sections = []Section{
 	{ID: "detections", Title: "Detections", Help: "Whether detections run by themselves, and how many findings one run can raise."},
 	{ID: "assistant", Title: "AI assistant", Help: "An optional AI model. Ask sends it only the question and field names, never events. Investigate with AI sends a finding's events, and is off until you turn it on below."},
 	{ID: "intel", Title: "Threat intel", Help: "Where threat intel feeds may be downloaded from."},
+	{ID: "vulns", Title: "Vulnerability scans", Help: "How scans on the Vulnerabilities page look up the known vulnerabilities (CVEs) of the software they find. Only product names are sent, never addresses."},
 }
 
 // Registry lists every setting on the page, in page order.
@@ -336,6 +337,14 @@ var Registry = []Setting{
 	{Key: "intel.allow_loopback_feeds", Scope: ScopeCluster, Section: "intel", Label: "Allow feeds from this computer", Type: TypeBool, Restart: true,
 		Help:    "Lets feeds download from 127.0.0.1 or ::1, for a feed server on this computer.",
 		Confirm: "Feeds can then reach services on this computer that are not meant to be reachable from outside. Turn this on only if a feed server runs here.", ConfirmWhen: "on"},
+	{Key: "vulns.nvd_api_key", Scope: ScopeCluster, Section: "vulns", Label: "NVD API key", Type: TypeSecret,
+		Help: "Optional and free from https://nvd.nist.gov/developers/request-an-api-key. Without one, the National Vulnerability Database allows " +
+			"5 lookups every 30 seconds, so a first scan that finds a lot of different software takes a few extra minutes; with one, lookups are about ten times faster.",
+		Env: "SIGNALITH_NVD_API_KEY", SentWith: []string{"vulns.nvd_url"}, sentTo: func(c *Config) string { return c.NVDURL() }},
+	{Key: "vulns.nvd_url", Scope: ScopeCluster, Section: "vulns", Label: "CVE database address", Type: TypeURL,
+		Help:        "Only for a copy of the NVD's CVE API 2.0 on your own network.",
+		Placeholder: DefaultNVDURL, EmptyMeans: "the National Vulnerability Database", Env: "SIGNALITH_NVD_URL",
+		check: noSecretIn("put the key in NVD API key above")},
 }
 
 // Exclusion is a setting of Config that is not on the Settings page.
@@ -875,6 +884,17 @@ func deref(p *int, d int) int {
 		return d
 	}
 	return *p
+}
+
+// DefaultNVDURL is the NVD's CVE API 2.0.
+const DefaultNVDURL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+// NVDURL returns where CVE lookups go.
+func (c *Config) NVDURL() string {
+	if c.Vulns.NVDURL != "" {
+		return c.Vulns.NVDURL
+	}
+	return DefaultNVDURL
 }
 
 // AssistantURL returns the address the AI assistant sends questions to:

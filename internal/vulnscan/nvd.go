@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -206,21 +205,39 @@ type NVD struct {
 	last time.Time
 }
 
-// NewNVD returns a client with the API key from SIGNALITH_NVD_API_KEY (or
-// the file SIGNALITH_NVD_API_KEY_FILE names), when one is set.
-// SIGNALITH_NVD_URL points it at a mirror of the CVE API instead.
-func NewNVD() *NVD {
-	key := strings.TrimSpace(os.Getenv("SIGNALITH_NVD_API_KEY"))
-	if f := os.Getenv("SIGNALITH_NVD_API_KEY_FILE"); key == "" && f != "" {
-		if b, err := os.ReadFile(f); err == nil {
-			key = strings.TrimSpace(string(b))
-		}
+// NewNVD returns a client for the CVE API at url (DefaultNVDURL when
+// empty), sending key when one is set.
+func NewNVD(url, key string) *NVD {
+	n := &NVD{HTTP: &http.Client{Timeout: 2 * time.Minute}}
+	n.Set(url, key)
+	return n
+}
+
+// Set changes where lookups go and the API key, as the Settings page
+// saves them.
+func (n *NVD) Set(url, key string) {
+	if url == "" {
+		url = DefaultNVDURL
 	}
-	u := DefaultNVDURL
-	if v := strings.TrimSpace(os.Getenv("SIGNALITH_NVD_URL")); v != "" {
-		u = v
+	n.mu.Lock()
+	n.URL, n.APIKey = url, strings.TrimSpace(key)
+	n.mu.Unlock()
+}
+
+// endpoint returns where lookups go and the API key.
+func (n *NVD) endpoint() (string, string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.URL == "" {
+		return DefaultNVDURL, n.APIKey
 	}
-	return &NVD{URL: u, APIKey: key, HTTP: &http.Client{Timeout: 2 * time.Minute}}
+	return n.URL, n.APIKey
+}
+
+// HasKey reports whether an API key is set.
+func (n *NVD) HasKey() bool {
+	_, key := n.endpoint()
+	return key != ""
 }
 
 func (n *NVD) gap() time.Duration {
@@ -338,18 +355,15 @@ func (n *NVD) page(ctx context.Context, query, vendor, product string) ([]CVE, i
 	if err := n.wait(ctx); err != nil {
 		return nil, 0, err
 	}
-	base := n.URL
-	if base == "" {
-		base = DefaultNVDURL
-	}
+	base, key := n.endpoint()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"?"+query, nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "Signalith vulnerability scanner")
-	if n.APIKey != "" {
-		req.Header.Set("apiKey", n.APIKey)
+	if key != "" {
+		req.Header.Set("apiKey", key)
 	}
 	hc := n.HTTP
 	if hc == nil {
@@ -362,8 +376,8 @@ func (n *NVD) page(ctx context.Context, query, vendor, product string) ([]CVE, i
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests:
-		if n.APIKey != "" && resp.StatusCode == http.StatusForbidden {
-			return nil, 0, errors.New("the National Vulnerability Database refused the API key in SIGNALITH_NVD_API_KEY; check it, or remove it to look up more slowly without one")
+		if key != "" && resp.StatusCode == http.StatusForbidden {
+			return nil, 0, errors.New("the National Vulnerability Database refused the NVD API key; check it on the Settings page, or remove it to look up more slowly without one")
 		}
 		return nil, 0, errors.New("the National Vulnerability Database asked Signalith to slow down; lookups carry on at the next scan")
 	case resp.StatusCode == http.StatusNotFound:

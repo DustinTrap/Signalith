@@ -47,6 +47,7 @@ See docs/encryption.md.
 var secretEnv = map[string]string{
 	"opensearch.password":     "SIGNALITH_OPENSEARCH_PASSWORD",
 	"assistant.api_key":       "SIGNALITH_ASSISTANT_API_KEY",
+	"vulns.nvd_api_key":       "SIGNALITH_NVD_API_KEY",
 	"auth.ldap.bind_password": "SIGNALITH_LDAP_BIND_PASSWORD",
 	"ingest.tokens":           "SIGNALITH_INGEST_TOKEN",
 }
@@ -292,7 +293,7 @@ func secretsStatus(c *config.Config, out io.Writer) error {
 		}
 	}
 	var env []string
-	for _, name := range []string{"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_INGEST_TOKEN", "SIGNALITH_ASSISTANT_API_KEY", "SIGNALITH_LDAP_BIND_PASSWORD"} {
+	for _, name := range []string{"SIGNALITH_OPENSEARCH_PASSWORD", "SIGNALITH_ADMIN_PASSWORD", "SIGNALITH_INGEST_TOKEN", "SIGNALITH_ASSISTANT_API_KEY", "SIGNALITH_NVD_API_KEY", "SIGNALITH_LDAP_BIND_PASSWORD"} {
 		if os.Getenv(name) != "" {
 			env = append(env, name)
 		}

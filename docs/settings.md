@@ -19,7 +19,7 @@ answers them `403`.
 ## Using the page
 
 The page has one card per section (General, Web server, HTTPS, OpenSearch,
-Search, Syslog, Detections, AI assistant, Threat intel) and **About this server**. On a
+Search, Syslog, Detections, AI assistant, Threat intel, Vulnerability scans) and **About this server**. On a
 wide screen a list of the sections stays on the left; on a phone the sections
 are a row of buttons under the top bar that scrolls sideways.
 
@@ -186,7 +186,7 @@ Every setting on the page shows which of these its value comes from, and
 
 Settings marked **applies at once** take effect when you save: the public address,
 the sign-out time, the default time range and events per search, the quiet data
-source time, the most findings per run, and the AI assistant. A new public address
+source time, the most findings per run, the AI assistant, and the NVD API key for vulnerability scans. A new public address
 waits for the restart when the listen address or the certificate also changes, so
 agents set up meanwhile are not sent to an address nothing answers yet.
 
@@ -329,7 +329,7 @@ docker compose -f deploy/docker/docker-compose.yml restart signalith
 
 ## Passwords and API keys
 
-The OpenSearch password and the AI assistant's API key are never shown or sent back
+The OpenSearch password and the AI assistant's and the NVD's API keys are never shown or sent back
 to the browser; the page only says whether one is set.
 
 - One saved on the page shows as **Saved encrypted, hidden**, and one from

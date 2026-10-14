@@ -221,7 +221,7 @@ func archiveFacts(h Host, archiving bool) (*ArchiveFacts, bool) {
 
 // secretFileVars name files of secrets the server reads.
 var secretFileVars = []string{"SIGNALITH_ADMIN_PASSWORD_FILE", "SIGNALITH_INGEST_TOKEN_FILE", "SIGNALITH_OPENSEARCH_PASSWORD_FILE",
-	"SIGNALITH_LDAP_BIND_PASSWORD_FILE", "SIGNALITH_ASSISTANT_API_KEY_FILE"}
+	"SIGNALITH_LDAP_BIND_PASSWORD_FILE", "SIGNALITH_ASSISTANT_API_KEY_FILE", "SIGNALITH_NVD_API_KEY_FILE"}
 
 // fileFacts reads who may use Signalith's keys, private files, folders
 // and configuration. The master key is left to rest.master_key.

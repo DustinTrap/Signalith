@@ -157,13 +157,13 @@ func (c *Checker) Run(ctx context.Context, set Settings) (checks []Check, path s
 	key := Check{ID: "nvd_key", Title: "NVD API key",
 		Why: "Without a key the database allows 5 lookups every 30 seconds, so the first scan of a network with a lot of different software takes longer. Lookups are kept for a day, so later scans are fast either way."}
 	switch {
-	case c.NVD != nil && c.NVD.APIKey != "":
+	case c.NVD != nil && c.NVD.HasKey():
 		key.State, key.Detail = CheckOK, "An API key is set, so lookups run about ten times faster."
 	default:
 		key.State, key.Detail = CheckInfo, "No API key is set. That is fine; lookups are just slower."
 		key.Fix = []string{
 			"Request a free key at https://nvd.nist.gov/developers/request-an-api-key.",
-			"Set it in the SIGNALITH_NVD_API_KEY environment variable of the Signalith service, then restart it.",
+			"Enter it as NVD API key on the Settings page, under Vulnerability scans. It is used from the next lookup, with no restart.",
 		}
 	}
 	checks = append(checks, key)
