@@ -18,17 +18,5 @@ const (
 // LevelSharedLibrary (every server reads them), and the founder's
 // detections and dashboards were imported.
 func (rt *Runtime) SharedLibrary() bool {
-	if !rt.SharedSettings() {
-		return false
-	}
-	b, ok := rt.Cluster().Get()
-	if !ok || b.Level < LevelSharedLibrary {
-		return false
-	}
-	for _, name := range []string{ImportDetections, ImportDashboards} {
-		if _, done := b.Import.Done[name]; !done {
-			return false
-		}
-	}
-	return true
+	return rt.SharedSettings() && rt.sharedAt(LevelSharedLibrary, ImportDetections, ImportDashboards)
 }

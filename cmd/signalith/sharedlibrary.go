@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
+	"github.com/jrsamsanchez/signalith/internal/clustercfg"
 	"github.com/jrsamsanchez/signalith/internal/clusterlib"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/dashboards"
@@ -35,14 +36,23 @@ type sharedLibrary struct {
 	on atomic.Bool
 }
 
-func newSharedLibrary(node *cluster.Node, cfg func() *config.Config, log *slog.Logger) *sharedLibrary {
-	return &sharedLibrary{docs: clusterlib.NewDocs(), node: node, log: log, cfg: cfg}
+func newSharedLibrary(docs *clusterlib.Docs, node *cluster.Node, cfg func() *config.Config, log *slog.Logger) *sharedLibrary {
+	return &sharedLibrary{docs: docs, node: node, log: log, cfg: cfg}
 }
 
-// track makes the library's documents on h.
-func (l *sharedLibrary) track(h *shared.Hub) { l.docs.Track(h) }
+// libraryFiles is what the library's importers read: the detections and
+// dashboards folders of the configuration in use.
+func libraryFiles(f clustercfg.Files) clusterlib.Files {
+	return clusterlib.Files{
+		DetectionsDir: func() string { return f.Config().DetectionsDir() },
+		DashboardsDir: func() string { return f.Config().DashboardsDir() },
+		Node:          f.Node,
+		Log:           f.Log,
+		Now:           f.Now,
+	}
+}
 
-// files is what the importers and the inbox read: this server's folders.
+// files is what the inbox reads: this server's folders.
 func (l *sharedLibrary) files() clusterlib.Files {
 	return clusterlib.Files{
 		DetectionsDir: func() string { return l.cfg().DetectionsDir() },
@@ -52,18 +62,10 @@ func (l *sharedLibrary) files() clusterlib.Files {
 	}
 }
 
-// importers move the founder's detections and dashboards into the
-// shared settings once the cluster's level allows it.
-func (l *sharedLibrary) importers() []shared.Importer {
-	return clusterlib.Importers(l.docs, l.files())
-}
-
 // start makes lib and boards keep their detections and dashboards in the
 // shared settings when on, and keeps this server's folders in step with
 // them in jobs until ctx ends. Off, they keep using the folders.
 func (l *sharedLibrary) start(ctx context.Context, rt *shared.Runtime, on bool, c *config.Config, lib *detect.Library, boards *dashboards.Store, jobs *sync.WaitGroup) error {
-	// A component of the start that ended hears of no more changes.
-	l.docs.Reset()
 	l.on.Store(on)
 	if !on {
 		return nil
