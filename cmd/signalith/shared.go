@@ -10,6 +10,7 @@ import (
 	"github.com/jrsamsanchez/signalith/internal/cluster"
 	"github.com/jrsamsanchez/signalith/internal/clusterauth"
 	"github.com/jrsamsanchez/signalith/internal/clustercfg"
+	"github.com/jrsamsanchez/signalith/internal/clusterpki"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/store"
@@ -67,12 +68,15 @@ type sharedDocs struct {
 	auth *clusterauth.Docs
 	// tls holds the cluster's certificate authority (see sharedtls.go).
 	tls *sharedTLS
+	// osca holds OpenSearch's certificate authority, which issues each
+	// server its own OpenSearch certificate (see sharedosid.go).
+	osca *clusterpki.OSCA
 }
 
 // newSharedDocs returns the documents of a process, with auth as the
 // users' documents.
 func newSharedDocs(auth *clusterauth.Docs) sharedDocs {
-	d := sharedDocs{docs: clustercfg.NewDocs(), auth: auth, tls: newSharedTLS()}
+	d := sharedDocs{docs: clustercfg.NewDocs(), auth: auth, tls: newSharedTLS(), osca: clusterpki.New()}
 	// The users and directory importers and the auth settings of
 	// signalith.yaml reach the users' documents.
 	d.docs.UseAuth(auth)
@@ -93,6 +97,7 @@ func (d sharedDocs) trackers() []sharedTracker {
 		d.docs,
 		d.auth,
 		d.tls.tls,
+		d.osca,
 		// Append a new shared collection here.
 	}
 }
