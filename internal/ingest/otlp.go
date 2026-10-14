@@ -3,6 +3,8 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -341,6 +343,7 @@ func otlpWindows(b map[string]any) Event {
 
 	values := map[string]string{}
 	var ordered []any
+	binary := ""
 	if ed, ok := b["event_data"].(map[string]any); ok {
 		if list, ok := ed["data"].([]any); ok {
 			for _, item := range list {
@@ -354,6 +357,9 @@ func otlpWindows(b map[string]any) Event {
 			}
 		} else {
 			for k, v := range ed {
+				if k == "binary" {
+					binary = otlpText(v)
+				}
 				if k == "name" || k == "binary" {
 					continue
 				}
@@ -362,9 +368,15 @@ func otlpWindows(b map[string]any) Event {
 		}
 	}
 	if ordered == nil {
-		if schema, ok := windowsSchemaFor(channel, eventID); ok {
+		if schema, ok := windowsSchemaFor(channel, provider, eventID); ok {
 			for _, name := range schema {
 				ordered = append(ordered, values[name])
+			}
+		} else if channel == ApplicationChannel || strings.EqualFold(channel, CodeIntegrityChannel) {
+			// An Application or Code Integrity event's data is searched
+			// as a whole, so its values go in by name.
+			for _, k := range slices.Sorted(maps.Keys(values)) {
+				ordered = append(ordered, values[k])
 			}
 		}
 	}
@@ -376,6 +388,9 @@ func otlpWindows(b map[string]any) Event {
 		"TimeCreated":   str(b, "system_time"),
 		"Message":       message,
 		"StringInserts": ordered,
+	}
+	if binary != "" {
+		rec["Binary"] = binary
 	}
 	var named map[string]string
 	if strings.EqualFold(channel, "Microsoft-Windows-Sysmon/Operational") || strings.EqualFold(channel, DefenderChannel) {
@@ -390,15 +405,19 @@ func otlpWindows(b map[string]any) Event {
 	return ev
 }
 
-// windowsSchemaFor returns the schema order of a channel's event, for the
-// events the Windows parser reads by position.
-func windowsSchemaFor(channel, eventID string) ([]string, bool) {
+// windowsSchemaFor returns the schema order of a channel's event (from
+// provider, "" for the channel's usual one), for the events the Windows
+// parser reads by position.
+func windowsSchemaFor(channel, provider, eventID string) ([]string, bool) {
 	switch {
 	case channel == "Security":
 		s, ok := windowsSchema[eventID]
 		return s, ok
-	case channel == SystemChannel && eventID == "7045":
+	case channel == SystemChannel && eventID == "7045" && (provider == "" || strings.EqualFold(provider, ServiceControlManager)):
 		return serviceInstallSchema, true
+	case channel == SystemChannel:
+		e, ok := systemEventFor(provider, eventID)
+		return e.data, ok
 	case strings.EqualFold(channel, PowerShellChannel) && eventID == "4104":
 		return scriptBlockSchema, true
 	}

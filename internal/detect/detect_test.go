@@ -421,17 +421,25 @@ func TestCoverage(t *testing.T) {
 		{ID: "b", MITRE: []string{"T1110"}, Enabled: false},
 		{ID: "c", MITRE: []string{"T1490"}, Enabled: false},
 		{ID: "d", MITRE: []string{"T9999"}, Enabled: true},
+		{ID: "e", MITRE: []string{"T9998"}, Enabled: false},
+		// Retired in ATT&CK 19: T1574.002 DLL Side-Loading is T1574.001
+		// DLL.
+		{ID: "f", MITRE: []string{"T1574.002"}, Enabled: true},
 	}
 	cov := ComputeCoverage(ds)
-	if cov.Summary.Enabled != 1 || cov.Summary.Available != 1 || cov.Summary.Techniques < 150 {
+	if cov.Summary.Enabled != 2 || cov.Summary.Available != 1 || cov.Summary.Techniques < 150 {
 		t.Errorf("summary = %+v", cov.Summary)
 	}
-	if cov.Unknown["T9999"] != "d" {
+	// A detection that is off is not worth a warning.
+	if cov.Unknown["T9999"] != "d" || len(cov.Unknown) != 1 {
 		t.Errorf("unknown = %v", cov.Unknown)
 	}
 	var found bool
 	for _, tac := range cov.Tactics {
 		for _, te := range tac.Techniques {
+			if te.ID == "T1574" && (len(te.Enabled) != 1 || te.Subs[0] != "T1574.001") {
+				t.Errorf("T1574 = %+v", te)
+			}
 			if te.ID == "T1110" {
 				found = true
 				if tac.Short != "credential-access" || len(te.Enabled) != 1 || len(te.Disabled) != 1 || te.Subs[0] != "T1110.003" {
@@ -627,10 +635,22 @@ func TestConvertSigmaServiceInstall(t *testing.T) {
 			t.Errorf("query missing %s: %s", want, q)
 		}
 	}
-	// Other System log events are not read.
+	// Other System log events have their own data, not a service
+	// install's.
 	other := strings.ReplaceAll(rule, "7045", "7036")
 	if _, err := ConvertSigmaWith([]byte(other), SigmaOptions{Strict: true}); err == nil {
-		t.Error("a 7036 rule converted strictly")
+		t.Error("a 7036 rule about a service install's data converted strictly")
+	}
+	stopped := "title: Defender stopped\nlogsource:\n  product: windows\n  service: system\ndetection:\n  sel:\n    Provider_Name: 'Service Control Manager'\n    EventID: 7036\n    param1: 'Windows Defender Antivirus Service'\n    param2: stopped\n  condition: sel\nlevel: medium\n"
+	res, err = ConvertSigmaWith([]byte(stopped), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q = res.Detection.Query
+	for _, want := range []string{"datamodel=Other", "sourcetype=WinEventLog:System", "signature_id=7036", `system_param1="Windows Defender Antivirus Service"`, "system_param2=stopped"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query missing %s: %s", want, q)
+		}
 	}
 }
 

@@ -58,9 +58,15 @@ var categories = map[string]string{
 	"process_access":       "rules/windows/process_access",
 	"create_remote_thread": "rules/windows/create_remote_thread",
 	"ps_script":            "rules/windows/powershell/powershell_script",
-	// Not a Sigma category: Windows System log rules (service: system)
-	// about services installed.
-	"system": "rules/windows/builtin/system/service_control_manager",
+	// Not a Sigma category: Windows System log rules (service: system),
+	// in folders by provider.
+	"system": "rules/windows/builtin/system",
+	// Nor this: Windows Application log rules (service: application), in
+	// folders by provider.
+	"application": "rules/windows/builtin/application",
+	// Nor this: Code Integrity log rules (service:
+	// codeintegrity-operational).
+	"code_integrity": "rules/windows/builtin/code_integrity",
 	// Nor this: Microsoft Defender Antivirus log rules (service:
 	// windefend).
 	"windefend": "rules/windows/builtin/windefend",
@@ -154,7 +160,7 @@ func main() {
 			cases = sigmacheck.AuditdCases
 		}
 		files, _ := filepath.Glob(filepath.Join(*sigmaDir, src.dir, "*.yml"))
-		if cat == "security" || cat == "auditd" {
+		if cat == "security" || cat == "auditd" || cat == "system" || cat == "application" {
 			more, _ := filepath.Glob(filepath.Join(*sigmaDir, src.dir, "*", "*.yml"))
 			files = append(files, more...)
 		}
@@ -182,14 +188,21 @@ func main() {
 				continue
 			}
 			want := map[string]string{"product": product, "category": cat, "service": ""}
-			if cat == "system" || cat == "security" || cat == "auditd" || cat == "windefend" {
+			if cat == "system" || cat == "security" || cat == "auditd" || cat == "windefend" || cat == "application" {
 				want["category"], want["service"] = "", cat
+			}
+			if cat == "code_integrity" {
+				want["category"], want["service"] = "", "codeintegrity-operational"
 			}
 			if rule.Logsource["product"] != want["product"] || rule.Logsource["category"] != want["category"] || rule.Logsource["service"] != want["service"] {
 				skip("log source is not plain "+product+" "+cat, rel)
 				continue
 			}
 			rcat, rbases := cat, bases
+			if cat == "system" {
+				rcat = sigmacheck.SystemCategory(rule.EventIDs()...)
+				rbases = sigmacheck.Bases[rcat]
+			}
 			if cat == "security" {
 				ids := rule.EventIDs()
 				rcat = sigmacheck.SecurityCategory(ids...)

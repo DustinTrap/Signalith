@@ -86,6 +86,14 @@ func generateOTel(o Options) (*Agent, error) {
 		// logs a warning instead of stopping the Collector.
 		b.WriteString("  windowseventlog/defender:\n    channel: Microsoft-Windows-Windows Defender/Operational\n    ignore_channel_errors: true\n    storage: file_storage/signalith\n")
 		receivers = append(receivers, "windowseventlog/defender")
+		// The Application log, where SQL Server, Windows Installer and
+		// other programs log.
+		b.WriteString("  windowseventlog/application:\n    channel: Application\n    storage: file_storage/signalith\n")
+		receivers = append(receivers, "windowseventlog/application")
+		// Code Integrity: unsigned, revoked and blocked drivers and
+		// images.
+		b.WriteString("  windowseventlog/codeintegrity:\n    channel: Microsoft-Windows-CodeIntegrity/Operational\n    storage: file_storage/signalith\n")
+		receivers = append(receivers, "windowseventlog/codeintegrity")
 		if o.Sysmon {
 			b.WriteString("  windowseventlog/sysmon:\n    channel: Microsoft-Windows-Sysmon/Operational\n    storage: file_storage/signalith\n")
 			receivers = append(receivers, "windowseventlog/sysmon")

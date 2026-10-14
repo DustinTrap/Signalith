@@ -12,7 +12,7 @@ Open **Add data**, pick **OpenTelemetry**, and choose where the Collector runs:
 
 - **Linux**: reads `/var/log/auth.log` or `/var/log/secure`, or the systemd journal,
   like the Fluent Bit agent.
-- **Windows**: reads the Security and System event logs, Microsoft Defender, Sysmon when
+- **Windows**: reads the Security, System and Application event logs, Code Integrity, Microsoft Defender, Sysmon when
   **Include Sysmon** is on, and PowerShell script blocks when **Include PowerShell** is on.
 
 Either way the Collector also listens on `127.0.0.1:4317` (gRPC) and `127.0.0.1:4318`

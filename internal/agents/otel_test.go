@@ -80,6 +80,8 @@ func TestOTelWindows(t *testing.T) {
 		dig(m, "receivers", "windowseventlog/system", "channel") != "System" ||
 		dig(m, "receivers", "windowseventlog/defender", "channel") != "Microsoft-Windows-Windows Defender/Operational" ||
 		dig(m, "receivers", "windowseventlog/defender", "ignore_channel_errors") != true ||
+		dig(m, "receivers", "windowseventlog/application", "channel") != "Application" ||
+		dig(m, "receivers", "windowseventlog/codeintegrity", "channel") != "Microsoft-Windows-CodeIntegrity/Operational" ||
 		dig(m, "receivers", "windowseventlog/sysmon", "channel") != "Microsoft-Windows-Sysmon/Operational" ||
 		dig(m, "receivers", "windowseventlog/powershell", "channel") != "Microsoft-Windows-PowerShell/Operational" {
 		t.Errorf("receivers = %v", m["receivers"])
