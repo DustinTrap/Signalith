@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jrsamsanchez/signalith/internal/auth"
+	"github.com/jrsamsanchez/signalith/internal/clusterauth"
 	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
@@ -86,6 +87,13 @@ type principal struct {
 	// Method is how the request signed in: session or basic.
 	Method string
 	token  string // the session's token, to keep it when others end
+	// remember is whether that session was kept through idle periods.
+	remember bool
+	// epoch is the user's session epoch, which a session made for them
+	// starts in (shared users only).
+	epoch int64
+	// shared is set when the users are kept in the shared settings.
+	shared bool
 }
 
 type userKey struct{}
@@ -177,11 +185,16 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 			// A password changed since signing in (perhaps on another
 			// server sharing the users file) ends the session too.
 			if p := s.principalFor(ss.User); p != nil && (ss.Version == "" || ss.Version == s.passwordStamp(ss.User)) {
-				p.Method, p.token = "session", c.Value
+				p.Method, p.token, p.remember = "session", c.Value, ss.Remember
 				return p, nil
 			}
 			// Deleted, disabled or given a new password since signing in.
-			s.sessions().Delete(r.Context(), c.Value)
+			// Shared sessions are not deleted for that: this server may
+			// not have read the user yet, and the user's session epoch or
+			// housekeeping ends them.
+			if s.SharedUsers == nil {
+				s.sessions().Delete(r.Context(), c.Value)
+			}
 		}
 	}
 	user, pass, ok := r.BasicAuth()
@@ -200,9 +213,11 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 
 // principalFor looks up a signed-in user's current role and state, or
 // returns nil if they may no longer sign in. Directory users are checked
-// with the directory again every few minutes (see recheckDirectoryUser).
+// with the directory again every few minutes (see recheckDirectoryUser);
+// with shared users, the server that runs the background jobs does that
+// for every server.
 func (s *Server) principalFor(name string) *principal {
-	if strings.EqualFold(name, s.conf().Auth.AdminUser) {
+	if s.isBuiltin(name) {
 		return s.builtinPrincipal()
 	}
 	u, ok := s.userStore().Get(name)
@@ -213,9 +228,13 @@ func (s *Server) principalFor(name string) *principal {
 		if !s.dir().Enabled() || u.Refused != "" {
 			return nil
 		}
-		s.recheckDirectoryUser(u.Username)
+		if s.SharedUsers == nil {
+			s.recheckDirectoryUser(u.Username)
+		}
 	}
-	return principalFromUser(u)
+	p := principalFromUser(u)
+	p.shared = s.SharedUsers != nil
+	return p
 }
 
 // passwordStamp identifies a local user's current password without
@@ -231,12 +250,13 @@ func (s *Server) passwordStamp(name string) string {
 }
 
 func (s *Server) builtinPrincipal() *principal {
-	return &principal{Username: s.conf().Auth.AdminUser, Role: users.Admin, Source: users.SourceBuiltin}
+	return &principal{Username: s.builtinName(), Role: users.Admin, Source: users.SourceBuiltin,
+		epoch: s.builtinEpoch(), shared: s.SharedUsers != nil}
 }
 
 func principalFromUser(u users.User) *principal {
 	return &principal{Username: u.Username, Name: u.Name, Email: u.Email, Role: u.Role, Source: u.Source,
-		MustChangePassword: u.MustChangePassword}
+		MustChangePassword: u.MustChangePassword, epoch: u.SessionEpoch}
 }
 
 // signInError is a refused sign-in, with the status and words to send.
@@ -328,7 +348,11 @@ func (s *Server) browserKey() *auth.BrowserKey {
 // the account again. Directory passwords are not seen here.
 func (s *Server) passwordVersion(account string) string {
 	login := users.LoginName(account)
-	if strings.EqualFold(login, s.conf().Auth.AdminUser) {
+	if s.isBuiltin(login) {
+		if s.SharedUsers != nil {
+			// The same on every server.
+			return "builtin:" + s.builtinHash()
+		}
 		return "builtin:" + s.conf().AdminPasswordVersion()
 	}
 	if v := s.userStore().PasswordVersion(login); v != "" {
@@ -423,7 +447,9 @@ func (s *Server) signIn(r *http.Request, name, password, method string) (*princi
 	if err != nil {
 		return nil, err
 	}
-	p, reason, err := s.checkCredentials(r.Context(), name, password)
+	// The Users page shows how each user last signed in.
+	ctx := clusterauth.WithMethod(r.Context(), method)
+	p, reason, err := s.checkCredentials(ctx, name, password)
 	if err != nil {
 		var f auth.Failure
 		if errors.Is(err, errWrongCredentials) {
@@ -453,8 +479,8 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		return nil, "empty username or password", errWrongCredentials
 	}
 	store := s.userStore()
-	if strings.EqualFold(name, s.conf().Auth.AdminUser) {
-		if !s.conf().CheckPassword(name, password) {
+	if s.isBuiltin(name) {
+		if !s.checkBuiltinPassword(password, true) {
 			return nil, "wrong password", errWrongCredentials
 		}
 		store.RecordBuiltinSignIn(ctx)
@@ -479,7 +505,7 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 	// domain in front is refused without asking the directory.
 	login := users.LoginName(name)
 	if !strings.EqualFold(login, name) {
-		if u, ok := store.Get(login); strings.EqualFold(login, s.conf().Auth.AdminUser) || (ok && u.Source == users.SourceLocal) {
+		if u, ok := store.Get(login); s.isBuiltin(login) || (ok && u.Source == users.SourceLocal) {
 			users.WasteTime(password)
 			return nil, "a domain in front of a local user's or the built-in admin's name", errWrongCredentials
 		}
@@ -730,8 +756,8 @@ func (c *credCache) put(key [32]byte, user string, ttl time.Duration) {
 func (s *Server) credentialKey(user, pass string) ([32]byte, time.Duration) {
 	version, ttl := "", basicCacheLocal
 	switch {
-	case strings.EqualFold(strings.TrimSpace(user), s.conf().Auth.AdminUser):
-		version = "builtin:" + s.conf().Auth.AdminPasswordHash
+	case s.isBuiltin(user):
+		version = "builtin:" + s.builtinHash()
 	case s.userStore().PasswordVersion(user) != "":
 		version = "local:" + s.userStore().PasswordVersion(user)
 	default:

@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/jrsamsanchez/signalith/internal/cluster"
+	"github.com/jrsamsanchez/signalith/internal/clusterauth"
 	"github.com/jrsamsanchez/signalith/internal/clustercfg"
 	"github.com/jrsamsanchez/signalith/internal/config"
 	"github.com/jrsamsanchez/signalith/internal/securefile"
@@ -59,6 +60,8 @@ type clusterCLI struct {
 	out    io.Writer
 	errOut io.Writer
 	by     string
+	// auth holds the users' documents of the runtime made last.
+	auth *clusterauth.Docs
 }
 
 // runCluster is cmdCluster with its input and output.
@@ -152,6 +155,8 @@ func (x *clusterCLI) keyStore() shared.KeyStore {
 // readOnly writes nothing to OpenSearch or the state folder.
 func (x *clusterCLI) runtime(readOnly bool, name string) *shared.Runtime {
 	docs := clustercfg.NewDocs()
+	x.auth = clusterauth.NewDocs()
+	docs.UseAuth(x.auth)
 	rt := shared.NewRuntime(shared.RuntimeOptions{
 		StateDir: x.c.StateDir(), Self: shared.Self{NodeID: x.self.NodeID, Name: x.self.Name},
 		KeyFile: os.Getenv(clusterKeyFileEnv), ClusterName: name, ReadOnly: readOnly, Log: x.log,
@@ -159,11 +164,15 @@ func (x *clusterCLI) runtime(readOnly bool, name string) *shared.Runtime {
 			peers, _ := x.peers(context.Background(), 0)
 			return peers
 		},
-		// A founding from the command line imports this server's feeds
-		// and retention policies, as the server's own would.
-		Content:   docs.Track,
+		// A founding from the command line imports this server's feeds,
+		// retention policies and users, as the server's own would.
+		Content: func(h *shared.Hub) {
+			docs.Track(h)
+			x.auth.Track(h)
+		},
 		Importers: clustercfg.Importers(docs, x.files()),
 	})
+	x.auth.Cluster = rt.Cluster
 	rt.Use(x.cl, x.prefix(), x.c.Keyring())
 	return rt
 }

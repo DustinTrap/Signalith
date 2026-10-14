@@ -30,8 +30,11 @@ import (
 // of each start. Like the runtime, it belongs to the process.
 type sharedContent struct {
 	docs *clustercfg.Docs
-	node *cluster.Node
-	log  *slog.Logger
+	// users links the users, the directory sign-in settings and the
+	// sessions kept in the shared settings (see sharedusers.go).
+	users *sharedUsers
+	node  *cluster.Node
+	log   *slog.Logger
 	// cfg and target are the configuration and the OpenSearch client of
 	// the start running now, which the importers read.
 	cfg    atomic.Pointer[config.Config]
@@ -51,9 +54,18 @@ type osTarget struct {
 
 // newSharedContent returns the content's link for the process.
 func newSharedContent(c *config.Config, node *cluster.Node, log *slog.Logger) *sharedContent {
-	ct := &sharedContent{docs: clustercfg.NewDocs(), node: node, log: log}
+	ct := &sharedContent{docs: clustercfg.NewDocs(), users: newSharedUsers(log), node: node, log: log}
+	// The users and directory importers and the auth settings of
+	// signalith.yaml reach the users' documents.
+	ct.docs.UseAuth(ct.users.docs)
 	ct.cfg.Store(c)
 	return ct
+}
+
+// track makes the shared documents of the content and of the users on h.
+func (ct *sharedContent) track(h *shared.Hub) {
+	ct.docs.Track(h)
+	ct.users.docs.Track(h)
 }
 
 // files is what the importers read: this server's files and settings.
@@ -83,6 +95,7 @@ func (ct *sharedContent) use(c *config.Config, cl *store.Client) {
 	ct.target.Store(&osTarget{cl: cl, prefix: c.OpenSearch.IndexPrefix})
 	// A component of the start that ended hears of no more changes.
 	ct.docs.Reset()
+	ct.users.docs.Reset()
 }
 
 // peerAge is how recent another server's heartbeat must be for its

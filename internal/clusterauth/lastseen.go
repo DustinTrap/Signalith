@@ -3,6 +3,7 @@ package clusterauth
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,6 +41,24 @@ const (
 	MethodSession = "session"
 	MethodBasic   = "basic"
 )
+
+// methodKey holds how the sign-ins recorded with a context were made.
+type methodKey struct{}
+
+// WithMethod returns ctx saying how the sign-ins recorded with it are
+// made: MethodSession or MethodBasic.
+func WithMethod(ctx context.Context, method string) context.Context {
+	return context.WithValue(ctx, methodKey{}, method)
+}
+
+// MethodOf returns the method WithMethod gave ctx, MethodSession when
+// none.
+func MethodOf(ctx context.Context) string {
+	if m, _ := ctx.Value(methodKey{}).(string); m != "" {
+		return m
+	}
+	return MethodSession
+}
 
 type seenDoc struct {
 	Kind string `json:"kind"`
@@ -95,6 +114,22 @@ func (l *LastSeen) Record(ctx context.Context, user, method string) error {
 	return l.put(ctx, Seen{User: user, At: now.UTC(), Node: l.Node, Method: method}, false)
 }
 
+// Hook returns a function for users.Store.SignIns: it records each
+// sign-in, by the method its context names (WithMethod), in the
+// background, so a sign-in never waits for the write.
+func (l *LastSeen) Hook(log *slog.Logger) func(ctx context.Context, name string, builtin bool) {
+	return func(ctx context.Context, name string, _ bool) {
+		method := MethodOf(ctx)
+		go func() {
+			wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if err := l.Record(wctx, name, method); err != nil && log != nil {
+				log.Debug("could not record a sign-in for the Users page", "user", name, "err", err)
+			}
+		}()
+	}
+}
+
 // Import records a last sign-in from before the users were shared, as
 // on node, unless one is there already.
 func (l *LastSeen) Import(ctx context.Context, s Seen) error {
@@ -147,4 +182,32 @@ func (l *LastSeen) All(ctx context.Context) (map[string]Seen, error) {
 	l.all, l.allAt = out, now
 	l.mu.Unlock()
 	return out, nil
+}
+
+// Housekeep deletes the last sign-ins of users who are gone: those not
+// in names, the users there are now. It returns how many it deleted.
+func (l *LastSeen) Housekeep(ctx context.Context, names []string) (int, error) {
+	if l.Writable != nil && !l.Writable() {
+		return 0, nil
+	}
+	cl, prefix := l.Client()
+	keep := make([]any, 0, len(names))
+	for _, n := range names {
+		keep = append(keep, strings.ToLower(n))
+	}
+	q := map[string]any{"bool": map[string]any{
+		"must":     []any{map[string]any{"term": map[string]any{"kind": "lastseen"}}},
+		"must_not": []any{map[string]any{"terms": map[string]any{"user": keep}}},
+	}}
+	var out struct {
+		Deleted int `json:"deleted"`
+	}
+	err := cl.Do(ctx, http.MethodPost, "/"+url.PathEscape(runtimeIndex(prefix))+"/_delete_by_query?conflicts=proceed&ignore_unavailable=true",
+		map[string]any{"query": q}, &out)
+	if err == nil && out.Deleted > 0 {
+		l.mu.Lock()
+		l.all = nil
+		l.mu.Unlock()
+	}
+	return out.Deleted, err
 }

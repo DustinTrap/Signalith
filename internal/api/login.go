@@ -176,29 +176,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeSignInError(w, err)
 		return
 	}
-	n := auth.NewSession{User: p.Username, Remember: req.Remember, Method: p.Source}
-	if a := s.client(r).Addr; a.IsValid() {
-		n.Client = a.String()
-	}
-	if p.Source == users.SourceLocal {
-		n.Version = s.passwordStamp(p.Username)
-	}
-	token, err := s.sessions().Create(r.Context(), n)
+	token, err := s.startSession(r, p, req.Remember)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	c := &http.Cookie{Name: s.cookieName(r), Value: token, Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, Secure: s.secureCookie(r)}
-	if req.Remember {
-		c.MaxAge = int(s.sessions().MaxAge().Seconds())
-	}
-	http.SetCookie(w, c)
+	s.setSessionCookie(w, r, token, req.Remember)
 	// From now on this browser can sign in to the account even while
 	// someone elsewhere is guessing its password.
 	s.rememberBrowser(w, r, req.Username, p.Username)
 	p.Method = "session"
 	writeJSON(w, http.StatusOK, meView(p))
+}
+
+// startSession starts a session for p, signing in from r: with shared
+// users, in the user's session epoch as it is now, so a password changed
+// or an account disabled since ends it.
+func (s *Server) startSession(r *http.Request, p *principal, remember bool) (string, error) {
+	n := auth.NewSession{User: p.Username, Remember: remember, Method: p.Source, Epoch: p.epoch}
+	if a := s.client(r).Addr; a.IsValid() {
+		n.Client = a.String()
+	}
+	if p.Source == users.SourceLocal && s.SharedUsers == nil {
+		n.Version = s.passwordStamp(p.Username)
+	}
+	return s.sessions().Create(r.Context(), n)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

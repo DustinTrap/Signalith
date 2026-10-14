@@ -215,6 +215,10 @@ func (s *Sessions) idleFor() time.Duration {
 // MaxAge is how long any session lasts after sign-in.
 func (s *Sessions) MaxAge() time.Duration { return MaxAge }
 
+// SetVersion does nothing: a shared session ends through its user's
+// session epoch when the password changes, not through a password stamp.
+func (s *Sessions) SetVersion(context.Context, string, string) {}
+
 // unusable reports whether a write failed because OpenSearch cannot be
 // used now (unreachable, overloaded, or refusing writes), rather than
 // because of what was written.

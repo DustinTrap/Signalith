@@ -43,10 +43,11 @@ func openShared(c *config.Config, node *cluster.Node, log *slog.Logger) (*shared
 		LeaseCheck: node.Check,
 		LeaseEpoch: node.Lease().Epoch,
 		Peers:      func() []shared.Peer { return peersOf(node.Status()) },
-		Content:    ct.docs.Track,
+		Content:    ct.track,
 		Importers:  clustercfg.Importers(ct.docs, ct.files()),
 		Log:        log,
 	})
+	ct.users.follow(rt)
 	return rt, ct
 }
 

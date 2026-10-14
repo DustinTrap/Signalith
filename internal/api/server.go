@@ -131,6 +131,10 @@ type Server struct {
 	// them in memory only.
 	Users     *users.Store
 	Directory *users.Directory
+	// SharedUsers is set when Users, Directory and SessionStore keep the
+	// users, the directory settings and the sessions in the shared
+	// settings of a cluster; nil keeps them on this server.
+	SharedUsers *SharedUsers
 
 	// DirectoryRecheck is how often signed-in directory users are looked
 	// up again; 0 means every 5 minutes.

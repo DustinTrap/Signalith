@@ -416,4 +416,12 @@ func TestLastSeen(t *testing.T) {
 	if n := len(o.fake.Requests()); n != 0 {
 		t.Errorf("a read-only server wrote: %d", n)
 	}
+	// Housekeeping deletes the last sign-ins of users who are gone.
+	if n, err := la.Housekeep(ctx, []string{"admin", "jlee"}); err != nil || n != 1 {
+		t.Fatalf("housekeeping deleted %d: %v", n, err)
+	}
+	all, err = la.All(ctx)
+	if _, ok := all["ann"]; err != nil || ok || all["jlee"].Node != "siem-b" {
+		t.Errorf("after housekeeping: %v %v", all, err)
+	}
 }

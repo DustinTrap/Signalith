@@ -74,7 +74,7 @@ Usage:
   signalith init      [-c file] [flags]   write a starter config file
   signalith serve     [-c file]           run the server
   signalith validate  [-c file]           check the config file
-  signalith passwd    [-c file]           set the admin password
+  signalith passwd    [-c file] [-local]  set the admin password
   signalith settings  list|reset [-c file] [-file f] [key...]   show or undo changes made on the Settings page
   signalith initial-password [-c file]    print the first admin password the Docker quick start or a package made
   signalith query     [-c file] [-explain] "<query>"   run a query from the shell
@@ -440,6 +440,10 @@ func cmdValidate(args []string) error {
 	if p := dir.Problem(); p != "" {
 		fmt.Println("Warning:", p)
 	}
+	if _, err := os.Stat(sharedCachePath(c)); err == nil {
+		fmt.Println("This server is a member of a cluster: once its servers share their users, the users, the built-in admin's password " +
+			"and directory sign-in are kept in OpenSearch, and the files above are only what was imported from.")
+	}
 	feeds := newFeeds(c, nil, nil)
 	if err := feeds.Load(); err != nil {
 		fmt.Println("Warning:", err)
@@ -526,6 +530,8 @@ func cmdValidate(args []string) error {
 func cmdPasswd(args []string) error {
 	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
 	path := configFlag(fs)
+	local := fs.Bool("local", false, "keep the new password on this server only, in its state folder: on a member of a cluster that shares its users, "+
+		"it works only while the shared settings cannot be used")
 	fs.Parse(args)
 	if _, err := os.Stat(*path); err != nil {
 		return fmt.Errorf("config file %s: %w", *path, err)
@@ -552,6 +558,24 @@ func cmdPasswd(args []string) error {
 	// and one for a service given the password in its environment.
 	stateDir := config.StateDirFor(*path)
 	hashFile := config.AdminHashFileIn(stateDir)
+	if *local {
+		if err := config.RecordStateDir(stateDir); err != nil {
+			return err
+		}
+		if err := writeAdminHash(hashFile, h); err != nil {
+			return err
+		}
+		fmt.Printf("Password updated in %s, on this server only.\n", hashFile)
+		fmt.Println("On a member of a cluster that shares its users, it works only while the shared settings cannot be used " +
+			"(OpenSearch down or refusing writes); signalith passwd without -local changes the password of every server.")
+		fmt.Println("On any other server it replaces the configured password: restart the server to apply it.")
+		return nil
+	}
+	// A member of a cluster that shares its users changes the built-in
+	// admin of every server, at once.
+	if done, err := passwdShared(*path, stateDir, h); done || err != nil {
+		return err
+	}
 	_, statErr := os.Stat(hashFile)
 	if os.Getenv("SIGNALITH_ADMIN_PASSWORD_FILE") != "" || svcPassword != "" || statErr == nil {
 		if err := config.RecordStateDir(stateDir); err != nil {
@@ -1108,20 +1132,42 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 			log.Error("dashboard file has errors; fix it to show the dashboard", "file", p.File, "err", p.Error)
 		}
 	}
-	people, dir, err := r.openUsers(c)
-	if err != nil {
-		return nil, err
+	// The users, the directory sign-in settings and the sessions: shared
+	// by the servers of the cluster once every one reads them there, else
+	// this server's own.
+	var parts *usersParts
+	if sharedOn && r.shared.SharedUsers() {
+		if parts, err = r.sharedContent.users.start(ctx, r.shared, r.node, c, cl, r.limiter, r.browsers, &in.jobs); err != nil {
+			return nil, err
+		}
 	}
-	if _, clash := people.Get(c.Auth.AdminUser); clash {
-		log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
+	if r.sharedContent != nil {
+		r.sharedContent.users.use(parts)
 	}
-	n := people.Count()
-	log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
+	var people *users.Store
+	var dir *users.Directory
+	if parts != nil {
+		people, dir = parts.store, parts.dir
+		n := people.Count()
+		log.Info("users loaded from the shared settings", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory])
+	} else {
+		// Lockouts other servers reported while the users were shared no
+		// longer count.
+		r.limiter.External(nil)
+		if people, dir, err = r.openUsers(c); err != nil {
+			return nil, err
+		}
+		if _, clash := people.Get(c.Auth.AdminUser); clash {
+			log.Warn("a user on the Users page has the built-in admin's name; that name signs in as the built-in admin", "user", c.Auth.AdminUser)
+		}
+		n := people.Count()
+		log.Info("users loaded", "local", n[users.SourceLocal], "directory", n[users.SourceDirectory], "file", c.UsersFile())
+	}
 	if (os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD") != "" || os.Getenv("SIGNALITH_LDAP_BIND_PASSWORD_FILE") != "") && c.Auth.LDAP == nil {
 		log.Warn("SIGNALITH_LDAP_BIND_PASSWORD is set but signalith.yaml has no auth.ldap, so it is not used; directory sign-in set up on the Users page keeps its own bind password")
 	}
 	if s := dir.Settings(); s.IsEnabled() {
-		log.Info("directory sign-in is on", "server", s.URL, "from_config_file", dir.FromConfig())
+		log.Info("directory sign-in is on", "server", s.URL, "from_config_file", dir.FromConfig(), "shared", parts != nil)
 		for _, w := range s.Warnings() {
 			log.Warn("directory sign-in: " + w)
 		}
@@ -1225,7 +1271,8 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	}
 	pruns := playbooks.NewOpenSearch(cl, c.OpenSearch.IndexPrefix)
 	pruns.Replicas = c.OpenSearch.Replicas.IndexSettings()
-	// Sessions and the failed sign-in limits carry over a restart.
+	// Sessions and the failed sign-in limits carry over a restart (shared
+	// sessions are in OpenSearch, with this server's cache of them kept).
 	r.sessions.SetIdle(c.SessionIdle())
 	// Agent tokens: one per agent or group, kept in the runtime index so
 	// every server that shares this OpenSearch accepts the same ones and
@@ -1308,6 +1355,9 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		Version:    version,
 	}
 	srv.KnownBrowsers = r.browsers
+	if parts != nil {
+		srv.SessionStore, srv.KnownBrowsers, srv.SharedUsers = parts.sessions, parts.browsers, parts.api(c)
+	}
 	in.jobs.Go(func() { srv.RunContentUpdates(ctx) })
 	pbRunner := &playbooks.Runner{
 		Playbooks: pbooks, Findings: fstore, Runs: pruns, Desk: srv.PlaybookDesk(), Respond: responder,
@@ -1446,6 +1496,11 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 	if r.shared != nil {
 		in.jobsList = append(in.jobsList, requestsJob(r.shared, contentHandlers(feeds, ret)))
 	}
+	if parts != nil {
+		// Signed-in directory users are checked again by this one server
+		// for every server.
+		in.jobsList = append(in.jobsList, parts.job())
+	}
 	if sharedOn {
 		// signalith.yaml's shared settings that changed since the last
 		// start go to the shared values.
@@ -1511,6 +1566,12 @@ func (r *runner) start(parent context.Context, c *config.Config) (*instance, err
 		if rt := r.shared; rt != nil {
 			settings.Shared = func() cluster.SharedStatus { return sharedStatus(rt, r.sharedContent) }
 			settings.Housekeep = rt.Housekeep
+			if parts != nil {
+				settings.Housekeep = func(ctx context.Context) {
+					rt.Housekeep(ctx)
+					parts.housekeep(ctx, log)
+				}
+			}
 		}
 		r.node.Use(cl, c.OpenSearch.IndexPrefix, settings)
 		// A server with detections.scheduler off never runs the jobs. It

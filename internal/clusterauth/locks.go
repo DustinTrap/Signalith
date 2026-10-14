@@ -79,20 +79,29 @@ func LockID(clusterID, scope, key string) string {
 	return "lock:" + hex.EncodeToString(sum[:])
 }
 
-// Listen makes the limiter report its locks here, and reads the locks
-// again whenever another server reports one. Call it once per start.
+// Listen makes the limiter report its locks here (Report), and reads
+// the locks again whenever another server reports one (Follow). Call it
+// once per start.
 func (l *Locks) Listen() {
-	l.Limiter.OnLock = func(scope, key string, until time.Time) {
-		// The limiter calls this as a sign-in fails; the write must not
-		// hold up the answer.
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := l.Write(ctx, scope, key, until); err != nil {
-				l.log().Warn("could not tell the other servers about a sign-in lockout", "scope", scope, "err", err)
-			}
-		}()
-	}
+	l.Limiter.OnLock = l.Report
+	l.Follow()
+}
+
+// Report writes a lock the limiter tripped, in the background: it is
+// called as a sign-in fails, and the write must not hold up the answer.
+func (l *Locks) Report(scope, key string, until time.Time) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := l.Write(ctx, scope, key, until); err != nil {
+			l.log().Warn("could not tell the other servers about a sign-in lockout", "scope", scope, "err", err)
+		}
+	}()
+}
+
+// Follow reads the locks again whenever another server reports one. Call
+// it once per start.
+func (l *Locks) Follow() {
 	l.Docs.OnLocks(func() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -100,6 +109,23 @@ func (l *Locks) Listen() {
 			_ = l.Reload(ctx)
 		}()
 	})
+}
+
+// Run reads the locks once now and then whenever they are Due, until
+// ctx ends. Every server runs it.
+func (l *Locks) Run(ctx context.Context) {
+	for {
+		if l.Due() {
+			if err := l.Reload(ctx); err != nil && ctx.Err() == nil {
+				l.log().Debug("could not read the sign-in lockouts of the other servers", "err", err)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+	}
 }
 
 func (l *Locks) log() *slog.Logger {
