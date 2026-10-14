@@ -133,6 +133,9 @@ datamodel=Vulnerabilities category=vulnerability known_exploited=true | stats dc
 datamodel=Vulnerabilities category=open_port app=rdp | table dest, dest_ip, product_version
 ```
 
+The built-in **Vulnerabilities** dashboard ([dashboards.md](dashboards.md#vulnerabilities))
+sums them up over the last 7 days.
+
 The Ask box understands questions such as "hosts with known exploited vulnerabilities" or
 "top CVEs".
 

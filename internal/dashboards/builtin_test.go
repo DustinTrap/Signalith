@@ -14,7 +14,7 @@ import (
 
 func TestBuiltinMalware(t *testing.T) {
 	bs := Builtin()
-	if len(bs) != 1 || bs[0].ID != MalwareID || bs[0].Title != "Malware" {
+	if len(bs) != 2 || bs[0].ID != MalwareID || bs[0].Title != "Malware" || bs[1].ID != VulnerabilitiesID {
 		t.Fatalf("built-ins = %+v", bs)
 	}
 	d, ok := GetBuiltin(MalwareID)
@@ -33,13 +33,31 @@ func TestBuiltinMalware(t *testing.T) {
 		t.Error("GetBuiltin returned shared panels")
 	}
 
+	checkPanels(t, d, "Malware")
+}
+
+func TestBuiltinVulnerabilities(t *testing.T) {
+	d, ok := GetBuiltin(VulnerabilitiesID)
+	if !ok || d.Title != "Vulnerabilities" || d.TimeRange != "7d" || len(d.Panels) != 11 {
+		t.Fatalf("vulnerabilities = %+v", d)
+	}
+	if err := d.check(); err != nil {
+		t.Errorf("check: %v", err)
+	}
+	checkPanels(t, d, "Vulnerabilities")
+}
+
+// checkPanels checks that every panel of d compiles, reads data model
+// model, and uses only that model's fields.
+func checkPanels(t *testing.T, d *Dashboard, model string) {
+	t.Helper()
 	eng := &search.Engine{Intel: intel.NewStore(intel.NewMemory())}
 	known := map[string]bool{}
-	for _, f := range datamodel.FieldsFor("Malware") {
+	for _, f := range datamodel.FieldsFor(model) {
 		known[f.Name] = true
 	}
-	if _, ok := datamodel.Get("Malware"); !ok {
-		t.Fatal("data model Malware is missing")
+	if _, ok := datamodel.Get(model); !ok {
+		t.Fatalf("data model %s is missing", model)
 	}
 	for _, p := range d.Panels {
 		q, err := query.Parse(p.Query)
@@ -50,12 +68,12 @@ func TestBuiltinMalware(t *testing.T) {
 		if _, err := eng.Compile(q); err != nil {
 			t.Errorf("%s: compile: %v", p.Title, err)
 		}
-		if q.Datamodel != "Malware" {
+		if q.Datamodel != model {
 			t.Errorf("%s: datamodel = %q", p.Title, q.Datamodel)
 		}
 		for _, f := range panelFields(q) {
 			if !known[f] {
-				t.Errorf("%s: field %s is not in the Malware data model", p.Title, f)
+				t.Errorf("%s: field %s is not in the %s data model", p.Title, f, model)
 			}
 		}
 	}
