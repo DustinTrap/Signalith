@@ -245,7 +245,8 @@
     const plats = [['', 'All']].concat(['windows', 'linux', 'darwin'].filter((p) => sum[p]).map((p) => [p, PLATFORM[p] + ' ' + sum[p]]));
     const offline = sum.total - sum.online;
     const agentFilters = [['', 'All'], ['silent', 'Silent'], ['needs', 'Needs a new configuration']];
-    panels.hosts.replaceChildren(
+    // replaceChildren, unlike el, would show a null as the text "null".
+    panels.hosts.replaceChildren(...[
       el('div', { class: 'ep-summary' },
         sum.total ? el('span', { class: 'ep-stat' }, el('b', {}, sum.total.toLocaleString()), sum.total === 1 ? ' host' : ' hosts') : null,
         sum.total ? el('span', { class: 'ep-stat' }, el('span', { class: 'pulse' }), el('b', {}, sum.online.toLocaleString()), ' online') : null,
@@ -258,7 +259,7 @@
         el('div', { class: 'input-wrap' }, icon('search'), findEl),
         plats.length > 2 ? seg(plats, S.platform, (v) => { S.platform = v; renderHosts(); }, 'Platform') : null,
         S.agents && S.agents.agents.length ? seg(agentFilters, S.agentFilter, (v) => { S.agentFilter = v; renderHosts(); }, 'Log agents') : null),
-      listEl);
+      listEl].filter(Boolean));
     drawList(listEl);
   }
 
