@@ -27,6 +27,10 @@ type Config struct {
 	// header (server.trusted_proxies). They may also connect without one,
 	// as a health check or an admin on the balancer would.
 	Trusted []netip.Prefix
+	// TrustedNow, when set, is asked for the trusted list instead of
+	// Trusted at each new connection, so a change to the list applies
+	// without opening the listener again.
+	TrustedNow func() []netip.Prefix
 	// HeaderTimeout is how long a trusted peer has to send its header;
 	// zero uses DefaultHeaderTimeout.
 	HeaderTimeout time.Duration
@@ -39,7 +43,11 @@ type Config struct {
 // Trusts reports whether a may send a PROXY header.
 func (c Config) Trusts(a netip.Addr) bool {
 	a = a.Unmap().WithZone("")
-	for _, p := range c.Trusted {
+	trusted := c.Trusted
+	if c.TrustedNow != nil {
+		trusted = c.TrustedNow()
+	}
+	for _, p := range trusted {
 		if p.Contains(a) {
 			return true
 		}

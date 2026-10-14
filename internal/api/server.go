@@ -1013,6 +1013,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			out["cluster_banners"] = b
 		}
 	}
+	s.addClusterHealth(r, out)
 	// Everyone signed in sees whether things work. Where they run (file
 	// paths, addresses, the OpenSearch URL and its errors) and the setup
 	// advice is for admins, who are the ones able to change it.
@@ -1071,6 +1072,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	warnings = append(warnings, s.behindWarnings(time.Now())...)
 	warnings = append(warnings, s.notifyWarnings(ctx)...)
+	if s.Cluster != nil {
+		warnings = append(warnings, agentTrafficWarnings(s.Cluster.Status())...)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}

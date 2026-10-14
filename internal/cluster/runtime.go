@@ -218,6 +218,9 @@ type Heartbeat struct {
 	// Restart is the server's restart run by request, nil when it has run
 	// none and runs none now.
 	Restart *RestartStatus `json:"restart,omitempty"`
+	// Traffic is what the server received from agents and syslog, nil
+	// from versions before it was kept (see Traffic).
+	Traffic *Traffic `json:"traffic,omitempty"`
 }
 
 // SettingsRev is the revisions of the settings document and of a server's
