@@ -20,10 +20,9 @@ func trafficOf(agents *agentinv.Inventory, receiver *syslog.Receiver) func() clu
 		if !last.IsZero() {
 			t.Agents.LastAt = &last
 		}
-		st := receiver.Stats()
-		t.Syslog.Messages = st.Received
-		if !st.LastMessage.IsZero() {
-			lm := st.LastMessage
+		var lm time.Time
+		t.Syslog.Messages, lm = receiver.Traffic()
+		if !lm.IsZero() {
 			t.Syslog.LastAt = &lm
 		}
 		return t

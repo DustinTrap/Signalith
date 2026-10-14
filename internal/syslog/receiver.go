@@ -960,6 +960,18 @@ func (r *Receiver) Stats() Stats {
 	return s
 }
 
+// Traffic is how many messages this receiver took in and when the last
+// came, read without locks so a heartbeat never waits on the receiver.
+func (r *Receiver) Traffic() (received int64, last time.Time) {
+	if r == nil {
+		return 0, time.Time{}
+	}
+	if ns := r.lastMessage.Load(); ns > 0 {
+		last = time.Unix(0, ns).UTC()
+	}
+	return r.received.Load(), last
+}
+
 // senderTable keeps the most recent senders, evicting the one heard from
 // longest ago when full.
 type senderTable struct {
