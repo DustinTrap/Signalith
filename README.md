@@ -95,6 +95,14 @@ while the first command was still waiting for the step that loads OpenSearch's s
 settings, Signalith had not started yet and does not start by itself: https://localhost:8080
 doesn't answer. Run `docker compose -f deploy/docker/docker-compose.yml up -d` again then.
 
+Signalith stops within a few seconds when an update replaces it, and Docker stops it by
+force after 90 seconds at most. If the first command stays at `Container
+docker-signalith-1 Stopping` for longer than that, and `docker kill docker-signalith-1`
+doesn't help either, Docker itself is stuck, not Signalith. On Windows, quit Docker Desktop
+(right-click its icon by the clock, **Quit Docker Desktop**), run `wsl --shutdown` in
+PowerShell, start Docker Desktop again and run the first command again. Your data is kept.
+This happens most when the computer is short of memory: OpenSearch alone uses about 1.5 GB.
+
 #### Running a release, or building the image yourself
 
 The quick start runs the image GitHub builds from `main`, which matches the code `git pull`
