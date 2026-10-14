@@ -175,17 +175,20 @@
   <!-- Product tour -->
   <div class="wrap tour" id="tour">
     <div class="tour__tabs" role="tablist" aria-label="Signalith pages">
-      <button role="tab" id="t-findings" aria-controls="p-tour" aria-selected="true" data-shot="findings" data-cap="A triage queue for findings, ranked by urgency, with triage guidance, evidence and ATT&amp;CK techniques next to each one.">Findings</button>
+      <button role="tab" id="t-findings" aria-controls="p-tour" aria-selected="true" data-shot="findings" data-cap="A triage queue for findings, ranked by urgency, with triage guidance, evidence, ATT&amp;CK techniques and Investigate with AI next to each one.">Findings</button>
       <button role="tab" id="t-search" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="search" data-cap="Ask a question in plain English or write a pipe query. Results come back as tables, charts and events you can click to dig further.">Search</button>
       <button role="tab" id="t-dashboard" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="dashboard" data-cap="A security posture dashboard out of the box: open findings, triage speed, top risk and data health, compared with the previous period.">Dashboards</button>
+      <button role="tab" id="t-detections" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="detections" data-cap="Thousands of tested SigmaHQ and Splunk rules ship with Signalith, off until you turn them on, next to your own detections.">Detections</button>
       <button role="tab" id="t-investigation" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="investigation" data-cap="Investigation cases gather findings, notes, saved searches and pinned events on one timeline, with the users, hosts and IPs involved.">Investigations</button>
+      <button role="tab" id="t-endpoints" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="endpoints" data-cap="Every host running osquery, with its failing configuration checks, file changes and inventory, and whether its log agent is sending.">Endpoints</button>
+      <button role="tab" id="t-vulnerabilities" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="vulnerabilities" data-cap="Nmap scans matched to CVEs from the National Vulnerability Database, with the ones attackers are known to use first.">Vulnerabilities</button>
+      <button role="tab" id="t-malware" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="malware" data-cap="Antivirus logs from Defender, ClamAV and syslog products in one place: what was found, what the antivirus did, and where protection is off.">Malware</button>
       <button role="tab" id="t-intel" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="intel" data-cap="Add free threat intel feeds from a catalog, any list or STIX file, or a TAXII 2.1 server, and match every event against them.">Threat intel</button>
-      <button role="tab" id="t-security" aria-controls="p-tour" aria-selected="false" tabindex="-1" data-shot="security" data-cap="The Security page checks how your server is set up, what is encrypted and what to fix first, in plain words.">Security</button>
     </div>
     <figure class="frame" id="p-tour" role="tabpanel" aria-labelledby="t-findings">
       <div class="frame__bar" aria-hidden="true"><i></i><i></i><i></i><span>https://signalith.corp.example:8080</span></div>
       <img class="frame__img" src="assets/shots/findings.webp" srcset="assets/shots/findings-720.webp 720w, assets/shots/findings.webp 1440w" sizes="(max-width: 1200px) 100vw, 1140px" width="1440" height="900" alt="The Signalith Findings page: a queue of findings with severity, status and owner, and an inspector panel for the selected finding." data-tour-img>
-      <figcaption data-tour-cap>A triage queue for findings, ranked by urgency, with triage guidance, evidence and ATT&amp;CK techniques next to each one.</figcaption>
+      <figcaption data-tour-cap>A triage queue for findings, ranked by urgency, with triage guidance, evidence, ATT&amp;CK techniques and Investigate with AI next to each one.</figcaption>
     </figure>
   </div>
 </section>
