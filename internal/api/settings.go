@@ -694,6 +694,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if p := s.settingsPending(); p != nil {
+		view["shared_pending"] = p
+	}
 	writeJSON(w, http.StatusOK, view)
 }
 

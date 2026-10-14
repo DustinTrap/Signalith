@@ -197,6 +197,11 @@ func (s *Server) decorateShared(view map[string]any, sh *config.Shared, nc *shar
 		}
 	}
 	self, _ := s.serverNamed("")
+	migrated := []shared.MigratedValue{}
+	if nc != nil && nc.Migrated != nil {
+		migrated = nc.Migrated
+	}
+	view["migrated"] = migrated
 	view["shared"] = true
 	view["server"] = self
 	view["servers"] = servers
@@ -335,6 +340,30 @@ func (s *Server) otherServerView(ctx context.Context, sv sharedServer) (map[stri
 		"problems":  []string{},
 		"warnings":  []string{},
 	}, nil
+}
+
+// settingsPending returns why a member of a cluster does not share its
+// settings yet, as usersPending does for the users: the servers whose
+// version cannot read them, or none while the server that founded the
+// cluster has not brought its settings in. nil on a server that shares
+// them, or that is no member.
+func (s *Server) settingsPending() *sharedPending {
+	if s.settingsShared() || !s.sharedContent() {
+		return nil
+	}
+	out := &sharedPending{Version: s.Version, Servers: []pendingServer{}}
+	if s.Cluster == nil {
+		return out
+	}
+	for _, sv := range s.Cluster.Status().Servers {
+		if sv.Self || sv.SeenAgo != nil && *sv.SeenAgo >= shared.LevelSeen {
+			continue
+		}
+		if sv.Detail == nil || max(sv.Detail.LevelMax, 1) < shared.LevelSharedSettings {
+			out.Servers = append(out.Servers, pendingServer{Name: sv.Name, Version: sv.Version})
+		}
+	}
+	return out
 }
 
 // rawValue is a value as JSON for the page; nil for none.
