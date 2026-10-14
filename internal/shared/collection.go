@@ -1,0 +1,514 @@
+package shared
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/jrsamsanchez/signalith/internal/store"
+)
+
+// Collection is a list of shared items that grows, such as users or
+// detections: one document per item, <kind>:<name>, of body type T (which
+// embeds Extra). List and Get read memory. Every write ends with a bump
+// of the collection's watch document, so the other servers list it again
+// within one poll.
+//
+// A deleted item is kept as a signed tombstone (deleted, empty body) for
+// 30 days, so a server can tell a deletion from an item someone removed
+// in OpenSearch: an item that disappears without a tombstone is kept from
+// memory and reported as tampered with.
+type Collection[T any] struct {
+	h      *Hub
+	kind   string
+	watch  string
+	format int
+	// Validate, when set, checks an item's body read or about to be
+	// written; an item it refuses is not used.
+	Validate func(*T) error
+
+	// wmu lets one write of this server's run at a time (see Doc).
+	wmu   sync.Mutex
+	mu    sync.Mutex
+	items map[string]*entry
+	gens  map[string]uint64
+	subs  []func()
+}
+
+// NewCollection returns the collection of items of kind, up to format,
+// whose watch document is watch:<watch>, and tracks it on h.
+func NewCollection[T any](h *Hub, kind, watch string, format int) *Collection[T] {
+	c := &Collection[T]{h: h, kind: kind, watch: "watch:" + watch, format: format, items: map[string]*entry{}, gens: map[string]uint64{}}
+	h.trackCollection(c)
+	return c
+}
+
+func (c *Collection[T]) watchID() string { return c.watch }
+
+// ItemID returns the document id of the item name.
+func (c *Collection[T]) ItemID(name string) string { return c.kind + ":" + name }
+
+func (c *Collection[T]) owns(id string) bool {
+	_, ok := itemName(c.kind, id)
+	return ok
+}
+
+// Item is one item of a collection as List returns it.
+type Item[T any] struct {
+	Name      string
+	Value     *T
+	ETag      string
+	UpdatedBy By
+	UpdatedAt string
+}
+
+// List returns copies of the items, by name.
+func (c *Collection[T]) List() []Item[T] {
+	c.mu.Lock()
+	var out []Item[T]
+	for id, e := range c.items {
+		if e.env.Deleted {
+			continue
+		}
+		name, _ := itemName(c.kind, id)
+		out = append(out, Item[T]{Name: name, ETag: e.ver.String(), UpdatedBy: e.env.UpdatedBy, UpdatedAt: e.env.UpdatedAt, Value: nil})
+		out[len(out)-1].Value, _ = decodeBody[T](e.env.Body)
+	}
+	c.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Get returns a copy of the item name and its ETag.
+func (c *Collection[T]) Get(name string) (*T, string, bool) {
+	c.mu.Lock()
+	e := c.items[c.ItemID(name)]
+	c.mu.Unlock()
+	if e == nil || e.env.Deleted {
+		return nil, "", false
+	}
+	v, err := decodeBody[T](e.env.Body)
+	if err != nil {
+		return nil, "", false
+	}
+	return v, e.ver.String(), true
+}
+
+// OnChange adds a function called whenever items were added, changed or
+// removed.
+func (c *Collection[T]) OnChange(fn func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subs = append(c.subs, fn)
+}
+
+func (c *Collection[T]) notify() {
+	c.mu.Lock()
+	subs := append([]func(){}, c.subs...)
+	c.mu.Unlock()
+	for _, fn := range subs {
+		fn()
+	}
+}
+
+// check checks a copy of item id read from OpenSearch.
+func (c *Collection[T]) check(id string, src json.RawMessage) (*Envelope, *Problem) {
+	e, p := c.h.open(id, c.kind, c.format, src)
+	if p == nil && !e.Deleted {
+		v, err := decodeBody[T](e.Body)
+		if err == nil && c.Validate != nil {
+			err = c.Validate(v)
+		}
+		if err != nil {
+			p = &Problem{Kind: ProblemInvalid, Reason: err.Error()}
+		}
+	}
+	return e, p
+}
+
+// apply uses a copy of an item read from OpenSearch when it passes its
+// checks and nothing was applied to that item since gen. It reports
+// whether the copy was put in use.
+func (c *Collection[T]) apply(d store.Doc, gen uint64) bool {
+	e, p := c.check(d.ID, d.Source)
+	c.mu.Lock()
+	cur := c.items[d.ID]
+	if c.gens[d.ID] != gen || cur != nil && cur.ver.Same(d.Version) {
+		c.mu.Unlock()
+		return false
+	}
+	if p == nil {
+		p = c.h.checkRev(d.ID, e.Rev)
+	}
+	if p != nil {
+		c.h.report(d.ID, p, d.Version)
+		c.mu.Unlock()
+		return false
+	}
+	changed := c.setLocked(d.ID, &entry{env: *e, src: d.Source, ver: d.Version})
+	c.mu.Unlock()
+	if changed != nil {
+		changed()
+	}
+	return true
+}
+
+// set puts this server's own write of item id in use, unless a later
+// revision was applied meanwhile.
+func (c *Collection[T]) set(id string, e *entry) {
+	c.mu.Lock()
+	if cur := c.items[id]; cur != nil && cur.env.Rev > e.env.Rev {
+		c.mu.Unlock()
+		return
+	}
+	changed := c.setLocked(id, e)
+	c.mu.Unlock()
+	if changed != nil {
+		changed()
+	}
+}
+
+// setLocked puts an entry in use; the caller holds c.mu and calls the
+// function returned, if any, once it let go.
+func (c *Collection[T]) setLocked(id string, e *entry) func() {
+	c.items[id] = e
+	c.gens[id]++
+	return c.h.fine(id, e.env.Rev)
+}
+
+func (c *Collection[T]) restore(d store.Doc) {
+	c.mu.Lock()
+	g := c.gens[d.ID]
+	c.mu.Unlock()
+	if c.apply(d, g) {
+		c.notify()
+	}
+}
+
+// reload lists the collection and reads the items that changed.
+func (c *Collection[T]) reload(ctx context.Context) error {
+	cl, _ := c.h.target()
+	index := c.h.index()
+	// What changes during the listing is not judged by it.
+	c.mu.Lock()
+	gens := maps.Clone(c.gens)
+	c.mu.Unlock()
+	listed, err := cl.SearchVersions(ctx, index, map[string]any{"term": map[string]any{"kind": c.kind}})
+	if err != nil {
+		return err
+	}
+	present := map[string]bool{}
+	var fetch []store.Ref
+	c.mu.Lock()
+	for _, d := range listed {
+		if !c.owns(d.ID) {
+			continue
+		}
+		present[d.ID] = true
+		if cur := c.items[d.ID]; cur == nil || !cur.ver.Same(d.Version) {
+			fetch = append(fetch, store.Ref{Index: index, ID: d.ID})
+		}
+	}
+	for id, e := range c.items {
+		if present[id] || gens[id] != c.gens[id] {
+			continue
+		}
+		if e.env.Deleted {
+			// A tombstone housekeeping removed.
+			delete(c.items, id)
+			c.gens[id]++
+			continue
+		}
+		c.h.report(id, &Problem{Kind: ProblemTamper, Reason: "it was removed in OpenSearch outside Signalith"}, store.Version{})
+	}
+	c.mu.Unlock()
+	docs, err := cl.MGet(ctx, fetch)
+	if err != nil {
+		return err
+	}
+	changed := false
+	for _, d := range docs {
+		if d.Found && c.apply(d, gens[d.ID]) {
+			changed = true
+		}
+	}
+	if changed {
+		c.notify()
+	}
+	return nil
+}
+
+// usable returns the item to build a write on.
+func (c *Collection[T]) usable(id string) (*entry, error) {
+	if p := c.h.problemOf(id); p != nil {
+		return nil, &ProblemError{Problem: *p}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.items[id], nil
+}
+
+// envelope makes the signed envelope of an item's new revision; v nil is
+// a tombstone.
+func (c *Collection[T]) envelope(id string, base *entry, by string, v *T) (*Envelope, error) {
+	e := &Envelope{Kind: c.kind, ID: id, Format: c.format, Rev: 1, UpdatedAt: c.h.now(),
+		UpdatedBy: By{User: by, Node: c.h.opts.NodeName}}
+	if v == nil {
+		e.Deleted = true
+	} else {
+		if c.Validate != nil {
+			if err := c.Validate(v); err != nil {
+				return nil, err
+			}
+		}
+		body, err := encodeBody(v)
+		if err != nil {
+			return nil, err
+		}
+		e.Body = body
+	}
+	if base != nil {
+		e.Rev, e.Extra = base.env.Rev+1, base.env.Extra
+	}
+	k := c.h.Keys().Active()
+	if k == nil {
+		return nil, errors.New("this server has no cluster key")
+	}
+	return e, Sign(k, id, e)
+}
+
+// write writes e over base (create when base is nil), applies it, and
+// bumps the watch document. It returns the _seq_no for the page's token.
+func (c *Collection[T]) write(ctx context.Context, id string, base *entry, e *Envelope) (int64, error) {
+	cl, _ := c.h.target()
+	var ver store.Version
+	var err error
+	if base == nil {
+		ver, err = cl.Create(ctx, c.h.index(), id, e, true)
+	} else {
+		ver, err = cl.PutIf(ctx, c.h.index(), id, e, base.ver, true)
+	}
+	if err != nil {
+		return 0, err
+	}
+	src, _ := json.Marshal(e)
+	c.set(id, &entry{env: *e, src: src, ver: ver})
+	c.notify()
+	seq, err := c.h.bump(ctx, c.watch)
+	if err != nil {
+		// Saved: the others find it at their next full listing.
+		c.h.log.Warn("saved, but the other servers may not see it for up to 5 minutes", "doc", id, "err", err)
+		return ver.SeqNo, nil
+	}
+	return seq, nil
+}
+
+// Create adds the item name: store.ErrExists when there is one. An item
+// deleted earlier (a tombstone) is written over.
+func (c *Collection[T]) Create(ctx context.Context, by, name string, v *T) (int64, error) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	id := c.ItemID(name)
+	base, err := c.usable(id)
+	if err != nil {
+		return 0, err
+	}
+	if base != nil && !base.env.Deleted {
+		return 0, store.ErrExists
+	}
+	e, err := c.envelope(id, base, by, v)
+	if err != nil {
+		return 0, err
+	}
+	seq, err := c.write(ctx, id, base, e)
+	if err == nil || base != nil || !errors.Is(err, store.ErrExists) {
+		if errors.Is(err, store.ErrConflict) {
+			return 0, store.ErrExists
+		}
+		return seq, err
+	}
+	// There is a copy this server has not read: a tombstone may be
+	// written over.
+	if err := c.readOne(ctx, id); err != nil {
+		return 0, err
+	}
+	if base, err = c.usable(id); err != nil {
+		return 0, err
+	}
+	if base == nil || !base.env.Deleted {
+		return 0, store.ErrExists
+	}
+	if e, err = c.envelope(id, base, by, v); err != nil {
+		return 0, err
+	}
+	seq, err = c.write(ctx, id, base, e)
+	if errors.Is(err, store.ErrConflict) {
+		return 0, store.ErrExists
+	}
+	return seq, err
+}
+
+// readOne reads item id now.
+func (c *Collection[T]) readOne(ctx context.Context, id string) error {
+	cl, _ := c.h.target()
+	c.mu.Lock()
+	g := c.gens[id]
+	c.mu.Unlock()
+	src, ver, found, err := cl.Get(ctx, c.h.index(), id)
+	if err != nil || !found {
+		return err
+	}
+	if c.apply(store.Doc{Ref: store.Ref{Index: c.h.index(), ID: id}, Found: true, Version: ver, Source: src}, g) {
+		c.notify()
+	}
+	return nil
+}
+
+// SaveIf replaces the item name, read at etag: a *StaleError when it
+// changed since, store.ErrNotFound when it is not there.
+func (c *Collection[T]) SaveIf(ctx context.Context, by, name string, v *T, etag string) (int64, error) {
+	return c.replace(ctx, by, name, v, etag)
+}
+
+// Delete deletes the item name, read at etag, leaving a signed
+// tombstone.
+func (c *Collection[T]) Delete(ctx context.Context, by, name, etag string) (int64, error) {
+	return c.replace(ctx, by, name, nil, etag)
+}
+
+func (c *Collection[T]) replace(ctx context.Context, by, name string, v *T, etag string) (int64, error) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	id := c.ItemID(name)
+	base, err := c.usable(id)
+	if err != nil {
+		return 0, err
+	}
+	if base == nil || base.ver.String() != etag {
+		if err := c.readOne(ctx, id); err != nil {
+			return 0, err
+		}
+		if base, err = c.usable(id); err != nil {
+			return 0, err
+		}
+	}
+	if base == nil || base.env.Deleted {
+		return 0, store.ErrNotFound
+	}
+	if base.ver.String() != etag {
+		return 0, &StaleError{By: base.env.UpdatedBy.User, Node: base.env.UpdatedBy.Node, At: base.env.UpdatedAt}
+	}
+	e, err := c.envelope(id, base, by, v)
+	if err != nil {
+		return 0, err
+	}
+	seq, err := c.write(ctx, id, base, e)
+	if errors.Is(err, store.ErrConflict) {
+		_ = c.readOne(ctx, id)
+		c.mu.Lock()
+		cur := c.items[id]
+		c.mu.Unlock()
+		if cur == nil {
+			return 0, &StaleError{}
+		}
+		return 0, &StaleError{By: cur.env.UpdatedBy.User, Node: cur.env.UpdatedBy.Node, At: cur.env.UpdatedAt}
+	}
+	return seq, err
+}
+
+// TombstoneAge is how long a deleted item's tombstone is kept.
+const TombstoneAge = 30 * 24 * time.Hour
+
+// Housekeep removes the tombstones older than TombstoneAge at now, then
+// bumps the watch document. It returns how many it removed and the
+// bump's _seq_no (0 when none was removed).
+func (c *Collection[T]) Housekeep(ctx context.Context, now time.Time) (int, int64, error) {
+	type old struct {
+		id  string
+		ver store.Version
+	}
+	var list []old
+	c.mu.Lock()
+	for id, e := range c.items {
+		if !e.env.Deleted {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, e.env.UpdatedAt)
+		if err == nil && now.Sub(at) > TombstoneAge {
+			list = append(list, old{id, e.ver})
+		}
+	}
+	c.mu.Unlock()
+	cl, _ := c.h.target()
+	n := 0
+	var errs []error
+	for _, o := range list {
+		err := cl.DeleteIf(ctx, c.h.index(), o.id, o.ver, true)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("%s: %w", o.id, err))
+			continue
+		}
+		c.mu.Lock()
+		delete(c.items, o.id)
+		c.gens[o.id]++
+		c.mu.Unlock()
+		n++
+	}
+	if n == 0 {
+		return 0, 0, errors.Join(errs...)
+	}
+	seq, err := c.h.bump(ctx, c.watch)
+	return n, seq, errors.Join(append(errs, err)...)
+}
+
+func (c *Collection[T]) cached() []CacheDoc {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []CacheDoc
+	for id, e := range c.items {
+		out = append(out, e.cacheDoc(id))
+	}
+	return out
+}
+
+// acceptRestore signs every item now in OpenSearch whose MAC verifies
+// again at rev.
+func (c *Collection[T]) acceptRestore(ctx context.Context, rev int64, by string) error {
+	cl, _ := c.h.target()
+	index := c.h.index()
+	listed, err := cl.SearchDocs(ctx, index, map[string]any{"term": map[string]any{"kind": c.kind}})
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, d := range listed {
+		if !c.owns(d.ID) {
+			continue
+		}
+		e, p := c.h.open(d.ID, c.kind, c.format, d.Source)
+		if p != nil {
+			continue
+		}
+		e.Rev, e.UpdatedAt, e.UpdatedBy = rev, c.h.now(), By{User: by, Node: c.h.opts.NodeName}
+		if err := Sign(c.h.Keys().Active(), d.ID, e); err != nil {
+			return err
+		}
+		nv, err := cl.PutIf(ctx, index, d.ID, e, d.Version, true)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", d.ID, err))
+			continue
+		}
+		src, _ := json.Marshal(e)
+		c.set(d.ID, &entry{env: *e, src: src, ver: nv})
+	}
+	if _, err := c.h.bump(ctx, c.watch); err != nil {
+		errs = append(errs, err)
+	}
+	c.notify()
+	return errors.Join(errs...)
+}

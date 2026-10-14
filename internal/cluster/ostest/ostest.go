@@ -10,7 +10,8 @@
 //   - PUT and GET /_index_template/<name> (GET answers the template as it
 //     was put, which real OpenSearch words its own way);
 //   - PUT /<index>/_settings (recorded, see Settings) and GET
-//     /<index>/_settings (as created, with those changes);
+//     /<index>/_settings (as created, with those changes, and the
+//     index's uuid and creation_date, new each time it is created);
 //   - GET, PUT and DELETE /<index>/_doc/<id>, PUT /<index>/_create/<id>,
 //     POST /<index>/_update/<id> (each with if_seq_no and if_primary_term);
 //   - POST /_mget;
@@ -82,6 +83,8 @@ type Server struct {
 	fault       func(method, path string) *Fault
 	requests    []string
 	autoID      int
+	// uuids counts the indices made, for their uuids.
+	uuids int
 	// security, when set, is the account every request must sign in as
 	// (see Secure).
 	security *Account
@@ -121,6 +124,7 @@ type index struct {
 	docs    map[string]*doc
 	seq     int64
 	created time.Time
+	uuid    string
 }
 
 type doc struct {
@@ -281,6 +285,22 @@ func (s *Server) Put(indexName, id string, source map[string]any) {
 	s.put(s.ensure(indexName), id, clone(source))
 }
 
+// Reserialize writes a document's source again with one more field, as
+// an _update that adds an unsigned field does: OpenSearch parses the
+// source and writes it out in its own way, with a new _seq_no. Nothing
+// happens when the document does not exist.
+func (s *Server) Reserialize(indexName, id, field string, value any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ix := s.indices[indexName]
+	if ix == nil || ix.docs[id] == nil {
+		return
+	}
+	src := clone(ix.docs[id].source)
+	src[field] = value
+	s.put(ix, id, clone(src))
+}
+
 // Delete deletes a document directly.
 func (s *Server) Delete(indexName, id string) {
 	s.mu.Lock()
@@ -325,7 +345,9 @@ func (s *Server) now() time.Time {
 func (s *Server) ensure(name string) *index {
 	ix := s.indices[name]
 	if ix == nil {
-		ix = &index{name: name, docs: map[string]*doc{}, seq: -1, created: s.now(), body: s.templateFor(name)}
+		s.uuids++
+		ix = &index{name: name, docs: map[string]*doc{}, seq: -1, created: s.now(), body: s.templateFor(name),
+			uuid: fmt.Sprintf("ostest-%s-%d", name, s.uuids)}
 		s.indices[name] = ix
 	}
 	return ix
@@ -524,6 +546,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request, p string, body [
 		var flat map[string]any
 		if ix != nil {
 			flat = indexSettings(ix.body, s.settings[parts[0]])
+			flat["uuid"] = ix.uuid
+			flat["creation_date"] = strconv.FormatInt(ix.created.UnixMilli(), 10)
 		}
 		s.mu.Unlock()
 		if ix == nil {
