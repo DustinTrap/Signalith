@@ -134,7 +134,7 @@ if (floor) {
 }
 
 // Reveal on scroll ------------------------------------------------------------
-const revealables = document.querySelectorAll('.section__head, .card, .split > *, .flow, .built, .start, .facts__in > div');
+const revealables = document.querySelectorAll('.section__head, .card, .soon__item, .split > *, .flow, .built, .start, .facts__in > div');
 if ('IntersectionObserver' in window && !reduced) {
   const io = new IntersectionObserver((entries) => entries.forEach((e) => {
     if (e.isIntersecting) { e.target.classList.add('is-in'); io.unobserve(e.target); }
