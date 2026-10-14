@@ -86,6 +86,15 @@ func compareQuery(c *query.Compare) (map[string]any, error) {
 		return equalsQuery(c.Field, c.Value), nil
 	case "!=":
 		return boolQuery("must_not", []any{equalsQuery(c.Field, c.Value)}), nil
+	case "=~":
+		if c.Field == RawField || c.Field == "_time" {
+			return nil, fmt.Errorf("a regular expression (=~) needs a field other than %s", c.Field)
+		}
+		re, err := ParseRegex(c.Value)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"regexp": map[string]any{c.Field: map[string]any{"value": re.Lucene}}}, nil
 	case "<", "<=", ">", ">=":
 		key := map[string]string{"<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}[c.Op]
 		var v any = c.Value
@@ -105,7 +114,7 @@ func compareQuery(c *query.Compare) (map[string]any, error) {
 // WildcardFields are the fields the index template maps as OpenSearch
 // wildcard fields (ingest.IndexTemplate): long text, such as a PowerShell
 // script block, searched for words inside it.
-var WildcardFields = map[string]bool{"script_block_text": true, "task_content": true}
+var WildcardFields = map[string]bool{"script_block_text": true, "task_content": true, "ad_value": true}
 
 func equalsQuery(field, value string) map[string]any {
 	if field == "_time" {
@@ -142,12 +151,15 @@ func equalsQuery(field, value string) map[string]any {
 
 // cidrQuery matches an IPv4 range such as 10.0.0.0/8 against a field that
 // stores addresses as text. The range becomes at most 128 prefix patterns
-// ("10.*", "10.0.4.*") or, below /24, exact addresses. IPv6 ranges are not
-// expanded and match as plain text.
+// ("10.*", "10.0.4.*") or, below /24, exact addresses. An IPv6 range is
+// a regular expression for its addresses' text (see ipv6RangePattern).
 func cidrQuery(field, value string) (map[string]any, bool) {
 	p, err := netip.ParsePrefix(value)
-	if err != nil || !p.Addr().Is4() {
+	if err != nil {
 		return nil, false
+	}
+	if !p.Addr().Is4() {
+		return ipv6Query(field, p)
 	}
 	p = p.Masked()
 	bits := p.Bits()
@@ -177,6 +189,24 @@ func cidrQuery(field, value string) (map[string]any, bool) {
 		return qs[0].(map[string]any), true
 	}
 	return map[string]any{"bool": map[string]any{"should": qs, "minimum_should_match": 1}}, true
+}
+
+// ipv6Query matches an IPv6 range against a field that stores addresses
+// as text.
+func ipv6Query(field string, p netip.Prefix) (map[string]any, bool) {
+	p = p.Masked()
+	if p.Bits() == 0 {
+		return map[string]any{"exists": map[string]any{"field": field}}, true
+	}
+	pat, err := ipv6RangePattern(p)
+	if err != nil {
+		return nil, false
+	}
+	re, err := ParseRegex(pat)
+	if err != nil {
+		return nil, false
+	}
+	return map[string]any{"regexp": map[string]any{field: map[string]any{"value": re.Lucene}}}, true
 }
 
 var queryStringReserved = regexp.MustCompile(`[+\-=&|><!(){}\[\]^"~:\\/]`)
@@ -388,4 +418,37 @@ func WildcardFieldTerms(e query.Expr) int {
 		return n
 	}
 	return 0
+}
+
+// Clauses estimates the clauses OpenSearch counts against its limit of
+// 1024 (indices.query.bool.max_clause_count) for a search: each query the
+// search compiles to, plus the pieces a wildcard field's patterns are
+// split into (WildcardFieldTerms).
+func Clauses(e query.Expr) (int, error) {
+	q, err := compileExpr(e)
+	if err != nil {
+		return 0, err
+	}
+	var count func(v any) int
+	count = func(v any) int {
+		switch x := v.(type) {
+		case []any:
+			n := 0
+			for _, c := range x {
+				n += count(c)
+			}
+			return n
+		case map[string]any:
+			if b, ok := x["bool"].(map[string]any); ok {
+				n := 0
+				for _, k := range []string{"filter", "must", "should", "must_not"} {
+					n += count(b[k])
+				}
+				return n
+			}
+			return 1
+		}
+		return 0
+	}
+	return count(q) + WildcardFieldTerms(e), nil
 }

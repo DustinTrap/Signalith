@@ -79,6 +79,8 @@ func parseWindowsWith(r map[string]any, named map[string]string) Event {
 	switch {
 	case channel == "Security":
 		parseWindowsSecurity(eventID, in, &ev)
+	case channel == SystemChannel:
+		parseWindowsSystem(eventID, str(r, "ProviderName"), in, &ev)
 	case strings.EqualFold(channel, "Microsoft-Windows-Sysmon/Operational"):
 		kv := keyValues(str(r, "Message"))
 		for k, v := range named {
@@ -119,6 +121,7 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 		f["app"] = "win:local"
 		f["user"] = at(in, 5)
 		f["user_domain"] = at(in, 6)
+		f["user_sid"] = at(in, 4)
 		if eventID == "4624" {
 			f["action"] = "success"
 			f["signature"] = "An account was successfully logged on"
@@ -127,6 +130,9 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 			f["src_port"] = atoi(at(in, 19))
 			f["src_host"] = at(in, 11)
 			f["authentication_method"] = strings.TrimSpace(at(in, 10))
+			f["logon_process"] = strings.TrimSpace(at(in, 9))
+			f["process_path"] = at(in, 17)
+			f["process_name"] = baseName(at(in, 17))
 		} else {
 			f["action"] = "failure"
 			f["signature"] = "An account failed to log on"
@@ -135,6 +141,9 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 			f["src_port"] = atoi(at(in, 20))
 			f["src_host"] = at(in, 13)
 			f["authentication_method"] = strings.TrimSpace(at(in, 12))
+			f["logon_process"] = strings.TrimSpace(at(in, 11))
+			f["process_path"] = at(in, 18)
+			f["process_name"] = baseName(at(in, 18))
 			sub := strings.ToLower(at(in, 9))
 			if reason, ok := windowsFailureReasons[sub]; ok {
 				f["reason"] = reason
@@ -147,6 +156,49 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 				f["logon_type_name"] = name
 			}
 		}
+	case "4648":
+		// A logon with explicit credentials (runas, or a program passing
+		// another account's password): the account that acted is
+		// src_user, the one it used user, on the server it named.
+		ev.Model = "Authentication"
+		f["app"] = "win:local"
+		f["signature"] = "A logon was attempted using explicit credentials"
+		f["user_sid"] = at(in, 0)
+		f["src_user"] = at(in, 1)
+		f["src_user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["user"] = at(in, 5)
+		f["user_domain"] = at(in, 6)
+		f["dest"] = at(in, 8)
+		f["target_info"] = at(in, 9)
+		f["process_id"] = atoi(at(in, 10))
+		f["process_path"] = at(in, 11)
+		f["process_name"] = baseName(at(in, 11))
+		f["src"] = at(in, 12)
+		f["src_port"] = atoi(at(in, 13))
+	case "5156", "5157":
+		// A connection the Windows Filtering Platform allowed (5156) or
+		// blocked (5157), with Audit Filtering Platform Connection on.
+		// The program is a device path (\device\harddiskvolume2\...).
+		ev.Model = "Network_Traffic"
+		f["action"] = map[string]string{"5156": "allowed", "5157": "blocked"}[eventID]
+		f["signature"] = map[string]string{
+			"5156": "The Windows Filtering Platform has permitted a connection",
+			"5157": "The Windows Filtering Platform has blocked a connection",
+		}[eventID]
+		f["process_id"] = atoi(at(in, 0))
+		f["process_path"] = at(in, 1)
+		f["process_name"] = baseName(at(in, 1))
+		// %%14592 is inbound, %%14593 outbound.
+		f["direction"] = map[string]string{"%%14592": "inbound", "%%14593": "outbound"}[at(in, 2)]
+		f["src"] = at(in, 3)
+		f["src_port"] = atoi(at(in, 4))
+		f["dest"] = at(in, 5)
+		f["dest_port"] = atoi(at(in, 6))
+		f["transport"] = map[string]string{"1": "icmp", "6": "tcp", "17": "udp", "58": "icmp"}[at(in, 7)]
+		f["filter_rtid"] = at(in, 8)
+		f["layer_name"] = at(in, 9)
+		f["layer_rtid"] = at(in, 10)
 	case "4688":
 		ev.Model = "Endpoint"
 		f["action"] = "allowed"
@@ -181,22 +233,56 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 		f["task_content"] = at(in, 5)
 		f["task_command"] = taskElement(at(in, 5), "Command")
 		f["task_arguments"] = taskElement(at(in, 5), "Arguments")
-	case "4663":
-		// An access to an object whose audit rule (SACL) asks for it: a
-		// file goes to Filesystem and a registry key to Registry.
-		f["signature"] = "An attempt was made to access an object"
+	case "4697":
+		// A service installed, as the Security log records it (with
+		// Audit Security System Extension on): the same as System 7045,
+		// with who installed it, and the type and start type as numbers.
+		ev.Model = "Change"
+		f["action"] = "created"
+		f["object_category"] = "service"
+		f["signature"] = "A service was installed in the system"
 		f["user"] = at(in, 1)
 		f["user_domain"] = at(in, 2)
 		f["logon_id"] = at(in, 3)
+		f["object"] = at(in, 4)
+		f["service_name"] = at(in, 4)
+		f["service_path"] = at(in, 5)
+		f["service_type"] = at(in, 6)
+		f["service_start_type"] = at(in, 7)
+		f["service_account"] = at(in, 8)
+	case "4656", "4661", "4663":
+		// A handle to an object asked for (4656, or 4661 for a directory or
+		// SAM object) or an access to it (4663), when its audit rule (SACL)
+		// asks for it: a file goes to Filesystem and a registry key to
+		// Registry. The three share the subject and object, then differ.
+		f["signature"] = map[string]string{
+			"4656": "A handle to an object was requested",
+			"4661": "A handle to an object was requested",
+			"4663": "An attempt was made to access an object",
+		}[eventID]
+		f["user_sid"] = at(in, 0)
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["object_server"] = at(in, 4)
 		f["object_type"] = at(in, 5)
 		name := at(in, 6)
 		f["object_path"] = name
 		f["object_name"] = baseName(name)
-		f["access_list"] = strings.Join(strings.Fields(at(in, 8)), " ")
-		f["access_mask"] = at(in, 9)
-		f["process_id"] = atoi(at(in, 10))
-		f["process_path"] = at(in, 11)
-		f["process_name"] = baseName(at(in, 11))
+		list, mask, pid, proc := at(in, 8), at(in, 9), at(in, 10), at(in, 11)
+		switch eventID {
+		case "4656":
+			list, mask, pid, proc = at(in, 9), at(in, 11), at(in, 14), at(in, 15)
+		case "4661":
+			list, mask, pid, proc = at(in, 9), at(in, 10), at(in, 14), at(in, 15)
+			f["object_properties"] = strings.Join(strings.Fields(at(in, 12)), " ")
+		}
+		f["access_list"] = strings.Join(strings.Fields(list), " ")
+		f["access_mask"] = mask
+		f["process_id"] = atoi(pid)
+		f["process_path"] = proc
+		f["process_name"] = baseName(proc)
+		f["access_names"] = accessNames(f["access_list"].(string))
 		f["action"] = objectAccessAction(f["access_list"].(string))
 		switch at(in, 5) {
 		case "File":
@@ -208,37 +294,305 @@ func parseWindowsSecurity(eventID string, in []string, ev *Event) {
 			f["registry_path"] = name
 			f["registry_key_name"] = baseName(name)
 		}
-	case "4720", "4726":
+	case "4657":
+		// A registry value changed, when the key's audit rule asks for it:
+		// the key, the value's name and its old and new data.
+		ev.Model = "Registry"
+		f["signature"] = "A registry value was modified"
+		f["user_sid"] = at(in, 0)
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		key, value := at(in, 4), at(in, 5)
+		f["object_path"] = key
+		f["registry_path"] = key + `\` + value
+		f["registry_key_name"] = baseName(key)
+		f["registry_value_name"] = value
+		// %%1904 is a value created, %%1905 changed and %%1906 deleted.
+		f["registry_operation"] = at(in, 7)
+		f["action"] = map[string]string{"%%1904": "created", "%%1906": "deleted"}[at(in, 7)]
+		if f["action"] == "" {
+			f["action"] = "modified"
+		}
+		f["registry_value_type"] = at(in, 10)
+		f["registry_old_value_data"] = at(in, 9)
+		f["registry_value_data"] = at(in, 11)
+		f["process_id"] = atoi(at(in, 12))
+		f["process_path"] = at(in, 13)
+		f["process_name"] = baseName(at(in, 13))
+	case "4662":
+		// An operation on an object a directory service or WMI audits
+		// (with Audit Directory Service Access on): reading a property,
+		// say, or a control access right such as replicating changes.
+		// Directory objects and classes are %{GUID}s, kept as recorded.
 		ev.Model = "Change"
-		f["object"] = at(in, 0)
+		f["signature"] = "An operation was performed on an object"
+		f["user_sid"] = at(in, 0)
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["object_server"] = at(in, 4)
+		f["object_category"] = "object"
+		if at(in, 4) == "DS" {
+			f["object_category"] = "directory_object"
+		}
+		f["object_type"] = at(in, 5)
+		f["object"] = at(in, 6)
+		f["access_list"] = strings.Join(strings.Fields(at(in, 9)), " ")
+		f["access_mask"] = at(in, 10)
+		f["access_names"] = accessNames(f["access_list"].(string))
+		f["object_properties"] = strings.Join(strings.Fields(at(in, 11)), " ")
+		f["action"] = objectAccessAction(f["access_list"].(string))
+	case "4768", "4769":
+		// A Kerberos ticket asked of a domain controller: a ticket-granting
+		// ticket (4768, a logon to the domain) or a service ticket (4769).
+		// Status 0x0 is granted, anything else a failure code. An IPv4
+		// client is recorded as ::ffff:a.b.c.d, stored as a.b.c.d.
+		ev.Model = "Authentication"
+		f["app"] = "win:kerberos"
+		f["authentication_method"] = "Kerberos"
+		f["user"] = at(in, 0)
+		f["user_domain"] = at(in, 1)
+		var status string
+		if eventID == "4768" {
+			f["signature"] = "A Kerberos authentication ticket (TGT) was requested"
+			f["user_sid"] = at(in, 2)
+			f["kerberos_service"] = at(in, 3)
+			f["kerberos_service_sid"] = at(in, 4)
+			f["ticket_options"] = at(in, 5)
+			status = at(in, 6)
+			f["ticket_encryption_type"] = at(in, 7)
+			f["pre_auth_type"] = at(in, 8)
+			f["src"] = strings.TrimPrefix(at(in, 9), "::ffff:")
+			f["src_port"] = atoi(at(in, 10))
+			f["cert_issuer"] = at(in, 11)
+			f["cert_serial"] = at(in, 12)
+			f["cert_thumbprint"] = at(in, 13)
+		} else {
+			f["signature"] = "A Kerberos service ticket was requested"
+			f["kerberos_service"] = at(in, 2)
+			f["kerberos_service_sid"] = at(in, 3)
+			f["ticket_options"] = at(in, 4)
+			f["ticket_encryption_type"] = at(in, 5)
+			f["src"] = strings.TrimPrefix(at(in, 6), "::ffff:")
+			f["src_port"] = atoi(at(in, 7))
+			status = at(in, 8)
+		}
+		f["kerberos_status"] = status
+		f["action"] = "failure"
+		if status == "0x0" {
+			f["action"] = "success"
+		}
+	case "5145":
+		// A file or named pipe on a network share, checked for the access
+		// a client asked for (with Audit Detailed File Share on). The
+		// path is relative to the share.
+		ev.Model = "Filesystem"
+		f["signature"] = "A network share object was checked to see whether client can be granted desired access"
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["object_type"] = at(in, 4)
+		f["src"] = at(in, 5)
+		f["src_port"] = atoi(at(in, 6))
+		f["share_name"] = at(in, 7)
+		f["share_path"] = at(in, 8)
+		f["share_target"] = at(in, 9)
+		f["file_path"] = at(in, 9)
+		f["file_name"] = baseName(at(in, 9))
+		f["access_mask"] = at(in, 10)
+		f["access_list"] = strings.Join(strings.Fields(at(in, 11)), " ")
+		f["access_names"] = accessNames(f["access_list"].(string))
+		f["action"] = objectAccessAction(f["access_list"].(string))
+	case "5136":
+		// A directory service object changed (with Audit Directory
+		// Service Changes on): one attribute value added or deleted.
+		ev.Model = "Change"
+		f["action"] = "modified"
+		f["object_category"] = "directory_object"
+		f["signature"] = "A directory service object was modified"
+		f["user"] = at(in, 3)
+		f["user_domain"] = at(in, 4)
+		f["logon_id"] = at(in, 5)
+		f["object"] = at(in, 8)
+		f["ad_object_guid"] = strings.Trim(at(in, 9), "{}")
+		f["ad_object_class"] = at(in, 10)
+		f["ad_attribute"] = at(in, 11)
+		f["ad_value"] = at(in, 13)
+		// %%14674 is a value added, %%14675 a value deleted.
+		f["ad_operation"] = at(in, 14)
+	case "4720", "4726", "4738":
+		// A user account created, deleted or changed: the account, then
+		// who did it, then (4720 and 4738) its attributes, "-" when a
+		// change left one as it was. 4738 starts with an unused value.
+		ev.Model = "Change"
 		f["object_category"] = "user"
-		f["user"] = at(in, 4)
-		f["action"] = map[string]string{"4720": "created", "4726": "deleted"}[eventID]
+		f["action"] = map[string]string{"4720": "created", "4726": "deleted", "4738": "modified"}[eventID]
 		f["signature"] = map[string]string{
 			"4720": "A user account was created",
 			"4726": "A user account was deleted",
+			"4738": "A user account was changed",
 		}[eventID]
+		if eventID == "4738" {
+			in = in[min(1, len(in)):]
+		}
+		f["object"] = at(in, 0)
+		f["object_domain"] = at(in, 1)
+		f["object_sid"] = at(in, 2)
+		f["user_sid"] = at(in, 3)
+		f["user"] = at(in, 4)
+		f["user_domain"] = at(in, 5)
+		f["logon_id"] = at(in, 6)
+		if eventID != "4726" {
+			f["sam_account_name"] = at(in, 8)
+			f["display_name"] = at(in, 9)
+			f["user_principal_name"] = at(in, 10)
+			f["primary_group_id"] = at(in, 18)
+			f["allowed_to_delegate_to"] = at(in, 19)
+			f["old_uac_value"] = at(in, 20)
+			f["new_uac_value"] = at(in, 21)
+			f["user_account_control"] = strings.Join(strings.Fields(at(in, 22)), " ")
+			f["sid_history"] = at(in, 24)
+		}
 	case "4728", "4732", "4756":
+		// A member added to a global (4728), local (4732) or universal
+		// (4756) security group.
 		ev.Model = "Change"
 		f["action"] = "modified"
 		f["object_category"] = "group"
 		f["signature"] = "A member was added to a security-enabled group"
 		f["member"] = at(in, 0)
+		f["member_sid"] = at(in, 1)
 		f["object"] = at(in, 2)
+		f["object_domain"] = at(in, 3)
+		f["object_sid"] = at(in, 4)
+		f["user_sid"] = at(in, 5)
 		f["user"] = at(in, 6)
+		f["user_domain"] = at(in, 7)
+		f["logon_id"] = at(in, 8)
+	case "4719":
+		// The audit policy changed: which subcategory and what was
+		// turned on or off (%%8448 success removed, %%8450 failure
+		// removed, %%8449 success added, %%8451 failure added).
+		ev.Model = "Change"
+		f["action"] = "modified"
+		f["object_category"] = "audit_policy"
+		f["signature"] = "System audit policy was changed"
+		f["user_sid"] = at(in, 0)
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["audit_category"] = at(in, 4)
+		f["audit_subcategory"] = at(in, 5)
+		f["object"] = at(in, 6)
+		f["audit_subcategory_guid"] = at(in, 6)
+		f["audit_policy_changes"] = strings.Join(strings.Fields(at(in, 7)), " ")
+	case "4706":
+		// A trust to a domain was created.
+		ev.Model = "Change"
+		f["action"] = "created"
+		f["object_category"] = "domain_trust"
+		f["signature"] = "A new trust was created to a domain"
+		f["object"] = at(in, 0)
+		f["object_sid"] = at(in, 1)
+		f["trust_type"] = at(in, 2)
+		f["trust_direction"] = at(in, 3)
+		f["trust_attributes"] = at(in, 4)
+		f["user_sid"] = at(in, 6)
+		f["user"] = at(in, 7)
+		f["user_domain"] = at(in, 8)
+		f["logon_id"] = at(in, 9)
+	case "4794":
+		// A domain controller's Directory Services Restore Mode
+		// administrator password was set.
+		ev.Model = "Change"
+		f["action"] = "modified"
+		f["object_category"] = "user"
+		f["object"] = "DSRM Administrator"
+		f["signature"] = "An attempt was made to set the Directory Services Restore Mode administrator password"
+		f["user_sid"] = at(in, 0)
+		f["user"] = at(in, 1)
+		f["user_domain"] = at(in, 2)
+		f["logon_id"] = at(in, 3)
+		f["src_host"] = at(in, 4)
 	}
 }
 
+// SystemChannel is the Windows System log, where the Service Control
+// Manager records services being installed.
+const SystemChannel = "System"
+
+// ServiceControlManager is the provider of the System log's service
+// events.
+const ServiceControlManager = "Service Control Manager"
+
+// parseWindowsSystem reads the System log events the parser knows: a
+// service installed (7045). Event IDs belong to their provider, so only
+// the Service Control Manager's 7045 is one; a record without a provider
+// is taken as its.
+func parseWindowsSystem(eventID, provider string, in []string, ev *Event) {
+	f := ev.Fields
+	if provider != "" {
+		f["provider"] = provider
+	}
+	if eventID != "7045" || (provider != "" && !strings.EqualFold(provider, ServiceControlManager)) {
+		return
+	}
+	f["provider"] = ServiceControlManager
+	ev.Model = "Change"
+	f["action"] = "created"
+	f["object_category"] = "service"
+	f["signature"] = "A service was installed in the system"
+	f["object"] = at(in, 0)
+	f["service_name"] = at(in, 0)
+	f["service_path"] = at(in, 1)
+	f["service_type"] = at(in, 2)
+	f["service_start_type"] = at(in, 3)
+	f["service_account"] = at(in, 4)
+}
+
+// accessRightNames are the names Windows shows for the access codes of
+// an object access's access list.
+var accessRightNames = map[string]string{
+	"%%7680": "CreateChild", "%%7681": "DeleteChild", "%%7682": "ListContents", "%%7683": "WriteSelf",
+	"%%7684": "ReadProperty", "%%7685": "WriteProperty", "%%7686": "DeleteTree", "%%7687": "ListObject",
+	"%%7688": "ControlAccess",
+	"%%1537": "DELETE", "%%1538": "READ_CONTROL", "%%1539": "WRITE_DAC", "%%1540": "WRITE_OWNER",
+	"%%1541": "SYNCHRONIZE", "%%1542": "ACCESS_SYS_SEC",
+	"%%4416": "ReadData", "%%4417": "WriteData", "%%4418": "AppendData", "%%4419": "ReadEA",
+	"%%4420": "WriteEA", "%%4421": "Execute", "%%4422": "DeleteChild", "%%4423": "ReadAttributes",
+	"%%4424": "WriteAttributes",
+}
+
+// accessNames is an access list followed by the names of its codes
+// (%%4417 WriteData), so a search finds an access by its code, as the
+// event records it, or by its name, as Windows shows it.
+func accessNames(list string) string {
+	out := strings.Fields(list)
+	for _, c := range strings.Fields(list) {
+		if n, ok := accessRightNames[c]; ok {
+			out = append(out, n)
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 // objectAccessAction is what an object access did, from its access list
-// (%%1537 DELETE, %%4417 WriteData, %%4418 AppendData, %%4420
-// WriteExtendedAttributes, %%4424 WriteAttributes); anything else reads.
+// (%%1537 DELETE and %%7686 DeleteTree; %%1539 WRITE_DAC, %%1540
+// WRITE_OWNER, %%4417 WriteData, %%4418 AppendData, %%4420
+// WriteExtendedAttributes, %%4424 WriteAttributes and %%7685
+// WriteProperty); anything else reads.
 func objectAccessAction(list string) string {
 	codes := strings.Fields(list)
 	switch {
-	case slices.Contains(codes, "%%1537"):
+	case slices.Contains(codes, "%%1537") || slices.Contains(codes, "%%7686"):
 		return "deleted"
 	case slices.ContainsFunc(codes, func(c string) bool {
-		return c == "%%4417" || c == "%%4418" || c == "%%4420" || c == "%%4424"
+		switch c {
+		case "%%1539", "%%1540", "%%4417", "%%4418", "%%4420", "%%4424", "%%7685":
+			return true
+		}
+		return false
 	}):
 		return "modified"
 	}

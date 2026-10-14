@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf16"
@@ -14,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/search"
 )
 
 // SigmaResult is a converted Sigma rule.
@@ -113,6 +116,50 @@ var sigmaEventFields = func() map[string]map[string]string {
 	load := with(map[string]string{
 		"imageloaded": "loaded_file_path", "signed": "signed", "signature": "signature", "signaturestatus": "signature_status",
 	})
+	// Security log events: the account that acted (Subject*) is the
+	// user, except in a logon, where it is the account logged on
+	// (Target*).
+	security := func(m map[string]string) map[string]string {
+		for k, v := range map[string]string{
+			"subjectusername": "user", "subjectdomainname": "user_domain", "subjectlogonid": "logon_id",
+			"computer": "host", "computername": "host", "eventid": "signature_id",
+		} {
+			if _, ok := m[k]; !ok {
+				m[k] = v
+			}
+		}
+		return m
+	}
+	logon := map[string]string{
+		"targetusername": "user", "targetdomainname": "user_domain", "targetusersid": "user_sid",
+		"logontype": "logon_type", "logonprocessname": "logon_process", "authenticationpackagename": "authentication_method",
+		"workstationname": "src_host", "ipaddress": "src", "ipport": "src_port", "processname": "process_path",
+		"computer": "host", "computername": "host", "eventid": "signature_id",
+	}
+	handle := security(map[string]string{
+		"subjectusersid": "user_sid", "objectserver": "object_server", "objectname": "object_path", "objecttype": "object_type",
+		"accesslist": "access_names", "accessmask": "access_mask", "processname": "process_path",
+	})
+	// A user account created or changed.
+	account := security(map[string]string{
+		"subjectusersid": "user_sid", "targetusername": "object", "targetdomainname": "object_domain", "targetsid": "object_sid",
+		"samaccountname": "sam_account_name", "displayname": "display_name", "userprincipalname": "user_principal_name",
+		"primarygroupid": "primary_group_id", "allowedtodelegateto": "allowed_to_delegate_to", "olduacvalue": "old_uac_value",
+		"newuacvalue": "new_uac_value", "useraccountcontrol": "user_account_control", "sidhistory": "sid_history",
+	})
+	// A connection the filtering platform allowed or blocked.
+	wfp := map[string]string{
+		"processid": "process_id", "application": "process_path", "sourceaddress": "src", "sourceport": "src_port",
+		"destaddress": "dest", "destport": "dest_port", "filterrtid": "filter_rtid", "layername": "layer_name",
+		"layerrtid": "layer_rtid", "computer": "host", "computername": "host", "eventid": "signature_id",
+	}
+	kerberos := map[string]string{
+		"targetusername": "user", "targetdomainname": "user_domain", "targetsid": "user_sid",
+		"servicename": "kerberos_service", "servicesid": "kerberos_service_sid", "ticketoptions": "ticket_options",
+		"status": "kerberos_status", "ticketencryptiontype": "ticket_encryption_type", "preauthtype": "pre_auth_type",
+		"ipaddress": "src", "ipport": "src_port", "certissuername": "cert_issuer", "certserialnumber": "cert_serial",
+		"certthumbprint": "cert_thumbprint", "computer": "host", "computername": "host", "eventid": "signature_id",
+	}
 	return map[string]map[string]string{
 		"file_event": file, "file_delete": file,
 		"registry_add": registry, "registry_delete": registry, "registry_set": registry, "registry_event": registry,
@@ -121,6 +168,70 @@ var sigmaEventFields = func() map[string]map[string]string {
 		"driver_load":          with(map[string]string{"imageloaded": "loaded_file_path", "signed": "signed", "signature": "signature", "signaturestatus": "signature_status", "image": "", "user": "", "processid": "", "processguid": ""}),
 		"process_access":       access,
 		"create_remote_thread": access,
+		"security_4624":        logon,
+		"security_4625":        logon,
+		"security_4663": security(map[string]string{
+			"objectname": "object_path", "objecttype": "object_type", "accesslist": "access_names",
+			"accessmask": "access_mask", "processname": "process_path",
+		}),
+		"security_4656":      handle,
+		"security_4656_4663": handle,
+		"security_4657": security(map[string]string{
+			"subjectusersid": "user_sid", "objectname": "object_path", "objectvaluename": "registry_value_name", "operationtype": "registry_operation",
+			"oldvalue": "registry_old_value_data", "newvalue": "registry_value_data", "newvaluetype": "registry_value_type",
+			"processname": "process_path",
+		}),
+		"security_4661": security(map[string]string{
+			"subjectusersid": "user_sid", "objectserver": "object_server", "objectname": "object_path", "objecttype": "object_type",
+			"accesslist": "access_names", "accessmask": "access_mask", "properties": "object_properties", "processname": "process_path",
+		}),
+		"security_4662": security(map[string]string{
+			"subjectusersid": "user_sid", "objectserver": "object_server", "objectname": "object", "objecttype": "object_type",
+			"accesslist": "access_names", "accessmask": "access_mask", "properties": "object_properties",
+		}),
+		"security_4648": security(map[string]string{
+			"subjectusersid": "user_sid", "subjectusername": "src_user", "subjectdomainname": "src_user_domain",
+			"targetusername": "user", "targetdomainname": "user_domain", "targetservername": "dest", "targetinfo": "target_info",
+			"processname": "process_path", "ipaddress": "src", "ipport": "src_port",
+		}),
+		"security_5156": wfp,
+		"security_5157": wfp,
+		"security_4706": security(map[string]string{
+			"subjectusersid": "user_sid", "domainname": "object", "domainsid": "object_sid", "tdotype": "trust_type",
+			"tdodirection": "trust_direction", "tdoattributes": "trust_attributes",
+		}),
+		"security_4719": security(map[string]string{
+			"subjectusersid": "user_sid", "categoryid": "audit_category", "subcategoryid": "audit_subcategory",
+			"subcategoryguid": "audit_subcategory_guid", "auditpolicychanges": "audit_policy_changes",
+		}),
+		"security_4720": account,
+		"security_4738": account,
+		"security_4732": security(map[string]string{
+			"subjectusersid": "user_sid", "membername": "member", "membersid": "member_sid", "targetusername": "object",
+			"targetdomainname": "object_domain", "targetsid": "object_sid",
+		}),
+		"security_4794": security(map[string]string{"subjectusersid": "user_sid", "workstation": "src_host"}),
+		"security_4768": kerberos,
+		"security_4769": kerberos,
+		"security_4697": security(map[string]string{
+			"servicename": "service_name", "servicefilename": "service_path", "servicetype": "service_type",
+			"servicestarttype": "service_start_type", "serviceaccount": "service_account",
+		}),
+		"security_4698": security(map[string]string{"taskname": "task_name", "taskcontent": "task_content"}),
+		"security_5136": security(map[string]string{
+			"objectdn": "object", "objectguid": "ad_object_guid", "objectclass": "ad_object_class",
+			"attributeldapdisplayname": "ad_attribute", "attributevalue": "ad_value", "operationtype": "ad_operation",
+		}),
+		"security_5145": security(map[string]string{
+			"objecttype": "object_type", "ipaddress": "src", "ipport": "src_port", "sharename": "share_name",
+			"sharelocalpath": "share_path", "relativetargetname": "share_target", "accessmask": "access_mask",
+			"accesslist": "access_names",
+		}),
+		"system": {
+			"servicename": "service_name", "imagepath": "service_path", "servicetype": "service_type",
+			"starttype": "service_start_type", "accountname": "service_account", "provider_name": "provider",
+			"computer": "host", "computername": "host", "eventid": "signature_id",
+		},
 		"ps_script": {
 			"scriptblocktext": "script_block_text", "path": "script_path", "scriptblockid": "script_block_id",
 			"computer": "host", "computername": "host", "eventid": "signature_id",
@@ -146,6 +257,85 @@ var sigmaWindowsEvents = map[string][]string{
 	"process_access":       {"10"},
 	"create_remote_thread": {"8"},
 	"ps_script":            {"4104"},
+	"system":               {"7045"},
+	"security_4624":        {"4624"},
+	"security_4625":        {"4625"},
+	"security_4648":        {"4648"},
+	"security_4656":        {"4656"},
+	"security_4657":        {"4657"},
+	"security_4661":        {"4661"},
+	"security_4662":        {"4662"},
+	"security_4663":        {"4663"},
+	"security_4656_4663":   {"4656", "4663"},
+	"security_4706":        {"4706"},
+	"security_4719":        {"4719"},
+	"security_4720":        {"4720"},
+	"security_4732":        {"4732"},
+	"security_4738":        {"4738"},
+	"security_4794":        {"4794"},
+	"security_4768":        {"4768"},
+	"security_4769":        {"4769"},
+	"security_4697":        {"4697"},
+	"security_4698":        {"4698"},
+	"security_5136":        {"5136"},
+	"security_5145":        {"5145"},
+	"security_5156":        {"5156"},
+	"security_5157":        {"5157"},
+}
+
+// sigmaSecurityModels are the Security log events Security log rules
+// (service: security) convert for, with each one's data model: a handle
+// request or an object access is a file's (Filesystem), a registry key's
+// (Registry) or another object's, so its rules search any.
+var sigmaSecurityModels = map[string]string{
+	"4624": "Authentication", "4625": "Authentication", "4656": "", "4657": "Registry", "4661": "", "4662": "Change",
+	"4663": "", "4697": "Change", "4698": "Change", "4706": "Change", "4719": "Change", "4720": "Change", "4732": "Change",
+	"4738": "Change", "4794": "Change", "4768": "Authentication", "4769": "Authentication",
+	"4648": "Authentication", "5136": "Change", "5145": "Filesystem", "5156": "Network_Traffic", "5157": "Network_Traffic",
+}
+
+// anyModel reports whether the rule's events land in more than one data
+// model, so it searches them all.
+func (c *sigmaConv) anyModel() bool {
+	switch c.category {
+	case "security_4656", "security_4661", "security_4663", "security_4656_4663":
+		return true
+	}
+	return false
+}
+
+// sigmaEventIDs returns the event IDs a rule's selections name (EventID
+// without modifiers), sorted.
+func sigmaEventIDs(det map[string]any) []string {
+	seen := map[string]bool{}
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case []any:
+			for _, it := range x {
+				walk(it)
+			}
+		case map[string]any:
+			for k, val := range x {
+				if k != "EventID" {
+					continue
+				}
+				if list, ok := val.([]any); ok {
+					for _, it := range list {
+						seen[fmt.Sprint(it)] = true
+					}
+				} else {
+					seen[fmt.Sprint(val)] = true
+				}
+			}
+		}
+	}
+	for k, v := range det {
+		if k != "condition" {
+			walk(v)
+		}
+	}
+	return slices.Sorted(maps.Keys(seen))
 }
 
 // sigmaLevels maps Sigma levels to severities.
@@ -182,9 +372,29 @@ func ConvertSigmaWith(src []byte, opt SigmaOptions) (*SigmaResult, error) {
 		return nil, errors.New("not a Sigma rule: title and detection are required")
 	}
 	category, _ := r.Logsource["category"].(string)
+	if product, _ := r.Logsource["product"].(string); category == "" && strings.EqualFold(product, "windows") {
+		switch service, _ := r.Logsource["service"].(string); strings.ToLower(service) {
+		case "system":
+			// The System log's events Signalith reads are services
+			// installed (7045).
+			category = "system"
+		case "security":
+			// A Security log rule's fields are its event's own, so it
+			// converts for one event, or events with the same data.
+			category = "security"
+			if ids := sigmaEventIDs(r.Detection); len(ids) > 0 {
+				if _, ok := sigmaWindowsEvents["security_"+strings.Join(ids, "_")]; ok {
+					category = "security_" + strings.Join(ids, "_")
+				}
+			}
+		}
+	}
 	c := &sigmaConv{strict: opt.Strict, category: strings.ToLower(category)}
 	dm := c.datamodel(r.Logsource)
-	if dm == "" && opt.Strict {
+	if c.category == "security" {
+		c.approx("Signalith converts Security log rules about one of the events %s", strings.Join(slices.Sorted(maps.Keys(sigmaSecurityModels)), ", "))
+	}
+	if dm == "" && opt.Strict && !c.anyModel() {
 		return nil, fmt.Errorf("log source %v has no Signalith data model", r.Logsource)
 	}
 	cond, ok := r.Detection["condition"]
@@ -202,6 +412,9 @@ func ConvertSigmaWith(src []byte, opt SigmaOptions) (*SigmaResult, error) {
 	}
 	if strings.Contains(condStr, "|") {
 		return nil, errors.New("Sigma aggregation conditions (| count() ...) are not supported; use a correlation in the query instead")
+	}
+	if c.category == "system" && !bytes.Contains(src, []byte("7045")) {
+		c.approx("Signalith reads only services installed (event 7045) from the System log, and this rule is about other events")
 	}
 	expr, err := c.condition(condStr, r.Detection)
 	if err != nil {
@@ -325,7 +538,7 @@ func productScope(ls map[string]any, category string) query.Expr {
 
 func (c *sigmaConv) datamodel(ls map[string]any) string {
 	get := func(k string) string { s, _ := ls[k].(string); return strings.ToLower(s) }
-	switch get("category") {
+	switch c.category {
 	case "process_creation":
 		return "Endpoint"
 	case "network_connection", "firewall":
@@ -346,6 +559,11 @@ func (c *sigmaConv) datamodel(ls map[string]any) string {
 		return "Endpoint"
 	case "ps_script":
 		return "Script"
+	case "system":
+		return "Change"
+	}
+	if id, ok := strings.CutPrefix(c.category, "security_"); ok {
+		return sigmaSecurityModels[id]
 	}
 	if get("product") == "linux" && get("service") == "auth" {
 		return "Authentication"
@@ -618,12 +836,16 @@ func (c *sigmaConv) fieldCond(key string, v any) (query.Expr, error) {
 	}
 	all := false
 	how := "equals"
+	reFlags := ""
 	// transforms apply in order to each value before matching.
 	var transforms []string
 	for _, m := range mods {
 		switch lm := strings.ToLower(m); lm {
-		case "contains", "startswith", "endswith", "cidr":
+		case "contains", "startswith", "endswith", "cidr", "re":
 			how = lm
+		case "i", "m", "s":
+			// Regular expression flags.
+			reFlags += lm
 		case "all":
 			all = true
 		case "windash", "base64", "base64offset", "utf16le", "wide", "utf16be", "utf16":
@@ -660,10 +882,18 @@ func (c *sigmaConv) fieldCond(key string, v any) (query.Expr, error) {
 				s = "inbound"
 			}
 		}
+		if how == "re" {
+			e, err := c.regex(field, key, reFlags, s)
+			if err != nil {
+				return nil, err
+			}
+			kids = append(kids, e)
+			continue
+		}
 		if how == "cidr" {
 			p, err := netip.ParsePrefix(s)
-			if err != nil || !p.Addr().Is4() {
-				return nil, fmt.Errorf("%s: only IPv4 ranges are supported, not %q", key, s)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %q is not an address range", key, s)
 			}
 			kids = append(kids, &query.Compare{Field: field, Op: "=", Value: p.Masked().String()})
 			continue
@@ -691,6 +921,16 @@ func (c *sigmaConv) fieldCond(key string, v any) (query.Expr, error) {
 			}
 		} else {
 			v, err := sigmaValue(s)
+			if errors.Is(err, errEscapedWildcard) {
+				// A literal * or ? in a pattern: a regular expression says
+				// it.
+				e, err := c.regex(field, key, "is", sigmaWildcardRegex(s, how))
+				if err != nil {
+					return nil, err
+				}
+				kids = append(kids, e)
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", key, err)
 			}
@@ -735,8 +975,13 @@ func (c *sigmaConv) compare(field, sigField, how, s string) query.Expr {
 	return &query.Compare{Field: field, Op: "=", Value: s}
 }
 
+// errEscapedWildcard is a value with a literal * or ?, which a wildcard
+// pattern cannot say.
+var errEscapedWildcard = errors.New("escaped wildcard")
+
 // sigmaValue resolves Sigma escapes: \\ is a backslash; \* and \? are
-// literal wildcards, which Signalith cannot express inside a pattern.
+// literal wildcards, which a Signalith pattern cannot express
+// (errEscapedWildcard).
 func sigmaValue(s string) (string, error) {
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
@@ -747,12 +992,57 @@ func sigmaValue(s string) (string, error) {
 				i++
 				continue
 			case '*', '?':
-				return "", fmt.Errorf("escaped wildcard \\%c is not supported", s[i+1])
+				return "", errEscapedWildcard
 			}
 		}
 		b.WriteByte(s[i])
 	}
 	return b.String(), nil
+}
+
+// regex is field=~pattern for a Sigma regular expression (|re, with
+// the flags of |i, |m and |s): found anywhere in the value, and
+// case-sensitive unless it says otherwise. A long text field is indexed
+// lowercased, so a case-sensitive expression cannot be searched on one.
+func (c *sigmaConv) regex(field, key, flags, pattern string) (query.Expr, error) {
+	if flags != "" {
+		pattern = "(?" + flags + ")" + pattern
+	}
+	if _, err := search.ParseRegex(pattern); err != nil {
+		return nil, fmt.Errorf("%s: %w", key, err)
+	}
+	if search.WildcardFields[field] && search.CaseMatters(pattern) {
+		return nil, fmt.Errorf("%s: a case-sensitive regular expression on %s, which is searched ignoring case", key, field)
+	}
+	return &query.Compare{Field: field, Op: "=~", Value: pattern}, nil
+}
+
+// sigmaWildcardRegex is the regular expression of a Sigma pattern with
+// a literal * or ?: * any run of characters, ? any one, the rest (and
+// the escaped wildcards) literal, matched as how says.
+func sigmaWildcardRegex(s, how string) string {
+	var b strings.Builder
+	if how == "equals" || how == "startswith" {
+		b.WriteByte('^')
+	}
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		switch c := rs[i]; {
+		case c == '\\' && i+1 < len(rs) && (rs[i+1] == '*' || rs[i+1] == '?' || rs[i+1] == '\\'):
+			b.WriteString(regexp.QuoteMeta(string(rs[i+1])))
+			i++
+		case c == '*':
+			b.WriteString(".*")
+		case c == '?':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	if how == "equals" || how == "endswith" {
+		b.WriteByte('$')
+	}
+	return b.String()
 }
 
 // sigmaLiteral resolves a value's escapes and refuses wildcards, for

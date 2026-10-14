@@ -10,6 +10,7 @@ import (
 
 	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"github.com/jrsamsanchez/signalith/internal/query"
+	"github.com/jrsamsanchez/signalith/internal/search"
 	"github.com/jrsamsanchez/signalith/internal/splcheck"
 )
 
@@ -94,11 +95,10 @@ func splunkExpr(e splcheck.Expr) (query.Expr, error) {
 		}
 		return &query.Not{Child: q}, nil
 	case *splcheck.Cmp:
+		if x.Regex {
+			return splunkRegex(x)
+		}
 		for _, v := range x.Values {
-			// ? is literal in Splunk and a wildcard in Signalith.
-			if strings.Contains(v, "?") {
-				return nil, fmt.Errorf("value %q of %s has a ?, which Splunk reads literally", v, x.Field)
-			}
 			if v == "" {
 				return nil, fmt.Errorf("an empty value of %s is not supported", x.Field)
 			}
@@ -140,12 +140,54 @@ func splunkExpr(e splcheck.Expr) (query.Expr, error) {
 	return nil, fmt.Errorf("unknown where clause %T", e)
 }
 
-// valuesMatch is field=v, or field IN (v...) for several values.
-func valuesMatch(field string, values []string) query.Expr {
-	if len(values) == 1 {
-		return &query.Compare{Field: field, Op: "=", Value: values[0]}
+// splunkRegex is a regex stage or match() as field=~"re". Fields whose
+// stored form differs from Splunk's (user, registry_value_data) are left
+// out, as are patterns OpenSearch cannot search exactly.
+func splunkRegex(x *splcheck.Cmp) (query.Expr, error) {
+	if x.Neg || len(x.Values) != 1 || x.Field == splcheck.RawUser || x.Field == "user" || x.Field == "registry_value_data" {
+		return nil, fmt.Errorf("a regular expression on %s is not supported", x.Field)
 	}
-	return &query.In{Field: field, Values: values}
+	p := x.Values[0]
+	if _, err := search.ParseRegex(p); err != nil {
+		return nil, err
+	}
+	if search.WildcardFields[x.Field] && search.CaseMatters(p) {
+		return nil, fmt.Errorf("a case-sensitive regular expression on %s, which is searched ignoring case", x.Field)
+	}
+	return &query.Compare{Field: x.Field, Op: "=~", Value: p}, nil
+}
+
+// valuesMatch is field=v, or field IN (v...) for several values. A value
+// with a ?, which Splunk reads literally and Signalith as a wildcard, is
+// a regular expression instead (splunkGlobRegex).
+func valuesMatch(field string, values []string) query.Expr {
+	var plain []string
+	var kids []query.Expr
+	for _, v := range values {
+		if strings.Contains(v, "?") {
+			kids = append(kids, &query.Compare{Field: field, Op: "=~", Value: splunkGlobRegex(v)})
+		} else {
+			plain = append(plain, v)
+		}
+	}
+	switch len(plain) {
+	case 0:
+	case 1:
+		kids = append([]query.Expr{&query.Compare{Field: field, Op: "=", Value: plain[0]}}, kids...)
+	default:
+		kids = append([]query.Expr{&query.In{Field: field, Values: plain}}, kids...)
+	}
+	return or(kids)
+}
+
+// splunkGlobRegex is a Splunk pattern as a regular expression: * is any
+// run of characters, case is ignored, and everything else is literal.
+func splunkGlobRegex(v string) string {
+	parts := strings.Split(v, "*")
+	for i, p := range parts {
+		parts[i] = regexp.QuoteMeta(p)
+	}
+	return "(?is)^" + strings.Join(parts, ".*") + "$"
 }
 
 // splunkSeverity is a rule's severity: TTPs by their risk score, and
@@ -170,13 +212,28 @@ var splunkTechnique = regexp.MustCompile(`^T\d{4}(\.\d{3})?$`)
 
 // splunkThrottle is packThrottle for a Splunk rule: an object access is
 // one a day per host, program and object, a scheduled task per host and
-// task.
+// task, a service per host and service, a directory change per object
+// and attribute, a share access per client, share and path, a Kerberos
+// ticket per account and service, an account change or group member
+// added per account or group.
 func splunkThrottle(node, dm string) []string {
 	switch node {
 	case "ObjectAccess":
 		return []string{"host", "process_path", "object_path"}
 	case "TaskCreated":
 		return []string{"host", "task_name"}
+	case "ServiceInstalled":
+		return []string{"host", "service_name"}
+	case "DirectoryChange":
+		return []string{"host", "object", "ad_attribute"}
+	case "ShareAccess":
+		return []string{"host", "src", "share_name", "share_target"}
+	case "KerberosTGT", "KerberosService":
+		return []string{"host", "user", "kerberos_service"}
+	case "UserChanged":
+		return []string{"host", "object"}
+	case "GroupMemberAdded":
+		return []string{"host", "object", "member_sid"}
 	}
 	return packThrottle("", dm)
 }

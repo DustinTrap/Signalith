@@ -44,13 +44,20 @@ var windowsSources = []string{
 	"Sysmon EventID 13", "Sysmon EventID 14", "Sysmon EventID 23", "Sysmon EventID 26",
 	"Powershell Script Block Logging 4104", "Sysmon EventID 7", "Sysmon EventID 8", "Sysmon EventID 10",
 	"Sysmon for Linux EventID 1", "Sysmon for Linux EventID 11", "Windows Event Log Security 4698",
-	"Windows Event Log Security 4663",
+	"Windows Event Log Security 4663", "Windows Event Log System 7045",
+	"Windows Event Log Security 5136", "Windows Event Log Security 5145",
+	"Windows Event Log Security 4768", "Windows Event Log Security 4769",
+	"Windows Event Log Security 4738", "Windows Event Log Security 4732",
 }
 
-// maxWildcardTerms keeps a rule's searches of wildcard fields under
+// maxWildcardTerms keeps a rule's searches under
 // OpenSearch's default limit of 1,024 clauses in one search (see
-// search.WildcardFieldTerms), as for the SigmaHQ pack.
+// search.WildcardFieldTerms and search.Clauses), as for the SigmaHQ pack.
 const maxWildcardTerms = 1000
+
+// maxClauses is OpenSearch's limit of clauses in one search, which a
+// rule's whole search must stay within (search.Clauses).
+const maxClauses = 1024
 
 var macroRef = regexp.MustCompile("`([\\w-]+)`")
 
@@ -180,6 +187,10 @@ func main() {
 		}
 		if n := search.WildcardFieldTerms(q.Search); n > maxWildcardTerms {
 			skip("too many script text pieces for one OpenSearch search", fmt.Sprintf("%s: about %d", rel, n))
+			continue
+		}
+		if n, err := search.Clauses(q.Search); err != nil || n > maxClauses {
+			skip("too many clauses for one OpenSearch search", clauseNote(rel, n, err))
 			continue
 		}
 		tf := &sigmacheck.TestFile{Rule: rule.ID, Cases: splcheck.Cases(rule)}
@@ -321,4 +332,12 @@ func writeReport(p *detect.Pack, skipped map[string][]string) {
 	if err := os.WriteFile(filepath.Join(*outDir, "REPORT.md"), []byte(b.String()), 0o644); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// clauseNote is a report line for a rule over the clause limit.
+func clauseNote(rel string, n int, err error) string {
+	if err != nil {
+		return fmt.Sprintf("%s: %v", rel, err)
+	}
+	return fmt.Sprintf("%s: about %d", rel, n)
 }

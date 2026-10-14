@@ -18,7 +18,7 @@ const keywordIgnoreAbove = 8191
 // Event.Document) matches a filter expression. It evaluates the same
 // OpenSearch query compileExpr builds, clause by clause, so it agrees with
 // a real search for keyword and numeric fields: case-insensitive terms and
-// wildcards, exists, IPv4 ranges, and number terms. Free text against the
+// wildcards, exists, IP ranges, and number terms. Free text against the
 // raw message is approximated as a case-insensitive substring match,
 // since OpenSearch analyzes that field. The detection content checks use
 // it to prove each shipped rule fires on its test events without a
@@ -64,6 +64,12 @@ func evalDSL(q map[string]any, doc map[string]any) (bool, error) {
 			text, _ := doc[field].(string)
 			pat := unescapeQueryString(fmt.Sprint(b["query"]))
 			return globMatch("*"+strings.Trim(pat, "*")+"*", text), nil
+		case "regexp":
+			for field, spec := range b {
+				s, _ := spec.(map[string]any)
+				return evalRegexp(field, fmt.Sprint(s["value"]), doc)
+			}
+			return false, nil
 		case "range":
 			for field, spec := range b {
 				s, _ := spec.(map[string]any)
@@ -163,6 +169,29 @@ func evalLeaf(kind, field string, spec map[string]any, doc map[string]any) (bool
 		return strings.EqualFold(strconv.FormatBool(x), want), nil
 	}
 	return false, nil
+}
+
+// evalRegexp evaluates a regexp query: the pattern matches a string
+// field's whole value, lowercased for a wildcard field, which the index
+// lowercases (ingest.IndexTemplate). OpenSearch refuses it on a numeric
+// or boolean field.
+func evalRegexp(field, pattern string, doc map[string]any) (bool, error) {
+	v, ok := indexedValue(doc, field)
+	if !ok {
+		return false, nil
+	}
+	s, isStr := v.(string)
+	if !isStr {
+		return false, fmt.Errorf("regexp query on non-text field %s", field)
+	}
+	if WildcardFields[field] {
+		s = strings.ToLower(s)
+	}
+	re, err := luceneRegexp(pattern)
+	if err != nil {
+		return false, err
+	}
+	return re.MatchString(s), nil
 }
 
 func evalRange(field string, spec map[string]any, doc map[string]any) bool {

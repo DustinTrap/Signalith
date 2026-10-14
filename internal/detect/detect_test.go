@@ -367,9 +367,33 @@ func TestConvertSigma(t *testing.T) {
 	}
 }
 
+func TestConvertSigmaRegex(t *testing.T) {
+	for rule, want := range map[string]string{
+		// |re keeps its pattern; |i makes it ignore case.
+		"title: R\nlogsource:\n  category: process_creation\ndetection:\n  sel:\n    CommandLine|re|i: 'curl .*://[0-9]{1,3}\\.'\n  condition: sel\n": `datamodel=Endpoint process=~"(?i)curl .*://[0-9]{1,3}\\."`,
+		// An escaped * is the character itself, searched as a pattern.
+		"title: S\nlogsource:\n  product: windows\n  service: security\ndetection:\n  sel:\n    EventID: 5145\n    ShareName: '\\\\\\*\\IPC$'\n  condition: sel\n": `share_name=~`,
+	} {
+		res, err := ConvertSigma([]byte(rule))
+		if err != nil {
+			t.Fatalf("%v\n%s", err, rule)
+		}
+		if !strings.Contains(res.Detection.Query, want) {
+			t.Errorf("query = %s, want %s", res.Detection.Query, want)
+		}
+		q, err := query.Parse(res.Detection.Query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (&search.Engine{}).Compile(q); err != nil {
+			t.Errorf("compile: %v", err)
+		}
+	}
+}
+
 func TestConvertSigmaUnsupported(t *testing.T) {
 	for name, rule := range map[string]string{
-		"regex":       "title: x\ndetection:\n  sel:\n    CommandLine|re: 'a.*b'\n  condition: sel\n",
+		"regex":       "title: x\ndetection:\n  sel:\n    CommandLine|re: '\\bab'\n  condition: sel\n",
 		"aggregation": "title: x\ndetection:\n  sel:\n    EventID: 4625\n  condition: sel | count() by IpAddress > 10\n",
 		"unknown sel": "title: x\ndetection:\n  sel:\n    EventID: 4625\n  condition: other\n",
 		"not sigma":   "hello: world\n",
@@ -588,6 +612,81 @@ func TestConvertSigmaAntivirus(t *testing.T) {
 	}
 	if _, err := (&search.Engine{}).Compile(mustParse(t, q)); err != nil {
 		t.Errorf("compile: %v", err)
+	}
+}
+
+func TestConvertSigmaServiceInstall(t *testing.T) {
+	rule := "title: PsExec service installed\nlogsource:\n  product: windows\n  service: system\ndetection:\n  sel:\n    Provider_Name: 'Service Control Manager'\n    EventID: 7045\n    ServiceName: PSEXESVC\n    ImagePath|endswith: '\\PSEXESVC.exe'\n  condition: sel\nlevel: medium\n"
+	res, err := ConvertSigmaWith([]byte(rule), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := res.Detection.Query
+	for _, want := range []string{"datamodel=Change", "signature_id IN (7045)", `provider="Service Control Manager"`, "service_name=PSEXESVC", `service_path=*\PSEXESVC.exe`} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query missing %s: %s", want, q)
+		}
+	}
+	// Other System log events are not read.
+	other := strings.ReplaceAll(rule, "7045", "7036")
+	if _, err := ConvertSigmaWith([]byte(other), SigmaOptions{Strict: true}); err == nil {
+		t.Error("a 7036 rule converted strictly")
+	}
+}
+
+func TestConvertSigmaSecurityLog(t *testing.T) {
+	logon := "title: RDP logon\nlogsource:\n  product: windows\n  service: security\ndetection:\n  sel:\n    EventID: 4624\n    LogonType: 10\n    LogonProcessName: User32\n  condition: sel\nlevel: medium\n"
+	res, err := ConvertSigmaWith([]byte(logon), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"datamodel=Authentication", "signature_id IN (4624)", "logon_type=10", "logon_process=User32"} {
+		if !strings.Contains(res.Detection.Query, want) {
+			t.Errorf("query missing %s: %s", want, res.Detection.Query)
+		}
+	}
+	// An object access may be a file's or a registry key's.
+	access := strings.NewReplacer("4624", "4663", "LogonType: 10", "ObjectType: Key", "LogonProcessName: User32", "AccessList|contains: '%%4417'").Replace(logon)
+	res, err = ConvertSigmaWith([]byte(access), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := res.Detection.Query; strings.Contains(q, "datamodel=") || !strings.Contains(q, "object_type=Key") {
+		t.Errorf("object access query = %s", q)
+	}
+	// A share access is searched by its access names as well as codes.
+	share := strings.NewReplacer("4624", "5145", "LogonType: 10", "RelativeTargetName: svcctl", "LogonProcessName: User32", "AccessList|contains: 'WriteData'").Replace(logon)
+	res, err = ConvertSigmaWith([]byte(share), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := res.Detection.Query; !strings.Contains(q, "datamodel=Filesystem") || !strings.Contains(q, "access_names=*WriteData*") || !strings.Contains(q, "share_target=svcctl") {
+		t.Errorf("share access query = %s", q)
+	}
+	// A Kerberos service ticket is an authentication, searched by its own
+	// fields.
+	ticket := strings.NewReplacer("4624", "4769", "LogonType: 10", "TicketEncryptionType: '0x17'", "LogonProcessName: User32", "ServiceName|endswith: '$'").Replace(logon)
+	res, err = ConvertSigmaWith([]byte(ticket), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := res.Detection.Query; !strings.Contains(q, "datamodel=Authentication") || !strings.Contains(q, "ticket_encryption_type=0x17") || !strings.Contains(q, "kerberos_service=*$") {
+		t.Errorf("kerberos query = %s", q)
+	}
+	// A handle request and the access made with it convert together.
+	both := strings.NewReplacer("EventID: 4624", "EventID: [4656, 4663]", "LogonType: 10", "ObjectType: Key", "LogonProcessName: User32", "ObjectName|endswith: '\\SAM'").Replace(logon)
+	res, err = ConvertSigmaWith([]byte(both), SigmaOptions{Strict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := res.Detection.Query; !strings.Contains(q, "signature_id IN (4656, 4663)") || !strings.Contains(q, "object_path=*\\SAM") {
+		t.Errorf("handle and access query = %s", q)
+	}
+	// A rule about two events, or one Signalith does not read, is refused.
+	for _, other := range []string{strings.Replace(logon, "EventID: 4624", "EventID: [4624, 4625]", 1), strings.Replace(logon, "4624", "4776", 1)} {
+		if _, err := ConvertSigmaWith([]byte(other), SigmaOptions{Strict: true}); err == nil {
+			t.Errorf("converted strictly: %s", other)
+		}
 	}
 }
 

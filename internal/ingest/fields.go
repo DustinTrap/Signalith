@@ -97,6 +97,37 @@ var knownFields = func() map[string]string {
 		// An object access (Security 4663): what kind of object, its path
 		// and name whatever the kind, and the access asked for.
 		"object_type": kw, "object_path": kw, "object_name": kw, "access_list": kw, "access_mask": kw,
+		// A service installed (System 7045): its name, the command it runs
+		// (a path, or a whole command line), its type, start type and
+		// account, and the log's provider.
+		"service_name": kw, "service_path": kw, "service_type": kw, "service_start_type": kw, "service_account": kw,
+		"provider": kw,
+		// A logon's (Security 4624 and 4625) logon process and account SID.
+		"logon_process": kw, "user_sid": kw,
+		// An object access's access list with the names of its codes
+		// added (WriteData for %%4417), a network share access (Security 5145) and a directory
+		// object change (Security 5136), whose values (security
+		// descriptors) rules search words inside.
+		"access_names": kw, "share_name": kw, "share_path": kw, "share_target": kw,
+		"ad_object_guid": kw, "ad_object_class": kw, "ad_attribute": kw, "ad_value": "wildcard", "ad_operation": kw,
+		// A handle asked for or an operation on an object (Security 4656,
+		// 4661 and 4662): the server that owns it and its properties; a
+		// registry value changed (4657); a Kerberos ticket asked for
+		// (4768 and 4769); a logon with explicit credentials (4648); a
+		// connection the filtering platform allowed or blocked (5156, 5157).
+		"object_server": kw, "object_properties": kw, "src_user_domain": kw, "target_info": kw,
+		"filter_rtid": kw, "layer_name": kw, "layer_rtid": kw,
+		// User accounts and groups changed (Security 4720, 4726, 4728,
+		// 4732, 4738, 4756), the audit policy changed (4719) and a domain
+		// trust created (4706).
+		"object_domain": kw, "object_sid": kw, "member_sid": kw, "sam_account_name": kw, "display_name": kw,
+		"user_principal_name": kw, "primary_group_id": kw, "allowed_to_delegate_to": kw, "old_uac_value": kw,
+		"new_uac_value": kw, "user_account_control": kw, "sid_history": kw, "audit_category": kw,
+		"audit_subcategory": kw, "audit_subcategory_guid": kw, "audit_policy_changes": kw, "trust_type": kw,
+		"trust_direction": kw, "trust_attributes": kw,
+		"registry_operation": kw, "registry_value_type": kw, "registry_old_value_data": kw,
+		"kerberos_service": kw, "kerberos_service_sid": kw, "kerberos_status": kw, "ticket_options": kw,
+		"ticket_encryption_type": kw, "pre_auth_type": kw, "cert_issuer": kw, "cert_serial": kw, "cert_thumbprint": kw,
 		// An sshd line whose client address cannot be told from text the
 		// client sent (see ambiguousSSH).
 		"src_ambiguous": kw,

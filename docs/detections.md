@@ -242,9 +242,9 @@ Content packs are rule sets from other open source projects, shipped unchanged
 inside Signalith and converted when it starts. Every pack detection is **off** until
 an admin turns it on.
 
-**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 1,805 rules from
-[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 1,695 Windows rules
-for these Sysmon, Security and PowerShell log sources, and 110 Linux rules (see
+**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 2,004 rules from
+[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 1,890 Windows rules
+for these Sysmon, Security, PowerShell and System log sources, and 114 Linux rules (see
 [Linux endpoints](#linux-endpoints-sysmon-for-linux)):
 
 | Sigma log source | Windows events | Data model |
@@ -257,6 +257,37 @@ for these Sysmon, Security and PowerShell log sources, and 110 Linux rules (see
 | `registry_add`, `registry_delete`, `registry_set`, `registry_event` | Sysmon 12; 12; 13; 12, 13 and 14 | Registry |
 | `dns_query` | Sysmon 22 | Network_Resolution |
 | `ps_script` | PowerShell 4104 | Script |
+| `service: system` | System 7045 (service installed) | Change |
+| `service: security` | The Security log events in the next table | See the next table |
+
+A Security log rule names its event's own fields (`TargetUserName`, `LogonType`,
+`ServiceFileName`, `ObjectName`), so each one converts for the one Security event it
+is about, or for a handle request and the access made with it (4656 and 4663), which
+carry the same data; rules about other Security events, or other sets of events, are
+left out. Windows logs each event only with its audit policy setting on:
+
+| Security events | Data model | Audit policy setting |
+| --- | --- | --- |
+| 4624, 4625 (logon, failed logon), 4648 (logon with explicit credentials) | Authentication | Audit Logon |
+| 4768, 4769 (Kerberos tickets, on domain controllers) | Authentication | Audit Kerberos Authentication Service, Audit Kerberos Service Ticket Operations |
+| 4697 (service installed) | Change | Audit Security System Extension |
+| 4698 (scheduled task created) | Change | Audit Other Object Access Events |
+| 4720, 4738 (user account created or changed), 4732 (member added to a local group) | Change | Audit User Account Management, Audit Security Group Management |
+| 4719 (audit policy changed) | Change | Audit Audit Policy Change |
+| 4706 (domain trust created), 4794 (DSRM password set) | Change | Audit Authentication Policy Change, Audit User Account Management |
+| 4656 (handle requested), 4663 (object access) | Filesystem for a file, Registry for a key | Audit Handle Manipulation, Audit File System or Audit Registry |
+| 4661 (handle to a SAM or directory object) | none (searched in every model) | Audit SAM |
+| 4657 (registry value modified) | Registry | Audit Registry |
+| 5145 (network share access) | Filesystem | Audit Detailed File Share |
+| 5136 (directory object changed), 4662 (operation on a directory object) | Change | Audit Directory Service Changes, Audit Directory Service Access (domain controllers) |
+| 5156, 5157 (connection allowed or blocked) | Network_Traffic | Audit Filtering Platform Connection |
+
+Handle requests, object accesses and registry value changes are logged only for
+objects whose auditing (SACL) asks for them. Directory object
+types and properties are kept as Windows records them (`%{19195a5b-...}`), so a rule
+that compares one to a bare GUID matches only events that already carry the name. An access list
+(`AccessList`) is searched by its codes (`%%4417`) and by their names (`WriteData`),
+since rules use both.
 
 Each pack rule only searches its own log source's event IDs, since several kinds of
 event share a data model (a process creation and a process access are both Endpoint).
@@ -360,7 +391,7 @@ The generator keeps each rule's Signalith ID across runs, rewrites `rules/`,
 
 ### Splunk Security Content
 
-**Splunk Security Content** (`internal/detect/packs/splunk`) holds 822 Windows and
+**Splunk Security Content** (`internal/detect/packs/splunk`) holds 855 Windows and
 Linux detections from Splunk's Threat Research Team
 ([security_content](https://github.com/splunk/security_content)), pinned to one
 commit. They are the production TTP and anomaly rules that search the CIM
@@ -378,6 +409,11 @@ names, so each rule's `where` clause becomes a Signalith filter field for field:
 | `` `sysmon` EventCode=8 `` or `10` (raw search) | Sysmon 8 and 10 | Endpoint |
 | `` `wineventlog_security` EventCode=4698 `` (raw search) | Security 4698 (scheduled task created) | Change |
 | `` `wineventlog_security` EventCode=4663 `` (raw search) | Security 4663 (object access) | Filesystem for a file, Registry for a key |
+| `` `wineventlog_system` EventCode=7045 `` (raw search) | System 7045 (service installed) | Change |
+| `` `wineventlog_security` EventCode=5136 `` (raw search) | Security 5136 (directory object changed) | Change |
+| `` `wineventlog_security` EventCode=5145 `` (raw search) | Security 5145 (network share access) | Filesystem |
+| `` `wineventlog_security` EventCode=4768 `` or `4769` (raw search) | Security 4768 and 4769 (Kerberos tickets) | Authentication |
+| `` `wineventlog_security` EventCode=4738 `` or `4732` (raw search) | Security 4738 (user account changed) and 4732 (member added to a local group) | Change |
 | `Endpoint.Processes` (Sysmon for Linux rules) | Sysmon for Linux 1 | Endpoint |
 | `Endpoint.Filesystem` (Sysmon for Linux rules) | Sysmon for Linux 11 and 23 | Filesystem |
 
@@ -415,15 +451,52 @@ Registry (action `read`, `modified` or `deleted`), and a rule searches both, as 
 Splunk. Windows logs 4663 only for objects whose auditing (SACL) asks for it, with
 **Audit File System** or **Audit Registry** on.
 
+Directory change rules (Security 5136) search the object's DN (`ObjectDN` is
+`object`), `ObjectClass` (`ad_object_class`), the attribute (`AttributeLDAPDisplayName`
+is `ad_attribute`), its value (`AttributeValue` is `ad_value`) and `OperationType`
+(`ad_operation`, `%%14674` for a value added). Share access rules (Security 5145)
+search `ShareName` (`share_name`), the path inside the share (`RelativeTargetName` is
+`share_target`), the client (`IpAddress` is `src`), `AccessMask` and `AccessList`.
+
+Kerberos rules (Security 4768 for a ticket-granting ticket, 4769 for a service
+ticket) search the account (`TargetUserName` is `user`), the service
+(`ServiceName` is `kerberos_service`), `TicketOptions` (`ticket_options`),
+`TicketEncryptionType` (`ticket_encryption_type`, `0x17` for RC4), `Status`
+(`kerberos_status`, `0x0` when granted) and the client (`src_ip` is `src`, stored
+without the `::ffff:` Windows puts before an IPv4 address). They are stored in
+Authentication with `app` `win:kerberos`, action `success` or `failure`.
+
+Account rules (Security 4738 for a user account changed, 4732 for a member added to
+a local group) search the account or group (`TargetUserName` is `object`), who made
+the change (`SubjectUserName` is `user`), the account's `UserAccountControl` flags
+(`user_account_control`, such as `%%2096` for Kerberos pre-authentication turned
+off), and the member added (`MemberSid` is `member_sid`). They are stored in Change
+with `object_category` `user` or `group`.
+
+Service install rules (System 7045, from the Sigma `service: system` log source or
+Splunk's `wineventlog_system`) search the service's name (`ServiceName` is
+`service_name`), what it runs (`ImagePath` is `service_path`, a path or a whole
+command line), `ServiceType` (`service_type`), `StartType` (`service_start_type`) and
+`AccountName` (`service_account`). They are stored in Change with `object_category`
+`service` and action `created`. The Service Control Manager logs 7045 on every
+Windows version without any audit setting, and the Windows agent collects the System
+log. Of the System log's events, Signalith reads only service installs; other System
+rules (services stopping, for example) are left out of the packs, and importing one
+says so.
+
 Registry values that Sysmon writes as `DWORD (0x00000001)` compare as `0x00000001`,
 the way Splunk's Sysmon add-on reads them.
 
 A rule is shipped only when its whole search converts exactly (a `tstats` search
 whose later stages only rename fields, format times, keep rows that have a field
-(`where isnotnull(...)`) or apply the rule's empty `_filter` macro) and, on test events made from its `where` clause and passed through
+(`where isnotnull(...)`), keep rows a regular expression matches (`regex field="..."`,
+or `where match(field, "...")` joined by AND or OR) or apply the rule's empty `_filter`
+macro) and, on test events made from its `where` clause and passed through
 the real Windows parser, the converted detection agrees with Splunk's reading of the
-clause on every event. Searches with `eval`, `rex`, `regex`, `lookup`, and other raw searches
-are left out for now; `internal/detect/packs/splunk/REPORT.md` lists
+clause on every event. A regular expression converts when it is also valid in Go's
+syntax (no lookarounds) and OpenSearch can search it exactly (no word boundaries).
+A value with a `?`, which Splunk reads literally, is searched as a regular expression
+too. Searches with `eval`, `rex`, `lookup`, and other raw searches are left out for now; `internal/detect/packs/splunk/REPORT.md` lists
 every rule left out and why. The same CI checks as the SigmaHQ pack run on it.
 
 Each rule is also checked on the real attack it was written for: Splunk records one
@@ -528,12 +601,15 @@ converts a rule and shows the result for review. Supported:
   `TargetUserName` to `user`; `IpAddress` to `src`; and so on). Unmapped fields are
   searched as-is and listed as warnings.
 - Modifiers `contains`, `startswith`, `endswith`, `all`, `windash`, `exists`,
-  `base64`, `base64offset`, `utf16le`, `utf16be`, `utf16`, `wide` and `cidr` (IPv4);
+  `base64`, `base64offset`, `utf16le`, `utf16be`, `utf16`, `wide`, `cidr` (IPv4 and IPv6) and
+  `re` (with `i`, `m` and `s`), searched as a regular expression (`field=~"..."`);
+  escaped wildcards (`\*`, a literal asterisk) also become a regular expression;
   lists, `null` and empty values, keyword lists; conditions with `and`, `or`, `not`,
   parentheses, `1 of`, `all of`, `them` and `selection_*` patterns.
 
-Not supported, and reported as an error: `re`, IPv6 `cidr` and other modifiers,
-aggregation conditions (`| count() > 10`), and escaped wildcards.
+Not supported, and reported as an error: other modifiers, regular
+expressions with word boundaries (`\b`) or line anchors, and aggregation conditions
+(`| count() > 10`).
 
 Strict mode, used for content packs, also refuses anything that would only be
 approximated: unmapped fields, keyword (free text) searches, rules with no data

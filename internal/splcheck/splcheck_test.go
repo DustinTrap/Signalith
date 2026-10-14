@@ -265,6 +265,64 @@ func TestParseObjectAccess(t *testing.T) {
 	}
 }
 
+func TestParseServiceInstalled(t *testing.T) {
+	src := rule("`wineventlog_system` EventCode=7045 ImagePath = \"*.exe\" NOT (ImagePath IN (\"*:\\\\Windows\\\\*\", \"*%systemroot%\\\\*\"))\n| stats count by EventCode ImagePath ServiceName Computer | rename Computer as dest")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Node != "ServiceInstalled" || !InModel(r.Node, "Change") {
+		t.Fatalf("node %s", r.Node)
+	}
+	if !Eval(r.Where, map[string]string{"signature_id": "7045", "service_path": `C:\Users\Public\svc.exe`}) ||
+		Eval(r.Where, map[string]string{"signature_id": "7045", "service_path": `%SystemRoot%\system32\svc.exe`}) {
+		t.Error("reads its events wrong")
+	}
+	pos := 0
+	for _, c := range Cases(r) {
+		if c.Expect {
+			pos++
+		}
+		if c.Expect != Reads(r, c) {
+			t.Errorf("case %+v: Reads disagrees", c)
+		}
+	}
+	if pos == 0 {
+		t.Error("no test event matches")
+	}
+}
+
+func TestParseDirectoryShareAndKerberos(t *testing.T) {
+	for src, node := range map[string]string{
+		"`wineventlog_security` EventCode=5136 AttributeLDAPDisplayName=sIDHistory OperationType=\"%%14674\"\n| stats values(ObjectDN) as ObjectDN by _time, Computer":      "DirectoryChange",
+		"`wineventlog_security` SubjectUserName=\"ANONYMOUS LOGON\" EventCode=5145 RelativeTargetName=lsarpc\n| stats count by dest, ShareName":                             "ShareAccess",
+		"`wineventlog_security` EventCode=4732 TargetUserName=DnsAdmins\n| stats count by dest src_user":                                                                    "GroupMemberAdded",
+		"`wineventlog_security` EventCode=4738 UserAccountControl=\"*%%2096*\"\n| rename TargetUserName as user\n| stats count by user":                                     "UserChanged",
+		"`wineventlog_security` EventCode=4768 TicketEncryptionType=0x17 ServiceName!=*$\n| stats count by ServiceName src_ip dest":                                         "KerberosTGT",
+		"`wineventlog_security` EventCode=4769 ServiceName!=\"*$\" (TicketOptions=0x40810000 OR TicketOptions=0x40800000) TicketEncryptionType=0x17\n| stats count by user": "KerberosService",
+	} {
+		r, err := Parse(rule(src), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Node != node {
+			t.Fatalf("node %s, want %s", r.Node, node)
+		}
+		pos := 0
+		for _, c := range Cases(r) {
+			if c.Expect {
+				pos++
+			}
+			if c.Expect != Reads(r, c) {
+				t.Errorf("%s case %+v: Reads disagrees", node, c)
+			}
+		}
+		if pos == 0 {
+			t.Errorf("%s: no test event matches", node)
+		}
+	}
+}
+
 func TestParseSysmonAccess(t *testing.T) {
 	src := rule("`sysmon` EventCode=10 TargetImage=\"*\\\\lsass.exe\" GrantedAccess IN (\"0x1010\", \"0x1410\") NOT SourceImage=\"*\\\\MsMpEng.exe\"\n| stats count by dest SourceImage")
 	r, err := Parse(src, nil)
@@ -291,5 +349,27 @@ func TestParseSysmonAccess(t *testing.T) {
 	}
 	if _, err := Parse(rule("`sysmon` EventCode IN (7, 10) ImageLoaded=\"*x*\" | stats count by dest"), nil); err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Errorf("mixed events: err = %v", err)
+	}
+}
+
+func TestRegexStage(t *testing.T) {
+	field := func(f string) (string, error) { return f, nil }
+	e, ok, err := regexStage(`where match(process, "(?i)cmd\.exe\s+\/Q") AND match(process,"\\\\127\.0\.0\.1\\.*")`, field)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	ev := map[string]string{"process": `CMD.EXE /Q /c echo > \\127.0.0.1\ADMIN$\__out`}
+	if !Eval(e, ev) {
+		t.Errorf("%+v does not match %v", e, ev)
+	}
+	ev["process"] = `cmd.exe /Q /c dir`
+	if Eval(e, ev) {
+		t.Errorf("%+v matches %v", e, ev)
+	}
+	if _, ok, _ := regexStage(`where match(a, "x") AND NOT match(b, "y")`, field); ok {
+		t.Error("NOT match accepted")
+	}
+	if _, ok, err := regexStage(`regex process="(?<!x)y"`, field); !ok || err == nil {
+		t.Errorf("lookbehind: %v %v", ok, err)
 	}
 }

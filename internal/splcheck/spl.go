@@ -161,6 +161,19 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 			present = append(present, &Cmp{Field: nn[1], Values: []string{"*"}})
 			continue
 		}
+		e, ok, err := regexStage(s, func(f string) (string, error) {
+			if !slices.Contains(fields, f) {
+				return "", fmt.Errorf("field %s has no Signalith mapping", f)
+			}
+			return f, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			present = append(present, e)
+			continue
+		}
 		if !harmlessRe.MatchString(s) && !filterRe.MatchString(s) {
 			return nil, fmt.Errorf("search has a later stage Signalith does not run: %s", firstWords(s))
 		}
@@ -181,13 +194,18 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 // the node, and each node's fields map to the Signalith fields they are
 // stored as. The code stays in the clause as signature_id.
 var (
-	rawRe = regexp.MustCompile("(?s)^`(powershell|sysmon|wineventlog_security)`\\s+(.*)$")
+	rawRe = regexp.MustCompile("(?s)^`(powershell|sysmon|wineventlog_security|wineventlog_system)`\\s+(.*)$")
 	// rawNodes are the nodes of each source by event code.
 	rawNodes = map[string]map[string]string{
 		"powershell": {"4104": "PowerShell"},
 		"sysmon":     {"7": "ImageLoad", "8": "ProcessAccess", "10": "ProcessAccess"},
 		// Security events the Windows parser reads.
-		"wineventlog_security": {"4698": "TaskCreated", "4663": "ObjectAccess"},
+		"wineventlog_security": {
+			"4698": "TaskCreated", "4663": "ObjectAccess", "5136": "DirectoryChange", "5145": "ShareAccess",
+			"4768": "KerberosTGT", "4769": "KerberosService", "4738": "UserChanged", "4732": "GroupMemberAdded",
+		},
+		// The Service Control Manager's service installed event.
+		"wineventlog_system": {"7045": "ServiceInstalled"},
 	}
 	// RawFields are the event fields a raw search may name on each node,
 	// with the Signalith field each is stored as.
@@ -208,6 +226,40 @@ var (
 			"ObjectType": "object_type", "AccessList": "access_list", "AccessMask": "access_mask",
 			"ProcessName": "process_path", "process_path": "process_path",
 		},
+		"DirectoryChange": {
+			"ObjectDN": "object", "ObjectGUID": "ad_object_guid", "ObjectClass": "ad_object_class",
+			"AttributeLDAPDisplayName": "ad_attribute", "AttributeValue": "ad_value", "OperationType": "ad_operation",
+			"SubjectUserName": "user",
+		},
+		"ShareAccess": {
+			"ShareName": "share_name", "ShareLocalPath": "share_path", "RelativeTargetName": "share_target",
+			"ObjectType": "object_type", "IpAddress": "src", "AccessMask": "access_mask", "AccessList": "access_list",
+			"SubjectUserName": "user",
+		},
+		// Kerberos tickets asked for; the add-on's src_ip is the client
+		// address without its ::ffff: prefix, as Signalith stores src.
+		"KerberosTGT": {
+			"TargetUserName": "user", "TargetSid": "user_sid", "ServiceName": "kerberos_service", "TicketOptions": "ticket_options",
+			"Status": "kerberos_status", "TicketEncryptionType": "ticket_encryption_type", "PreAuthType": "pre_auth_type", "src_ip": "src",
+		},
+		"KerberosService": {
+			"TargetUserName": "user", "ServiceName": "kerberos_service", "TicketOptions": "ticket_options",
+			"Status": "kerberos_status", "TicketEncryptionType": "ticket_encryption_type", "src_ip": "src",
+		},
+		// A user account changed, and a member added to a local group.
+		"UserChanged": {
+			"TargetUserName": "object", "TargetSid": "object_sid", "SubjectUserName": "user", "SamAccountName": "sam_account_name",
+			"UserAccountControl": "user_account_control", "AllowedToDelegateTo": "allowed_to_delegate_to",
+			"OldUacValue": "old_uac_value", "NewUacValue": "new_uac_value", "SidHistory": "sid_history",
+		},
+		"GroupMemberAdded": {
+			"TargetUserName": "object", "TargetSid": "object_sid", "MemberSid": "member_sid", "MemberName": "member",
+			"SubjectUserName": "user",
+		},
+		"ServiceInstalled": {
+			"ServiceName": "service_name", "ImagePath": "service_path", "ServiceType": "service_type",
+			"StartType": "service_start_type", "AccountName": "service_account",
+		},
 	}
 	// XMLKVFields are the fields xmlkv takes from a scheduled task's XML
 	// (TaskCreated), with the Signalith field each is stored as.
@@ -227,6 +279,40 @@ const RawUser = "raw:user"
 // eventCode is the stored field of EventCode or EventID.
 const eventCode = "signature_id"
 
+// rawFieldPrefix marks an event field of a raw search before its node,
+// and so the field it is stored as, is known.
+const rawFieldPrefix = "rawfield:"
+
+// resolveRaw replaces a raw search's event fields with the fields the
+// node stores them as.
+func resolveRaw(e Expr, node string) error {
+	switch x := e.(type) {
+	case *And:
+		for _, k := range x.Kids {
+			if err := resolveRaw(k, node); err != nil {
+				return err
+			}
+		}
+	case *Or:
+		for _, k := range x.Kids {
+			if err := resolveRaw(k, node); err != nil {
+				return err
+			}
+		}
+	case *Not:
+		return resolveRaw(x.Kid, node)
+	case *Cmp:
+		if name, ok := strings.CutPrefix(x.Field, rawFieldPrefix); ok {
+			f, ok := RawFields[node][name]
+			if !ok {
+				return fmt.Errorf("field %s is not a field of %s events", name, node)
+			}
+			x.Field = f
+		}
+	}
+	return nil
+}
+
 // rawSource is the pseudo node a raw search is parsed against before its
 // event code names the node.
 func rawSource(source string) string { return "raw:" + source }
@@ -240,12 +326,23 @@ const xmlkvSuffix = "+xmlkv"
 // (Without fillnull, Splunk's stats also drops events that miss one of
 // its by fields; Signalith keeps them, so it finds those too.)
 func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*Macro) (*Rule, error) {
-	filled, counted, xml := false, false, false
+	filled, counted, xml, renamed := false, false, false, false
 	var searches []string
+	var regexes []Expr
 	for _, s := range later {
+		if !counted && !renamed {
+			e, ok, err := regexStage(s, func(f string) (string, error) { return rawFieldPrefix + f, nil })
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				regexes = append(regexes, e)
+				continue
+			}
+		}
 		switch {
 		case harmlessRe.MatchString(s) || filterRe.MatchString(s):
-		case xmlkvRe.MatchString(s) && !counted && !filled && !xml && len(searches) == 0:
+		case xmlkvRe.MatchString(s) && !counted && !filled && !xml && !renamed && len(searches) == 0:
 			xml = true
 		case searchRe.MatchString(s) && xml && !counted && !filled:
 			// A search after xmlkv filters on what it extracted.
@@ -254,7 +351,10 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 			filled = true
 		case statsRe.MatchString(s) && !counted:
 			counted = true
-		case renameRe.MatchString(s) && counted:
+		case renameRe.MatchString(s) && (counted || !xml && len(searches) == 0):
+			// Before stats, a rename only renames what stats counts by,
+			// as long as no later stage filters on the new names.
+			renamed = true
 		default:
 			return nil, fmt.Errorf("search has a later stage Signalith does not run: %s", firstWords(s))
 		}
@@ -302,12 +402,16 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 		}
 		top = append(top, e)
 	}
+	top = append(top, regexes...)
 	if len(top) < 2 {
 		return nil, fmt.Errorf("a %s search must name a field besides its event code", source)
 	}
 	where = &And{Kids: top}
 	if len(top) == 1 {
 		where = top[0]
+	}
+	if err := resolveRaw(where, r.Node); err != nil {
+		return nil, err
 	}
 	if err := fieldsOf(where, r.Node, xml); err != nil {
 		return nil, err
@@ -440,4 +544,84 @@ func pipes(q string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// Regular expression stages: `regex field="re"` keeps the events whose
+// field the expression is found in, and `where match(field, "re")`, with
+// several joined by AND or by OR, does the same.
+var (
+	regexStageRe = regexp.MustCompile(`(?s)^regex\s+(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"\s*$`)
+	matchCallRe  = regexp.MustCompile(`(?s)^match\(\s*(\w+)\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)\s*`)
+	whereRe      = regexp.MustCompile(`(?is)^where\s+(.*)$`)
+	joinRe       = regexp.MustCompile(`^(?i:(AND|OR))\s+`)
+)
+
+// regexStage reads a regex stage or a where of match() calls, with each
+// field as field names it (a raw field marked for its node to resolve).
+func regexStage(s string, field func(string) (string, error)) (Expr, bool, error) {
+	var kids []Expr
+	join := ""
+	add := func(f, p string) error {
+		name, err := field(f)
+		if err != nil {
+			return err
+		}
+		p = splString(p)
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("regular expression %q: %w", p, err)
+		}
+		kids = append(kids, &Cmp{Field: name, Values: []string{p}, Regex: true})
+		return nil
+	}
+	if m := regexStageRe.FindStringSubmatch(s); m != nil {
+		err := add(m[1], m[2])
+		if err != nil {
+			return nil, true, err
+		}
+		return kids[0], true, nil
+	}
+	w := whereRe.FindStringSubmatch(s)
+	if w == nil {
+		return nil, false, nil
+	}
+	rest := strings.TrimSpace(w[1])
+	for {
+		m := matchCallRe.FindStringSubmatch(rest)
+		if m == nil {
+			return nil, false, nil
+		}
+		if err := add(m[1], m[2]); err != nil {
+			return nil, true, err
+		}
+		rest = rest[len(m[0]):]
+		if rest == "" {
+			break
+		}
+		j := joinRe.FindStringSubmatch(rest)
+		if j == nil || join != "" && !strings.EqualFold(j[1], join) {
+			return nil, false, nil
+		}
+		join = j[1]
+		rest = rest[len(j[0]):]
+	}
+	if len(kids) == 1 {
+		return kids[0], true, nil
+	}
+	if strings.EqualFold(join, "OR") {
+		return &Or{Kids: kids}, true, nil
+	}
+	return &And{Kids: kids}, true, nil
+}
+
+// splString is a quoted SPL string's text: \\ is a backslash and \" a
+// quote; any other backslash is kept.
+func splString(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '\\' || s[i+1] == '"') {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }

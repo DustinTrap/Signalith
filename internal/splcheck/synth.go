@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"maps"
+	"math/rand"
 	"path"
 	"regexp"
 	"slices"
@@ -21,7 +22,10 @@ type lit struct {
 	field  string
 	values []string
 	neg    bool // the event must not match
+	re     bool // values are regular expressions
 }
+
+func (l lit) matches(p, v string) bool { return (&Cmp{Regex: l.re}).matches(p, v) }
 
 // terms lists conjunctions of comparisons that together reach every
 // comparison of e: each OR branch and each IN value is in some term. It
@@ -32,19 +36,20 @@ func terms(e Expr, neg bool) [][]lit {
 	case *Not:
 		return terms(x.Kid, !neg)
 	case *Cmp:
+		re := x.Regex
 		if x.Neg {
 			// a != v is "a present and not v".
 			if neg {
-				return [][]lit{{{field: x.Field, values: x.Values}}, {{field: x.Field, values: nil, neg: true}}}
+				return [][]lit{{{field: x.Field, values: x.Values, re: re}}, {{field: x.Field, values: nil, neg: true}}}
 			}
-			return [][]lit{{{field: x.Field, values: []string{"*"}}, {field: x.Field, values: x.Values, neg: true}}}
+			return [][]lit{{{field: x.Field, values: []string{"*"}}, {field: x.Field, values: x.Values, neg: true, re: re}}}
 		}
 		if neg {
-			return [][]lit{{{field: x.Field, values: x.Values, neg: true}}}
+			return [][]lit{{{field: x.Field, values: x.Values, neg: true, re: re}}}
 		}
 		var out [][]lit
 		for _, v := range x.Values {
-			out = append(out, []lit{{field: x.Field, values: []string{v}}})
+			out = append(out, []lit{{field: x.Field, values: []string{v}, re: re}})
 		}
 		return out
 	case *And:
@@ -107,6 +112,19 @@ func instantiate(p string) string {
 	return strings.Join(parts, " ")
 }
 
+// example is a value a comparison's first value matches: a pattern
+// instantiated, or an example of a regular expression.
+func example(l lit, rng *rand.Rand) string {
+	if !l.re {
+		return instantiate(l.values[0])
+	}
+	s, err := sigmacheck.RegexExample(rng, l.values[0])
+	if err != nil {
+		return ""
+	}
+	return s
+}
+
 // mutate makes a value close to v that a pattern written for v should
 // not match: its last letter or digit changed.
 func mutate(v string) string {
@@ -128,8 +146,8 @@ func mutate(v string) string {
 // comparisons and none of its negated ones, or false when it finds none.
 func assign(term []lit) (map[string]string, bool) {
 	ev := map[string]string{}
-	pos := map[string][]string{}
-	neg := map[string][][]string{}
+	pos := map[string][]lit{}
+	neg := map[string][]lit{}
 	absent := map[string]bool{}
 	var fields []string
 	for _, l := range term {
@@ -140,9 +158,9 @@ func assign(term []lit) (map[string]string, bool) {
 		case l.neg && l.values == nil:
 			absent[l.field] = true
 		case l.neg:
-			neg[l.field] = append(neg[l.field], l.values)
+			neg[l.field] = append(neg[l.field], l)
 		default:
-			pos[l.field] = append(pos[l.field], l.values[0])
+			pos[l.field] = append(pos[l.field], lit{field: l.field, values: l.values[:1], re: l.re})
 		}
 	}
 	for _, f := range fields {
@@ -157,23 +175,28 @@ func assign(term []lit) (map[string]string, bool) {
 			continue // only excluded values: leaving it out satisfies them
 		}
 		var cands []string
-		parts := make([]string, len(ps))
-		for i, p := range ps {
-			parts[i] = instantiate(p)
+		// Several tries, since a regular expression's example is picked
+		// at random.
+		rng := rand.New(rand.NewSource(int64(len(f))))
+		for try := 0; try < 8; try++ {
+			parts := make([]string, len(ps))
+			for i, p := range ps {
+				parts[i] = example(p, rng)
+			}
+			cands = append(cands, strings.Join(parts, " "))
+			cands = append(cands, parts...)
 		}
-		cands = append(cands, strings.Join(parts, " "))
-		cands = append(cands, parts...)
 		found := false
 		for _, c := range cands {
 			ok := true
 			for _, p := range ps {
-				if !Glob(p, c) {
+				if !p.matches(p.values[0], c) {
 					ok = false
 				}
 			}
-			for _, vs := range neg[f] {
-				for _, p := range vs {
-					if Glob(p, c) {
+			for _, l := range neg[f] {
+				for _, p := range l.values {
+					if l.matches(p, c) {
 						ok = false
 					}
 				}
@@ -218,7 +241,7 @@ func Events(e Expr) (pos, neg []map[string]string) {
 				// The excluded value itself.
 				for _, p := range l.values {
 					m := maps.Clone(ev)
-					m[l.field] = instantiate(p)
+					m[l.field] = example(lit{values: []string{p}, re: l.re}, rand.New(rand.NewSource(1)))
 					add(&neg, m)
 				}
 				continue
@@ -434,6 +457,75 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 			out = append(out, sigmacheck.Case{Channel: sigmacheck.SecurityChannel, EventID: "4663", Data: key})
 		}
 		return out
+	case "DirectoryChange":
+		s := maps.Clone(sigmacheck.Bases[sigmacheck.SecurityCategory("5136")])
+		set(s, "ObjectDN", ev["object"])
+		set(s, "ObjectGUID", ev["ad_object_guid"])
+		set(s, "ObjectClass", ev["ad_object_class"])
+		set(s, "AttributeLDAPDisplayName", ev["ad_attribute"])
+		set(s, "AttributeValue", ev["ad_value"])
+		set(s, "OperationType", ev["ad_operation"])
+		set(s, "SubjectUserName", ev["user"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SecurityChannel, EventID: "5136", Data: s}}
+	case "ShareAccess":
+		s := maps.Clone(sigmacheck.Bases[sigmacheck.SecurityCategory("5145")])
+		set(s, "ShareName", ev["share_name"])
+		set(s, "ShareLocalPath", ev["share_path"])
+		set(s, "RelativeTargetName", ev["share_target"])
+		set(s, "ObjectType", ev["object_type"])
+		set(s, "IpAddress", ev["src"])
+		set(s, "AccessMask", ev["access_mask"])
+		set(s, "AccessList", ev["access_list"])
+		set(s, "SubjectUserName", ev["user"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SecurityChannel, EventID: "5145", Data: s}}
+	case "KerberosTGT", "KerberosService":
+		id := map[string]string{"KerberosTGT": "4768", "KerberosService": "4769"}[node]
+		s := maps.Clone(sigmacheck.Bases[sigmacheck.SecurityCategory(id)])
+		set(s, "TargetUserName", ev["user"])
+		set(s, "TargetSid", ev["user_sid"])
+		set(s, "ServiceName", ev["kerberos_service"])
+		set(s, "TicketOptions", ev["ticket_options"])
+		set(s, "Status", ev["kerberos_status"])
+		set(s, "TicketEncryptionType", ev["ticket_encryption_type"])
+		set(s, "PreAuthType", ev["pre_auth_type"])
+		// An IPv4 client is recorded as ::ffff:a.b.c.d.
+		if v := ev["src"]; v != "" && !strings.Contains(v, ":") {
+			set(s, "IpAddress", "::ffff:"+v)
+		} else {
+			set(s, "IpAddress", v)
+		}
+		return []sigmacheck.Case{{Channel: sigmacheck.SecurityChannel, EventID: id, Data: s}}
+	case "UserChanged":
+		s := maps.Clone(sigmacheck.Bases[sigmacheck.SecurityCategory("4738")])
+		set(s, "TargetUserName", ev["object"])
+		set(s, "TargetSid", ev["object_sid"])
+		set(s, "SubjectUserName", ev["user"])
+		set(s, "SamAccountName", ev["sam_account_name"])
+		set(s, "UserAccountControl", ev["user_account_control"])
+		set(s, "AllowedToDelegateTo", ev["allowed_to_delegate_to"])
+		set(s, "OldUacValue", ev["old_uac_value"])
+		set(s, "NewUacValue", ev["new_uac_value"])
+		set(s, "SidHistory", ev["sid_history"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SecurityChannel, EventID: "4738", Data: s}}
+	case "GroupMemberAdded":
+		s := maps.Clone(sigmacheck.Bases[sigmacheck.SecurityCategory("4732")])
+		set(s, "TargetUserName", ev["object"])
+		set(s, "TargetSid", ev["object_sid"])
+		set(s, "MemberSid", ev["member_sid"])
+		set(s, "MemberName", ev["member"])
+		set(s, "SubjectUserName", ev["user"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SecurityChannel, EventID: "4732", Data: s}}
+	case "ServiceInstalled":
+		s := map[string]string{
+			"ServiceName": "ExampleUpdater", "ImagePath": `"C:\Program Files\Example\updater.exe" --service`,
+			"ServiceType": "user mode service", "StartType": "auto start", "AccountName": "LocalSystem",
+		}
+		set(s, "ServiceName", ev["service_name"])
+		set(s, "ImagePath", ev["service_path"])
+		set(s, "ServiceType", ev["service_type"])
+		set(s, "StartType", ev["service_start_type"])
+		set(s, "AccountName", ev["service_account"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SystemChannel, EventID: "7045", Data: s}}
 	}
 	return nil
 }
@@ -558,7 +650,7 @@ func Cases(r *Rule) []sigmacheck.Case {
 }
 
 // NodeModel is the Signalith data model of each node ("" for any).
-var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry", "PowerShell": "Script", "ImageLoad": "Image_Load", "ProcessAccess": "Endpoint", "TaskCreated": "Change", "ObjectAccess": ""}
+var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry", "PowerShell": "Script", "ImageLoad": "Image_Load", "ProcessAccess": "Endpoint", "TaskCreated": "Change", "ObjectAccess": "", "ServiceInstalled": "Change", "DirectoryChange": "Change", "ShareAccess": "Filesystem", "KerberosTGT": "Authentication", "KerberosService": "Authentication", "UserChanged": "Change", "GroupMemberAdded": "Change"}
 
 // AttackDataSource marks a test event recorded in a real attack (Splunk's
 // attack_data, by internal/detect/attackgen).
@@ -574,14 +666,21 @@ func Reads(r *Rule, c sigmacheck.Case) bool {
 // NodeEvents are the Windows event IDs each node reads (as Splunk's
 // add-ons map them to the data model).
 var NodeEvents = map[string][]string{
-	"Processes":     {"1", "4688"},
-	"Filesystem":    {"11", "23", "26"},
-	"Registry":      {"12", "13", "14"},
-	"PowerShell":    {"4104"},
-	"ImageLoad":     {"7"},
-	"ProcessAccess": {"8", "10"},
-	"TaskCreated":   {"4698"},
-	"ObjectAccess":  {"4663"},
+	"Processes":        {"1", "4688"},
+	"Filesystem":       {"11", "23", "26"},
+	"Registry":         {"12", "13", "14"},
+	"PowerShell":       {"4104"},
+	"ImageLoad":        {"7"},
+	"ProcessAccess":    {"8", "10"},
+	"TaskCreated":      {"4698"},
+	"ObjectAccess":     {"4663"},
+	"ServiceInstalled": {"7045"},
+	"DirectoryChange":  {"5136"},
+	"ShareAccess":      {"5145"},
+	"KerberosTGT":      {"4768"},
+	"KerberosService":  {"4769"},
+	"UserChanged":      {"4738"},
+	"GroupMemberAdded": {"4732"},
 }
 
 // InModel reports whether an event of a data model is one a node reads.

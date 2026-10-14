@@ -397,6 +397,8 @@ func windowsSchemaFor(channel, eventID string) ([]string, bool) {
 	case channel == "Security":
 		s, ok := windowsSchema[eventID]
 		return s, ok
+	case channel == SystemChannel && eventID == "7045":
+		return serviceInstallSchema, true
 	case strings.EqualFold(channel, PowerShellChannel) && eventID == "4104":
 		return scriptBlockSchema, true
 	}
@@ -406,6 +408,10 @@ func windowsSchemaFor(channel, eventID string) ([]string, bool) {
 // scriptBlockSchema is the order of PowerShell's script block event
 // (4104): one part of a script that may be split over several events.
 var scriptBlockSchema = []string{"MessageNumber", "MessageTotal", "ScriptBlockText", "ScriptBlockId", "Path"}
+
+// serviceInstallSchema is the order of the Service Control Manager's
+// service installed event (System 7045).
+var serviceInstallSchema = []string{"ServiceName", "ImagePath", "ServiceType", "StartType", "AccountName"}
 
 // windowsSchema lists, for the Security events the Windows parser reads,
 // the names of the event's data values in schema order, up to the last
@@ -422,12 +428,57 @@ var windowsSchema = map[string][]string{
 		"ParentProcessName"},
 	"4663": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ObjectServer", "ObjectType",
 		"ObjectName", "HandleId", "AccessList", "AccessMask", "ProcessId", "ProcessName"},
+	"4648": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "LogonGuid", "TargetUserName",
+		"TargetDomainName", "TargetLogonGuid", "TargetServerName", "TargetInfo", "ProcessId", "ProcessName", "IpAddress", "IpPort"},
+	"5156": {"ProcessID", "Application", "Direction", "SourceAddress", "SourcePort", "DestAddress", "DestPort", "Protocol",
+		"FilterRTID", "LayerName", "LayerRTID"},
+	"5157": {"ProcessID", "Application", "Direction", "SourceAddress", "SourcePort", "DestAddress", "DestPort", "Protocol",
+		"FilterRTID", "LayerName", "LayerRTID"},
+	"4656": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ObjectServer", "ObjectType",
+		"ObjectName", "HandleId", "TransactionId", "AccessList", "AccessReason", "AccessMask", "PrivilegeList",
+		"RestrictedSidCount", "ProcessId", "ProcessName"},
+	"4657": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ObjectName", "ObjectValueName",
+		"HandleId", "OperationType", "OldValueType", "OldValue", "NewValueType", "NewValue", "ProcessId", "ProcessName"},
+	"4661": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ObjectServer", "ObjectType",
+		"ObjectName", "HandleId", "TransactionId", "AccessList", "AccessMask", "PrivilegeList", "Properties",
+		"RestrictedSidCount", "ProcessId", "ProcessName"},
+	"4662": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ObjectServer", "ObjectType",
+		"ObjectName", "OperationType", "HandleId", "AccessList", "AccessMask", "Properties"},
+	"4768": {"TargetUserName", "TargetDomainName", "TargetSid", "ServiceName", "ServiceSid", "TicketOptions", "Status",
+		"TicketEncryptionType", "PreAuthType", "IpAddress", "IpPort", "CertIssuerName", "CertSerialNumber", "CertThumbprint"},
+	"4769": {"TargetUserName", "TargetDomainName", "ServiceName", "ServiceSid", "TicketOptions", "TicketEncryptionType",
+		"IpAddress", "IpPort", "Status"},
 	"4698": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "TaskName", "TaskContent"},
-	"4720": {"TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName"},
-	"4726": {"TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName"},
-	"4728": {"MemberName", "MemberSid", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName"},
-	"4732": {"MemberName", "MemberSid", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName"},
-	"4756": {"MemberName", "MemberSid", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName"},
+	"5136": {"OpCorrelationID", "AppCorrelationID", "SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId",
+		"DSName", "DSType", "ObjectDN", "ObjectGUID", "ObjectClass", "AttributeLDAPDisplayName", "AttributeSyntaxOID",
+		"AttributeValue", "OperationType"},
+	"5145": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ObjectType", "IpAddress", "IpPort",
+		"ShareName", "ShareLocalPath", "RelativeTargetName", "AccessMask", "AccessList"},
+	"4719": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "CategoryId", "SubcategoryId",
+		"SubcategoryGuid", "AuditPolicyChanges"},
+	"4706": {"DomainName", "DomainSid", "TdoType", "TdoDirection", "TdoAttributes", "SidFilteringEnabled", "SubjectUserSid",
+		"SubjectUserName", "SubjectDomainName", "SubjectLogonId"},
+	"4794": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "Workstation"},
+	"4697": {"SubjectUserSid", "SubjectUserName", "SubjectDomainName", "SubjectLogonId", "ServiceName", "ServiceFileName",
+		"ServiceType", "ServiceStartType", "ServiceAccount"},
+	"4720": {"TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName", "SubjectDomainName",
+		"SubjectLogonId", "PrivilegeList", "SamAccountName", "DisplayName", "UserPrincipalName", "HomeDirectory",
+		"HomePath", "ScriptPath", "ProfilePath", "UserWorkstations", "PasswordLastSet", "AccountExpires",
+		"PrimaryGroupId", "AllowedToDelegateTo", "OldUacValue", "NewUacValue", "UserAccountControl",
+		"UserParameters", "SidHistory"},
+	"4738": {"Dummy", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName",
+		"SubjectDomainName", "SubjectLogonId", "PrivilegeList", "SamAccountName", "DisplayName", "UserPrincipalName",
+		"HomeDirectory", "HomePath", "ScriptPath", "ProfilePath", "UserWorkstations", "PasswordLastSet",
+		"AccountExpires", "PrimaryGroupId", "AllowedToDelegateTo", "OldUacValue", "NewUacValue",
+		"UserAccountControl", "UserParameters", "SidHistory"},
+	"4726": {"TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName", "SubjectDomainName",
+		"SubjectLogonId"},
+	"4728": {"MemberName", "MemberSid", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName",
+		"SubjectDomainName", "SubjectLogonId"},
+	"4732": {"MemberName", "MemberSid", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName",
+		"SubjectDomainName", "SubjectLogonId"},
+	"4756": {"MemberName", "MemberSid", "TargetUserName", "TargetDomainName", "TargetSid", "SubjectUserSid", "SubjectUserName",
+		"SubjectDomainName", "SubjectLogonId"},
 }
 
 // hexID is an OTLP trace or span ID as lower-case hex, or "" when it is

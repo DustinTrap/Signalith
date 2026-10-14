@@ -36,6 +36,7 @@ func TestWindowsFailedLogon(t *testing.T) {
 	ins := make([]string, 21)
 	ins[5], ins[6], ins[7], ins[9], ins[10], ins[12], ins[13], ins[19], ins[20] =
 		"administrator", "CORP", "0xC000006D", "0xC000006A", "3", "NTLM", "KALI", "203.0.113.9", "51234"
+	ins[4], ins[11], ins[18] = "S-1-0-0", "NtLmSsp ", `C:\Windows\System32\svchost.exe`
 	b, _ := json.Marshal(map[string]any{
 		"Channel": "Security", "Computer": "DC01.corp.local", "EventID": 4625,
 		"TimeCreated": "2026-10-11 10:00:00 +0000", "StringInserts": ins, "Message": "An account failed to log on.",
@@ -47,6 +48,7 @@ func TestWindowsFailedLogon(t *testing.T) {
 	expect(t, ev.Document(), map[string]any{
 		"action": "failure", "user": "administrator", "src": "203.0.113.9", "src_port": int64(51234),
 		"logon_type": int64(3), "logon_type_name": "network", "reason": "bad password",
+		"logon_process": "NtLmSsp", "user_sid": "S-1-0-0", "process_name": "svchost.exe",
 		"host": "DC01.corp.local", "signature_id": "4625", "sourcetype": "WinEventLog:Security",
 		"@timestamp": "2026-10-11T10:00:00Z", "datamodel": "Authentication",
 	})
@@ -76,6 +78,63 @@ func TestWindowsScheduledTaskCreated(t *testing.T) {
 	})
 }
 
+func TestWindowsServiceInstalled(t *testing.T) {
+	ins := []string{"RemCom Service", `%systemroot%\RemComSvc.exe`, "user mode service", "demand start", "LocalSystem"}
+	rec := map[string]any{"Channel": "System", "Computer": "WS1", "EventID": "7045", "ProviderName": "Service Control Manager", "StringInserts": ins}
+	b, _ := json.Marshal(rec)
+	ev := Normalize("win.events", decode(t, string(b)), now)
+	expect(t, ev.Document(), map[string]any{
+		"datamodel": "Change", "action": "created", "object_category": "service", "object": "RemCom Service",
+		"service_name": "RemCom Service", "service_path": `%systemroot%\RemComSvc.exe`, "service_type": "user mode service",
+		"service_start_type": "demand start", "service_account": "LocalSystem", "provider": "Service Control Manager",
+		"sourcetype": "WinEventLog:System", "signature_id": "7045",
+	})
+	// Event IDs are their provider's: another provider's 7045 is not a
+	// service install.
+	rec["ProviderName"] = "Some-Driver"
+	b, _ = json.Marshal(rec)
+	if ev := Normalize("win.events", decode(t, string(b)), now); ev.Model != "Other" || ev.Fields["provider"] != "Some-Driver" {
+		t.Errorf("other provider = %s %v", ev.Model, ev.Fields)
+	}
+	// Wazuh sends the same event by name.
+	alert := `{"timestamp":"2026-10-14T10:00:00.000+0000","rule":{"id":"61138","level":5,"description":"New Windows Service Created"},"agent":{"id":"001","name":"WS1"},` +
+		`"data":{"win":{"system":{"providerName":"Service Control Manager","eventID":"7045","channel":"System","computer":"WS1","systemTime":"2026-10-14T10:00:00Z"},` +
+		`"eventdata":{"serviceName":"KrbSCM","imagePath":"C:\\Users\\Public\\krb.exe","serviceType":"user mode service","startType":"auto start","accountName":"LocalSystem"}}}}`
+	ev, ok := wazuhWindows(decode(t, alert))
+	if !ok || ev.Model != "Change" || ev.Fields["service_name"] != "KrbSCM" || ev.Fields["service_path"] != `C:\Users\Public\krb.exe` || ev.Fields["service_start_type"] != "auto start" {
+		t.Errorf("wazuh = %v %s %v", ok, ev.Model, ev.Fields)
+	}
+}
+
+func TestWindowsSecurityServiceInstalled(t *testing.T) {
+	ins := []string{"S-1-5-21-1", "bob", "CORP", "0x3e7", "PSEXESVC", `%SystemRoot%\PSEXESVC.exe`, "0x10", "3", "LocalSystem"}
+	b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "WS1", "EventID": "4697", "StringInserts": ins})
+	ev := Normalize("win.security", decode(t, string(b)), now)
+	expect(t, ev.Document(), map[string]any{
+		"datamodel": "Change", "action": "created", "object_category": "service", "object": "PSEXESVC", "user": "bob",
+		"service_name": "PSEXESVC", "service_path": `%SystemRoot%\PSEXESVC.exe`, "service_type": "0x10",
+		"service_start_type": "3", "service_account": "LocalSystem",
+	})
+}
+
+func TestWindowsShareAccessAndDirectoryChange(t *testing.T) {
+	ins := []string{"S-1-5-7", "ANONYMOUS LOGON", "NT AUTHORITY", "0x3e6", "File", "198.51.100.7", "49702", `\\*\IPC$`, "", "lsarpc", "0x3", "%%1541 %%4416 %%4417"}
+	b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "DC1", "EventID": "5145", "StringInserts": ins})
+	expect(t, Normalize("win.security", decode(t, string(b)), now).Document(), map[string]any{
+		"datamodel": "Filesystem", "action": "modified", "user": "ANONYMOUS LOGON", "src": "198.51.100.7", "src_port": int64(49702),
+		"share_name": `\\*\IPC$`, "share_target": "lsarpc", "file_name": "lsarpc", "access_list": "%%1541 %%4416 %%4417",
+		"access_names": "%%1541 %%4416 %%4417 SYNCHRONIZE ReadData WriteData", "access_mask": "0x3",
+	})
+	ins = []string{"{1}", "-", "S-1-5-21-1", "eve", "CORP", "0x1a2b", "corp.example.com", "%%14676", "CN=bob,CN=Users,DC=corp,DC=example,DC=com",
+		"{6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10}", "user", "sIDHistory", "2.5.5.17", "S-1-5-21-2-500", "%%14674"}
+	b, _ = json.Marshal(map[string]any{"Channel": "Security", "Computer": "DC1", "EventID": "5136", "StringInserts": ins})
+	expect(t, Normalize("win.security", decode(t, string(b)), now).Document(), map[string]any{
+		"datamodel": "Change", "action": "modified", "object_category": "directory_object", "user": "eve",
+		"object": "CN=bob,CN=Users,DC=corp,DC=example,DC=com", "ad_object_class": "user", "ad_attribute": "sIDHistory",
+		"ad_value": "S-1-5-21-2-500", "ad_operation": "%%14674", "ad_object_guid": "6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10",
+	})
+}
+
 func TestWindowsObjectAccess(t *testing.T) {
 	ins := []string{"S-1-5-21-1", "bob", "CORP", "0x3e7", "Security", "File", `C:\Users\bob\AppData\Local\Google\Chrome\User Data\Local State`,
 		"0x1f4", "%%4416\n\t\t\t\t", "0x1", "0x1092", `C:\Tools\steal.exe`}
@@ -91,6 +150,93 @@ func TestWindowsObjectAccess(t *testing.T) {
 	expect(t, ev.Document(), map[string]any{
 		"datamodel": "Registry", "action": "deleted", "registry_path": `\REGISTRY\MACHINE\SOFTWARE\Clients\StartMenuInternet`,
 		"object_path": `\REGISTRY\MACHINE\SOFTWARE\Clients\StartMenuInternet`,
+	})
+}
+
+func TestWindowsHandleRequestsAndRegistryValue(t *testing.T) {
+	sec := func(id string, ins []string) map[string]any {
+		b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "WS1", "EventID": id, "StringInserts": ins})
+		return Normalize("win.security", decode(t, string(b)), now).Document()
+	}
+	expect(t, sec("4656", []string{"S-1-5-21-1", "bob", "CORP", "0x1a2b", "Security", "Key", `\REGISTRY\MACHINE\SAM`, "0x0", "{0}",
+		"%%1538 %%4432", "-", "0x20019", "-", "0", "0x1a4", `C:\Tools\dump.exe`}), map[string]any{
+		"datamodel": "Registry", "action": "read", "object_server": "Security", "object_type": "Key", "registry_path": `\REGISTRY\MACHINE\SAM`,
+		"access_mask": "0x20019", "process_path": `C:\Tools\dump.exe`, "process_id": int64(0x1a4), "signature": "A handle to an object was requested",
+	})
+	expect(t, sec("4661", []string{"S-1-5-21-1", "bob", "CORP", "0x1a2b", "Security Account Manager", "SAM_USER", "S-1-5-21-1-500", "0x0", "{0}",
+		"%%5392\n\t\t\t\t", "0x2d", "-", "{a}\n\t{b}", "0", "0x2b4", `C:\Windows\System32\lsass.exe`}), map[string]any{
+		"object_server": "Security Account Manager", "object_type": "SAM_USER", "object_path": "S-1-5-21-1-500", "access_list": "%%5392",
+		"access_mask": "0x2d", "object_properties": "{a} {b}", "process_name": "lsass.exe",
+	})
+	expect(t, sec("4657", []string{"S-1-5-21-1", "bob", "CORP", "0x1a2b", `\REGISTRY\MACHINE\SYSTEM\ControlSet001\Control\Lsa`,
+		"LmCompatibilityLevel", "0x1f0", "%%1905", "%%1876", "5", "%%1876", "2", "0x1a4", `C:\Windows\regedit.exe`}), map[string]any{
+		"datamodel": "Registry", "action": "modified", "object_path": `\REGISTRY\MACHINE\SYSTEM\ControlSet001\Control\Lsa`,
+		"registry_path": `\REGISTRY\MACHINE\SYSTEM\ControlSet001\Control\Lsa\LmCompatibilityLevel`, "registry_key_name": "Lsa",
+		"registry_value_name": "LmCompatibilityLevel", "registry_old_value_data": "5", "registry_value_data": "2", "process_name": "regedit.exe",
+	})
+}
+
+func TestWindowsDirectoryAccessAndKerberos(t *testing.T) {
+	sec := func(id string, ins []string) map[string]any {
+		b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "DC1", "EventID": id, "StringInserts": ins})
+		return Normalize("win.security", decode(t, string(b)), now).Document()
+	}
+	expect(t, sec("4662", []string{"S-1-5-21-1", "eve", "CORP", "0x1a2b", "DS", "%{19195a5b-6da0-11d0-afd3-00c04fd930c9}",
+		"%{6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10}", "Object Access", "0x0", "%%7688\n\t\t\t\t", "0x100",
+		"%%7688\n\t\t{1131f6ad-9c07-11d1-f79f-00c04fc2dcd2}\n\t{19195a5b-6da0-11d0-afd3-00c04fd930c9}"}), map[string]any{
+		"datamodel": "Change", "action": "read", "object_category": "directory_object", "object_server": "DS",
+		"object_type": "%{19195a5b-6da0-11d0-afd3-00c04fd930c9}", "object": "%{6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10}",
+		"access_names": "%%7688 ControlAccess", "access_mask": "0x100",
+		"object_properties": "%%7688 {1131f6ad-9c07-11d1-f79f-00c04fc2dcd2} {19195a5b-6da0-11d0-afd3-00c04fd930c9}",
+	})
+	expect(t, sec("4768", []string{"bob", "CORP", "S-1-5-21-1-1104", "krbtgt", "S-1-5-21-1-502", "0x40810010", "0x0", "0x17", "0",
+		"::ffff:192.0.2.10", "50123", "", "", ""}), map[string]any{
+		"datamodel": "Authentication", "action": "success", "app": "win:kerberos", "user": "bob", "user_sid": "S-1-5-21-1-1104",
+		"kerberos_service": "krbtgt", "ticket_options": "0x40810010", "kerberos_status": "0x0", "ticket_encryption_type": "0x17",
+		"pre_auth_type": "0", "src": "192.0.2.10", "src_port": int64(50123),
+	})
+	expect(t, sec("4769", []string{"bob@CORP.EXAMPLE.COM", "CORP.EXAMPLE.COM", "MSSQLSvc", "S-1-5-21-1-1300", "0x40810000", "0x17",
+		"::ffff:192.0.2.10", "50124", "0x1b"}), map[string]any{
+		"datamodel": "Authentication", "action": "failure", "user": "bob@CORP.EXAMPLE.COM", "kerberos_service": "MSSQLSvc",
+		"ticket_encryption_type": "0x17", "kerberos_status": "0x1b", "src_port": int64(50124),
+	})
+}
+
+func TestWindowsExplicitCredentialsAndFilteringPlatform(t *testing.T) {
+	sec := func(id string, ins []string) map[string]any {
+		b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "WS1", "EventID": id, "StringInserts": ins})
+		return Normalize("win.security", decode(t, string(b)), now).Document()
+	}
+	expect(t, sec("4648", []string{"S-1-5-21-1", "bob", "CORP", "0x1a2b", "{0}", "admin", "CORP", "{0}", "fs1.corp.example.com",
+		"fs1.corp.example.com", "0x1a4", `C:\Windows\System32\cmd.exe`, "-", "-"}), map[string]any{
+		"datamodel": "Authentication", "src_user": "bob", "user": "admin", "dest": "fs1.corp.example.com",
+		"process_name": "cmd.exe", "signature": "A logon was attempted using explicit credentials",
+	})
+	expect(t, sec("5157", []string{"4242", `\device\harddiskvolume2\program files\vendor\agent.exe`, "%%14593", "10.0.0.5", "50123",
+		"203.0.113.9", "443", "6", "70413", "%%14611", "48"}), map[string]any{
+		"datamodel": "Network_Traffic", "action": "blocked", "direction": "outbound", "transport": "tcp", "process_name": "agent.exe",
+		"src": "10.0.0.5", "dest": "203.0.113.9", "dest_port": int64(443), "layer_rtid": "48",
+	})
+}
+
+func TestWindowsAccountAndAuditPolicyChanges(t *testing.T) {
+	sec := func(id string, ins []string) map[string]any {
+		b, _ := json.Marshal(map[string]any{"Channel": "Security", "Computer": "DC1", "EventID": id, "StringInserts": ins})
+		return Normalize("win.security", decode(t, string(b)), now).Document()
+	}
+	ins := []string{"-", "jdoe", "CORP", "S-1-5-21-1-1201", "S-1-5-21-1-500", "admin", "CORP", "0x967cf92", "-", "-", "-", "-", "-", "-",
+		"-", "-", "-", "-", "-", "-", "-", "0x10", "0x10010", "\r\n\t\t%%2096", "-", "-", "%%1793"}
+	expect(t, sec("4738", ins), map[string]any{
+		"datamodel": "Change", "action": "modified", "object_category": "user", "object": "jdoe", "object_sid": "S-1-5-21-1-1201",
+		"user": "admin", "old_uac_value": "0x10", "new_uac_value": "0x10010", "user_account_control": "%%2096",
+	})
+	expect(t, sec("4720", ins[1:]), map[string]any{"action": "created", "object": "jdoe", "user": "admin", "user_domain": "CORP"})
+	expect(t, sec("4732", []string{"-", "S-1-5-21-1-1201", "DnsAdmins", "CORP", "S-1-5-21-1-1101", "S-1-5-21-1-500", "admin", "CORP", "0x1"}), map[string]any{
+		"object_category": "group", "object": "DnsAdmins", "member_sid": "S-1-5-21-1-1201", "user": "admin", "object_sid": "S-1-5-21-1-1101",
+	})
+	expect(t, sec("4719", []string{"S-1-5-18", "DC1$", "CORP", "0x3e7", "%%8274", "%%12801", "{0CCE9215-69AE-11D9-BED3-505054503030}", "%%8448, %%8450"}), map[string]any{
+		"object_category": "audit_policy", "audit_subcategory_guid": "{0CCE9215-69AE-11D9-BED3-505054503030}",
+		"audit_policy_changes": "%%8448, %%8450", "user": "DC1$",
 	})
 }
 
