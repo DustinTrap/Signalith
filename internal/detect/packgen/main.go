@@ -51,6 +51,7 @@ var categories = map[string]string{
 	"registry_event":       "rules/windows/registry/registry_event",
 	"dns_query":            "rules/windows/dns_query",
 	"pipe_created":         "rules/windows/pipe_created",
+	"raw_access_thread":    "rules/windows/raw_access_thread",
 	"create_stream_hash":   "rules/windows/create_stream_hash",
 	"image_load":           "rules/windows/image_load",
 	"driver_load":          "rules/windows/driver_load",
@@ -60,6 +61,9 @@ var categories = map[string]string{
 	// Not a Sigma category: Windows System log rules (service: system)
 	// about services installed.
 	"system": "rules/windows/builtin/system/service_control_manager",
+	// Nor this: Microsoft Defender Antivirus log rules (service:
+	// windefend).
+	"windefend": "rules/windows/builtin/windefend",
 	// Nor this: Windows Security log rules (service: security), each
 	// about one of the Security events sigmacheck.SecurityEvents lists.
 	"security": "rules/windows/builtin/security",
@@ -178,7 +182,7 @@ func main() {
 				continue
 			}
 			want := map[string]string{"product": product, "category": cat, "service": ""}
-			if cat == "system" || cat == "security" || cat == "auditd" {
+			if cat == "system" || cat == "security" || cat == "auditd" || cat == "windefend" {
 				want["category"], want["service"] = "", cat
 			}
 			if rule.Logsource["product"] != want["product"] || rule.Logsource["category"] != want["category"] || rule.Logsource["service"] != want["service"] {
