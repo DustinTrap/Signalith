@@ -114,3 +114,64 @@ func TestCasesAgreeWithTheRule(t *testing.T) {
 		t.Fatalf("%d positives of %d", pos, len(cases))
 	}
 }
+
+func TestParseUppercaseAndNotNull(t *testing.T) {
+	src := rule("| tstats count FROM datamodel=Endpoint.Registry\n  WHERE Registry.registry_path=\"*\\\\Winlogon*\" Registry.registry_value_name=AutoAdminLogon Registry.registry_value_data=0x00000001\n" +
+		"  BY Registry.dest Registry.registry_value_data\n| `drop_dm_object_name(Registry)`\n| where isnotnull(registry_value_data)\n| `test_rule_filter`")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := map[string]string{"registry_path": `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\AutoAdminLogon`, "registry_value_name": "AutoAdminLogon", "registry_value_data": "0x00000001"}
+	if !Eval(r.Where, ev) {
+		t.Error("does not match its own event")
+	}
+	// Splunk's Sysmon add-on reads "DWORD (0x00000001)" as 0x00000001.
+	if v := View(map[string]any{"registry_value_data": "DWORD (0x00000001)"}); v["registry_value_data"] != "0x00000001" {
+		t.Errorf("view = %v", v)
+	}
+	cases := Cases(r)
+	found := false
+	for _, c := range cases {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Errorf("no test event matches: %+v", cases)
+	}
+}
+
+func TestParsePowerShell(t *testing.T) {
+	src := rule("`powershell` EventCode=4104 ScriptBlockText = \"*ShadowCopy*\" (ScriptBlockText = \"*Delete*\" OR ScriptBlockText = \"*Remove*\")\n" +
+		"| fillnull | stats count min(_time) as firstTime BY dest signature\n| rename dest as host | `security_content_ctime(firstTime)` | `test_rule_filter`")
+	r, err := Parse(src, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Node != "PowerShell" {
+		t.Fatalf("node %s", r.Node)
+	}
+	if !Eval(r.Where, map[string]string{"script_block_text": "Get-WmiObject Win32_ShadowCopy | Remove-WmiObject"}) {
+		t.Error("does not match its own event")
+	}
+	if Eval(r.Where, map[string]string{"script_block_text": "Get-WmiObject Win32_ShadowCopy"}) {
+		t.Error("matches without Delete or Remove")
+	}
+	found := false
+	for _, c := range Cases(r) {
+		found = found || c.Expect
+	}
+	if !found {
+		t.Error("no test event matches")
+	}
+	for search, want := range map[string]string{
+		"`powershell` ScriptBlockText=\"*x*\" | fillnull | stats count by dest":                               "must name its event code",
+		"`powershell` EventCode=4103 ScriptBlockText=\"*x*\" | fillnull | stats count by dest":                "must be of event 4104",
+		"`powershell` EventCode=4104 ScriptBlockText=\"*x*\" | stats count by dest":                           "later stage",
+		"`powershell` EventCode=4104 Path=\"*x*\" | fillnull | stats count by dest":                           "no Signalith mapping",
+		"`powershell` EventCode=4104 (ScriptBlockText=\"*x*\" OR EventID=1) | fillnull | stats count by dest": "only be named once",
+	} {
+		if _, err := Parse(rule(search), nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err = %v, want %q", search, err, want)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -325,6 +326,10 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
 		set(s, "User", ev["user"])
 		target := ev["registry_path"]
+		// The path ends in the value's name, as Sysmon writes it.
+		if v := ev["registry_value_name"]; target != "" && v != "" && !strings.HasSuffix(strings.ToLower(target), `\`+strings.ToLower(v)) {
+			target = strings.TrimRight(target, `\`) + `\` + v
+		}
 		if target == "" {
 			key := ev["registry_key_name"]
 			if key == "" {
@@ -352,6 +357,10 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 			delete(s, "Details")
 		}
 		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: id, Data: s}}
+	case "PowerShell":
+		s := map[string]string{"MessageNumber": "1", "MessageTotal": "1", "ScriptBlockId": "6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10"}
+		set(s, "ScriptBlockText", ev["script_block_text"])
+		return []sigmacheck.Case{{Channel: sigmacheck.PowerShellChannel, EventID: "4104", Data: s}}
 	}
 	return nil
 }
@@ -383,8 +392,16 @@ func View(doc map[string]any) map[string]string {
 			out[k] = fmt.Sprint(x)
 		}
 	}
+	// Splunk's Sysmon add-on keeps the number of "DWORD (0x00000001)" as
+	// registry_value_data, so its rules compare with 0x00000001.
+	if m := wordRe.FindStringSubmatch(out["registry_value_data"]); m != nil {
+		out["registry_value_data"] = m[1]
+	}
 	return out
 }
+
+// wordRe is how Sysmon writes a DWORD or QWORD value's data.
+var wordRe = regexp.MustCompile(`^[DQ]WORD \((0x[0-9a-fA-F]+)\)$`)
 
 // Cases makes a rule's test events: each field-level event becomes the
 // Windows events that carry it, and whether the rule must match each is
@@ -405,7 +422,7 @@ func Cases(r *Rule) []sigmacheck.Case {
 }
 
 // NodeModel is the Signalith data model of each node.
-var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry"}
+var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry", "PowerShell": "Script"}
 
 // Verify checks a converted detection against a rule's test events: each
 // event, as the real parser stores it, must be read the same way by the
