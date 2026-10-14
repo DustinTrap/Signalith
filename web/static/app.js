@@ -4026,6 +4026,8 @@ function healthSyslogRejected(sl) {
     rb.too_large && [rb.too_large, 'over 64 KB, the most a message may be', ['.']],
     rb.bad_framing && [rb.bad_framing, `from ${tcp(rb.bad_framing)} that did not send syslog`, ['.']],
     conns && [conns, `${tcp(conns)} over the connection limit`, ['.']],
+    rb.proxy_untrusted && [rb.proxy_untrusted, `${tcp(rb.proxy_untrusted)} with a PROXY header from an untrusted peer`,
+      ['. If it is your load balancer, add its address to Trusted reverse proxies on the Settings page, under HTTPS.']],
   ].filter(Boolean);
   const one = why.length === 1;
   const line = ([n, what, more]) => [one ? what.charAt(0).toUpperCase() + what.slice(1) : `${healthPageNum(n)} ${what}`, ...more];
