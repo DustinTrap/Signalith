@@ -1,13 +1,16 @@
 package api
 
 import (
+	"cmp"
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/jrsamsanchez/signalith/internal/clusterauth"
+	"github.com/jrsamsanchez/signalith/internal/shared"
 	"github.com/jrsamsanchez/signalith/internal/users"
 )
 
@@ -118,4 +121,62 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		c.MaxAge = int(s.sessions().MaxAge().Seconds())
 	}
 	http.SetCookie(w, c)
+}
+
+// sharedPending is why a member of a cluster does not share the users
+// yet: Servers names the servers seen in the last day whose version
+// cannot read them (the cluster's level stays below
+// shared.LevelSharedUsers until every one can), each with its version.
+// With none, the users wait to be brought in by the server that founded
+// the cluster.
+type sharedPending struct {
+	// Version is this server's version, which every server needs.
+	Version string          `json:"version"`
+	Servers []pendingServer `json:"servers"`
+}
+
+type pendingServer struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// usersPending returns why the users are not shared yet on a member of a
+// cluster, or nil on a server that shares them, or that is no member and
+// keeps them in its files for good.
+func (s *Server) usersPending() *sharedPending {
+	if s.SharedUsers != nil || !s.sharedContent() {
+		return nil
+	}
+	out := &sharedPending{Version: s.Version, Servers: []pendingServer{}}
+	if s.Cluster == nil {
+		return out
+	}
+	for _, sv := range s.Cluster.Status().Servers {
+		if sv.Self || sv.SeenAgo != nil && *sv.SeenAgo >= shared.LevelSeen {
+			continue
+		}
+		// A heartbeat without levels is from a version before them, which
+		// reads level 1 only.
+		if sv.Detail == nil || max(sv.Detail.LevelMax, 1) < shared.LevelSharedUsers {
+			out.Servers = append(out.Servers, pendingServer{Name: sv.Name, Version: sv.Version})
+		}
+	}
+	return out
+}
+
+// pendingWarning says on the Servers page which servers keep the users
+// from being shared, or "" when none does.
+func (p *sharedPending) warning() string {
+	if p == nil || len(p.Servers) == 0 {
+		return ""
+	}
+	names := make([]string, len(p.Servers))
+	for i, sv := range p.Servers {
+		names[i] = sv.Name
+		if sv.Version != "" {
+			names[i] += " (" + sv.Version + ")"
+		}
+	}
+	return fmt.Sprintf("Users and sign-in become shared by every server once every server runs %s or later. "+
+		"Until then each server keeps its own users and sessions. Upgrade %s.", cmp.Or(p.Version, "this version"), strings.Join(names, ", "))
 }

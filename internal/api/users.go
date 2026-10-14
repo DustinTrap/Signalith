@@ -300,6 +300,8 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		"users":  out,
 		"roles":  users.RoleInfos,
 		"shared": s.SharedUsers != nil,
+		// Set on a member of a cluster whose users are not shared yet.
+		"shared_pending": s.usersPending(),
 		"directory": map[string]any{
 			"enabled":     s.dir().Enabled(),
 			"from_config": s.dir().FromConfig(),

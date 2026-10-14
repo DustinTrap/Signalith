@@ -460,6 +460,10 @@ func TestUserETags(t *testing.T) {
 	if code != http.StatusPreconditionFailed || !strings.Contains(fmt.Sprint(out["error"]), "siem-a") || !strings.Contains(fmt.Sprint(out["error"]), "admin") {
 		t.Fatalf("stale change on B: %d %v", code, out)
 	}
+	// The page says who changed it and where in its own words.
+	if out["code"] != "stale" || out["changed_on"] != "siem-a" || out["changed_by"] != "admin" || out["changed_at"] == nil {
+		t.Errorf("stale answer: %v", out)
+	}
 	// Without If-Match, B's change goes on top of A's, though B has not
 	// read it yet.
 	if code, out, _ := c.b.call("PUT", "/api/users/jlee", `{"email":"j@example.com"}`, admin, nil); code != http.StatusOK {
@@ -662,5 +666,40 @@ func TestDegradedBuiltinSignIn(t *testing.T) {
 	}
 	if !strings.Contains(c.a.logs.String(), "signed in while OpenSearch cannot be written") {
 		t.Errorf("the degraded sign-in was not logged:\n%s", c.a.logs.String())
+	}
+}
+
+// On a member of a cluster whose users are not shared yet, the Users page
+// and the Servers page name the servers whose version keeps them apart;
+// a server not in a cluster says nothing of it.
+func TestUsersPendingNamesOldServers(t *testing.T) {
+	ts, _ := newTestServerWith(t, func(s *Server) {
+		s.Cluster = &fakeCluster{holder: "siem-a"}
+		s.Shared = &memberShared{}
+		s.Version = "1.6.0"
+	})
+	code, out := do(t, ts, "GET", "/api/users", "", true)
+	if code != http.StatusOK || out["shared"] != false {
+		t.Fatalf("list: %d %v", code, out)
+	}
+	p, _ := out["shared_pending"].(map[string]any)
+	sv, _ := p["servers"].([]any)
+	if p["version"] != "1.6.0" || len(sv) != 1 || sv[0].(map[string]any)["name"] != "siem-a" || sv[0].(map[string]any)["version"] != "1.5.0" {
+		t.Errorf("pending: %v", out["shared_pending"])
+	}
+	_, out = do(t, ts, "GET", "/api/cluster", "", true)
+	found := false
+	for _, w := range out["warnings"].([]any) {
+		if text := w.(map[string]any)["text"].(string); strings.Contains(text, "runs 1.6.0 or later") && strings.Contains(text, "siem-a (1.5.0)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no warning naming siem-a: %v", out["warnings"])
+	}
+
+	ts, _ = newTestServerWith(t, func(s *Server) { s.Cluster = &fakeCluster{holder: "siem-a"} })
+	if _, out := do(t, ts, "GET", "/api/users", "", true); out["shared_pending"] != nil {
+		t.Errorf("a server not in a cluster: %v", out["shared_pending"])
 	}
 }

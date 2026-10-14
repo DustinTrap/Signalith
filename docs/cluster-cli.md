@@ -26,6 +26,10 @@ others may run while Signalith runs on the same computer.
 | [`reset-key`](#reset-key) | Makes a new cluster key when every copy of it is lost |
 | [`accept-restore`](#accept-restore) | Accepts the shared settings after an OpenSearch snapshot was restored |
 
+`signalith passwd`, which is not a `cluster` command, changes the built-in admin's
+password for every server of a cluster that shares its users; see
+[The built-in admin's password](#the-built-in-admins-password).
+
 ## status
 
 ```
@@ -33,7 +37,7 @@ signalith cluster status [-c file] [-json]
 ```
 
 Shows this server's name and identity, its mode, the cluster's name, identity and
-level, the cluster key it uses, the servers in the keyring and any problem, such as a
+level (2 once every server can read shared users, 1 before), the cluster key it uses, the servers in the keyring and any problem, such as a
 shared setting that does not check out. `-json` prints the same as JSON, with the
 mode and the cluster under `shared`, and `problems` and `warnings` when there are any:
 
@@ -164,6 +168,27 @@ changed outside Signalith. After you restore an OpenSearch snapshot on purpose, 
 this on a member of the cluster: every server accepts the shared settings now in
 OpenSearch within seconds.
 
+## The built-in admin's password
+
+```
+signalith passwd [-c file] [-local]
+```
+
+On a server of a cluster whose servers share their users (see
+[Users on several servers](users.md#users-on-several-servers)), `signalith passwd`
+asks for the new password twice and changes the built-in admin's password for every
+server of the cluster, in OpenSearch. It applies within a few seconds, with no restart,
+and is written to the log as an audit record. It needs the cluster key and OpenSearch,
+like the commands above. When OpenSearch cannot be reached, or the servers do not
+share their users yet, it changes the password in this server's files, as on a server
+that is not in a cluster, and says so.
+
+`-local` keeps the new password on this server only, in `admin-password-hash` in its
+state folder. On a server of a cluster that shares its users it works only while the
+shared settings cannot be used (OpenSearch down, or refusing writes because its disk is
+full), so an admin can always sign in to that server to fix it. Use it before you need
+it, as a break-glass password; it never changes the password of the other servers.
+
 ## When to use which
 
 | What happened | What to do |
@@ -173,3 +198,5 @@ OpenSearch within seconds.
 | OpenSearch was restored from a snapshot | `accept-restore` |
 | Every copy of the cluster key is lost | Stop every server, `reset-key`, then `export-key` and `import-key` |
 | No server can run the background jobs, and you need the cluster now | `found` |
+| The built-in admin's password is lost or must change on every server | `signalith passwd` on any server |
+| You want a password for one server that works while OpenSearch is down | `signalith passwd -local` on that server |
