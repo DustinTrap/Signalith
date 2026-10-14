@@ -234,6 +234,10 @@ rules:
     rule_id: 72170ec5-f7d2-42f5-aefb-2b8be6aad15f
     file: detect_regasm_spawning_a_process.yml
     path: detections/endpoint/detect_regasm_spawning_a_process.yml
+  - id: splunk-detect-regasm-with-network-connection
+    rule_id: 07921114-6db4-4e2e-ae58-3ea8a52ae93f
+    file: detect_regasm_with_network_connection.yml
+    path: detections/endpoint/detect_regasm_with_network_connection.yml
   - id: splunk-detect-regasm-with-no-command-line-arguments
     rule_id: c3bc1430-04e7-4178-835f-047d8e6e97df
     file: detect_regasm_with_no_command_line_arguments.yml
@@ -242,6 +246,10 @@ rules:
     rule_id: bc477b57-5c21-4ab6-9c33-668772e7f114
     file: detect_regsvcs_spawning_a_process.yml
     path: detections/endpoint/detect_regsvcs_spawning_a_process.yml
+  - id: splunk-detect-regsvcs-with-network-connection
+    rule_id: e3e7a1c0-f2b9-445c-8493-f30a63522d1a
+    file: detect_regsvcs_with_network_connection.yml
+    path: detections/endpoint/detect_regsvcs_with_network_connection.yml
   - id: splunk-detect-regsvcs-with-no-command-line-arguments
     rule_id: 6b74d578-a02e-4e94-a0d1-39440d0bf254
     file: detect_regsvcs_with_no_command_line_arguments.yml
@@ -406,6 +414,10 @@ rules:
     rule_id: f0c9d62f-a232-4edd-b17e-bc409fb133d4
     file: domain_group_discovery_with_dsquery.yml
     path: detections/endpoint/domain_group_discovery_with_dsquery.yml
+  - id: splunk-download-files-using-telegram
+    rule_id: 58194e28-ae5e-11eb-8912-acde48001122
+    file: download_files_using_telegram.yml
+    path: detections/endpoint/download_files_using_telegram.yml
   - id: splunk-dsquery-domain-discovery
     rule_id: cc316032-924a-11eb-91a2-acde48001122
     file: dsquery_domain_discovery.yml
@@ -438,6 +450,30 @@ rules:
     rule_id: 9cf8fe08-7ad8-11eb-9819-acde48001122
     file: eventvwr_uac_bypass.yml
     path: detections/endpoint/eventvwr_uac_bypass.yml
+  - id: splunk-excessive-attempt-to-disable-services
+    rule_id: 8fa2a0f0-acd9-11eb-8994-acde48001122
+    file: excessive_attempt_to_disable_services.yml
+    path: detections/endpoint/excessive_attempt_to_disable_services.yml
+  - id: splunk-excessive-distinct-processes-from-windows-temp
+    rule_id: 23587b6a-c479-11eb-b671-acde48001122
+    file: excessive_distinct_processes_from_windows_temp.yml
+    path: detections/endpoint/excessive_distinct_processes_from_windows_temp.yml
+  - id: splunk-excessive-file-deletion-in-windefender-folder
+    rule_id: b5baa09a-7a05-11ec-8da4-acde48001122
+    file: excessive_file_deletion_in_windefender_folder.yml
+    path: detections/endpoint/excessive_file_deletion_in_windefender_folder.yml
+  - id: splunk-excessive-number-of-service-control-start-as-disabled
+    rule_id: 77592bec-d5cc-11eb-9e60-acde48001122
+    file: excessive_number_of_service_control_start_as_disabled.yml
+    path: detections/endpoint/excessive_number_of_service_control_start_as_disabled.yml
+  - id: splunk-excessive-usage-of-cacls-app
+    rule_id: 0bdf6092-af17-11eb-939a-acde48001122
+    file: excessive_usage_of_cacls_app.yml
+    path: detections/endpoint/excessive_usage_of_cacls_app.yml
+  - id: splunk-excessive-usage-of-taskkill
+    rule_id: fe5bca48-accb-11eb-a67c-acde48001122
+    file: excessive_usage_of_taskkill.yml
+    path: detections/endpoint/excessive_usage_of_taskkill.yml
   - id: splunk-exchange-powershell-module-usage
     rule_id: 2d10095e-05ae-11ec-8fdf-acde48001122
     file: exchange_powershell_module_usage.yml
@@ -646,6 +682,190 @@ rules:
     rule_id: bf0a378e-5f3c-11ec-a6de-acde48001122
     file: linux_at_application_execution.yml
     path: detections/endpoint/linux_at_application_execution.yml
+  - id: splunk-linux-auditd-add-user-account
+    rule_id: aae66dc0-74b4-4807-b480-b35f8027abb4
+    file: linux_auditd_add_user_account.yml
+    path: detections/endpoint/linux_auditd_add_user_account.yml
+  - id: splunk-linux-auditd-add-user-account-type
+    rule_id: f8c325ea-506e-4105-8ccf-da1492e90115
+    file: linux_auditd_add_user_account_type.yml
+    path: detections/endpoint/linux_auditd_add_user_account_type.yml
+  - id: splunk-linux-auditd-ai-cli-permission-override-activated
+    rule_id: 737e8baa-d44e-4fa9-8281-24056ed424c0
+    file: linux_auditd_ai_cli_permission_override_activated.yml
+    path: detections/endpoint/linux_auditd_ai_cli_permission_override_activated.yml
+  - id: splunk-linux-auditd-at-application-execution
+    rule_id: 9f306e0a-1c36-469e-8892-968ca12470dd
+    file: linux_auditd_at_application_execution.yml
+    path: detections/endpoint/linux_auditd_at_application_execution.yml
+  - id: splunk-linux-auditd-auditd-daemon-abort
+    rule_id: 76d6573f-c4ab-4fa1-8390-c036416d4add
+    file: linux_auditd_auditd_daemon_abort.yml
+    path: detections/endpoint/linux_auditd_auditd_daemon_abort.yml
+  - id: splunk-linux-auditd-auditd-daemon-shutdown
+    rule_id: 6e2574b3-e24b-4321-ae3c-ba83a75bb714
+    file: linux_auditd_auditd_daemon_shutdown.yml
+    path: detections/endpoint/linux_auditd_auditd_daemon_shutdown.yml
+  - id: splunk-linux-auditd-auditd-daemon-start
+    rule_id: 6b0cb0ff-9a7e-4475-a687-43827fdb31d6
+    file: linux_auditd_auditd_daemon_start.yml
+    path: detections/endpoint/linux_auditd_auditd_daemon_start.yml
+  - id: splunk-linux-auditd-auditd-service-stop
+    rule_id: 6cb9d0e1-eabe-41de-a11a-5efade354e9d
+    file: linux_auditd_auditd_service_stop.yml
+    path: detections/endpoint/linux_auditd_auditd_service_stop.yml
+  - id: splunk-linux-auditd-base64-decode-files
+    rule_id: 5890ba10-4e48-4dc0-8a40-3e1ebe75e737
+    file: linux_auditd_base64_decode_files.yml
+    path: detections/endpoint/linux_auditd_base64_decode_files.yml
+  - id: splunk-linux-auditd-change-file-owner-to-root
+    rule_id: 7b87c556-0ca4-47e0-b84c-6cd62a0a3e90
+    file: linux_auditd_change_file_owner_to_root.yml
+    path: detections/endpoint/linux_auditd_change_file_owner_to_root.yml
+  - id: splunk-linux-auditd-clipboard-data-copy
+    rule_id: 9ddfe470-c4d0-4e60-8668-7337bd699edd
+    file: linux_auditd_clipboard_data_copy.yml
+    path: detections/endpoint/linux_auditd_clipboard_data_copy.yml
+  - id: splunk-linux-auditd-data-destruction-command
+    rule_id: 4da5ce1a-f71b-4e71-bb73-c0a3c73f3c3c
+    file: linux_auditd_data_destruction_command.yml
+    path: detections/endpoint/linux_auditd_data_destruction_command.yml
+  - id: splunk-linux-auditd-data-transfer-size-limits-via-split
+    rule_id: 4669561d-3bbd-44e3-857c-0e3c6ef2120c
+    file: linux_auditd_data_transfer_size_limits_via_split.yml
+    path: detections/endpoint/linux_auditd_data_transfer_size_limits_via_split.yml
+  - id: splunk-linux-auditd-data-transfer-size-limits-via-split-syscall
+    rule_id: c03d4a49-cf9d-435b-86e9-c6f8c9b6c42e
+    file: linux_auditd_data_transfer_size_limits_via_split_syscall.yml
+    path: detections/endpoint/linux_auditd_data_transfer_size_limits_via_split_syscall.yml
+  - id: splunk-linux-auditd-database-file-and-directory-discovery
+    rule_id: f616c4f3-bde9-41cf-856c-019b65f668bb
+    file: linux_auditd_database_file_and_directory_discovery.yml
+    path: detections/endpoint/linux_auditd_database_file_and_directory_discovery.yml
+  - id: splunk-linux-auditd-dd-file-overwrite
+    rule_id: d1b74420-4cea-4752-a123-9b40dfcca49a
+    file: linux_auditd_dd_file_overwrite.yml
+    path: detections/endpoint/linux_auditd_dd_file_overwrite.yml
+  - id: splunk-linux-auditd-disable-or-modify-system-firewall
+    rule_id: 07052556-d4b5-4bae-89aa-cbdc1bb11250
+    file: linux_auditd_disable_or_modify_system_firewall.yml
+    path: detections/endpoint/linux_auditd_disable_or_modify_system_firewall.yml
+  - id: splunk-linux-auditd-doas-tool-execution
+    rule_id: 91b8ca78-f205-4826-a3ef-cd8d6b24e97b
+    file: linux_auditd_doas_tool_execution.yml
+    path: detections/endpoint/linux_auditd_doas_tool_execution.yml
+  - id: splunk-linux-auditd-edit-cron-table-parameter
+    rule_id: f4bb7321-7e64-4d1e-b1aa-21f8b019a91f
+    file: linux_auditd_edit_cron_table_parameter.yml
+    path: detections/endpoint/linux_auditd_edit_cron_table_parameter.yml
+  - id: splunk-linux-auditd-file-and-directory-discovery
+    rule_id: 0bbfb79c-a755-49a5-a38a-1128d0a452f1
+    file: linux_auditd_file_and_directory_discovery.yml
+    path: detections/endpoint/linux_auditd_file_and_directory_discovery.yml
+  - id: splunk-linux-auditd-file-permission-modification-via-chmod
+    rule_id: 5f1d2ea7-eec0-4790-8b24-6875312ad492
+    file: linux_auditd_file_permission_modification_via_chmod.yml
+    path: detections/endpoint/linux_auditd_file_permission_modification_via_chmod.yml
+  - id: splunk-linux-auditd-file-permissions-modification-via-chattr
+    rule_id: f2d1110d-b01c-4a58-9975-90a9edeb083a
+    file: linux_auditd_file_permissions_modification_via_chattr.yml
+    path: detections/endpoint/linux_auditd_file_permissions_modification_via_chattr.yml
+  - id: splunk-linux-auditd-find-credentials-from-password-managers
+    rule_id: 784241aa-85a5-4782-a503-d071bd3446f9
+    file: linux_auditd_find_credentials_from_password_managers.yml
+    path: detections/endpoint/linux_auditd_find_credentials_from_password_managers.yml
+  - id: splunk-linux-auditd-find-credentials-from-password-stores
+    rule_id: 4de73044-9a1d-4a51-a1c2-85267d8dcab3
+    file: linux_auditd_find_credentials_from_password_stores.yml
+    path: detections/endpoint/linux_auditd_find_credentials_from_password_stores.yml
+  - id: splunk-linux-auditd-find-ssh-private-keys
+    rule_id: e2d2bd10-dcd1-4b2f-8a76-0198eab32ba5
+    file: linux_auditd_find_ssh_private_keys.yml
+    path: detections/endpoint/linux_auditd_find_ssh_private_keys.yml
+  - id: splunk-linux-auditd-hardware-addition-swapoff
+    rule_id: 5728bb16-1a0b-4b66-bce2-0074ac839770
+    file: linux_auditd_hardware_addition_swapoff.yml
+    path: detections/endpoint/linux_auditd_hardware_addition_swapoff.yml
+  - id: splunk-linux-auditd-hidden-files-and-directories-creation
+    rule_id: 555cc358-bf16-4e05-9b3a-0f89c73b7261
+    file: linux_auditd_hidden_files_and_directories_creation.yml
+    path: detections/endpoint/linux_auditd_hidden_files_and_directories_creation.yml
+  - id: splunk-linux-auditd-insert-kernel-module-using-insmod-utility
+    rule_id: bc0ca53f-dea6-4906-9b12-09c396fdf1d3
+    file: linux_auditd_insert_kernel_module_using_insmod_utility.yml
+    path: detections/endpoint/linux_auditd_insert_kernel_module_using_insmod_utility.yml
+  - id: splunk-linux-auditd-install-kernel-module-using-modprobe-utility
+    rule_id: 95165985-ace5-4d42-9c42-93a89a5af901
+    file: linux_auditd_install_kernel_module_using_modprobe_utility.yml
+    path: detections/endpoint/linux_auditd_install_kernel_module_using_modprobe_utility.yml
+  - id: splunk-linux-auditd-kernel-module-enumeration
+    rule_id: d1b088de-c47a-4572-9339-bdcc26493b32
+    file: linux_auditd_kernel_module_enumeration.yml
+    path: detections/endpoint/linux_auditd_kernel_module_enumeration.yml
+  - id: splunk-linux-auditd-kernel-module-using-rmmod-utility
+    rule_id: 31810b7a-0abe-42be-a210-0dec8106afee
+    file: linux_auditd_kernel_module_using_rmmod_utility.yml
+    path: detections/endpoint/linux_auditd_kernel_module_using_rmmod_utility.yml
+  - id: splunk-linux-auditd-nopasswd-entry-in-sudoers-file
+    rule_id: 651df959-ad17-4b73-a323-90cb96d5fa1b
+    file: linux_auditd_nopasswd_entry_in_sudoers_file.yml
+    path: detections/endpoint/linux_auditd_nopasswd_entry_in_sudoers_file.yml
+  - id: splunk-linux-auditd-osquery-service-stop
+    rule_id: 0c320fea-6e87-4b99-a884-74d09d4b655d
+    file: linux_auditd_osquery_service_stop.yml
+    path: detections/endpoint/linux_auditd_osquery_service_stop.yml
+  - id: splunk-linux-auditd-possible-access-to-credential-files
+    rule_id: 0419cb7a-57ea-467b-974f-77c303dfe2a3
+    file: linux_auditd_possible_access_to_credential_files.yml
+    path: detections/endpoint/linux_auditd_possible_access_to_credential_files.yml
+  - id: splunk-linux-auditd-preload-hijack-library-calls
+    rule_id: 35c50572-a70b-452f-afa9-bebdf3c3ce36
+    file: linux_auditd_preload_hijack_library_calls.yml
+    path: detections/endpoint/linux_auditd_preload_hijack_library_calls.yml
+  - id: splunk-linux-auditd-private-keys-and-certificate-enumeration
+    rule_id: 892eb674-3344-4143-8e52-4775b1daf3f1
+    file: linux_auditd_private_keys_and_certificate_enumeration.yml
+    path: detections/endpoint/linux_auditd_private_keys_and_certificate_enumeration.yml
+  - id: splunk-linux-auditd-service-restarted
+    rule_id: 8eb3e858-18d3-44a4-a514-52cfa39f154a
+    file: linux_auditd_service_restarted.yml
+    path: detections/endpoint/linux_auditd_service_restarted.yml
+  - id: splunk-linux-auditd-service-started
+    rule_id: b5eed06d-5c97-4092-a3a1-fa4b7e77c71a
+    file: linux_auditd_service_started.yml
+    path: detections/endpoint/linux_auditd_service_started.yml
+  - id: splunk-linux-auditd-setuid-using-chmod-utility
+    rule_id: 8230c407-1b47-4d95-ac2e-718bd6381386
+    file: linux_auditd_setuid_using_chmod_utility.yml
+    path: detections/endpoint/linux_auditd_setuid_using_chmod_utility.yml
+  - id: splunk-linux-auditd-setuid-using-setcap-utility
+    rule_id: 1474459a-302b-4255-8add-d82f96d14cd9
+    file: linux_auditd_setuid_using_setcap_utility.yml
+    path: detections/endpoint/linux_auditd_setuid_using_setcap_utility.yml
+  - id: splunk-linux-auditd-shred-overwrite-command
+    rule_id: ce2bde4d-a1d4-4452-8c87-98440e5adfb3
+    file: linux_auditd_shred_overwrite_command.yml
+    path: detections/endpoint/linux_auditd_shred_overwrite_command.yml
+  - id: splunk-linux-auditd-sudo-or-su-execution
+    rule_id: 817a5c89-5b92-4818-a22d-aa35e1361afe
+    file: linux_auditd_sudo_or_su_execution.yml
+    path: detections/endpoint/linux_auditd_sudo_or_su_execution.yml
+  - id: splunk-linux-auditd-sysmon-service-stop
+    rule_id: 20901256-633a-40de-8753-7b88811a460f
+    file: linux_auditd_sysmon_service_stop.yml
+    path: detections/endpoint/linux_auditd_sysmon_service_stop.yml
+  - id: splunk-linux-auditd-unload-module-via-modprobe
+    rule_id: 90964d6a-4b5f-409a-85bd-95e261e03fe9
+    file: linux_auditd_unload_module_via_modprobe.yml
+    path: detections/endpoint/linux_auditd_unload_module_via_modprobe.yml
+  - id: splunk-linux-auditd-virtual-disk-file-and-directory-discovery
+    rule_id: eec78cef-d4c8-4b35-8f5b-6922102a4a41
+    file: linux_auditd_virtual_disk_file_and_directory_discovery.yml
+    path: detections/endpoint/linux_auditd_virtual_disk_file_and_directory_discovery.yml
+  - id: splunk-linux-auditd-whoami-user-discovery
+    rule_id: d1ff2e22-310d-446a-80b3-faedaa7b3b52
+    file: linux_auditd_whoami_user_discovery.yml
+    path: detections/endpoint/linux_auditd_whoami_user_discovery.yml
   - id: splunk-linux-awk-privilege-escalation
     rule_id: 4510cae0-96a2-4840-9919-91d262db210a
     file: linux_awk_privilege_escalation.yml
@@ -930,6 +1150,10 @@ rules:
     rule_id: 084275ba-61b8-11ec-8d64-acde48001122
     file: linux_service_restarted.yml
     path: detections/endpoint/linux_service_restarted.yml
+  - id: splunk-linux-service-started-or-enabled
+    rule_id: e0428212-61b7-11ec-88a3-acde48001122
+    file: linux_service_started_or_enabled.yml
+    path: detections/endpoint/linux_service_started_or_enabled.yml
   - id: splunk-linux-setuid-using-chmod-utility
     rule_id: bf0304b6-6250-11ec-9d7c-acde48001122
     file: linux_setuid_using_chmod_utility.yml
@@ -1006,6 +1230,10 @@ rules:
     rule_id: dc057fd6-34db-4c41-b8dd-00463c47bf83
     file: linux_suspicious_xdg_autostart.yml
     path: detections/endpoint/linux_suspicious_xdg_autostart.yml
+  - id: splunk-linux-system-network-discovery
+    rule_id: 535cb214-8b47-11ec-a2c7-acde48001122
+    file: linux_system_network_discovery.yml
+    path: detections/endpoint/linux_system_network_discovery.yml
   - id: splunk-linux-system-reboot-via-system-request-key
     rule_id: e1912b58-ed9c-422c-bbb0-2dbc70398345
     file: linux_system_reboot_via_system_request_key.yml
@@ -1038,6 +1266,14 @@ rules:
     rule_id: 4c38c264-1f74-11ec-b5fa-acde48001122
     file: logon_script_event_trigger_execution.yml
     path: detections/endpoint/logon_script_event_trigger_execution.yml
+  - id: splunk-lolbas-network-connection-on-uncommon-port
+    rule_id: a6628e6d-be28-4278-b17d-6b5a32968eea
+    file: lolbas_network_connection_on_uncommon_port.yml
+    path: detections/endpoint/lolbas_network_connection_on_uncommon_port.yml
+  - id: splunk-lolbas-rare-network-connection
+    rule_id: d09b66cc-269b-4675-81b5-a3dabe4f5ac2
+    file: lolbas_rare_network_connection.yml
+    path: detections/endpoint/lolbas_rare_network_connection.yml
   - id: splunk-mailsniper-invoke-functions
     rule_id: a36972c8-b894-11eb-9f78-acde48001122
     file: mailsniper_invoke_functions.yml
@@ -1506,6 +1742,10 @@ rules:
     rule_id: 15d905f6-da6b-11eb-ab82-acde48001122
     file: spoolsv_spawning_rundll32.yml
     path: detections/endpoint/spoolsv_spawning_rundll32.yml
+  - id: splunk-spoolsv-suspicious-loaded-modules
+    rule_id: a5e451f8-da81-11eb-b245-acde48001122
+    file: spoolsv_suspicious_loaded_modules.yml
+    path: detections/endpoint/spoolsv_suspicious_loaded_modules.yml
   - id: splunk-spoolsv-suspicious-process-access
     rule_id: 799b606e-da81-11eb-93f8-acde48001122
     file: spoolsv_suspicious_process_access.yml
@@ -1590,6 +1830,10 @@ rules:
     rule_id: 5ba382c4-2105-11ec-8d8f-acde48001122
     file: time_provider_persistence_registry.yml
     path: detections/endpoint/time_provider_persistence_registry.yml
+  - id: splunk-trickbot-named-pipe
+    rule_id: 1804b0a4-a682-11eb-8f68-acde48001122
+    file: trickbot_named_pipe.yml
+    path: detections/endpoint/trickbot_named_pipe.yml
   - id: splunk-uac-bypass-mmc-load-unsigned-dll
     rule_id: 7f04349c-e30d-11eb-bc7f-acde48001122
     file: uac_bypass_mmc_load_unsigned_dll.yml
@@ -1666,6 +1910,14 @@ rules:
     rule_id: 894f48ea-8d85-4dcd-9132-c66cdb407c9b
     file: windows_apache_benchmark_binary.yml
     path: detections/endpoint/windows_apache_benchmark_binary.yml
+  - id: splunk-windows-app-layer-protocol-qakbot-namedpipe
+    rule_id: 63a2c15e-9448-43c5-a4a8-9852266aaada
+    file: windows_app_layer_protocol_qakbot_namedpipe.yml
+    path: detections/endpoint/windows_app_layer_protocol_qakbot_namedpipe.yml
+  - id: splunk-windows-app-layer-protocol-wermgr-connect-to-namedpipe
+    rule_id: 2f3a4092-548b-421c-9caa-84918e1787ef
+    file: windows_app_layer_protocol_wermgr_connect_to_namedpipe.yml
+    path: detections/endpoint/windows_app_layer_protocol_wermgr_connect_to_namedpipe.yml
   - id: splunk-windows-appcertdll-modification-via-command-line
     rule_id: 3ba73a2b-3396-47e4-bdef-c80e6a7895c0
     file: windows_appcertdll_modification_via_command_line.yml
@@ -1674,6 +1926,10 @@ rules:
     rule_id: 547d98dd-6d6e-4aa4-be91-a1a119f48df3
     file: windows_appcertdll_modification_via_registry.yml
     path: detections/endpoint/windows_appcertdll_modification_via_registry.yml
+  - id: splunk-windows-application-layer-protocol-rms-radmin-tool-namedp
+    rule_id: b62a6040-49f4-47c8-b3f6-fc1adb952a33
+    file: windows_application_layer_protocol_rms_radmin_tool_namedpipe.yml
+    path: detections/endpoint/windows_application_layer_protocol_rms_radmin_tool_namedpipe.yml
   - id: splunk-windows-application-whitelisting-bypass-attempt-via-rundl
     rule_id: 1ef5dab0-e1f1-495d-a272-d134583c10b1
     file: windows_application_whitelisting_bypass_attempt_via_rundll32.yml
@@ -1846,6 +2102,10 @@ rules:
     rule_id: 08a9ddcc-5b02-4055-abc5-945ba399f596
     file: windows_command_obfuscation_with_environment_variable_substrings.yml
     path: detections/endpoint/windows_command_obfuscation_with_environment_variable_substrings.yml
+  - id: splunk-windows-command-shell-dcrat-forkbomb-payload
+    rule_id: 2bb1a362-7aa8-444a-92ed-1987e8da83e1
+    file: windows_command_shell_dcrat_forkbomb_payload.yml
+    path: detections/endpoint/windows_command_shell_dcrat_forkbomb_payload.yml
   - id: splunk-windows-compatibility-telemetry-suspicious-child-process
     rule_id: 56fe46ca-ffef-46fe-8f0e-5cd4b7b4cc0c
     file: windows_compatibility_telemetry_suspicious_child_process.yml
@@ -2050,6 +2310,10 @@ rules:
     rule_id: 347e0892-e8f3-4512-afda-dc0e3fa996f3
     file: windows_dns_gather_network_info.yml
     path: detections/endpoint/windows_dns_gather_network_info.yml
+  - id: splunk-windows-dns-query-request-to-tinyurl
+    rule_id: b1ea79da-719c-437c-acaf-5c93f838f425
+    file: windows_dns_query_request_to_tinyurl.yml
+    path: detections/endpoint/windows_dns_query_request_to_tinyurl.yml
   - id: splunk-windows-dnsadmins-new-member-added
     rule_id: 27e600aa-77f8-4614-bc80-2662a67e2f48
     file: windows_dnsadmins_new_member_added.yml
@@ -2106,6 +2370,14 @@ rules:
     rule_id: ee54241e-0815-4423-9729-e1f5dfc402de
     file: windows_excel_spawning_microsoft_project_application.yml
     path: detections/endpoint/windows_excel_spawning_microsoft_project_application.yml
+  - id: splunk-windows-excessive-service-stop-attempt
+    rule_id: 8f3a614f-6b98-4f7d-82dd-d0df38452a8b
+    file: windows_excessive_service_stop_attempt.yml
+    path: detections/endpoint/windows_excessive_service_stop_attempt.yml
+  - id: splunk-windows-excessive-usage-of-net-app
+    rule_id: 355ba810-0a20-4215-8485-9ce3f87f2e38
+    file: windows_excessive_usage_of_net_app.yml
+    path: detections/endpoint/windows_excessive_usage_of_net_app.yml
   - id: splunk-windows-executable-in-loaded-modules
     rule_id: 3e27af56-fcf0-4113-988d-24969b062be7
     file: windows_executable_in_loaded_modules.yml
@@ -2158,6 +2430,10 @@ rules:
     rule_id: a44c0be1-d7ab-41e4-92fd-aa9af4fe232c
     file: windows_file_share_discovery_with_powerview.yml
     path: detections/endpoint/windows_file_share_discovery_with_powerview.yml
+  - id: splunk-windows-file-transfer-protocol-in-non-common-process-path
+    rule_id: 0f43758f-1fe9-470a-a9e4-780acc4d5407
+    file: windows_file_transfer_protocol_in_non_common_process_path.yml
+    path: detections/endpoint/windows_file_transfer_protocol_in_non_common_process_path.yml
   - id: splunk-windows-files-and-dirs-access-rights-modification-via-ica
     rule_id: c76b796c-27e1-4520-91c4-4a58695c749e
     file: windows_files_and_dirs_access_rights_modification_via_icacls.yml
@@ -2234,6 +2510,10 @@ rules:
     rule_id: cafa4bce-9f06-11ec-a7b2-acde48001122
     file: windows_hide_notification_features_through_registry.yml
     path: detections/endpoint/windows_hide_notification_features_through_registry.yml
+  - id: splunk-windows-high-file-deletion-frequency
+    rule_id: 45b125c4-866f-11eb-a95a-acde48001122
+    file: windows_high_file_deletion_frequency.yml
+    path: detections/endpoint/windows_high_file_deletion_frequency.yml
   - id: splunk-windows-hijack-execution-flow-version-dll-side-load
     rule_id: 8351340b-ac0e-41ec-8b07-dd01bf32d6ea
     file: windows_hijack_execution_flow_version_dll_side_load.yml
@@ -2366,6 +2646,10 @@ rules:
     rule_id: 3428ac18-a410-4823-816c-ce697d26f7a8
     file: windows_indirect_command_execution_via_pcalua.yml
     path: detections/endpoint/windows_indirect_command_execution_via_pcalua.yml
+  - id: splunk-windows-indirect-command-execution-via-series-of-forfiles
+    rule_id: bfdaabe7-3db8-48c5-80c1-220f9b8f22be
+    file: windows_indirect_command_execution_via_series_of_forfiles.yml
+    path: detections/endpoint/windows_indirect_command_execution_via_series_of_forfiles.yml
   - id: splunk-windows-information-discovery-fsutil
     rule_id: 2181f261-93e6-4166-a5a9-47deac58feff
     file: windows_information_discovery_fsutil.yml
@@ -2430,10 +2714,18 @@ rules:
     rule_id: 510ea428-4731-4d2f-8829-a28293e427aa
     file: windows_linked_policies_in_adsi_discovery.yml
     path: detections/endpoint/windows_linked_policies_in_adsi_discovery.yml
+  - id: splunk-windows-local-administrator-credential-stuffing
+    rule_id: 09555511-aca6-484a-b6ab-72cd03d73c34
+    file: windows_local_administrator_credential_stuffing.yml
+    path: detections/endpoint/windows_local_administrator_credential_stuffing.yml
   - id: splunk-windows-lsa-secrets-nolmhash-registry
     rule_id: 48cc1605-538c-4223-8382-e36bee5b540d
     file: windows_lsa_secrets_nolmhash_registry.yml
     path: detections/endpoint/windows_lsa_secrets_nolmhash_registry.yml
+  - id: splunk-windows-mail-protocol-in-non-common-process-path
+    rule_id: ac3311f5-661d-4e99-bd1f-3ec665b05441
+    file: windows_mail_protocol_in_non_common_process_path.yml
+    path: detections/endpoint/windows_mail_protocol_in_non_common_process_path.yml
   - id: splunk-windows-mark-of-the-web-bypass
     rule_id: 8ca13343-7405-4916-a2d1-ae34ce0c28ae
     file: windows_mark_of_the_web_bypass.yml
@@ -2654,6 +2946,18 @@ rules:
     rule_id: 3718549b-867e-4084-b770-790e8dab6ab8
     file: windows_mstsc_rdp_commandline.yml
     path: detections/endpoint/windows_mstsc_rdp_commandline.yml
+  - id: splunk-windows-multiple-disabled-users-failed-to-authenticate-wt
+    rule_id: 98f22d82-9d62-11eb-9fcf-acde48001122
+    file: windows_multiple_disabled_users_failed_to_authenticate_wth_kerberos.yml
+    path: detections/endpoint/windows_multiple_disabled_users_failed_to_authenticate_wth_kerberos.yml
+  - id: splunk-windows-multiple-invalid-users-fail-to-authenticate-using
+    rule_id: 001266a6-9d5b-11eb-829b-acde48001122
+    file: windows_multiple_invalid_users_fail_to_authenticate_using_kerberos.yml
+    path: detections/endpoint/windows_multiple_invalid_users_fail_to_authenticate_using_kerberos.yml
+  - id: splunk-windows-multiple-users-remotely-failed-to-authenticate-fr
+    rule_id: 80f9d53e-9ca1-11eb-b0d6-acde48001122
+    file: windows_multiple_users_remotely_failed_to_authenticate_from_host.yml
+    path: detections/endpoint/windows_multiple_users_remotely_failed_to_authenticate_from_host.yml
   - id: splunk-windows-mustang-panda-usb-tool-execution
     rule_id: e66a167f-6506-4e5b-8e4d-1b04940c70be
     file: windows_mustang_panda_usb_tool_execution.yml
@@ -2666,6 +2970,10 @@ rules:
     rule_id: 125f96f9-6f34-418b-b868-c4a8d7fb865f
     file: windows_netsupport_rmm_dll_loaded_by_uncommon_process.yml
     path: detections/endpoint/windows_netsupport_rmm_dll_loaded_by_uncommon_process.yml
+  - id: splunk-windows-network-connection-from-program-in-suspect-locati
+    rule_id: 90fd571b-78d4-409e-a2de-0f0a80c75a84
+    file: windows_network_connection_from_program_in_suspect_location.yml
+    path: detections/endpoint/windows_network_connection_from_program_in_suspect_location.yml
   - id: splunk-windows-network-sniffing-tool-executed
     rule_id: 0c594353-e12d-4867-92f6-2a1b8a1faf5f
     file: windows_network_sniffing_tool_executed.yml
@@ -2702,6 +3010,10 @@ rules:
     rule_id: b1ce9a72-73cf-11ec-981b-acde48001122
     file: windows_non_system_account_targeting_lsass.yml
     path: detections/endpoint/windows_non_system_account_targeting_lsass.yml
+  - id: splunk-windows-non-system-process-querying-definition-update
+    rule_id: 9d375cfd-c9a5-48ff-b875-9bcaf6b63265
+    file: windows_non_system_process_querying_definition_update.yml
+    path: detections/endpoint/windows_non_system_process_querying_definition_update.yml
   - id: splunk-windows-northstar-c2-agent-execution
     rule_id: 5f13d5b2-5181-487b-89eb-e2b471522202
     file: windows_northstar_c2_agent_execution.yml
@@ -2958,6 +3270,10 @@ rules:
     rule_id: e64399d4-94a8-11ec-a9da-acde48001122
     file: windows_process_with_namedpipe_commandline.yml
     path: detections/endpoint/windows_process_with_namedpipe_commandline.yml
+  - id: splunk-windows-process-with-netexec-command-line-parameters
+    rule_id: adbff89c-c1f2-4a2e-88a4-b5e645856510
+    file: windows_process_with_netexec_command_line_parameters.yml
+    path: detections/endpoint/windows_process_with_netexec_command_line_parameters.yml
   - id: splunk-windows-product-key-registry-query
     rule_id: 977da0c0-c7d5-45de-8b7e-f79e959ca13d
     file: windows_product_key_registry_query.yml
@@ -2994,6 +3310,10 @@ rules:
     rule_id: c9f010da-57ab-11ec-82bd-acde48001122
     file: windows_raccine_scheduled_task_deletion.yml
     path: detections/endpoint/windows_raccine_scheduled_task_deletion.yml
+  - id: splunk-windows-rapid-authentication-on-multiple-hosts
+    rule_id: 62606c77-d53d-4182-9371-b02cdbbbcef7
+    file: windows_rapid_authentication_on_multiple_hosts.yml
+    path: detections/endpoint/windows_rapid_authentication_on_multiple_hosts.yml
   - id: splunk-windows-rasautou-dll-execution
     rule_id: 6f42b8be-8e96-11ec-ad5a-acde48001122
     file: windows_rasautou_dll_execution.yml
@@ -3014,6 +3334,10 @@ rules:
     rule_id: 1af84ac8-05ea-4f11-8541-b2d1e45a7744
     file: windows_rdp_client_launched_with_admin_session.yml
     path: detections/endpoint/windows_rdp_client_launched_with_admin_session.yml
+  - id: splunk-windows-rdp-login-session-was-established
+    rule_id: 00ca7f9e-88ab-4841-a6c2-83979ab1ed29
+    file: windows_rdp_login_session_was_established.yml
+    path: detections/endpoint/windows_rdp_login_session_was_established.yml
   - id: splunk-windows-rdp-server-registry-deletion
     rule_id: 1a058296-7c68-4d66-9560-464764d6e26c
     file: windows_rdp_server_registry_deletion.yml
@@ -3462,6 +3786,10 @@ rules:
     rule_id: 5c7ee6ad-baf4-44fb-b2f0-0cfeddf82dbc
     file: windows_user_execution_malicious_url_shortcut_file.yml
     path: detections/endpoint/windows_user_execution_malicious_url_shortcut_file.yml
+  - id: splunk-windows-visual-basic-commandline-compiler-dnsquery
+    rule_id: 8976744a-ae7a-46a4-8128-690df85c2af4
+    file: windows_visual_basic_commandline_compiler_dnsquery.yml
+    path: detections/endpoint/windows_visual_basic_commandline_compiler_dnsquery.yml
   - id: splunk-windows-vssvc-process-accessing-defender-engine
     rule_id: 0c398be7-e33a-4882-9546-12166ceaf73c
     file: windows_vssvc_process_accessing_defender_engine.yml
@@ -3470,6 +3798,10 @@ rules:
     rule_id: 0175f0b7-728d-4038-bbf1-1c30d6ee3d31
     file: windows_wbadmin_file_recovery_from_backup.yml
     path: detections/endpoint/windows_wbadmin_file_recovery_from_backup.yml
+  - id: splunk-windows-wermgr-alternate-data-stream-in-temp-dir
+    rule_id: 65222e9b-9d0b-4bfe-8da1-199b98e1d44a
+    file: windows_wermgr_alternate_data_stream_in_temp_dir.yml
+    path: detections/endpoint/windows_wermgr_alternate_data_stream_in_temp_dir.yml
   - id: splunk-windows-wermgr-spawning-system-integrity-process
     rule_id: d39634c8-7ce7-4503-a5da-73ca3c758fb9
     file: windows_wermgr_spawning_system_integrity_process.yml

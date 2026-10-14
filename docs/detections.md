@@ -242,10 +242,11 @@ Content packs are rule sets from other open source projects, shipped unchanged
 inside Signalith and converted when it starts. Every pack detection is **off** until
 an admin turns it on.
 
-**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 2,035 rules from
-[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 1,921 Windows rules
-for these Sysmon, Security, PowerShell and System log sources, and 114 Linux rules (see
-[Linux endpoints](#linux-endpoints-sysmon-for-linux)):
+**SigmaHQ community rules** (`internal/detect/packs/sigmahq`) holds 2,100 rules from
+[SigmaHQ](https://github.com/SigmaHQ/sigma), pinned to one commit: 1,946 Windows rules
+for these Sysmon, Security, PowerShell and System log sources, and 154 Linux rules (see
+[Linux endpoints](#linux-endpoints-sysmon-for-linux) and
+[the Linux audit log](#linux-audit-log-auditd)):
 
 | Sigma log source | Windows events | Data model |
 | --- | --- | --- |
@@ -256,6 +257,8 @@ for these Sysmon, Security, PowerShell and System log sources, and 114 Linux rul
 | `file_event`, `file_delete` | Sysmon 11; 23 and 26 | Filesystem |
 | `registry_add`, `registry_delete`, `registry_set`, `registry_event` | Sysmon 12; 12; 13; 12, 13 and 14 | Registry |
 | `dns_query` | Sysmon 22 | Network_Resolution |
+| `pipe_created` | Sysmon 17 and 18 (named pipe created or connected to) | Endpoint |
+| `create_stream_hash` | Sysmon 15 (alternate data stream written, such as a download's `Zone.Identifier`) | Filesystem |
 | `ps_script` | PowerShell 4104 | Script |
 | `service: system` | System 7045 (service installed) | Change |
 | `service: security` | The Security log events in the next table | See the next table |
@@ -313,6 +316,39 @@ Sysmon for Linux events. To collect them, install Sysmon for Linux with a
 configuration, then on **Add data** choose Linux, turn on **Include Sysmon for Linux**
 and use the new agent configuration: the agent reads Sysmon's events from the
 systemd journal.
+
+### Linux audit log (auditd)
+
+The Linux audit system (auditd, open source) records what its audit rules ask for:
+programs run, files opened, services stopped, accounts added. The Linux agent reads
+its log, `/var/log/audit/audit.log`, and the syslog receiver reads audit records
+forwarded by auditd's syslog plugin. Each record is one event in the Other data model,
+with sourcetype `linux:audit`. Every field is kept by auditd's own name with
+`auditd_` in front (`exe` is `auditd_exe`, `a0` is `auditd_a0`, the record type is
+`auditd_type`). The names an ENRICHED record gives numbers, which rules write in
+capitals (`UID`, `SYSCALL`), get `_name` at the end (`auditd_uid_name`,
+`auditd_syscall_name`). Text auditd writes in hex, such as a command line, is
+decoded. A program's arguments are also joined as `auditd_execve_command`, and the
+program, its process ID and the logged-in user are in the usual `process`,
+`process_path`, `process_name`, `process_id` and `user` fields. Records that
+`ausearch -i` printed are read too.
+
+40 SigmaHQ rules (`service: auditd`) and 46 Splunk rules (the `linux_auditd` macro)
+read these records, for example capabilities discovery, clipboard and screen capture,
+hidden files run, kernel modules loaded, firewalls turned off, `LD_PRELOAD` and
+`/etc/ld.so.preload` changes, SUID binaries made, and audit or Sysmon stopped. Each
+Splunk rule also fires on Splunk's own recording of its attack.
+
+Most of these rules need auditd to record each program run, which it does not do by
+default. Install auditd and add a rule such as:
+
+```sh
+sudo auditctl -a always,exit -F arch=b64 -S execve -k exec
+echo '-a always,exit -F arch=b64 -S execve -k exec' | sudo tee /etc/audit/rules.d/signalith.rules
+```
+
+The OpenTelemetry Collector runs as its own user and cannot read the audit log, so
+collect it with the Fluent Bit agent, or forward it with auditd's syslog plugin.
 
 ### PowerShell script blocks
 
@@ -391,7 +427,7 @@ The generator keeps each rule's Signalith ID across runs, rewrites `rules/`,
 
 ### Splunk Security Content
 
-**Splunk Security Content** (`internal/detect/packs/splunk`) holds 892 Windows and
+**Splunk Security Content** (`internal/detect/packs/splunk`) holds 975 Windows and
 Linux detections from Splunk's Threat Research Team
 ([security_content](https://github.com/splunk/security_content)), pinned to one
 commit. They are the production TTP and anomaly rules that search the CIM
@@ -404,12 +440,18 @@ names, so each rule's `where` clause becomes a Signalith filter field for field:
 | `Endpoint.Processes` | Sysmon 1, Security 4688 | Endpoint |
 | `Endpoint.Filesystem` | Sysmon 11, 23 and 26 | Filesystem |
 | `Endpoint.Registry` | Sysmon 12, 13 and 14 | Registry |
+| `Network_Traffic.All_Traffic` | Sysmon 3 (`app` is the program's path, `dest_ip` and `src_ip` are `dest` and `src`) | Network_Traffic |
 | `` `powershell` EventCode=4104 `` (raw search) | PowerShell 4104 | Script |
 | `` `sysmon` EventCode=1 `` (raw search) | Sysmon 1 | Endpoint |
+| `` `sysmon` EventCode=3 `` (raw search) | Sysmon 3 | Network_Traffic |
 | `` `sysmon` EventCode=7 `` (raw search) | Sysmon 7 | Image_Load |
+| `` `sysmon` EventCode=22 `` (raw search) | Sysmon 22 | Network_Resolution |
 | `` `sysmon` EventCode=11 ``, `23` or `26` (raw search) | Sysmon 11, 23 and 26 | Filesystem |
 | `` `sysmon` EventCode=12 ``, `13` or `14` (raw search) | Sysmon 12, 13 and 14 | Registry |
 | `` `sysmon` EventCode=8 `` or `10` (raw search) | Sysmon 8 and 10 | Endpoint |
+| `` `sysmon` EventCode=17 `` or `18` (raw search) | Sysmon 17 and 18 (named pipe created or connected to; `PipeName` is `pipe_name`) | Endpoint |
+| `` `sysmon` EventCode=15 `` (raw search) | Sysmon 15 (alternate data stream written; `Contents` is `file_contents`) | Filesystem |
+| `` `wineventlog_security` EventCode=4624 `` or `4625` (raw search) | Security 4624 (successful logon) and 4625 (failed logon) | Authentication |
 | `` `wineventlog_security` EventCode=4698 `` (raw search) | Security 4698 (scheduled task created) | Change |
 | `` `wineventlog_security` EventCode=4663 `` (raw search) | Security 4663 (object access) | Filesystem for a file, Registry for a key |
 | `` `wineventlog_system` EventCode=7045 `` (raw search) | System 7045 (service installed) | Change |
@@ -419,6 +461,7 @@ names, so each rule's `where` clause becomes a Signalith filter field for field:
 | `` `wineventlog_security` EventCode=4738 `` or `4732` (raw search) | Security 4738 (user account changed) and 4732 (member added to a local group) | Change |
 | `Endpoint.Processes` (Sysmon for Linux rules) | Sysmon for Linux 1 | Endpoint |
 | `Endpoint.Filesystem` (Sysmon for Linux rules) | Sysmon for Linux 11 and 23 | Filesystem |
+| `` `linux_auditd` `` (raw search) | Linux audit records, each field by auditd's name (see [the Linux audit log](#linux-audit-log-auditd)) | Other |
 
 The rule files and the macros they use ship unchanged; Signalith converts them when
 it starts, reading the search the way Splunk does: `*` is the only wildcard (`?` is
@@ -499,9 +542,31 @@ the real Windows parser, the converted detection agrees with Splunk's reading of
 clause on every event. A regular expression converts when it is also valid in Go's
 syntax (no lookarounds) and OpenSearch can search it exactly (no word boundaries).
 A value with a `?`, which Splunk reads literally, is searched as a regular expression
-too. Raw searches that test an access mask bit by bit (`eval m = tonumber(GrantedAccess, 16)`,
+too. An address range (`dest_ip IN ("10.0.0.0/8", ...)`) matches the addresses in it, as in Splunk. Raw searches that test an access mask bit by bit (`eval m = tonumber(GrantedAccess, 16)`,
 `bit_and(m, 16)` and a `where` on the result being the mask, 0 or not 0) convert to a regular
-expression over the mask's hex digits. Searches with other `eval`s, `rex`, `lookup`, and other
+expression over the mask's hex digits.
+
+Rules that count events convert too: a `tstats` count `by` some fields and
+`_time span=1m` (or a raw search's `bucket span=5m _time` and `stats ... by`), then a
+`where` limit on the count (`where count >= 10`, `where unique_accounts > 30`, several
+joined by AND). The detection runs `| stats count, dc(field) as name by fields` and
+the same limit. Each run counts the rule's span plus the time since the last run
+(every minute for spans under 5 minutes, every 5 minutes otherwise; a count without
+a span covers an hour, as Splunk's default schedule does), so a burst Splunk finds
+in one of its fixed buckets is counted even when its events arrive a little late,
+and each group is found once a day. Fields of Splunk's add-ons that only restate
+which event it is (`signature`, `vendor_product`, `dvc`, `app`, `user_id`,
+`authentication_method`) are left out of the grouping; an event's `Computer` is
+`host`. A rule ships only when its test events carry every field it groups by and
+counts. Counts compared with an average (`eventstats`) are left out.
+
+A test that only leaves out the other platform's events (`NOT Processes.os="Linux"` in
+a Windows rule) is always true for the rule's own events, whether Splunk's add-on sets
+`os` or not, so it is dropped; other tests of `os` or `vendor_product` are left out.
+A `\/` in a value is left out too, since Splunk's documented escapes do not say how
+it reads it.
+
+Searches with other `eval`s, `rex`, `lookup`, and other
 raw searches are left out for now; `internal/detect/packs/splunk/REPORT.md` lists
 every rule left out and why. The same CI checks as the SigmaHQ pack run on it.
 

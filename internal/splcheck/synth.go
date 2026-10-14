@@ -1,10 +1,12 @@
 package splcheck
 
 import (
+	"cmp"
 	"fmt"
 	"html"
 	"maps"
 	"math/rand"
+	"net/netip"
 	"path"
 	"regexp"
 	"slices"
@@ -99,6 +101,14 @@ func line(kids []Expr, neg bool) [][]lit {
 func instantiate(p string) string {
 	if p == "*" {
 		return "x"
+	}
+	// An address range becomes an address in it.
+	if pre, err := netip.ParsePrefix(p); err == nil {
+		a := pre.Masked().Addr()
+		if n := a.Next(); pre.Contains(n) {
+			a = n
+		}
+		return a.String()
 	}
 	// A * at either end becomes a letter so values keep their edges (a
 	// command line does not start with a space); inside, a space.
@@ -293,6 +303,8 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 		}
 	}
 	switch node {
+	case AuditdNode:
+		return []sigmacheck.Case{auditdRecord(ev)}
 	case "Processes":
 		s := map[string]string{"ProcessId": "4242", "ParentProcessId": "4000"}
 		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
@@ -352,6 +364,37 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 			out = append(out, sigmacheck.Case{Channel: sigmacheck.SysmonChannel, EventID: id, Data: both})
 		}
 		return out
+	case "FileStream":
+		s := map[string]string{"ProcessId": "4242", "Hash": "SHA256=0000000000000000000000000000000000000000000000000000000000000000"}
+		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
+		set(s, "User", ev["user"])
+		target := ev["file_path"]
+		if target == "" {
+			name := ev["file_name"]
+			if name == "" {
+				name = "download.zip:Zone.Identifier"
+			}
+			target = `C:\Users\Public\Downloads\` + name
+		}
+		set(s, "TargetFilename", target)
+		set(s, "Contents", ev["file_contents"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: "15", Data: s}}
+	case "Pipe":
+		s := map[string]string{"ProcessId": "4242", "EventType": "CreatePipe"}
+		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
+		set(s, "User", ev["user"])
+		pipe := ev["pipe_name"]
+		if pipe == "" {
+			pipe = `\test_pipe`
+		}
+		s["PipeName"] = pipe
+		id := "17"
+		// A raw search names its event code, or the event type picks it.
+		if c := ev[eventCode]; c == "18" || c != "17" && ev["pipe_event_type"] == "ConnectPipe" {
+			id, s["EventType"] = "18", "ConnectPipe"
+		}
+		set(s, "EventType", ev["pipe_event_type"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: id, Data: s}}
 	case "Registry":
 		s := map[string]string{"ProcessId": "4242", "EventType": "SetValue"}
 		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
@@ -416,6 +459,38 @@ func records(node string, ev map[string]string) []sigmacheck.Case {
 			}
 		}
 		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: id, Data: s}}
+	case "NetworkConnection", "All_Traffic":
+		s := maps.Clone(sigmacheck.Bases["network_connection"])
+		// A public address: rules leave out private and reserved ranges.
+		s["DestinationIp"] = "93.184.216.34"
+		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
+		set(s, "DestinationIp", ev["dest"])
+		set(s, "DestinationPort", ev["dest_port"])
+		set(s, "DestinationPortName", ev["dest_port_name"])
+		set(s, "DestinationHostname", ev["dest_host"])
+		set(s, "SourceIp", ev["src"])
+		set(s, "SourcePort", ev["src_port"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: "3", Data: s}}
+	case "DnsQuery":
+		s := maps.Clone(sigmacheck.Bases["dns_query"])
+		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
+		set(s, "QueryName", ev["query"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SysmonChannel, EventID: "22", Data: s}}
+	case "Logon":
+		// A failed logon (4625) when the rule names it.
+		id := "4624"
+		if ev[eventCode] == "4625" {
+			id = "4625"
+		}
+		s := maps.Clone(sigmacheck.Bases[sigmacheck.SecurityCategory(id)])
+		set(s, "LogonType", ev["logon_type"])
+		set(s, "TargetUserName", ev["user"])
+		set(s, "AuthenticationPackageName", ev["authentication_method"])
+		set(s, "LogonProcessName", ev["logon_process"])
+		set(s, "IpAddress", ev["src"])
+		set(s, "WorkstationName", ev["src_host"])
+		set(s, "ProcessName", ev["process_path"])
+		return []sigmacheck.Case{{Channel: sigmacheck.SecurityChannel, EventID: id, Data: s}}
 	case "ImageLoad":
 		s := map[string]string{"ProcessId": "4242", "ProcessGuid": "{6f1b4c2e-0d3a-4b8e-9c71-2a5d8e4f9b10}"}
 		set(s, "Image", imagePath(ev["process_path"], ev["process_name"]))
@@ -689,6 +764,9 @@ func Cases(r *Rule) []sigmacheck.Case {
 	pos, neg := Events(r.Where)
 	var out []sigmacheck.Case
 	for _, ev := range append(pos, neg...) {
+		if r.Threshold != nil {
+			countable(r.Threshold, ev)
+		}
 		cs := records(r.Node, ev)
 		if r.Linux {
 			cs = linuxRecords(r.Node, ev)
@@ -704,8 +782,78 @@ func Cases(r *Rule) []sigmacheck.Case {
 	return out
 }
 
+// countable gives a field-level event of a threshold rule the fields its
+// count groups by and counts that the where clause leaves open, so that
+// its test events can be counted. dest and host are the event's host.
+func countable(t *Threshold, ev map[string]string) {
+	for _, f := range t.Fields() {
+		if ev[f] != "" {
+			continue
+		}
+		switch f {
+		case "user":
+			ev[f] = `CORP\tester`
+		case "parent_process_name":
+			ev[f] = "cmd.exe"
+		case "parent_process":
+			ev[f] = `cmd.exe /c run.bat`
+		case "original_file_name":
+			ev[f] = cmp.Or(ev["process_name"], "sample.exe")
+		case "process":
+			ev[f] = cmp.Or(ev["process_name"], "sample.exe") + " /run"
+		case "action":
+			ev[f] = "deleted"
+		}
+	}
+}
+
+// auditdRecord turns a field-level event into the audit record that
+// carries it: stored fields back to auditd's names (auditd_uid_name is an
+// ENRICHED record's UID), of the type the event names, or the one whose
+// fields it has. A program's arguments, joined (execve_command), are the
+// EXECVE record's a0, a1...
+func auditdRecord(ev map[string]string) sigmacheck.Case {
+	data := map[string]string{}
+	typ := ""
+	for k, v := range ev {
+		name, ok := strings.CutPrefix(k, "auditd_")
+		if !ok {
+			continue
+		}
+		switch {
+		case name == "type":
+			typ = strings.ToUpper(v)
+		case name == "execve_command":
+			args := strings.Split(v, " ")
+			for i, a := range args {
+				data[fmt.Sprintf("a%d", i)] = a
+			}
+			data["argc"] = fmt.Sprint(len(args))
+		case strings.HasSuffix(name, "_name"):
+			data[strings.ToUpper(strings.TrimSuffix(name, "_name"))] = v
+		default:
+			data[name] = v
+		}
+	}
+	if typ == "" {
+		switch {
+		case data["argc"] != "":
+			typ = "EXECVE"
+		case data["proctitle"] != "":
+			typ = "PROCTITLE"
+		case data["unit"] != "":
+			typ = "SERVICE_STOP"
+		case data["nametype"] != "":
+			typ = "PATH"
+		default:
+			typ = "SYSCALL"
+		}
+	}
+	return sigmacheck.Case{Channel: sigmacheck.AuditdChannel, EventID: typ, Data: data}
+}
+
 // NodeModel is the Signalith data model of each node ("" for any).
-var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry", "PowerShell": "Script", "ImageLoad": "Image_Load", "ProcessAccess": "Endpoint", "TaskCreated": "Change", "ObjectAccess": "", "ServiceInstalled": "Change", "DirectoryChange": "Change", "ShareAccess": "Filesystem", "KerberosTGT": "Authentication", "KerberosService": "Authentication", "UserChanged": "Change", "GroupMemberAdded": "Change"}
+var NodeModel = map[string]string{"Processes": "Endpoint", "Filesystem": "Filesystem", "Registry": "Registry", "FileStream": "Filesystem", "Pipe": "Endpoint", "PowerShell": "Script", "ImageLoad": "Image_Load", "ProcessAccess": "Endpoint", "NetworkConnection": "Network_Traffic", "All_Traffic": "Network_Traffic", "DnsQuery": "Network_Resolution", "Logon": "Authentication", "TaskCreated": "Change", "ObjectAccess": "", "ServiceInstalled": "Change", "DirectoryChange": "Change", "ShareAccess": "Filesystem", "KerberosTGT": "Authentication", "KerberosService": "Authentication", "UserChanged": "Change", "GroupMemberAdded": "Change", AuditdNode: "Other"}
 
 // AttackDataSource marks a test event recorded in a real attack (Splunk's
 // attack_data, by internal/detect/attackgen).
@@ -715,27 +863,37 @@ const AttackDataSource = "attack_data"
 // events whose stored fields match the where clause.
 func Reads(r *Rule, c sigmacheck.Case) bool {
 	doc, model := Stored(c)
+	if r.Node == AuditdNode {
+		// Every audit record type.
+		return c.Channel == sigmacheck.AuditdChannel && Eval(r.Where, View(doc))
+	}
 	return InModel(r.Node, model) && slices.Contains(NodeEvents[r.Node], c.EventID) && Eval(r.Where, View(doc))
 }
 
 // NodeEvents are the Windows event IDs each node reads (as Splunk's
 // add-ons map them to the data model).
 var NodeEvents = map[string][]string{
-	"Processes":        {"1", "4688"},
-	"Filesystem":       {"11", "23", "26"},
-	"Registry":         {"12", "13", "14"},
-	"PowerShell":       {"4104"},
-	"ImageLoad":        {"7"},
-	"ProcessAccess":    {"8", "10"},
-	"TaskCreated":      {"4698"},
-	"ObjectAccess":     {"4663"},
-	"ServiceInstalled": {"7045"},
-	"DirectoryChange":  {"5136"},
-	"ShareAccess":      {"5145"},
-	"KerberosTGT":      {"4768"},
-	"KerberosService":  {"4769"},
-	"UserChanged":      {"4738"},
-	"GroupMemberAdded": {"4732"},
+	"Processes":         {"1", "4688"},
+	"Filesystem":        {"11", "23", "26"},
+	"Registry":          {"12", "13", "14"},
+	"FileStream":        {"15"},
+	"Pipe":              {"17", "18"},
+	"PowerShell":        {"4104"},
+	"ImageLoad":         {"7"},
+	"ProcessAccess":     {"8", "10"},
+	"NetworkConnection": {"3"},
+	"All_Traffic":       {"3"},
+	"DnsQuery":          {"22"},
+	"Logon":             {"4624", "4625"},
+	"TaskCreated":       {"4698"},
+	"ObjectAccess":      {"4663"},
+	"ServiceInstalled":  {"7045"},
+	"DirectoryChange":   {"5136"},
+	"ShareAccess":       {"5145"},
+	"KerberosTGT":       {"4768"},
+	"KerberosService":   {"4769"},
+	"UserChanged":       {"4738"},
+	"GroupMemberAdded":  {"4732"},
 }
 
 // InModel reports whether an event of a data model is one a node reads.
@@ -777,6 +935,13 @@ func Verify(r *Rule, datamodel string, filter query.Expr, tf *sigmacheck.TestFil
 		if m != c.Expect {
 			errs = append(errs, fmt.Errorf("%s: the detection says %v for %s", where, m, sigmacheck.String(c.Data)))
 		}
+	}
+	if t := r.Threshold; t != nil && !slices.ContainsFunc(tf.Cases, func(c sigmacheck.Case) bool {
+		doc, _ := Stored(c)
+		v := View(doc)
+		return c.Expect && !slices.ContainsFunc(t.Fields(), func(f string) bool { return v[f] == "" })
+	}) {
+		errs = append(errs, fmt.Errorf("no matching test event has every field the count reads (%s), so no group could be counted", strings.Join(t.Fields(), ", ")))
 	}
 	return errs
 }

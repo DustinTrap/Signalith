@@ -9,9 +9,11 @@ package splcheck
 import (
 	"errors"
 	"fmt"
+	"github.com/jrsamsanchez/signalith/internal/ingest"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -62,6 +64,8 @@ type Rule struct {
 	Where Expr `yaml:"-"`
 	// Linux is set for a rule over Sysmon for Linux events only.
 	Linux bool `yaml:"-"`
+	// Threshold is set for a rule that counts the events Where selects.
+	Threshold *Threshold `yaml:"-"`
 }
 
 // Score is the risk the rule assigns, 0 when it names none.
@@ -108,11 +112,29 @@ var Nodes = map[string][]string{
 		"registry_path", "registry_key_name", "registry_value_name", "registry_value_data", "action",
 		"process_name", "process_path", "user",
 	},
+	// Network_Traffic.All_Traffic, as Sysmon's network connections (3)
+	// fill it.
+	"All_Traffic": {"app", "dest_ip", "dest_port", "src_ip", "src_port", "transport"},
+}
+
+// NodeRenames are the node fields Signalith stores under another name:
+// a connection's app is its program's path, and its addresses are dest
+// and src.
+var NodeRenames = map[string]map[string]string{
+	"All_Traffic": {"app": "process_path", "dest_ip": "dest", "src_ip": "src"},
+}
+
+// nodeField is the Signalith field a node's field is stored as.
+func nodeField(node, f string) string {
+	if r, ok := NodeRenames[node][f]; ok {
+		return r
+	}
+	return f
 }
 
 // The stages after the where clause that only reshape the results.
 var (
-	tstatsRe    = regexp.MustCompile(`(?is)^\|\s*tstats\s+.*?\bfrom\s+datamodel=Endpoint\.(\w+)\s+where\s+(.*?)\s+by\s+[^|]*$`)
+	tstatsRe    = regexp.MustCompile(`(?is)^\|\s*tstats\s+(.*?)\s*\bfrom\s+datamodel=(Endpoint|Network_Traffic)\.(\w+)\s+where\s+(.*?)\s+by\s+([^|]*)$`)
 	harmlessRe  = regexp.MustCompile("^`(drop_dm_object_name|security_content_ctime)\\([^`]*\\)`$")
 	filterRe    = regexp.MustCompile("^`[\\w-]+_filter`$")
 	summariesRe = regexp.MustCompile("`security_content_summariesonly`")
@@ -134,8 +156,12 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 	if r.ID == "" || r.Name == "" || r.Search == "" {
 		return nil, errors.New("not a detection: name, id and search are required")
 	}
-	r.Linux = len(r.DataSource) > 0 && !slices.ContainsFunc(r.DataSource, func(s string) bool {
-		return !strings.HasPrefix(s, "Sysmon for Linux ")
+	// osquery's results are Linux events too, which Signalith keeps in
+	// another data model; Sysmon for Linux is what the rule reads here.
+	r.Linux = slices.ContainsFunc(r.DataSource, func(s string) bool {
+		return strings.HasPrefix(s, "Sysmon for Linux ")
+	}) && !slices.ContainsFunc(r.DataSource, func(s string) bool {
+		return !strings.HasPrefix(s, "Sysmon for Linux ") && s != "Osquery Results"
 	})
 	// ```text``` is a comment in SPL.
 	stages := pipes(strings.TrimSpace(commentRe.ReplaceAllString(r.Search, " ")))
@@ -150,22 +176,30 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 	if m == nil {
 		return nil, errors.New("search is not a tstats search of Endpoint.Processes, Filesystem or Registry")
 	}
-	r.Node = m[1]
+	r.Node = m[3]
 	fields, ok := Nodes[r.Node]
-	if !ok {
-		return nil, fmt.Errorf("data model node Endpoint.%s is not supported", r.Node)
+	if !ok || (m[2] == "Network_Traffic") != (r.Node == "All_Traffic") {
+		return nil, fmt.Errorf("data model node %s.%s is not supported", m[2], r.Node)
 	}
 	var present []Expr
 	for _, s := range stages[1:] {
+		if limits, ok := parseLimits(s); ok && r.Threshold == nil {
+			t, err := tstatsThreshold(r.Node, m[1], m[5], limits)
+			if err != nil {
+				return nil, err
+			}
+			r.Threshold = t
+			continue
+		}
 		if nn := notNullRe.FindStringSubmatch(s); nn != nil && slices.Contains(fields, nn[1]) {
-			present = append(present, &Cmp{Field: nn[1], Values: []string{"*"}})
+			present = append(present, &Cmp{Field: nodeField(r.Node, nn[1]), Values: []string{"*"}})
 			continue
 		}
 		e, ok, err := regexStage(s, func(f string) (string, error) {
 			if !slices.Contains(fields, f) {
 				return "", fmt.Errorf("field %s has no Signalith mapping", f)
 			}
-			return f, nil
+			return nodeField(r.Node, f), nil
 		})
 		if err != nil {
 			return nil, err
@@ -178,8 +212,11 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 			return nil, fmt.Errorf("search has a later stage Signalith does not run: %s", firstWords(s))
 		}
 	}
-	where, err := ParseWhere(m[2], r.Node, macros)
+	where, err := ParseWhere(m[4], r.Node, macros)
 	if err != nil {
+		return nil, err
+	}
+	if where, err = dropPlatform(where, r.Linux); err != nil {
 		return nil, err
 	}
 	if len(present) > 0 {
@@ -194,21 +231,25 @@ func Parse(src []byte, macros map[string]*Macro) (*Rule, error) {
 // the node, and each node's fields map to the Signalith fields they are
 // stored as. The code stays in the clause as signature_id.
 var (
-	rawRe = regexp.MustCompile("(?s)^`(powershell|sysmon|wineventlog_security|wineventlog_system)`\\s+(.*)$")
+	rawRe = regexp.MustCompile("(?s)^`(powershell|sysmon|wineventlog_security|wineventlog_system|linux_auditd)`\\s+(.*)$")
 	// rawNodes are the nodes of each source by event code.
 	rawNodes = map[string]map[string]string{
 		"powershell": {"4104": "PowerShell"},
 		"sysmon": {
-			"1": "Processes", "7": "ImageLoad", "8": "ProcessAccess", "10": "ProcessAccess",
+			"1": "Processes", "3": "NetworkConnection", "7": "ImageLoad", "8": "ProcessAccess", "10": "ProcessAccess",
+			"22": "DnsQuery", "15": "FileStream", "17": "Pipe", "18": "Pipe",
 			"11": "Filesystem", "23": "Filesystem", "26": "Filesystem", "12": "Registry", "13": "Registry", "14": "Registry",
 		},
 		// Security events the Windows parser reads.
 		"wineventlog_security": {
-			"4698": "TaskCreated", "4663": "ObjectAccess", "5136": "DirectoryChange", "5145": "ShareAccess",
+			"4624": "Logon", "4625": "Logon", "4698": "TaskCreated", "4663": "ObjectAccess", "5136": "DirectoryChange", "5145": "ShareAccess",
 			"4768": "KerberosTGT", "4769": "KerberosService", "4738": "UserChanged", "4732": "GroupMemberAdded",
 		},
 		// The Service Control Manager's service installed event.
 		"wineventlog_system": {"7045": "ServiceInstalled"},
+		// Linux audit records: every record type is one node, whose
+		// fields are auditd's own (AuditdNode).
+		"linux_auditd": {},
 	}
 	// RawFields are the event fields a raw search may name on each node,
 	// with the Signalith field each is stored as.
@@ -234,8 +275,33 @@ var (
 			"ParentCommandLine": "parent_process", "parent_process": "parent_process", "IntegrityLevel": "process_integrity_level",
 			"CurrentDirectory": "process_current_directory",
 		},
+		// A network connection (3) and a DNS query (22), with the add-on's
+		// names: dest_ip and src_ip are the addresses Signalith keeps as
+		// dest and src.
+		"NetworkConnection": {
+			"Image": "process_path", "process_path": "process_path", "process_name": "process_name",
+			"DestinationIp": "dest", "dest_ip": "dest", "DestinationPort": "dest_port", "dest_port": "dest_port",
+			"DestinationPortName": "dest_port_name", "DestinationHostname": "dest_host",
+			"SourceIp": "src", "src_ip": "src", "SourcePort": "src_port", "src_port": "src_port",
+		},
+		"DnsQuery": {
+			"QueryName": "query", "query": "query", "Image": "process_path", "process_path": "process_path",
+			"process_name": "process_name",
+		},
 		"Filesystem": {
 			"TargetFilename": "file_path", "file_path": "file_path", "file_name": "file_name", "action": "action",
+			"Image": "process_path", "process_path": "process_path", "process_name": "process_name",
+		},
+		// An alternate data stream written (15): its path (file:stream)
+		// and, for small text streams, its contents.
+		"FileStream": {
+			"TargetFilename": "file_path", "file_path": "file_path", "file_name": "file_name", "Contents": "file_contents",
+			"Image": "process_path", "process_path": "process_path", "process_name": "process_name",
+		},
+		// A named pipe created (17) or connected to (18); EventType is
+		// CreatePipe or ConnectPipe.
+		"Pipe": {
+			"PipeName": "pipe_name", "pipe_name": "pipe_name", "EventType": "pipe_event_type",
 			"Image": "process_path", "process_path": "process_path", "process_name": "process_name",
 		},
 		"Registry": {
@@ -246,6 +312,12 @@ var (
 		"ProcessAccess": {
 			"SourceImage": "process_path", "TargetImage": "target_process_path",
 			"GrantedAccess": "granted_access", "CallTrace": "call_trace", "SourceUser": RawUser,
+		},
+		// A successful logon; the add-on names the logon type Logon_Type.
+		"Logon": {
+			"LogonType": "logon_type", "Logon_Type": "logon_type", "TargetUserName": "user",
+			"AuthenticationPackageName": "authentication_method", "LogonProcessName": "logon_process",
+			"IpAddress": "src", "WorkstationName": "src_host", "ProcessName": "process_path",
 		},
 		"TaskCreated": {"TaskName": "task_name", "TaskContent": "task_content", "user": "user"},
 		"ObjectAccess": {
@@ -301,6 +373,11 @@ var (
 	renameRe    = regexp.MustCompile(`(?is)^rename\s`)
 )
 
+// AuditdNode is the node of Linux audit records (the linux_auditd
+// macro). A search names no event code: each record names its type, and
+// every field is stored by auditd's name (ingest.AuditdField).
+const AuditdNode = "Auditd"
+
 // RawUser is an event's own user field (SourceUser), DOMAIN\name as
 // Sysmon writes it; the CIM user field is the name alone (View). Both are
 // stored as user.
@@ -332,7 +409,13 @@ func resolveRaw(e Expr, node string) error {
 	case *Not:
 		return resolveRaw(x.Kid, node)
 	case *Cmp:
-		if name, ok := strings.CutPrefix(x.Field, rawFieldPrefix); ok {
+		if name, ok := strings.CutPrefix(x.Field, rawFieldPrefix); ok && node == AuditdNode {
+			f, ok := ingest.AuditdField(name)
+			if !ok {
+				return fmt.Errorf("field %s is not a field of %s events", name, node)
+			}
+			x.Field = f
+		} else if ok {
 			f, ok := RawFields[node][name]
 			if !ok {
 				return fmt.Errorf("field %s is not a field of %s events", name, node)
@@ -358,6 +441,10 @@ const xmlkvSuffix = "+xmlkv"
 func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*Macro) (*Rule, error) {
 	filled, counted, xml, renamed := false, false, false, false
 	var searches []string
+	// A count with limits: the bucket span, the stats stage and the where.
+	var span time.Duration
+	var stats string
+	var limits []Limit
 	var regexes []Expr
 	bits := newBitStages()
 	for _, s := range later {
@@ -390,8 +477,14 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 			searches = append(searches, searchRe.FindStringSubmatch(s)[1])
 		case fillnullRe.MatchString(s) && !counted && !filled:
 			filled = true
+		case bucketRe.MatchString(s) && !counted && span == 0:
+			b := bucketRe.FindStringSubmatch(s)
+			span = parseSpan(b[1]+b[3], b[2]+b[4])
 		case statsRe.MatchString(s) && !counted:
 			counted = true
+			stats = s
+		case counted && limits == nil && isLimits(s):
+			limits, _ = parseLimits(s)
 		case evalRe.MatchString(s) && counted:
 			// After stats, eval only reshapes the counted rows (splits a
 			// call trace into lines); no stage after it filters them.
@@ -417,7 +510,21 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 	} else {
 		top = []Expr{where}
 	}
+	// EventCode=4625 OR EventCode=4624 names the codes once too.
+	for i, k := range top {
+		if c := codes(k); c != nil {
+			top[i] = c
+		}
+	}
+	if a, ok := where.(*And); ok {
+		a.Kids = top
+	} else {
+		where = top[0]
+	}
 	var code *Cmp
+	if source == "linux_auditd" {
+		r.Node = AuditdNode
+	}
 	for _, k := range top {
 		if c, ok := k.(*Cmp); ok && c.Field == eventCode {
 			if code != nil || c.Neg {
@@ -426,15 +533,31 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 			code = c
 		}
 	}
-	if code == nil || countField(where, eventCode) != 1 {
+	if r.Node == AuditdNode {
+		if countField(where, eventCode) != 0 {
+			return nil, fmt.Errorf("a %s search names no event code", source)
+		}
+	} else if code == nil || countField(where, eventCode) != 1 {
 		return nil, fmt.Errorf("a %s search must name its event code (EventCode=...) once, at the top", source)
 	}
-	for _, v := range code.Values {
+	for _, v := range codeValues(code) {
 		n := rawNodes[source][v]
 		if n == "" || (r.Node != "" && n != r.Node) {
 			return nil, fmt.Errorf("%s event %s is not supported", source, v)
 		}
 		r.Node = n
+	}
+	if limits != nil {
+		if filled {
+			return nil, fmt.Errorf("a count after fillnull is not supported")
+		}
+		t, err := rawThreshold(r.Node, stats, span, limits)
+		if err != nil {
+			return nil, err
+		}
+		r.Threshold = t
+	} else if span != 0 {
+		return nil, fmt.Errorf("search has a later stage Signalith does not run: bucket")
 	}
 	if xml && r.Node != "TaskCreated" {
 		return nil, fmt.Errorf("xmlkv on %s events is not supported", r.Node)
@@ -450,7 +573,7 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 		top = append(top, e)
 	}
 	top = append(top, regexes...)
-	if len(top) < 2 {
+	if len(top) < 2 && r.Node != AuditdNode {
 		return nil, fmt.Errorf("a %s search must name a field besides its event code", source)
 	}
 	where = &And{Kids: top}
@@ -466,6 +589,24 @@ func parseRaw(r *Rule, source, terms string, later []string, macros map[string]*
 	unescapeXML(where)
 	r.Where = where
 	return r, nil
+}
+
+// codes reads an OR of event codes (EventCode=4625 OR EventCode=4624)
+// as one comparison with each code; nil when e is not one.
+func codes(e Expr) *Cmp {
+	o, ok := e.(*Or)
+	if !ok {
+		return nil
+	}
+	out := &Cmp{Field: eventCode}
+	for _, k := range o.Kids {
+		c, ok := k.(*Cmp)
+		if !ok || c.Field != eventCode || c.Neg || c.Regex {
+			return nil
+		}
+		out.Values = append(out.Values, c.Values...)
+	}
+	return out
 }
 
 // fieldsOf checks that a raw clause names only fields of node, and of
@@ -487,7 +628,7 @@ func fieldsOf(e Expr, node string, xml bool) error {
 	case *Not:
 		return fieldsOf(x.Kid, node, xml)
 	case *Cmp:
-		if x.Field == eventCode {
+		if x.Field == eventCode || node == AuditdNode && strings.HasPrefix(x.Field, "auditd_") {
 			return nil
 		}
 		for _, f := range RawFields[node] {
@@ -671,4 +812,12 @@ func splString(s string) string {
 		b.WriteByte(s[i])
 	}
 	return b.String()
+}
+
+// codeValues are an event code comparison's codes; none for no comparison.
+func codeValues(c *Cmp) []string {
+	if c == nil {
+		return nil
+	}
+	return c.Values
 }

@@ -297,7 +297,7 @@ func TestSysmonMultiLineCommandLine(t *testing.T) {
 }
 
 func TestSysmonNetwork(t *testing.T) {
-	msg := "Network connection detected:\r\nRuleName: -\r\nImage: C:\\Tools\\nc.exe\r\nUser: CORP\\bob\r\nProtocol: tcp\r\nSourceIsIpv6: False\r\nSourceIp: 10.0.0.5\r\nSourcePort: 50000\r\nDestinationIp: 198.51.100.7\r\nDestinationHostname: -\r\nDestinationPort: 4444"
+	msg := "Network connection detected:\r\nRuleName: -\r\nImage: C:\\Tools\\nc.exe\r\nUser: CORP\\bob\r\nProtocol: tcp\r\nSourceIsIpv6: False\r\nSourceIp: 10.0.0.5\r\nSourcePort: 50000\r\nDestinationIp: 198.51.100.7\r\nDestinationHostname: -\r\nDestinationPort: 4444\r\nDestinationPortName: -"
 	b, _ := json.Marshal(map[string]any{"Channel": "Microsoft-Windows-Sysmon/Operational", "Computer": "WS1", "EventID": 3,
 		"ProviderName": "Microsoft-Windows-Sysmon", "Message": msg})
 	ev := Normalize("win.sysmon", decode(t, string(b)), now)
@@ -306,6 +306,9 @@ func TestSysmonNetwork(t *testing.T) {
 		"datamodel": "Network_Traffic", "dest": "198.51.100.7", "dest_port": int64(4444), "process_name": "nc.exe", "transport": "tcp",
 		"src_is_ipv6": "false", "provider": "Microsoft-Windows-Sysmon",
 	})
+	if _, ok := doc["dest_port_name"]; ok {
+		t.Errorf("dest_port_name '-' should be dropped")
+	}
 	if _, ok := doc["dest_host"]; ok {
 		t.Errorf("dest_host '-' should be dropped")
 	}
@@ -461,6 +464,18 @@ func TestSysmonEventTypes(t *testing.T) {
 	})
 	expect(t, sysmon(12, "Registry object added or deleted:", "EventType: CreateKey", `TargetObject: HKLM\System\CurrentControlSet\Services\Evil`), map[string]any{
 		"datamodel": "Registry", "action": "created", "registry_key_name": "Evil",
+	})
+	expect(t, sysmon(15, "File stream created:", `Image: C:\Program Files\Mozilla Firefox\firefox.exe`,
+		`TargetFilename: C:\Users\bob\Downloads\setup.exe:Zone.Identifier`, "Hash: SHA256=ABCD,IMPHASH=00",
+		`Contents: [ZoneTransfer]  ZoneId=3`), map[string]any{
+		"datamodel": "Filesystem", "action": "created", "signature": "File stream created", "file_name": "setup.exe:Zone.Identifier",
+		"file_hash": "abcd", "file_hashes": "SHA256=ABCD,IMPHASH=00", "file_contents": "[ZoneTransfer]  ZoneId=3", "process_name": "firefox.exe",
+	})
+	expect(t, sysmon(17, "Pipe Created:", "EventType: CreatePipe", `PipeName: \MSSE-1234-server`, `Image: C:\Users\bob\beacon.exe`), map[string]any{
+		"datamodel": "Endpoint", "signature": "Pipe Created", "pipe_name": `\MSSE-1234-server`, "pipe_event_type": "CreatePipe", "process_name": "beacon.exe",
+	})
+	expect(t, sysmon(18, "Pipe Connected:", "EventType: ConnectPipe", `PipeName: \lsarpc`, `Image: C:\x.exe`), map[string]any{
+		"datamodel": "Endpoint", "signature": "Pipe Connected", "pipe_name": `\lsarpc`, "pipe_event_type": "ConnectPipe",
 	})
 	expect(t, sysmon(22, "Dns query:", `Image: C:\x.exe`, "QueryName: bad.example", "QueryStatus: 9003", "QueryResults: -"), map[string]any{
 		"datamodel": "Network_Resolution", "query": "bad.example", "reply_code": "NXDomain", "process_name": "x.exe",
