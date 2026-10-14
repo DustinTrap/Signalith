@@ -101,7 +101,20 @@ docker-signalith-1 Stopping` for longer than that, and `docker kill docker-signa
 doesn't help either, Docker itself is stuck, not Signalith. On Windows, quit Docker Desktop
 (right-click its icon by the clock, **Quit Docker Desktop**), run `wsl --shutdown` in
 PowerShell, start Docker Desktop again and run the first command again. Your data is kept.
+If `wsl --shutdown` hangs too, restart the computer, or end WSL in PowerShell run as
+administrator with `taskkill /F /IM wslservice.exe`, then start Docker Desktop again.
+
 This happens most when the computer is short of memory: OpenSearch alone uses about 1.5 GB.
+To keep Docker from taking all of it, give WSL a fixed share in `%UserProfile%\.wslconfig`
+(make the file if there is none), for example on a computer with 16 GB:
+
+```ini
+[wsl2]
+memory=6GB
+```
+
+then run `wsl --shutdown` and start Docker Desktop again. Signalith with OpenSearch needs
+at least 4 GB there.
 
 #### Running a release, or building the image yourself
 
