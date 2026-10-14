@@ -700,6 +700,21 @@ func (c *Config) DirectoryFile() string {
 // defaults filled in and the bind password from the environment if set
 // there, or nil when the file has no auth.ldap.
 func (c *Config) LDAP() (*users.LDAPSettings, error) {
+	return c.ldap(true)
+}
+
+// LDAPFromFile is LDAP with the bind password signalith.yaml itself
+// gives, whatever SIGNALITH_LDAP_BIND_PASSWORD says: the servers of a
+// cluster apply each source when it changes.
+func (c *Config) LDAPFromFile() (*users.LDAPSettings, error) {
+	return c.ldap(false)
+}
+
+// LDAPBindPasswordFromEnv returns the bind password that
+// SIGNALITH_LDAP_BIND_PASSWORD(_FILE) gives, or "".
+func (c *Config) LDAPBindPasswordFromEnv() string { return c.ldapBindPassword }
+
+func (c *Config) ldap(env bool) (*users.LDAPSettings, error) {
 	if c.Auth.LDAP == nil {
 		return nil, nil
 	}
@@ -708,7 +723,7 @@ func (c *Config) LDAP() (*users.LDAPSettings, error) {
 		on := true
 		s.Enabled = &on
 	}
-	if c.ldapBindPassword != "" {
+	if env && c.ldapBindPassword != "" {
 		s.BindPassword = c.ldapBindPassword
 	}
 	if s.CACertFile != "" {
@@ -1507,6 +1522,42 @@ func (c *Config) SignInKeyFile() string { return filepath.Join(c.StateDir(), "si
 // AdminPasswordChanged returns AdminHashFile when the built-in admin's
 // password comes from it, else "".
 func (c *Config) AdminPasswordChanged() string { return c.adminHashFile }
+
+// AdminHashFromFile returns the password hash in AdminHashFile when the
+// built-in admin's password comes from it, else "".
+func (c *Config) AdminHashFromFile() string {
+	if c.adminHashFile == "" {
+		return ""
+	}
+	return c.Auth.AdminPasswordHash
+}
+
+// SeenPassword is the built-in admin's password as one source gives it,
+// for the servers of a cluster, which apply it when it changes: Seen is
+// what is compared (stable across restarts), Hash the hash to apply.
+type SeenPassword struct {
+	// Source is "yaml" (auth.admin_password_hash in signalith.yaml) or
+	// "env" (SIGNALITH_ADMIN_PASSWORD or SIGNALITH_ADMIN_PASSWORD_FILE).
+	Source string
+	Seen   string
+	Hash   string
+}
+
+// SeenAdminPassword returns the built-in admin's password as
+// signalith.yaml and the environment give it, each that sets it. The
+// file signalith passwd writes is not a source: it is only used while
+// the shared settings cannot be.
+func (c *Config) SeenAdminPassword() []SeenPassword {
+	var out []SeenPassword
+	if c.layers != nil && c.layers.file["auth.admin_password_hash"] && c.file != nil && c.file.Auth.AdminPasswordHash != "" {
+		h := c.file.Auth.AdminPasswordHash
+		out = append(out, SeenPassword{Source: "yaml", Seen: "hash:" + h, Hash: h})
+	}
+	if c.envAdminVersion != "" {
+		out = append(out, SeenPassword{Source: "env", Seen: "env:" + c.envAdminVersion, Hash: c.envAdminHash})
+	}
+	return out
+}
 
 // PublicAdminPassword reports whether the built-in admin's password in
 // use is change-me-please, the example in an older docker-compose.yml,

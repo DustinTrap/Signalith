@@ -174,6 +174,9 @@ type Hub struct {
 	resyncAt time.Duration
 	// changed is called after anything new was applied (cache.enc).
 	changed func()
+	// confirmed is when a cycle last read everything it found, on the
+	// wall clock, or when the cache.enc restored was written.
+	confirmed time.Time
 }
 
 // NewHub returns a hub; Use points it at OpenSearch.
@@ -437,6 +440,16 @@ func (h *Hub) firstRev(id string, all bool) int64 {
 	return r + 1
 }
 
+// Confirmed returns when this server last read the shared settings in
+// full from OpenSearch (or when the cache.enc it started from was
+// written), so a copy kept while OpenSearch cannot be used can be judged
+// by its age; zero before either.
+func (h *Hub) Confirmed() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.confirmed
+}
+
 // Applied returns how far this server has read the config index, as a
 // _seq_no (see Token); -1 before it has read anything.
 func (h *Hub) Applied() int64 {
@@ -674,6 +687,7 @@ func (h *Hub) Cycle(ctx context.Context) error {
 		if h.uuid == uuid {
 			h.applied = max(h.applied, top)
 		}
+		h.confirmed = h.clock.Now()
 		h.mu.Unlock()
 	}
 	return errors.Join(errs...)
@@ -711,6 +725,9 @@ func (h *Hub) Restore(d CacheData) {
 	h.mu.Lock()
 	for id, r := range d.Floors {
 		h.floors[id] = max(h.floors[id], r)
+	}
+	if d.WrittenAt.After(h.confirmed) {
+		h.confirmed = d.WrittenAt
 	}
 	singles := maps.Clone(h.singles)
 	cols := slices.Clone(h.colls)

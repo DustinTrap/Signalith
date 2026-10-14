@@ -123,6 +123,18 @@ type fileBackend struct {
 	subs   []func()
 }
 
+// ReadFile reads the users file at path, as a cluster's import does: every
+// user with their password hash and session epoch, by username, and when
+// the built-in admin last signed in. A file that is not there holds no
+// users.
+func ReadFile(path string) (map[string]Record, *time.Time, error) {
+	f := newFileBackend(path)
+	if _, err := f.reloadLocked(); err != nil {
+		return nil, nil, err
+	}
+	return f.recs, f.builtinLast, nil
+}
+
 func newFileBackend(path string) *fileBackend {
 	return &fileBackend{path: path, recs: map[string]Record{}}
 }

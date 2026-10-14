@@ -29,8 +29,10 @@ type Collection[T any] struct {
 	watch  string
 	format int
 	// Validate, when set, checks an item's body read or about to be
-	// written; an item it refuses is not used.
-	Validate func(*T) error
+	// written; an item it refuses is not used. ValidateItem does the same
+	// with the item's name, for a body that must agree with its id.
+	Validate     func(*T) error
+	ValidateItem func(name string, v *T) error
 
 	// wmu lets one write of this server's run at a time (see Doc).
 	wmu   sync.Mutex
@@ -116,13 +118,27 @@ func (c *Collection[T]) notify() {
 	}
 }
 
+// validate runs Validate and ValidateItem on the body of item id.
+func (c *Collection[T]) validate(id string, v *T) error {
+	if c.Validate != nil {
+		if err := c.Validate(v); err != nil {
+			return err
+		}
+	}
+	if c.ValidateItem != nil {
+		name, _ := itemName(c.kind, id)
+		return c.ValidateItem(name, v)
+	}
+	return nil
+}
+
 // check checks a copy of item id read from OpenSearch.
 func (c *Collection[T]) check(id string, src json.RawMessage) (*Envelope, *Problem) {
 	e, p := c.h.open(id, c.kind, c.format, src)
 	if p == nil && !e.Deleted {
 		v, err := decodeBody[T](e.Body)
-		if err == nil && c.Validate != nil {
-			err = c.Validate(v)
+		if err == nil {
+			err = c.validate(id, v)
 		}
 		if err != nil {
 			p = &Problem{Kind: ProblemInvalid, Reason: err.Error()}
@@ -275,10 +291,8 @@ func (c *Collection[T]) envelope(id string, base *entry, by string, v *T) (*Enve
 	if v == nil {
 		e.Deleted = true
 	} else {
-		if c.Validate != nil {
-			if err := c.Validate(v); err != nil {
-				return nil, err
-			}
+		if err := c.validate(id, v); err != nil {
+			return nil, err
 		}
 		body, err := encodeBody(v)
 		if err != nil {
@@ -368,6 +382,12 @@ func (c *Collection[T]) Create(ctx context.Context, by, name string, v *T) (int6
 		return 0, store.ErrExists
 	}
 	return seq, err
+}
+
+// Refresh reads the item name from OpenSearch now, so Get returns what
+// is there rather than what the last poll found.
+func (c *Collection[T]) Refresh(ctx context.Context, name string) error {
+	return c.readOne(ctx, c.ItemID(name))
 }
 
 // readOne reads item id now.

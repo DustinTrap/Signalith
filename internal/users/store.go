@@ -200,7 +200,15 @@ type Store struct {
 	// BuiltinAdmin is the built-in admin's name from signalith.yaml. The
 	// name is reserved, and that account always counts as an enabled admin.
 	BuiltinAdmin string
-	Now          func() time.Time
+	// Builtin, when set, names the built-in admin and its password hash
+	// instead of BuiltinAdmin: the servers of a cluster keep it in the
+	// shared settings. ok is false while it is not known.
+	Builtin func() (name, hash string, ok bool)
+	// SignIns, when set, records sign-ins instead of the backend: the
+	// servers of a cluster keep them apart from the users, so a sign-in
+	// does not change the user. builtin is true for the built-in admin.
+	SignIns func(ctx context.Context, name string, builtin bool)
+	Now     func() time.Time
 
 	b    Backend
 	path string
@@ -366,8 +374,22 @@ func (s *Store) List() []User {
 	return out
 }
 
+// builtinName returns the built-in admin's name, or "" when there is
+// none.
+func (s *Store) builtinName() string {
+	if s.Builtin != nil {
+		name, _, ok := s.Builtin()
+		if !ok {
+			return ""
+		}
+		return name
+	}
+	return s.BuiltinAdmin
+}
+
 func (s *Store) reserved(name string) bool {
-	return s.BuiltinAdmin != "" && strings.EqualFold(name, s.BuiltinAdmin)
+	b := s.builtinName()
+	return b != "" && strings.EqualFold(name, b)
 }
 
 // Create adds a local user.
@@ -418,10 +440,11 @@ func recordUser(r Record) User {
 // adminsLeft counts the enabled admins if the named user had role and
 // disabled instead. The built-in admin always counts.
 func (s *Store) adminsLeft(name string, role Role, disabled bool) int {
+	builtin := s.builtinName()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	n := 0
-	if s.BuiltinAdmin != "" {
+	if builtin != "" {
 		n++
 	}
 	if _, ok := s.users[name]; !ok && role == Admin && !disabled {
@@ -591,6 +614,10 @@ const signInWrites = time.Minute
 // stays disabled or deleted.
 func (s *Store) RecordSignIn(ctx context.Context, name string) {
 	name = NormalizeUsername(name)
+	if s.SignIns != nil {
+		s.SignIns(ctx, name, false)
+		return
+	}
 	now := s.now()
 	_, _ = s.b.Change(ctx, Actor(ctx), name, "", func(r *Record) error {
 		if r.LastSignIn != nil && now.Sub(*r.LastSignIn) < signInWrites {
@@ -603,6 +630,10 @@ func (s *Store) RecordSignIn(ctx context.Context, name string) {
 
 // RecordBuiltinSignIn notes when the built-in admin signed in.
 func (s *Store) RecordBuiltinSignIn(ctx context.Context) {
+	if s.SignIns != nil {
+		s.SignIns(ctx, s.builtinName(), true)
+		return
+	}
 	if f, ok := s.b.(*fileBackend); ok {
 		f.recordBuiltin(s.now())
 	}
@@ -641,10 +672,17 @@ func (s *Store) SeeDirectoryUser(ctx context.Context, d DirectoryUser) (User, er
 			if changed {
 				u.Updated = now
 			}
-			if !changed && u.LastSignIn != nil && now.Sub(*u.LastSignIn) < signInWrites {
-				return ErrNoChange
+			if s.SignIns != nil {
+				// The sign-in is recorded apart.
+				if !changed {
+					return ErrNoChange
+				}
+			} else {
+				if !changed && u.LastSignIn != nil && now.Sub(*u.LastSignIn) < signInWrites {
+					return ErrNoChange
+				}
+				u.LastSignIn = &now
 			}
-			u.LastSignIn = &now
 			r.User = u
 			return nil
 		})
@@ -652,6 +690,7 @@ func (s *Store) SeeDirectoryUser(ctx context.Context, d DirectoryUser) (User, er
 			if err != nil {
 				return User{}, err
 			}
+			s.signedIn(ctx, r)
 			return recordUser(r), nil
 		}
 		// Their first sign-in.
@@ -664,7 +703,15 @@ func (s *Store) SeeDirectoryUser(ctx context.Context, d DirectoryUser) (User, er
 		if err != nil {
 			return User{}, err
 		}
+		s.signedIn(ctx, r)
 		return recordUser(r), nil
+	}
+}
+
+// signedIn records a directory user's sign-in through SignIns, when set.
+func (s *Store) signedIn(ctx context.Context, r Record) {
+	if s.SignIns != nil && !r.Disabled {
+		s.SignIns(ctx, r.Username, false)
 	}
 }
 
