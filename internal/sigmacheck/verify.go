@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ const (
 	SecurityChannel   = "Security"
 	SystemChannel     = ingest.SystemChannel
 	PowerShellChannel = ingest.PowerShellChannel
+	DefenderChannel   = ingest.DefenderChannel
 	// LinuxSysmonChannel is Sysmon for Linux, whose events have Sysmon's
 	// event IDs and fields.
 	LinuxSysmonChannel = ingest.LinuxSysmonChannel
@@ -76,6 +78,14 @@ func (c Case) SigmaView() (map[string]string, bool) {
 		return out, true
 	case strings.EqualFold(c.Channel, SysmonChannel), strings.EqualFold(c.Channel, LinuxSysmonChannel),
 		strings.EqualFold(c.Channel, PowerShellChannel) && c.EventID == "4104":
+		out := map[string]string{"EventID": c.EventID}
+		for k, v := range c.Data {
+			out[k] = v
+		}
+		return out, true
+	case strings.EqualFold(c.Channel, DefenderChannel):
+		// Defender rules name the event's data as its message labels
+		// it (Path, ProcessName, NewValue).
 		out := map[string]string{"EventID": c.EventID}
 		for k, v := range c.Data {
 			out[k] = v
@@ -147,12 +157,16 @@ var sysmonEvents = map[string]string{
 	"registry_set":         "13",
 	"create_stream_hash":   "15",
 	"pipe_created":         "17",
+	"raw_access_thread":    "9",
 	"dns_query":            "22",
 	"file_delete":          "26",
 	"ps_script":            "4104",
 	// Windows System log rules (service: system) are about services
 	// installed.
 	"system": "7045",
+	// Defender log rules (service: windefend) name their events; a
+	// threat detected is the first.
+	"windefend": "1116",
 }
 
 // SecurityEvents are the Security log events Security log rules
@@ -160,12 +174,14 @@ var sysmonEvents = map[string]string{
 // SecurityCategory of its one event, or of the events of one of
 // SecurityGroups.
 var SecurityEvents = []string{"4624", "4625", "4648", "4656", "4657", "4661", "4662", "4663", "4697", "4698", "4706", "4719",
-	"4720", "4732", "4738", "4794", "4768", "4769", "5136", "5145", "5156", "5157"}
+	"4720", "4732", "4738", "4794", "4768", "4769", "5136", "5145", "5156", "5157", "4728", "4729", "4730", "1102", "4699",
+	"4701", "4702", "5140"}
 
 // SecurityGroups are Security events with the same data that a rule may
 // name together: a handle to an object requested (4656) and the access
-// made with it (4663). Test events are made as the last one first.
-var SecurityGroups = [][]string{{"4656", "4663"}}
+// made with it (4663), and a scheduled task deleted (4699) or disabled
+// (4701). Test events are made as the last one first.
+var SecurityGroups = [][]string{{"4656", "4663"}, {"4699", "4701"}}
 
 // SecurityCategory is the category of a Security log rule about its
 // events (sorted), as Bases, Cases and Channel know it; it is known (by
@@ -173,6 +189,8 @@ var SecurityGroups = [][]string{{"4656", "4663"}}
 func SecurityCategory(eventIDs ...string) string { return "security_" + strings.Join(eventIDs, "_") }
 
 func init() {
+	// A task disabled has the data of a task deleted.
+	Bases[SecurityCategory("4701")] = Bases[SecurityCategory("4699")]
 	for _, id := range SecurityEvents {
 		sysmonEvents[SecurityCategory(id)] = id
 	}
@@ -191,6 +209,8 @@ func Channel(category string) string {
 		return PowerShellChannel
 	case "system":
 		return SystemChannel
+	case "windefend":
+		return DefenderChannel
 	}
 	if strings.HasPrefix(category, "security_") {
 		return SecurityChannel
@@ -426,6 +446,51 @@ var Bases = map[string]map[string]string{
 		"StartType":   "auto start",
 		"AccountName": "LocalSystem",
 	},
+	"security_4728": {
+		"MemberName": "CN=Example User,OU=Staff,DC=corp,DC=example,DC=com", "MemberSid": "S-1-5-21-1000-1201",
+		"TargetUserName": "Report Readers", "TargetDomainName": "CORP", "TargetSid": "S-1-5-21-1000-1301",
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+	},
+	"security_4729": {
+		"MemberName": "CN=Example User,OU=Staff,DC=corp,DC=example,DC=com", "MemberSid": "S-1-5-21-1000-1201",
+		"TargetUserName": "Report Readers", "TargetDomainName": "CORP", "TargetSid": "S-1-5-21-1000-1301",
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+	},
+	"security_4730": {
+		"TargetUserName": "Report Readers", "TargetDomainName": "CORP", "TargetSid": "S-1-5-21-1000-1301",
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c", "PrivilegeList": "-",
+	},
+	"security_1102": {"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c", "Provider_Name": "Microsoft-Windows-Eventlog"},
+	"security_4699": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"TaskName":    `\ExampleUpdater`,
+		"TaskContent": `<?xml version="1.0" encoding="UTF-16"?><Task version="1.2"><Actions Context="Author"><Exec><Command>D:\apps\updater\updater.exe</Command></Exec></Actions></Task>`,
+	},
+	"security_4702": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"TaskName":       `\ExampleUpdater`,
+		"TaskContentNew": `<?xml version="1.0" encoding="UTF-16"?><Task version="1.2"><Actions Context="Author"><Exec><Command>D:\apps\updater\updater.exe</Command></Exec></Actions></Task>`,
+	},
+	"security_5140": {
+		"SubjectUserSid": "S-1-5-21-1000-1104", "SubjectUserName": "tester", "SubjectDomainName": "CORP", "SubjectLogonId": "0x1a2b3c",
+		"ObjectType": "File", "IpAddress": "192.0.2.10", "IpPort": "50123", "ShareName": `\\*\Projects`,
+		"ShareLocalPath": `\??\D:\Projects`, "AccessMask": "0x1", "AccessList": "%%4416",
+	},
+	"windefend": {
+		"ThreatName":    "Trojan:Win32/Example",
+		"SeverityName":  "Severe",
+		"CategoryName":  "Trojan",
+		"Path":          `file:_C:\Users\tester\Downloads\invoice.exe`,
+		"SourceName":    "Real-Time Protection",
+		"ProcessName":   `C:\Windows\explorer.exe`,
+		"DetectionUser": `CORP\tester`,
+	},
+	"raw_access_thread": {
+		"Image":     `D:\apps\backup\backup.exe`,
+		"ProcessId": "4242",
+		"User":      `CORP\tester`,
+		"Device":    `\Device\HarddiskVolume3`,
+	},
 	"pipe_created": {
 		"Image":     `D:\apps\launcher\launcher.exe`,
 		"ProcessId": "4242",
@@ -623,6 +688,11 @@ func CasesOn(channel, category string, syn *Synthesis, fields []string) []Case {
 			eid = v
 			ev = maps.Clone(ev)
 			delete(ev, "EventID")
+		}
+		if n, err := strconv.Atoi(eid); err == nil && n < 1000 && channel == SecurityChannel {
+			// A Windows 2000 or XP event, which never reaches Signalith
+			// (Rule.EventIDs).
+			return
 		}
 		out = append(out, Case{Expect: expect, Source: "synthesized", Channel: channel, EventID: eid, Data: ev})
 		if also4688 {
