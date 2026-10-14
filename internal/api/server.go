@@ -117,8 +117,11 @@ type Server struct {
 	Runtime *Runtime
 
 	// Sessions and Limiter back the sign-in page; nil uses defaults.
-	Sessions *auth.Sessions
-	Limiter  *auth.Limiter
+	// SessionStore, when set, keeps the sessions instead of Sessions (in
+	// OpenSearch, for every server of a cluster).
+	Sessions     *auth.Sessions
+	SessionStore SessionStore
+	Limiter      *auth.Limiter
 	// KnownBrowsers signs the cookie that marks a browser as one that
 	// signed in to an account before (see auth.Limiter); nil makes a key
 	// kept in memory only.

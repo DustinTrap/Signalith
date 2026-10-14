@@ -123,7 +123,7 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 			"error": "Choose a new password that is different from the current one."})
 		return
 	}
-	u, err := s.userStore().SetPassword(p.Username, req.New, false)
+	u, err := s.userStore().SetPassword(r.Context(), p.Username, req.New, false)
 	if errors.Is(err, users.ErrBusy) {
 		writeUserError(w, err)
 		return
@@ -136,8 +136,8 @@ func (s *Server) handleChangeOwnPassword(w http.ResponseWriter, r *http.Request)
 	// that share the users file, when they next make a request), and are
 	// strangers to the account until they sign in with the new password;
 	// this one stays known.
-	ended := s.sessions().EndUser(p.Username, p.token)
-	s.sessions().SetVersion(p.token, s.passwordStamp(p.Username))
+	ended := s.sessions().EndUser(r.Context(), p.Username, p.token)
+	s.sessions().SetVersion(r.Context(), p.token, s.passwordStamp(p.Username))
 	if p.Method == "session" {
 		s.rememberBrowser(w, r, p.Username)
 	}
@@ -276,7 +276,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if s.builtinTarget(w, req.Username) {
 		return
 	}
-	u, err := s.userStore().Create(users.NewUser{Username: req.Username, Name: req.Name, Email: req.Email, Role: req.Role,
+	u, err := s.userStore().Create(r.Context(), users.NewUser{Username: req.Username, Name: req.Name, Email: req.Email, Role: req.Role,
 		Password: req.Password, MustChangePassword: mustChange})
 	if err != nil {
 		writeUserError(w, err)
@@ -325,7 +325,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	u, err := s.userStore().Update(name, users.Change{Name: req.Name, Email: req.Email, Role: req.Role, Disabled: req.Disabled})
+	u, err := s.userStore().Update(r.Context(), name, users.Change{Name: req.Name, Email: req.Email, Role: req.Role, Disabled: req.Disabled})
 	if err != nil {
 		writeUserError(w, err)
 		return
@@ -345,7 +345,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if u.Disabled != cur.Disabled {
 		if u.Disabled {
-			ended := s.sessions().EndUser(u.Username, "")
+			ended := s.sessions().EndUser(r.Context(), u.Username, "")
 			s.audit(r, "user disabled", "user", u.Username, "sessions_ended", ended)
 		} else {
 			s.audit(r, "user enabled", "user", u.Username)
@@ -368,12 +368,12 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errors.New("you cannot delete your own account; ask another admin"))
 		return
 	}
-	u, err := s.userStore().Delete(cur.Username)
+	u, err := s.userStore().Delete(r.Context(), cur.Username)
 	if err != nil {
 		writeUserError(w, err)
 		return
 	}
-	ended := s.sessions().EndUser(u.Username, "")
+	ended := s.sessions().EndUser(r.Context(), u.Username, "")
 	s.audit(r, "user deleted", "user", u.Username, "source", u.Source, "role", u.Role, "sessions_ended", ended)
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": u.Username})
 }
@@ -409,12 +409,12 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		generated = users.GeneratePassword()
 		req.Password = generated
 	}
-	u, err := s.userStore().SetPassword(name, req.Password, true)
+	u, err := s.userStore().SetPassword(r.Context(), name, req.Password, true)
 	if err != nil {
 		writeUserError(w, err)
 		return
 	}
-	ended := s.sessions().EndUser(u.Username, "")
+	ended := s.sessions().EndUser(r.Context(), u.Username, "")
 	s.audit(r, "password reset", "user", u.Username, "sessions_ended", ended)
 	resp := map[string]any{"user": s.viewUser(u, userOf(r))}
 	if generated != "" {
@@ -549,7 +549,7 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 	before := d.Settings()
 	next, again := s.mergeSettings(&in)
-	err := d.Save(next)
+	err := d.Save(r.Context(), next)
 	var se *users.SettingsError
 	switch {
 	case errors.As(err, &se):
@@ -562,7 +562,7 @@ func (s *Server) handlePutDirectory(w http.ResponseWriter, r *http.Request) {
 	after := d.Settings()
 	// Check signed-in directory users against the new settings now, rather
 	// than at their next request.
-	for _, name := range s.sessions().Users() {
+	for _, name := range s.sessions().Users(r.Context()) {
 		if u, ok := s.userStore().Get(name); ok && u.Source == users.SourceDirectory && !u.Disabled && u.Refused == "" && after.IsEnabled() {
 			s.recheckDirectoryUser(u.Username)
 		}

@@ -43,6 +43,7 @@ const (
 	infoCookie  = "signalith session cookie v1"
 	infoArchive = "signalith archive v1"
 	infoSeal    = "signalith seal-to-node v1"
+	infoBrowser = "signalith known browser v1"
 )
 
 const keySize = 32
@@ -148,6 +149,10 @@ func (k *ClusterKey) CookieKey() []byte { return k.sub(infoCookie) }
 
 // ArchiveKey returns the key that encrypts archives.
 func (k *ClusterKey) ArchiveKey() []byte { return k.sub(infoArchive) }
+
+// KnownBrowserKey returns the key that signs the known-browser cookies of
+// the sign-in limiter, so a browser known on one member is known on all.
+func (k *ClusterKey) KnownBrowserKey() []byte { return k.sub(infoBrowser) }
 
 func (k *ClusterKey) sub(info string) []byte {
 	b, err := hkdf.Key(sha256.New, k.raw, nil, info, 32)

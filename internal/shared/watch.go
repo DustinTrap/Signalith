@@ -492,8 +492,9 @@ func (h *Hub) ownWrite(id string, v store.Version) {
 // bump rewrites the watch document id, so every server reloads what it
 // watches. When nobody else bumped it since this server last read it,
 // this server, which applied its own change already, has nothing to
-// reload. It returns the bump's _seq_no.
-func (h *Hub) bump(ctx context.Context, id string) (int64, error) {
+// reload. fields, when set, are added to the body. It returns the bump's
+// _seq_no.
+func (h *Hub) bump(ctx context.Context, id string, fields map[string]any) (int64, error) {
 	c, prefix := h.target()
 	var out struct {
 		SeqNo       int64 `json:"_seq_no"`
@@ -501,8 +502,10 @@ func (h *Hub) bump(ctx context.Context, id string) (int64, error) {
 		Version     int64 `json:"_version"`
 	}
 	index := ConfigIndex(prefix)
-	err := c.Do(ctx, http.MethodPut, "/"+url.PathEscape(index)+"/_doc/"+url.PathEscape(id),
-		map[string]any{"kind": "watch", "id": id, "at": h.now()}, &out)
+	body := map[string]any{}
+	maps.Copy(body, fields)
+	body["kind"], body["id"], body["at"] = "watch", id, h.now()
+	err := c.Do(ctx, http.MethodPut, "/"+url.PathEscape(index)+"/_doc/"+url.PathEscape(id), body, &out)
 	if err != nil {
 		return 0, fmt.Errorf("could not tell the other servers about the change (%s): %w", id, err)
 	}
@@ -796,7 +799,7 @@ func (h *Hub) AcceptRestore(ctx context.Context, by string, peerMaxRev int64) er
 		errs = append(errs, err)
 	}
 	for _, w := range watches {
-		if _, err := h.bump(ctx, w.ID); err != nil {
+		if _, err := h.bump(ctx, w.ID, nil); err != nil {
 			errs = append(errs, err)
 		}
 	}

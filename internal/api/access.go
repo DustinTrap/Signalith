@@ -173,11 +173,7 @@ func background(r *http.Request) bool { return r.Header.Get(backgroundHeader) ==
 // returns nil without an error when the request is not signed in.
 func (s *Server) authenticate(r *http.Request) (*principal, error) {
 	if c, err := r.Cookie(s.cookieName(r)); err == nil {
-		lookup := s.sessions().Lookup
-		if background(r) {
-			lookup = s.sessions().Peek
-		}
-		if ss, ok := lookup(c.Value); ok {
+		if ss, ok := s.sessions().Lookup(r.Context(), c.Value, !background(r)); ok {
 			// A password changed since signing in (perhaps on another
 			// server sharing the users file) ends the session too.
 			if p := s.principalFor(ss.User); p != nil && (ss.Version == "" || ss.Version == s.passwordStamp(ss.User)) {
@@ -185,7 +181,7 @@ func (s *Server) authenticate(r *http.Request) (*principal, error) {
 				return p, nil
 			}
 			// Deleted, disabled or given a new password since signing in.
-			s.sessions().Delete(c.Value)
+			s.sessions().Delete(r.Context(), c.Value)
 		}
 	}
 	user, pass, ok := r.BasicAuth()
@@ -461,7 +457,7 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		if !s.conf().CheckPassword(name, password) {
 			return nil, "wrong password", errWrongCredentials
 		}
-		store.RecordBuiltinSignIn()
+		store.RecordBuiltinSignIn(ctx)
 		return s.builtinPrincipal(), "", nil
 	}
 	if u, ok := store.Get(name); ok && u.Source == users.SourceLocal {
@@ -471,7 +467,7 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		if u.Disabled {
 			return nil, "account disabled", errDisabled
 		}
-		store.RecordSignIn(u.Username)
+		store.RecordSignIn(ctx, u.Username)
 		return principalFromUser(u), "", nil
 	}
 	d := s.dir()
@@ -514,7 +510,7 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 		if du != nil && du.Username != "" {
 			who = du.Username
 		}
-		s.revokeDirectoryUser(who, sie.Revoke)
+		s.revokeDirectoryUser(ctx, who, sie.Revoke)
 	}
 	switch {
 	case errors.As(err, &sie) && errors.Is(err, users.ErrNoRole):
@@ -528,7 +524,7 @@ func (s *Server) checkCredentials(ctx context.Context, name, password string) (*
 	case err != nil:
 		return nil, "directory: " + err.Error(), errDirectoryDown
 	}
-	u, err := store.SeeDirectoryUser(*du)
+	u, err := store.SeeDirectoryUser(ctx, *du)
 	if errors.Is(err, users.ErrExists) || errors.Is(err, users.ErrReserved) {
 		return nil, fmt.Sprintf("directory user %s has the name of a local user or the built-in admin", du.Username), errWrongCredentials
 	}
@@ -634,15 +630,15 @@ func (s *Server) runDirectoryRecheck(name string, rev uint64, settingsChanged bo
 	var sie *users.SignInError
 	switch {
 	case err == nil && users.NormalizeUsername(du.Username) != name:
-		s.revokeDirectoryUser(name, "renamed in the directory to "+du.Username)
+		s.revokeDirectoryUser(ctx, name, "renamed in the directory to "+du.Username)
 	case err == nil:
 		before, _ := s.userStore().Get(name)
-		u, changed, err := s.userStore().RefreshDirectoryUser(name, *du)
+		u, changed, err := s.userStore().RefreshDirectoryUser(ctx, name, *du)
 		if err == nil && changed && u.Role != before.Role {
 			s.Log.Info("directory user's role changed", "audit", true, "user", name, "from", before.Role, "to", u.Role, "by", "directory")
 		}
 	case errors.As(err, &sie) && sie.Revoke != "":
-		s.revokeDirectoryUser(name, sie.Revoke)
+		s.revokeDirectoryUser(ctx, name, sie.Revoke)
 	case errors.Is(err, users.ErrDirectoryOff):
 		// Directory users cannot use Signalith while it is off.
 	default:
@@ -652,7 +648,7 @@ func (s *Server) runDirectoryRecheck(name string, rev uint64, settingsChanged bo
 		// sessions end.
 		ended := 0
 		if settingsChanged {
-			ended = s.sessions().EndUser(name, "")
+			ended = s.sessions().EndUser(ctx, name, "")
 		}
 		s.Log.Warn("could not check a directory user with the directory", "user", name, "err", err, "sessions_ended", ended)
 	}
@@ -661,12 +657,12 @@ func (s *Server) runDirectoryRecheck(name string, rev uint64, settingsChanged bo
 // revokeDirectoryUser takes away a directory user's access after the
 // directory refused them, and ends their sessions. Names that are not
 // directory users are ignored.
-func (s *Server) revokeDirectoryUser(name, reason string) {
-	u, changed, err := s.userStore().RefuseDirectoryUser(name, reason)
+func (s *Server) revokeDirectoryUser(ctx context.Context, name, reason string) {
+	u, changed, err := s.userStore().RefuseDirectoryUser(ctx, name, reason)
 	if err != nil {
 		return
 	}
-	ended := s.sessions().EndUser(u.Username, "")
+	ended := s.sessions().EndUser(ctx, u.Username, "")
 	if changed || ended > 0 {
 		s.Log.Warn("directory user lost access", "audit", true, "user", u.Username, "reason", reason, "sessions_ended", ended, "by", "directory")
 	}
