@@ -68,7 +68,7 @@ jobs:
             -ldflags "-X main.version=$PREV_VERSION" -o "$RUNNER_TEMP/bin/signalith-prev" ./cmd/signalith)
           next="$PREV_VERSION-next+${GITHUB_SHA::7}"
           go build -tags clustertest -ldflags "-X main.version=$next" -o "$RUNNER_TEMP/bin/signalith-next" ./cmd/signalith
-          echo "NEXT_VERSION=$next" >> "$GITHUB_ENV"
+          echo "SIGNALITH_TEST_NEXT_VERSION=$next" >> "$GITHUB_ENV"
       - name: Start the Docker quick start's OpenSearch
         if: steps.prev.outputs.ref != ''
         run: |
