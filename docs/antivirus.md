@@ -15,7 +15,7 @@ Three ways in:
 
 | Product | How it gets here | Set up |
 | --- | --- | --- |
-| Microsoft Defender Antivirus | The Windows agent, with no extra setup | [Microsoft Defender](#microsoft-defender) |
+| Microsoft Defender Antivirus | The Windows agent or the OpenTelemetry Collector, with no extra setup | [Microsoft Defender](#microsoft-defender) |
 | ClamAV | The Linux agent | [ClamAV](#clamav) |
 | Symantec, Trend Micro, Sophos, Trellix (McAfee) ePO, ESET, CrowdStrike, SentinelOne, Kaspersky, Bitdefender and any product that sends CEF or LEEF | Syslog from the product's management console | [Antivirus consoles](#antivirus-consoles-over-syslog) |
 
@@ -29,6 +29,11 @@ event log next to the Security log, so every host with the agent sends its
 Defender events. Hosts without Defender (for example Server Core with the
 feature removed) are skipped quietly: the agent still starts and still sends
 the Security log.
+
+The [OpenTelemetry Collector](opentelemetry.md)'s Windows configuration reads
+the same log (Collector Contrib 0.129 or later, which skips a missing Defender
+log with a warning). Its events are mapped the same way, whether or not the
+Collector renders the event message.
 
 | Event IDs | What it means | `type` | `action` |
 | --- | --- | --- | --- |

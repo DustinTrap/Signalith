@@ -98,7 +98,7 @@ func parseWindowsWith(r map[string]any, named map[string]string) Event {
 		}
 		parseSysmon(eventID, kv, &ev)
 	case strings.EqualFold(channel, DefenderChannel):
-		parseDefender(eventID, str(r, "Message"), in, &ev)
+		parseDefender(eventID, str(r, "Message"), in, named, &ev)
 	case strings.EqualFold(channel, PowerShellChannel) && eventID == "4104":
 		parseScriptBlock(in, &ev)
 	}

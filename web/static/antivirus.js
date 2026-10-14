@@ -205,7 +205,7 @@
     return [
       { id: 'defender', label: 'Microsoft Defender', title: 'Microsoft Defender Antivirus, through the Windows agent',
         check: 'The test detection shows in Search within a minute of Defender removing the file.', render: () => steps(
-          [text('The Windows agent collects Microsoft Defender events. If a host doesn’t have the agent yet, set it up from the Windows card.'),
+          [text('The Windows agent collects Microsoft Defender events. If a host doesn’t have the agent yet, set it up from the Windows card. The OpenTelemetry Collector’s Windows configuration collects them too.'),
             sourceButton('windows', 'Set up the Windows agent')],
           [text('Already running the agent from before this update? Download the configuration again from the Windows card, copy it over ',
             code('C:\\Program Files\\fluent-bit\\conf\\fluent-bit.conf'), ', then restart the agent in PowerShell as administrator:'),
