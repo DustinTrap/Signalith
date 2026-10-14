@@ -72,22 +72,27 @@ func writeDetectionError(w http.ResponseWriter, err error) {
 type detectionView struct {
 	*detect.Detection
 	State detect.RunState `json:"state"`
+	// StateError says the run state could not be read just now.
+	StateError string `json:"state_error,omitempty"`
 }
 
 func (s *Server) handleListDetections(w http.ResponseWriter, r *http.Request) {
 	if !s.detectionsReady(w) {
 		return
 	}
-	states := s.Scheduler.Status()
+	states, serr := s.Scheduler.StatusCtx(r.Context())
 	ds := s.Detections.List()
 	out := make([]detectionView, 0, len(ds))
 	for _, d := range ds {
 		out = append(out, detectionView{Detection: d, State: states[d.ID]})
 	}
 	// scheduler says whether detections run on this server now; when they
-	// run on another one, runs_on names it, and the run times here are
-	// not theirs.
+	// run on another one, runs_on names it. The run state is shared, so
+	// it is the same on every server.
 	resp := map[string]any{"detections": out, "scheduler": s.conf().Detections.Scheduler}
+	if serr != nil {
+		resp["state_error"] = "The run state of the detections could not be read just now, so what is shown may be out of date: " + serr.Error()
+	}
 	if s.Cluster != nil {
 		resp["scheduler"] = s.conf().Detections.Scheduler && s.Cluster.RunsJobs()
 		if !s.Cluster.RunsJobs() {
@@ -107,7 +112,12 @@ func (s *Server) handleGetDetection(w http.ResponseWriter, r *http.Request) {
 		writeDetectionError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, detectionView{Detection: d, State: s.Scheduler.Status()[d.ID]})
+	states, serr := s.Scheduler.StatusCtx(r.Context())
+	v := detectionView{Detection: d, State: states[d.ID]}
+	if serr != nil {
+		v.StateError = "The run state of this detection could not be read just now, so what is shown may be out of date: " + serr.Error()
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (s *Server) handleDetectionYAML(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +251,7 @@ func (s *Server) handleRunDetection(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
-	res, err := s.Scheduler.Run(ctx, d)
+	res, err := s.Scheduler.RunManual(ctx, d, userOf(r))
 	if err != nil {
 		writeSearchError(w, err)
 		return

@@ -23,7 +23,7 @@ length, so "Last 24 hours" compares today with the 24 hours before.
 | Top detections firing | Findings plus risk events per detection; click one to open it |
 | Top risk objects | Users and systems with the most risk; click one to open it on the Risk page |
 | ATT&CK tactics seen | Findings and risk events per ATT&CK tactic, in matrix order |
-| Detection health | Enabled detections, detections whose last run failed, enabled detections with no findings and no risk events in 30 days, and data sources that stopped sending |
+| Detection health | Enabled detections, detections whose last run failed, detections behind schedule, enabled detections with no findings and no risk events in 30 days, and data sources that stopped sending. When missed runs were skipped (older than `detections.catch_up`) in the period or the last day, a line says when, for example "Signalith was not running detections from 02:10 to 09:40; 90 runs of 'Brute force' were skipped". Every server shows the same health |
 | Events by data model, by source type | Event volume over time |
 
 A data source is a host and source type pair. It counts as stopped when it sent

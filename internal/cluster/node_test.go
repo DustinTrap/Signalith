@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1145,4 +1146,44 @@ func TestIndexingServers(t *testing.T) {
 	close(stopOld)
 	<-oldDone
 	until(t, 5*time.Second, "the old one goes offline", func() bool { return a.IndexingServers(10*time.Minute) == 1 })
+}
+
+// stepClock is a real clock whose wall time a test can step, as a clock
+// correction does, without moving its monotonic time.
+type stepClock struct {
+	Clock
+	mu  sync.Mutex
+	off time.Duration
+}
+
+func (c *stepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Clock.Now().Add(c.off)
+}
+
+func (c *stepClock) step(d time.Duration) {
+	c.mu.Lock()
+	c.off += d
+	c.mu.Unlock()
+}
+
+// ClusterNow follows OpenSearch's clock, not this server's wall clock:
+// a server 5 s behind works out OpenSearch's time, and a step of its
+// wall clock does not move it.
+func TestClusterNowFollowsOpenSearch(t *testing.T) {
+	fos := ostest.New(t)
+	fos.Offset = 5 * time.Second
+	c := store.New(store.Config{URL: fos.URL})
+	clock := &stepClock{Clock: NewRealClock()}
+	n := startNode(t, t.TempDir(), c, clock, nil)
+	near := func() bool {
+		d := n.ClusterNow().Sub(time.Now().Add(5 * time.Second))
+		return d < 50*time.Millisecond && d > -50*time.Millisecond
+	}
+	until(t, 5*time.Second, "OpenSearch's time", near)
+	clock.step(time.Hour)
+	if !near() {
+		t.Errorf("a step of the wall clock moved the cluster time: %v", n.ClusterNow().Sub(time.Now()))
+	}
 }

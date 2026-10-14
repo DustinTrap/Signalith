@@ -1803,6 +1803,7 @@ body:has(.page.active .inspector:not([hidden], .hidden)) #toast { bottom: 88px; 
 /* plain-language second lines (schedule, last run) in the sans face; mono stays for ids */
 #page-detections .dx-meta { display: block; margin-top: 4px; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #page-detections .dx-fail { color: var(--danger); font-weight: 500; }
+#page-detections .dx-skipchip { margin-right: 6px; vertical-align: 1px; }
 #page-detections .dx-id { flex: none; font: 400 var(--fs-xs)/20px var(--font-mono); color: var(--text-3); margin-right: 4px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 #page-detections .dx-tok { font: 450 .92em var(--font-mono); color: var(--text-2); }
 #page-detections tr.dx-off .dx-rowlink { color: var(--text-2); }

@@ -87,6 +87,10 @@ type Node struct {
 	members      map[string]*member
 	offset       *time.Duration
 	offsetNext   time.Duration
+	// osAt is OpenSearch's time at the last clock measurement, and
+	// osMono the monotonic time then (see ClusterNow).
+	osAt   time.Time
+	osMono time.Duration
 	// fp are the files fingerprints worked out last; fpDone is closed when
 	// the one being worked out now is ready (nil when none is).
 	fp          Fingerprints
@@ -807,6 +811,20 @@ func (n *Node) heartbeatConflict(ctx context.Context, c *store.Client, prefix, i
 	return store.Version{}, errConflicted
 }
 
+// ClusterNow is OpenSearch's time, as this server last measured it, moved
+// on by this server's monotonic clock since: every server works out
+// about the same time with it, whatever its own wall clock says, and a
+// step of the local wall clock does not move it. Before the first
+// measurement it is the local wall clock.
+func (n *Node) ClusterNow() time.Time {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.osAt.IsZero() {
+		return n.clock.Now()
+	}
+	return n.osAt.Add(n.clock.Mono() - n.osMono)
+}
+
 // measureOffset measures how far this server's clock is off OpenSearch's:
 // OpenSearch's time minus this server's at the middle of the request.
 func (n *Node) measureOffset(ctx context.Context, c *store.Client) {
@@ -822,9 +840,9 @@ func (n *Node) measureOffset(ctx context.Context, c *store.Client) {
 	}
 	rctx, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
-	t0 := n.clock.Now()
+	t0, m0 := n.clock.Now(), n.clock.Mono()
 	err := c.Do(rctx, http.MethodGet, "/_nodes/_local/stats/os?filter_path=nodes.*.os.timestamp", nil, &out)
-	t1 := n.clock.Now()
+	t1, m1 := n.clock.Now(), n.clock.Mono()
 	if err != nil {
 		n.log.Debug("could not read OpenSearch's clock", "err", err)
 		return
@@ -837,6 +855,7 @@ func (n *Node) measureOffset(ctx context.Context, c *store.Client) {
 		off := time.UnixMilli(nd.OS.Timestamp).Sub(mid)
 		n.mu.Lock()
 		n.offset = &off
+		n.osAt, n.osMono = time.UnixMilli(nd.OS.Timestamp).UTC(), m0+(m1-m0)/2
 		n.mu.Unlock()
 		if off > 2*time.Second || off < -2*time.Second {
 			n.log.Warn("this server's clock is off OpenSearch's; keep both in sync with NTP", "offset", off.Round(time.Millisecond))

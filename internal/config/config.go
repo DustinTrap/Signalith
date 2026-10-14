@@ -884,6 +884,9 @@ type Detections struct {
 	Scheduler bool `yaml:"scheduler"`
 	// MaxFindingsPerRun caps findings one run can raise.
 	MaxFindingsPerRun int `yaml:"max_findings_per_run"`
+	// CatchUp is how far back detection runs missed while no server ran
+	// them are made up, such as 6h; "0" turns that off. Empty means 6h.
+	CatchUp string `yaml:"catch_up,omitempty"`
 	// ContentUpdates is how newer content pack rules arrive: manual (an
 	// admin checks or uploads on the Detections page) or daily (checked
 	// and installed every day). Empty means manual.
@@ -1120,6 +1123,19 @@ func (c *Config) StaleAfter() time.Duration {
 	return 2 * time.Hour
 }
 
+// DetectionsCatchUp returns detections.catch_up as a duration: 6h when it
+// is unset or invalid (Validate reports invalid values), 0 when off.
+func (c *Config) DetectionsCatchUp() time.Duration {
+	v := strings.TrimSpace(c.Detections.CatchUp)
+	if v == "0" {
+		return 0
+	}
+	if d, err := detect.ParseDuration(v); err == nil && d >= 0 && d <= detect.MaxCatchUp {
+		return d
+	}
+	return detect.DefaultCatchUp
+}
+
 // Default returns a config with every default filled in.
 func Default() *Config {
 	return &Config{
@@ -1128,7 +1144,7 @@ func Default() *Config {
 		Search:     Search{DefaultEarliest: "-24h", MaxEvents: 10000},
 		Retention:  Retention{Days: 90},
 		Auth:       Auth{AdminUser: "admin"},
-		Detections: Detections{Dir: "detections", Scheduler: true, MaxFindingsPerRun: 100},
+		Detections: Detections{Dir: "detections", Scheduler: true, MaxFindingsPerRun: 100, CatchUp: "6h"},
 		Lookups:    Lookups{Dir: "lookups"},
 		Dashboards: Dashboards{Dir: "dashboards", StaleAfter: "2h"},
 	}
@@ -1884,6 +1900,11 @@ func (c *Config) Validate() error {
 	if c.Detections.MaxFindingsPerRun < 1 || c.Detections.MaxFindingsPerRun > 10000 {
 		p = append(p, "detections.max_findings_per_run must be between 1 and 10000")
 	}
+	if v := strings.TrimSpace(c.Detections.CatchUp); v != "" && v != "0" {
+		if d, err := detect.ParseDuration(v); err != nil || d < 0 || d > detect.MaxCatchUp {
+			p = append(p, fmt.Sprintf("detections.catch_up %q must be 0 (off) or a duration up to 168h (7d), for example 6h", c.Detections.CatchUp))
+		}
+	}
 	switch c.Detections.ContentUpdates {
 	case "", ContentManual, ContentDaily:
 	default:
@@ -2195,6 +2216,8 @@ const header = `# Signalith configuration.
 # detections.dir     folder for custom detections (relative to this file)
 # detections.scheduler  lets this server run detections, threat intel downloads and
 #                    retention; servers that share one OpenSearch take turns
+# detections.catch_up  how far back detection runs missed while no server ran them
+#                    are made up (default 6h, at most 7d; 0 = off)
 # lookups.dir        folder for assets.csv and identities.csv (relative to this file)
 # dashboards.dir     folder for custom dashboards, one YAML file each (relative to this file)
 # dashboards.stale_after  how long a host can go quiet before the posture dashboard flags it
